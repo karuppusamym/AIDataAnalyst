@@ -132,11 +132,20 @@ def test_connector_certification_is_deterministic() -> None:
 
 
 def test_registry_exposes_planned_connectors_without_claiming_implementation() -> None:
+    databricks = connector_registry.definition("databricks")
+
+    assert databricks.implementation_status == "PLANNED"
+    assert "databricks" not in connector_registry.supported_types
+    assert databricks.transports == ("PUSH",)
+
+
+def test_registry_exposes_snowflake_as_implemented() -> None:
     snowflake = connector_registry.definition("snowflake")
 
-    assert snowflake.implementation_status == "PLANNED"
-    assert "snowflake" not in connector_registry.supported_types
-    assert snowflake.transports == ("PUSH",)
+    assert snowflake.implementation_status == "IMPLEMENTED"
+    assert "snowflake" in connector_registry.supported_types
+    assert "PULL" in snowflake.transports
+    assert "PUSH" in snowflake.transports
 
 
 def test_registry_exposes_bigquery_as_implemented() -> None:

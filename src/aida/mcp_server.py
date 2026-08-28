@@ -46,6 +46,7 @@ Error codes (MCP standard)
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
@@ -64,6 +65,7 @@ from aida.agent_orchestrator import (
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.events import record_audit, record_outbox
 from aida.models import (
     DataSource,
     GovernedTool,
@@ -115,6 +117,24 @@ def _err(request_id: Any, code: int, message: str, data: Any = None) -> dict[str
     if data is not None:
         error["data"] = data
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
+
+
+# ---------------------------------------------------------------------------
+# Tool eligibility
+# ---------------------------------------------------------------------------
+
+
+def _tool_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> bool:
+    """
+    Mirror the native governed-tool execution role binding
+    (see POST /v1/tool-versions/{id}/execute in tool_api.py) so that an MCP
+    client is offered, and may invoke, exactly the tools its identity is
+    bound to -- no more, no less. ``PlatformAdmin`` is exempt, matching the
+    same carve-out used by the native execution path.
+    """
+    if "PlatformAdmin" in roles:
+        return True
+    return not roles.isdisjoint(allowed_roles)
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +195,19 @@ async def _handle_tools_list(
             continue
         seen_slugs.add(tool.slug)
 
+        # Eligible-tool exposure: an MCP client only ever sees tools its
+        # identity is role-bound to invoke (CX-5). A tool the caller cannot
+        # invoke is not merely hidden at call time -- it never appears in
+        # the catalog it's offered, matching the module 12 principle that
+        # policy filtering happens before the candidate set is built, not
+        # after.
+        if not _tool_role_eligible(context.roles, version.allowed_roles):
+            continue
+
         # Build JSON Schema from parameter_schema
         properties: dict[str, Any] = {}
         required: list[str] = []
-        for param in (version.parameter_schema or []):
+        for param in version.parameter_schema or []:
             param_name = param.get("name", "")
             param_type = param.get("type", "string").lower()
             param_desc = param.get("description", "")
@@ -210,6 +239,7 @@ async def _handle_tools_list(
                     "datasource_id": str(version.datasource_id),
                     "version": version.version,
                     "status": version.status,
+                    "allowed_roles": sorted(version.allowed_roles),
                 },
             }
         )
@@ -279,6 +309,43 @@ async def _handle_tools_call(
         }
 
     version, tool = row
+
+    # Role-binding enforcement (CX-5, mirrors tool_api.py execute_tool).
+    # A caller whose roles do not intersect the tool's allowed_roles gets
+    # the identical "not found or not published" response used above --
+    # never a distinguishable access-denied message. Telling an
+    # unauthorized caller that a tool *does* exist, just not for them,
+    # leaks its existence through a side channel exactly like ranking an
+    # object the caller cannot see (module 12, section 6). The denial is
+    # still recorded as evidence for operators.
+    if not _tool_role_eligible(context.roles, version.allowed_roles):
+        record_audit(
+            session,
+            context,
+            action="mcp.tool_call.role_binding_denied",
+            resource_type="governed_tool_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "tool_slug": slug,
+                "allowed_roles": sorted(version.allowed_roles),
+                "principal_roles": sorted(context.roles),
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=context.organization_id,
+            aggregate_type="governed_tool_version",
+            aggregate_id=str(version.id),
+            event_type="mcp.tool_invocation_denied.v1",
+            payload={"tool_slug": slug, "principal_id": context.principal_id},
+        )
+        await session.commit()
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
 
     # Resolve datasource
     datasource = await session.get(DataSource, version.datasource_id)
@@ -555,9 +622,7 @@ async def mcp_endpoint(
             result = await _handle_tools_list(session, context)
 
         elif method == "tools/call":
-            result = await _handle_tools_call(
-                params, session, context, settings, correlation_id
-            )
+            result = await _handle_tools_call(params, session, context, settings, correlation_id)
 
         elif method == "resources/list":
             result = await _handle_resources_list(session, context)

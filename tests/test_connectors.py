@@ -19,10 +19,13 @@ def test_registry_definitions_expose_capabilities_without_connector_instantiatio
     postgres = connector_registry.definition("postgres")
     sqlserver = connector_registry.definition("sqlserver")
     snowflake = connector_registry.definition("snowflake")
+    databricks = connector_registry.definition("databricks")
 
     assert postgres.capabilities["constraints"] is True
     assert postgres.capabilities["explain"] is True
     assert sqlserver.capabilities["approximate_statistics"] is True
+    assert snowflake.capabilities["explain"] is True
     assert default_capabilities(postgres) == postgres.capabilities
     assert default_capabilities(sqlserver) == sqlserver.capabilities
-    assert default_capabilities(snowflake) == {}
+    assert default_capabilities(snowflake) == snowflake.capabilities
+    assert default_capabilities(databricks) == {}

@@ -1508,6 +1508,7 @@ class DbtProjectRead(ApiModel):
 class DbtArtifactImportRequest(ApiModel):
     manifest: dict[str, Any]
     catalog: dict[str, Any] | None = None
+    run_results: dict[str, Any] | None = None
 
 
 class DbtArtifactImportRead(ApiModel):
@@ -1554,6 +1555,10 @@ class DbtResourceRead(ApiModel):
     tags: list[str]
     depends_on_unique_ids: list[str]
     matched_table_id: UUID | None
+    test_status: str | None = None
+    test_failures: int | None = None
+    test_execution_time: float | None = None
+    extra_metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
 
@@ -1565,6 +1570,7 @@ class DbtLineageNodeRead(ApiModel):
     resource_type: str
     materialization: str | None
     matched_table_id: UUID | None
+    test_status: str | None = None
 
 
 class DbtLineageEdgeRead(ApiModel):
@@ -1637,7 +1643,7 @@ class DataQualityIncidentRead(ApiModel):
     table_id: UUID
     table_name: str
     policy_id: UUID | None
-    latest_observation_id: UUID
+    latest_observation_id: UUID | None = None
     anomaly_type: str
     severity: str
     status: str

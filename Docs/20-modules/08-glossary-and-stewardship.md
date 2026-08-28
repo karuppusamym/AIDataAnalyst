@@ -68,7 +68,7 @@ Future precedence learning may use resolution history, but the current implement
 
 | Operation | Implemented form |
 |---|---|
-| Assign ownership | Explicit tables or tables selected by a reusable schema/table glob rule; individual or group owner |
+| Assign ownership | Explicit tables or tables selected by a reusable rule (table name, schema, business domain, or annotation tag glob); individual or group owner |
 | Link terms | Explicit table selection linked to one approved active term |
 | Certify | Explicit table selection with shared rationale and expiry |
 | Deprecate | Explicit term selection with shared rationale |
@@ -120,7 +120,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 |---|---|---|
 | Term lifecycle | Implemented vertical slice | Category edit/archive; scheduled lifecycle policy |
 | Term-asset linkage | Manual, reviewed bulk, and reviewed exact inferred links | Fuzzy/model-assisted ranking and bank corpus calibration |
-| Ownership | Individual/group, manual/rule, reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
+| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
 | Conflicts | Manual and synonym detection with reviewed retained resolution | Definition-source precedence learning and richer impact preview |
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |

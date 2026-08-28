@@ -13,7 +13,9 @@ from aida.dbt_artifacts import (
     ParsedDbtResource,
     parse_dbt_catalog,
     parse_dbt_manifest,
+    parse_dbt_run_results,
 )
+from aida.dbt_quality_bridge import reconcile_dbt_test_quality
 from aida.events import record_audit, record_outbox
 from aida.integration_catalog import transformation_metadata_integration_enabled
 from aida.integration_service import ensure_organization_integration_policy
@@ -253,6 +255,12 @@ async def import_dbt_manifest(
             catalog_types = parse_dbt_catalog(body.catalog)
         except DbtArtifactError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    test_results = {}
+    if body.run_results is not None:
+        try:
+            test_results = parse_dbt_run_results(body.run_results)
+        except DbtArtifactError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     existing = await session.scalar(
         select(DbtArtifactImport).where(
             DbtArtifactImport.dbt_project_id == dbt_project.id,
@@ -295,6 +303,7 @@ async def import_dbt_manifest(
         col_types = dict(parsed_resource.column_types)
         if parsed_resource.unique_id in catalog_types:
             col_types.update(catalog_types[parsed_resource.unique_id])
+        test_info = test_results.get(parsed_resource.unique_id)
         dbt_resource = DbtResource(
             organization_id=dbt_project.organization_id,
             artifact_import_id=artifact.id,
@@ -317,6 +326,10 @@ async def import_dbt_manifest(
             tags=parsed_resource.tags,
             depends_on_unique_ids=parsed_resource.depends_on_unique_ids,
             matched_table_id=table_id,
+            test_status=test_info.status if test_info else None,
+            test_failures=test_info.failures if test_info else None,
+            test_execution_time=test_info.execution_time if test_info else None,
+            extra_metadata=parsed_resource.extra_metadata,
         )
         session.add(dbt_resource)
         resource_by_unique_id[dbt_resource.unique_id] = dbt_resource
@@ -329,6 +342,14 @@ async def import_dbt_manifest(
                 source_resource_id=resource_by_unique_id[source_unique_id].id,
                 target_resource_id=resource_by_unique_id[target_unique_id].id,
             )
+        )
+    if test_results:
+        await reconcile_dbt_test_quality(
+            session,
+            organization_id=dbt_project.organization_id,
+            datasource_id=datasource.id,
+            dbt_resources=list(resource_by_unique_id.values()),
+            context=context,
         )
     record_audit(
         session,
@@ -480,6 +501,7 @@ async def get_dbt_lineage(
                 resource_type=resource.resource_type,
                 materialization=resource.materialization,
                 matched_table_id=resource.matched_table_id,
+                test_status=resource.test_status,
             )
             for resource in resources
         ],

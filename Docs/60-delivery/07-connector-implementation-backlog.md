@@ -109,6 +109,29 @@ Blocking policy stays deterministic **in the gateway**. A connector does not cla
 
 **Remaining acceptance.** Live project run with exact discovery counts against a real region-qualified `INFORMATION_SCHEMA`; certification; validation that the region-qualified INFORMATION_SCHEMA views behave as documented across BigQuery API versions.
 
+## 4a. Workstream E — Snowflake
+
+**Target.** `snowflake` native pull adapter reaching feature parity with the Oracle/BigQuery slice. Registry `IMPLEMENTED` · maturity `BETA` · transports `PULL` and `PUSH` · dialect `snowflake`.
+
+**Note on provenance.** Unlike Oracle and BigQuery, this adapter was not built as a tracked workstream in this document — it appeared as unattributed concurrent work on the same checkout (see `06-accomplishment-log.md`'s 2026-08-28 consolidation note) and was only ever touched afterward for a lint/mypy/missing-dependency fixup (R27). This section backfills the workstream record after the fact, from a direct code read, so the registry's `IMPLEMENTED` claim has the same paper trail as every other connector.
+
+**Functional scope.** `test_connection` · discovery of databases/schemas/tables/views/columns · primary/unique/foreign-key discovery via `INFORMATION_SCHEMA` · `EXPLAIN`-based cost/row/byte estimate · governed read execution · bounded profiling.
+
+### Status — implemented, live verification outstanding
+
+| # | Task | State |
+|---|---|---|
+| 1 | Credential contract | **Done** — `src/aida/connectors/snowflake.py::_parse_dsn` accepts either a `snowflake://` URI or a structured JSON payload; one canonical shape, rejects partial/ambiguous forms before network access |
+| 2 | Hierarchy mapping | **Done** — Snowflake database → catalog, schema → schema, matching every other connector |
+| 3 | Discovery | **Done** — multi-database `INFORMATION_SCHEMA`-based discovery for columns, primary/unique and foreign-key constraints, reusing `aida.connectors.discovery` assembly helpers (`discover`) |
+| 4 | Estimate via EXPLAIN | **Done** — `EXPLAIN USING JSON` parsed for a partition-pruned cost/row/byte estimate with a pruning-ratio evidence field (`_extract_snowflake_explain_estimate`); registered with `capabilities.explain=True` |
+| 5 | Governed execution | **Done** — read-only execution capturing the real Snowflake query ID via `cur.sfqid` as `warehouse_query_id="snowflake-query:<sfqid>"`, matching the `oracle-sid:`/`sqlserver-spid:`/`bigquery-job:` convention |
+| 6 | Bounded profiling | **Done** — `APPROX_COUNT_DISTINCT`-based approximate-statistics profiling |
+| 7 | Tests | **Done** — 7 tests in `tests/test_connectors_snowflake.py` (identifier quoting, both DSN formats, EXPLAIN-JSON extraction, registry definition, discovery assembly, query execution), all passing |
+| **Live Snowflake account verification** | **OUTSTANDING** — no live Snowflake account, warehouse, or credentials were available in any session; `test_connection`/discovery/EXPLAIN estimate/execution/profiling have never been run against a real Snowflake instance |
+
+**Acceptance.** Listed in `connector_registry.supported_types`; represented in the matrix and certification path. **Remaining acceptance.** Live account run with exact discovery counts; certification; version fixtures; a Docker or hosted-trial fixture (Snowflake has no self-hostable container image, so this likely means a hosted trial account rather than a `compose.yaml` service).
+
 ## 5. Workstream D — Certification and fixtures
 
 **Required test layers**

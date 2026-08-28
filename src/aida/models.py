@@ -434,8 +434,8 @@ class DataQualityIncident(Base, TimestampMixin):
     policy_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("data_quality_policy.id", ondelete="SET NULL"), index=True
     )
-    latest_observation_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_quality_observation.id", ondelete="CASCADE"), nullable=False, index=True
+    latest_observation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_quality_observation.id", ondelete="SET NULL"), index=True
     )
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     anomaly_type: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -1508,6 +1508,10 @@ class DbtResource(Base, TimestampMixin):
     matched_table_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
     )
+    test_status: Mapped[str | None] = mapped_column(String(30))
+    test_failures: Mapped[int | None] = mapped_column(Integer)
+    test_execution_time: Mapped[float | None] = mapped_column(Float)
+    extra_metadata: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class DbtLineageEdge(Base, TimestampMixin):

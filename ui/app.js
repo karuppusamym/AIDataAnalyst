@@ -6,6 +6,8 @@ const state = {
   memory: [], outbox: [], pendingDecision: null, metricTables: [], metricColumns: [],
   dbtProjects: [], dbtImports: [], dbtResources: [], dbtLineage: null,
   selectedDbtProjectId: null, selectedDbtImportId: null,
+  dbtDagMode: "dag", dbtDagZoom: 1.0, dbtDagSearch: "",
+  dbtDagExpandedNodes: new Set(), dbtDagSelectedNodeId: null,
   openlineageEvents: [],
   integrationPolicy: null,
   semanticInferenceRuns: [], enrichmentProposals: [], businessAnnotations: [],
@@ -988,6 +990,190 @@ function renderDbtImports() {
   renderTable("dbt-imports-table", ["Artifact","Status","Models / sources / tests","Edges","Catalog coverage"], rows, "No manifest imports yet");
 }
 
+function applyDbtDagZoom() {
+  const viewport = $("#dbt-dag-viewport");
+  if (viewport) viewport.style.transform = `scale(${state.dbtDagZoom})`;
+  const fitBtn = $("#dbt-dag-zoom-fit");
+  if (fitBtn) fitBtn.textContent = `${Math.round(state.dbtDagZoom * 100)}%`;
+}
+
+function renderDbtLineageDAG(artifact) {
+  const nodes = state.dbtLineage?.nodes || [];
+  const edges = state.dbtLineage?.edges || [];
+  if (!nodes.length) {
+    setHtml("dbt-lineage", empty("No lineage graph", "This artifact has no declared resources or dependency nodes."));
+    return;
+  }
+  const resourceMap = new Map(state.dbtResources.map(r => [r.id, r]));
+  const nodeMap = new Map(nodes.map(n => [n.id, n]));
+  const searchQuery = (state.dbtDagSearch || "").trim().toLowerCase();
+
+  const tiers = [[], [], [], [], []];
+  const tierTitles = ["Sources & Seeds", "Staging & Prep", "Marts & Transforms", "Tests & Metrics", "Exposures & BI"];
+
+  nodes.forEach(node => {
+    const resource = resourceMap.get(node.id);
+    const rType = (node.resource_type || "").toUpperCase();
+    if (searchQuery) {
+      const matchName = node.label.toLowerCase().includes(searchQuery);
+      const matchCol = resource?.column_names?.some(c => c.toLowerCase().includes(searchQuery));
+      const matchTag = resource?.tags?.some(t => t.toLowerCase().includes(searchQuery));
+      if (!matchName && !matchCol && !matchTag) return;
+    }
+    if (rType === "SOURCE" || rType === "SEED") {
+      tiers[0].push({node, resource});
+    } else if (rType === "TEST" || rType === "METRIC" || rType === "SEMANTIC_MODEL") {
+      tiers[3].push({node, resource});
+    } else if (rType === "EXPOSURE") {
+      tiers[4].push({node, resource});
+    } else if (rType === "SNAPSHOT") {
+      tiers[2].push({node, resource});
+    } else {
+      const hasIncomingFromSource = edges.some(e => {
+        if (e.target_resource_id !== node.id) return false;
+        const srcNode = nodeMap.get(e.source_resource_id);
+        return srcNode && ["SOURCE", "SEED"].includes(srcNode.resource_type);
+      });
+      if (hasIncomingFromSource) {
+        tiers[1].push({node, resource});
+      } else {
+        tiers[2].push({node, resource});
+      }
+    }
+  });
+
+  const tierHtml = tiers.map((tierList, tierIdx) => {
+    if (!tierList.length) return "";
+    const cards = tierList.map(({node, resource}) => {
+      const rType = (node.resource_type || "MODEL").toLowerCase().replace("_", "-");
+      const isSelected = state.dbtDagSelectedNodeId === node.id;
+      const isExpanded = state.dbtDagExpandedNodes.has(node.id);
+
+      let testPill = "";
+      if (resource?.test_status) {
+        const tStatus = resource.test_status.toLowerCase();
+        testPill = `<span class="dbt-test-pill ${tStatus}">${esc(resource.test_status)}${resource.test_failures ? ` (${resource.test_failures})` : ""}</span>`;
+      }
+
+      let colHtml = "";
+      if (resource?.column_names?.length && isExpanded) {
+        const colItems = resource.column_names.slice(0, 30).map(colName => {
+          const dtype = resource.column_types?.[colName] || "";
+          const desc = resource.column_descriptions?.[colName] || "";
+          const descIcon = desc ? `<span class="dbt-col-desc-indicator" title="${esc(desc)}">&#9432;</span>` : "";
+          return `<div class="dbt-col-item"><span class="dbt-col-name">${esc(colName)}${descIcon}</span>${dtype ? `<span class="dbt-col-type">${esc(dtype)}</span>` : ""}</div>`;
+        }).join("");
+        colHtml = `<div class="dbt-dag-card-columns">${colItems}${resource.column_names.length > 30 ? `<div class="secondary-cell">+${resource.column_names.length - 30} more</div>` : ""}</div>`;
+      }
+
+      return `
+        <div class="dbt-dag-card ${rType} ${isSelected ? 'selected' : ''}" data-dbt-dag-node="${node.id}">
+          <div class="dbt-dag-card-head">
+            <span class="type-tag">${esc(node.resource_type)}</span>
+            ${testPill || (node.matched_table_id ? '<span class="status">MATCHED</span>' : '')}
+          </div>
+          <div class="dbt-dag-card-body">
+            <div class="dbt-dag-card-name">${esc(node.label)}</div>
+            <div class="dbt-dag-card-meta">
+              ${node.materialization ? `<span>${esc(node.materialization)}</span>` : ''}
+              ${resource?.column_names?.length ? `<button type="button" class="link-button" data-toggle-dbt-columns="${node.id}">${resource.column_names.length} cols ${isExpanded ? '▲' : '▼'}</button>` : ''}
+            </div>
+          </div>
+          ${colHtml}
+        </div>
+      `;
+    }).join("");
+
+    return `
+      <div class="dbt-dag-tier">
+        <div class="dbt-dag-tier-title"><span>${tierTitles[tierIdx]}</span><small>${tierList.length}</small></div>
+        ${cards}
+      </div>
+    `;
+  }).filter(Boolean).join("");
+
+  setHtml("dbt-lineage", `
+    <div id="dbt-dag-viewport" class="dbt-dag-viewport" style="transform: scale(${state.dbtDagZoom})">
+      <div class="dbt-dag-columns-wrapper">${tierHtml || empty("No matching DAG nodes found")}</div>
+    </div>
+  `);
+}
+
+function renderDbtColumnFlows(artifact) {
+  const resources = state.dbtResources || [];
+  const edges = state.dbtLineage?.edges || [];
+  const resMap = new Map(resources.map(r => [r.id, r]));
+  const searchQuery = (state.dbtDagSearch || "").trim().toLowerCase();
+
+  const flows = [];
+  edges.slice(0, 100).forEach(edge => {
+    const src = resMap.get(edge.source_resource_id);
+    const tgt = resMap.get(edge.target_resource_id);
+    if (!src || !tgt) return;
+    const commonCols = src.column_names.filter(c => tgt.column_names.includes(c));
+    if (!commonCols.length) {
+      flows.push({
+        srcName: src.name,
+        srcType: src.resource_type,
+        tgtName: tgt.name,
+        tgtType: tgt.resource_type,
+        srcCol: "(relation link)",
+        tgtCol: "(relation link)",
+        srcDataType: "",
+        tgtDataType: "",
+        desc: tgt.description || ""
+      });
+    } else {
+      commonCols.forEach(col => {
+        if (searchQuery && !col.toLowerCase().includes(searchQuery) && !src.name.toLowerCase().includes(searchQuery) && !tgt.name.toLowerCase().includes(searchQuery)) return;
+        flows.push({
+          srcName: src.name,
+          srcType: src.resource_type,
+          tgtName: tgt.name,
+          tgtType: tgt.resource_type,
+          srcCol: col,
+          tgtCol: col,
+          srcDataType: src.column_types?.[col] || "",
+          tgtDataType: tgt.column_types?.[col] || "",
+          desc: tgt.column_descriptions?.[col] || src.column_descriptions?.[col] || ""
+        });
+      });
+    }
+  });
+
+  if (!flows.length) {
+    setHtml("dbt-lineage", empty("No column flows found", "Trace columns across upstream and downstream dbt models."));
+    return;
+  }
+
+  const cards = flows.slice(0, 80).map(flow => `
+    <div class="dbt-col-flow-card">
+      <div class="dbt-col-flow-side">
+        <span class="dbt-col-flow-node-name">${esc(flow.srcType)} · ${esc(flow.srcName)}</span>
+        <span class="dbt-col-flow-col-name">${esc(flow.srcCol)} ${flow.srcDataType ? `<small class="dbt-col-type">${esc(flow.srcDataType)}</small>` : ''}</span>
+      </div>
+      <div class="dbt-col-flow-arrow">&rarr;</div>
+      <div class="dbt-col-flow-side">
+        <span class="dbt-col-flow-node-name">${esc(flow.tgtType)} · ${esc(flow.tgtName)}</span>
+        <span class="dbt-col-flow-col-name">${esc(flow.tgtCol)} ${flow.tgtDataType ? `<small class="dbt-col-type">${esc(flow.tgtDataType)}</small>` : ''}</span>
+        ${flow.desc ? `<small class="secondary-cell">${esc(flow.desc)}</small>` : ''}
+      </div>
+    </div>
+  `).join("");
+
+  setHtml("dbt-lineage", `<div class="dbt-col-flow-list">${cards}${flows.length > 80 ? `<p class="form-note">Showing first 80 of ${flows.length} column flows.</p>` : ''}</div>`);
+}
+
+function renderDbtEdgeList(artifact) {
+  const nodes = new Map((state.dbtLineage?.nodes || []).map(node => [node.id, node]));
+  const edges = (state.dbtLineage?.edges || []).slice(0, 100).map(edge => {
+    const source = nodes.get(edge.source_resource_id), target = nodes.get(edge.target_resource_id);
+    if (!source || !target) return "";
+    return `<div class="lineage-edge"><div class="lineage-node"><strong>${esc(source.label)}</strong><small>${esc(human(source.resource_type))}${source.matched_table_id ? " / catalog linked" : ""}</small></div><b>&rarr;</b><div class="lineage-node target"><strong>${esc(target.label)}</strong><small>${esc(human(target.resource_type))}${target.materialization ? ` / ${esc(target.materialization)}` : ""}</small></div></div>`;
+  }).join("");
+  setHtml("dbt-lineage", edges ? `<div class="lineage-list">${edges}</div>${artifact.lineage_edge_count > 100 ? `<p class="form-note">Showing first 100 of ${artifact.lineage_edge_count} edges.</p>` : ""}` : empty("No dependencies declared"));
+}
+
 function renderDbtArtifact() {
   if (!dbtEnabled()) {
     renderDbtDisabledState();
@@ -1001,17 +1187,34 @@ function renderDbtArtifact() {
     setHtml("dbt-lineage-status", badge("NOT_CONFIGURED"));
     return;
   }
-  setHtml("dbt-metrics", [["Models",artifact.model_count,"Compiled transformation nodes"],["Sources",artifact.source_count,"Declared upstream relations"],["Catalog matches",artifact.matched_resource_count,`${artifact.unmatched_resource_count} relation mappings need attention`],["Lineage edges",artifact.lineage_edge_count,`${artifact.test_count} test nodes included`]].map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
-  const type = $("#dbt-resource-type")?.value || "ALL"; const match = $("#dbt-match-filter")?.value || "ALL";
+  setHtml("dbt-metrics", [
+    ["Models",artifact.model_count,"Compiled transformation nodes"],
+    ["Sources",artifact.source_count,"Declared upstream relations"],
+    ["Catalog matches",artifact.matched_resource_count,`${artifact.unmatched_resource_count} relation mappings need attention`],
+    ["Lineage edges",artifact.lineage_edge_count,`${artifact.test_count} test nodes included`]
+  ].map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
+
+  const type = $("#dbt-resource-type")?.value || "ALL";
+  const match = $("#dbt-match-filter")?.value || "ALL";
   const visible = state.dbtResources.filter(item => (type === "ALL" || item.resource_type === type) && (match === "ALL" || (match === "MATCHED") === Boolean(item.matched_table_id)));
-  const rows = visible.map(item => `<tr><td><button class="link-button" data-dbt-resource="${item.id}">${esc(item.name)}</button><span class="secondary-cell">${esc(item.package_name)} / ${esc(item.unique_id)}</span></td><td>${badge(item.resource_type)}</td><td>${esc(item.materialization || "Not applicable")}</td><td>${badge(item.matched_table_id ? "MATCHED" : "UNMATCHED")}</td><td>${badge(item.sql_parse_status)}</td><td>${item.column_names.length}</td></tr>`);
+  const rows = visible.map(item => {
+    const testPill = item.test_status ? `<span class="dbt-test-pill ${item.test_status.toLowerCase()}">${esc(item.test_status)}${item.test_failures ? ` (${item.test_failures})` : ""}</span>` : "";
+    return `<tr><td><button class="link-button" data-dbt-resource="${item.id}">${esc(item.name)}</button><span class="secondary-cell">${esc(item.package_name)} / ${esc(item.unique_id)}</span></td><td>${badge(item.resource_type)} ${testPill}</td><td>${esc(item.materialization || "Not applicable")}</td><td>${badge(item.matched_table_id ? "MATCHED" : "UNMATCHED")}</td><td>${badge(item.sql_parse_status)}</td><td>${item.column_names.length}</td></tr>`;
+  });
   renderTable("dbt-resources-table", ["Resource","Type","Materialization","Catalog","SQL evidence","Columns"], rows, "No resources match these filters");
-  const nodes = new Map((state.dbtLineage?.nodes || []).map(node => [node.id, node]));
-  const edges = (state.dbtLineage?.edges || []).slice(0, 60).map(edge => {
-    const source = nodes.get(edge.source_resource_id), target = nodes.get(edge.target_resource_id); if (!source || !target) return "";
-    return `<div class="lineage-edge"><div class="lineage-node"><strong>${esc(source.label)}</strong><small>${esc(human(source.resource_type))}${source.matched_table_id ? " / catalog linked" : ""}</small></div><b>&rarr;</b><div class="lineage-node target"><strong>${esc(target.label)}</strong><small>${esc(human(target.resource_type))}${target.materialization ? ` / ${esc(target.materialization)}` : ""}</small></div></div>`;
-  }).join("");
-  setHtml("dbt-lineage", edges ? `<div class="lineage-list">${edges}</div>${artifact.lineage_edge_count > 60 ? `<p class="form-note">Showing the first 60 of ${artifact.lineage_edge_count} edges in this bounded UI slice.</p>` : ""}` : empty("No dependencies declared", "This artifact has resources but no resolvable depends_on edges."));
+
+  // Update view mode button active state
+  $$("[data-dbt-dag-mode]").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.dbtDagMode === state.dbtDagMode);
+  });
+
+  if (state.dbtDagMode === "columns") {
+    renderDbtColumnFlows(artifact);
+  } else if (state.dbtDagMode === "edges") {
+    renderDbtEdgeList(artifact);
+  } else {
+    renderDbtLineageDAG(artifact);
+  }
   setHtml("dbt-lineage-status", badge("IMPORTED"));
 }
 
@@ -1073,7 +1276,56 @@ async function loadOpenLineage() {
 function showDbtResource(resourceId) {
   const resource = state.dbtResources.find(item => item.id === resourceId); if (!resource) return;
   $("#record-title").textContent = `${human(resource.resource_type)} / ${resource.name}`;
-  const details = `<dl class="record-json"><dt>Unique ID</dt><dd>${esc(resource.unique_id)}</dd><dt>Relation</dt><dd>${esc(resource.relation_name || "Not a warehouse relation")}</dd><dt>Materialization</dt><dd>${esc(resource.materialization || "Not applicable")}</dd><dt>Catalog mapping</dt><dd>${esc(resource.matched_table_id || "Unmatched")}</dd><dt>Source file</dt><dd>${esc(resource.original_file_path || "Not recorded")}</dd><dt>Columns</dt><dd>${esc(resource.column_names.join(", ") || "Not declared")}</dd><dt>Tags</dt><dd>${esc(resource.tags.join(", ") || "None")}</dd><dt>SQL fingerprint</dt><dd>${esc(resource.compiled_sql_hash || "No compiled SQL")}</dd></dl>${resource.compiled_sql_redacted ? `<h3>Literal-redacted compiled SQL</h3><pre class="sql-preview">${esc(resource.compiled_sql_redacted)}</pre>` : `<p class="form-note">Compiled SQL was not present or could not be safely normalized; only its fingerprint is retained.</p>`}`;
+
+  let testBanner = "";
+  if (resource.test_status) {
+    testBanner = `
+      <div class="boundary-callout">
+        <div>
+          <strong>Test Execution Health: ${esc(resource.test_status)}</strong>
+          <p>${resource.test_failures !== null && resource.test_failures !== undefined ? `Failures observed: ${resource.test_failures} rows.` : 'Assertions executed with 0 failures.'} ${resource.test_execution_time ? `Execution time: ${resource.test_execution_time.toFixed(2)}s.` : ''}</p>
+        </div>
+      </div>
+    `;
+  }
+
+  let colSection = "";
+  if (resource.column_names && resource.column_names.length) {
+    const colRows = resource.column_names.map(col => {
+      const dtype = resource.column_types?.[col] || "Not resolved";
+      const desc = resource.column_descriptions?.[col] || "—";
+      return `<tr><td><strong>${esc(col)}</strong></td><td><code>${esc(dtype)}</code></td><td>${esc(desc)}</td></tr>`;
+    }).join("");
+    colSection = `
+      <h3>Columns & Physical Schema Types</h3>
+      <table class="data-table">
+        <thead><tr><th>Column Name</th><th>Physical Type</th><th>Documentation</th></tr></thead>
+        <tbody>${colRows}</tbody>
+      </table>
+    `;
+  }
+
+  let exposureSection = "";
+  if (resource.extra_metadata && Object.keys(resource.extra_metadata).length) {
+    const entries = Object.entries(resource.extra_metadata).map(([k, v]) => `<dt>${esc(human(k))}</dt><dd>${esc(String(v))}</dd>`).join("");
+    exposureSection = `<h3>Downstream & Exposure Metadata</h3><dl class="record-json">${entries}</dl>`;
+  }
+
+  const details = `
+    ${testBanner}
+    <dl class="record-json">
+      <dt>Unique ID</dt><dd>${esc(resource.unique_id)}</dd>
+      <dt>Relation</dt><dd>${esc(resource.relation_name || "Not a warehouse relation")}</dd>
+      <dt>Materialization</dt><dd>${esc(resource.materialization || "Not applicable")}</dd>
+      <dt>Catalog mapping</dt><dd>${esc(resource.matched_table_id || "Unmatched")}</dd>
+      <dt>Source file</dt><dd>${esc(resource.original_file_path || "Not recorded")}</dd>
+      <dt>Tags</dt><dd>${esc(resource.tags.join(", ") || "None")}</dd>
+      <dt>SQL fingerprint</dt><dd>${esc(resource.compiled_sql_hash || "No compiled SQL")}</dd>
+    </dl>
+    ${colSection}
+    ${exposureSection}
+    ${resource.compiled_sql_redacted ? `<h3>Literal-redacted compiled SQL</h3><pre class="sql-preview">${esc(resource.compiled_sql_redacted)}</pre>` : `<p class="form-note">Compiled SQL was not present or could not be safely normalized; only its fingerprint is retained.</p>`}
+  `;
   setHtml("record-content", details); $("#record-dialog").showModal();
 }
 
@@ -1485,6 +1737,28 @@ function bindDirectEvents() {
     if (!dbtEnabled()) return notify("Enable dbt in Administration before importing manifests.");
     return state.dbtProjects.length ? $("#dbt-import-dialog").showModal() : notify("Register a dbt project before importing a manifest.");
   });
+  $$("[data-dbt-dag-mode]").forEach(btn => {
+    btn.addEventListener("click", event => {
+      state.dbtDagMode = event.currentTarget.dataset.dbtDagMode;
+      renderDbtArtifact();
+    });
+  });
+  $("#dbt-dag-zoom-in")?.addEventListener("click", () => {
+    state.dbtDagZoom = Math.min(2.0, state.dbtDagZoom + 0.15);
+    applyDbtDagZoom();
+  });
+  $("#dbt-dag-zoom-out")?.addEventListener("click", () => {
+    state.dbtDagZoom = Math.max(0.5, state.dbtDagZoom - 0.15);
+    applyDbtDagZoom();
+  });
+  $("#dbt-dag-zoom-fit")?.addEventListener("click", () => {
+    state.dbtDagZoom = 1.0;
+    applyDbtDagZoom();
+  });
+  $("#dbt-dag-search")?.addEventListener("input", event => {
+    state.dbtDagSearch = event.target.value;
+    renderDbtArtifact();
+  });
   $("#dbt-resource-type").addEventListener("change", renderDbtArtifact); $("#dbt-match-filter").addEventListener("change", renderDbtArtifact);
   $("#refresh-dbt").addEventListener("click", () => loadDbtProjects().then(() => notify("Transformation evidence refreshed.", true)).catch(error => notify(error.message)));
   $("#tools-project").addEventListener("change", async event => { populateProjectSources("tool-author-source", event.target.value); await loadTools(); });
@@ -1557,10 +1831,44 @@ function bindDirectEvents() {
     try { const created = await api(`/v1/projects/${projectId}/dbt-projects`, {method:"POST", body:JSON.stringify(body)}); state.selectedDbtProjectId = created.id; $("#dbt-project-dialog").close(); form.reset(); notify("dbt project registered to its governed warehouse source.", true); await loadDbtProjects(); } catch (error) { notify(error.message); }
   });
   $("#dbt-import-form").addEventListener("submit", async event => {
-    event.preventDefault(); const form = event.target; const data = new FormData(form); const file = $("#dbt-manifest-file").files[0];
-    if (!file) return notify("Choose a dbt manifest.json file."); if (file.size > 32 * 1024 * 1024) return notify("The manifest exceeds the 32 MiB ingestion limit.");
+    event.preventDefault(); const form = event.target; const data = new FormData(form);
+    const manifestFile = $("#dbt-manifest-file")?.files[0];
+    const catalogFile = $("#dbt-catalog-file")?.files[0];
+    const runResultsFile = $("#dbt-run-results-file")?.files[0];
+    if (!manifestFile) return notify("Choose a dbt manifest.json file.");
+    if (manifestFile.size > 32 * 1024 * 1024) return notify("The manifest exceeds the 32 MiB ingestion limit.");
     const button = form.querySelector("button[type=submit]"); button.disabled = true; button.textContent = "Validating artifact";
-    try { const manifest = JSON.parse(await file.text()); const imported = await api(`/v1/dbt-projects/${data.get("dbt_project_id")}/artifact-imports`, {method:"POST", body:JSON.stringify({manifest})}); state.selectedDbtProjectId = String(data.get("dbt_project_id")); state.selectedDbtImportId = imported.id; $("#dbt-import-dialog").close(); form.reset(); notify(`Imported ${imported.resource_count} dbt resources and ${imported.lineage_edge_count} lineage edges.`, true); await loadDbtProjects(); } catch (error) { notify(error instanceof SyntaxError ? "The selected file is not valid JSON." : error.message); } finally { button.disabled = false; button.textContent = "Validate and import"; }
+    try {
+      const manifest = JSON.parse(await manifestFile.text());
+      let catalog = null;
+      if (catalogFile) {
+        try { catalog = JSON.parse(await catalogFile.text()); }
+        catch { return notify("The catalog.json file is not valid JSON."); }
+      }
+      let runResults = null;
+      if (runResultsFile) {
+        try { runResults = JSON.parse(await runResultsFile.text()); }
+        catch { return notify("The run_results.json file is not valid JSON."); }
+      }
+      const imported = await api(`/v1/dbt-projects/${data.get("dbt_project_id")}/artifact-imports`, {
+        method: "POST",
+        body: JSON.stringify({
+          manifest,
+          catalog,
+          run_results: runResults
+        })
+      });
+      state.selectedDbtProjectId = String(data.get("dbt_project_id"));
+      state.selectedDbtImportId = imported.id;
+      $("#dbt-import-dialog").close();
+      form.reset();
+      notify(`Imported ${imported.resource_count} dbt resources, ${imported.lineage_edge_count} lineage edges, and associated catalog/test metadata.`, true);
+      await loadDbtProjects();
+    } catch (error) {
+      notify(error instanceof SyntaxError ? "The selected file is not valid JSON." : error.message);
+    } finally {
+      button.disabled = false; button.textContent = "Validate and import";
+    }
   });
   $("#schedule-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.target; const data = new FormData(form); const sourceId = $("#schedule-source").value;
@@ -1677,6 +1985,23 @@ function bindDelegatedEvents() {
     const tool = event.target.closest("[data-tool]"); if (tool) return selectTool(tool.dataset.tool);
     const dbtProject = event.target.closest("[data-dbt-project]"); if (dbtProject) return selectDbtProject(dbtProject.dataset.dbtProject).catch(error => notify(error.message));
     const dbtImport = event.target.closest("[data-dbt-import]"); if (dbtImport) return loadDbtArtifact(dbtImport.dataset.dbtImport).catch(error => notify(error.message));
+    const toggleCols = event.target.closest("[data-toggle-dbt-columns]");
+    if (toggleCols) {
+      const nodeId = toggleCols.dataset.toggleDbtColumns;
+      if (state.dbtDagExpandedNodes.has(nodeId)) {
+        state.dbtDagExpandedNodes.delete(nodeId);
+      } else {
+        state.dbtDagExpandedNodes.add(nodeId);
+      }
+      return renderDbtArtifact();
+    }
+    const dagNode = event.target.closest("[data-dbt-dag-node]");
+    if (dagNode) {
+      const nodeId = dagNode.dataset.dbtDagNode;
+      state.dbtDagSelectedNodeId = state.dbtDagSelectedNodeId === nodeId ? null : nodeId;
+      showDbtResource(nodeId);
+      return renderDbtArtifact();
+    }
     const dbtResource = event.target.closest("[data-dbt-resource]"); if (dbtResource) return showDbtResource(dbtResource.dataset.dbtResource);
     const proposalDetail = event.target.closest("[data-proposal-detail]"); if (proposalDetail) return showRecord("Business metadata proposal", state.enrichmentProposals.find(item => item.id === proposalDetail.dataset.proposalDetail));
     const annotationDetail = event.target.closest("[data-annotation-detail]"); if (annotationDetail) return showRecord("Approved business annotation", state.businessAnnotations.find(item => item.id === annotationDetail.dataset.annotationDetail));

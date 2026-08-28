@@ -482,8 +482,15 @@ async def apply_ownership_rule(
     enforce_organization(context, rule.organization_id)
     rows = (
         await session.execute(
-            select(MetadataTable, MetadataSchema)
+            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .outerjoin(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.table_id == MetadataTable.id,
+            )
+            .outerjoin(
+                BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id
+            )
             .where(
                 MetadataTable.organization_id == rule.organization_id,
                 MetadataTable.status == "ACTIVE",
@@ -492,14 +499,22 @@ async def apply_ownership_rule(
             .limit(10_000)
         )
     ).all()
+    pattern = rule.match_pattern.casefold()
     matched: list[UUID] = []
-    for table, schema in rows:
-        candidates = {
-            "TABLE_NAME": table.name,
-            "SCHEMA_NAME": schema.name,
-            "QUALIFIED_NAME": f"{schema.name}.{table.name}",
-        }
-        if fnmatchcase(candidates[rule.match_field].casefold(), rule.match_pattern.casefold()):
+    for table, schema, annotation, domain in rows:
+        if rule.match_field == "TAG":
+            tags = annotation.tags if annotation is not None else []
+            is_match = any(fnmatchcase(tag.casefold(), pattern) for tag in tags)
+        else:
+            candidates = {
+                "TABLE_NAME": table.name,
+                "SCHEMA_NAME": schema.name,
+                "QUALIFIED_NAME": f"{schema.name}.{table.name}",
+                "DOMAIN_KEY": domain.domain_key if domain is not None else None,
+            }
+            value = candidates[rule.match_field]
+            is_match = value is not None and fnmatchcase(value.casefold(), pattern)
+        if is_match:
             matched.append(table.id)
         if len(matched) == 500:
             break

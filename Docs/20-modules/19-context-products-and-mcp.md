@@ -130,15 +130,15 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 
 ## 13. Current state → target
 
-**Entirely unbuilt.** This is a P0 entry-ticket gap *and* the W2 differentiator — an unusual combination that makes it the highest-priority new build alongside glossary.
+**Partially built, and previously under-reported.** `src/aida/mcp_server.py` implements a real JSON-RPC 2.0 MCP endpoint (`POST /mcp`, mounted in `src/aida/main.py`) with `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`. Tool calls do **not** bypass the gateway: `tools/call` runs through the same `GovernedAgentOrchestrator` → `QueryExecutionGateway` path as the native analyst (prompt-risk screening, AST guard, cost check, masking, audit). `tools/list` and `tools/call` now also enforce the tool's `allowed_roles` binding — an MCP caller is offered, and may invoke, only the governed tools its identity is bound to, mirroring the native `POST /v1/tool-versions/{id}/execute` check; an ineligible tool is denied with the same "not found or not published" response used for a genuinely-absent tool, so eligibility is never revealed as a distinguishable side channel. What is still missing is everything the *context product* abstraction itself was meant to provide: there is no `ContextProduct` concept anywhere in the codebase (no model, no versioning, no maker-checker, no scope/purpose curation) — the MCP server exposes raw catalog metadata and governed tools directly, not a reviewed, owned, versioned package. `resources/list` and `resources/read` (metadata reads) are not recorded as consumption/lineage evidence the way tool calls are. The server advertises a `"prompts": {}` capability in `initialize` but implements no `prompts/list` or `prompts/get` handler. There is no per-consumer rate limiting or budget enforcement. This file had previously reported the entire module as unbuilt; that was inaccurate — verify against the code, not this table, before re-scoping work here.
 
 | Aspect | Now | Target |
 |---|---|---|
-| MCP server | Not implemented | P0 — the distribution channel for 2026 |
-| Context products | Not implemented | P0 |
-| Per-read policy | Not implemented | P0 — the differentiator |
-| Consumption lineage | Not implemented | P0 |
-| Eligible tools exposure | Not implemented | P0 — the differentiator |
+| MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`, mounted; tool calls route through the full governed gateway | Add MCP `prompts/*` (capability is advertised but unimplemented) |
+| Context products | Not implemented — no `ContextProduct` model, versioning, or maker-checker; MCP exposes raw catalog/tools instead | P0 |
+| Per-read policy | Partial — tenancy-scoped on every read/list; tool eligibility now enforced by role binding | ABAC / purpose-based evaluation once module 17 has it natively |
+| Consumption lineage | Partial — tool calls get the same audit/evidence trail as native runs; resource reads (`resources/list`/`read`) are not recorded at all | P0 |
+| Eligible tools exposure | **Implemented** — `tools/list` only returns role-eligible tools; an ineligible `tools/call` is denied without confirming the tool's existence | Extend to a real `ContextProduct.eligible_tools` once CX-2 exists |
 | Consumer budgets | Not implemented | P1 |
 
 ## 14. Open work
