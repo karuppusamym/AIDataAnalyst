@@ -1,0 +1,159 @@
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from time import perf_counter
+from uuid import uuid4
+
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from sqlalchemy import text
+from temporalio.client import Client
+
+from aida import __version__
+from aida.ai_governance_api import router as ai_governance_router
+from aida.api import router
+from aida.config import get_settings
+from aida.context import correlation_id_var
+from aida.db import session_factory
+from aida.dbt_api import router as dbt_router
+from aida.glossary_api import router as glossary_router
+from aida.ingestion_api import router as ingestion_router
+from aida.intelligence_api import router as intelligence_router
+from aida.logging import configure_logging
+from aida.mcp_server import router as mcp_router
+from aida.openlineage_api import router as openlineage_router
+from aida.operational_api import router as operational_router
+from aida.quality_api import router as quality_router
+from aida.schemas import HealthResponse
+from aida.semantic_api import router as semantic_router
+from aida.semantic_intelligence_api import router as semantic_intelligence_router
+from aida.stewardship_api import router as stewardship_router
+from aida.tool_api import router as tool_router
+
+settings = get_settings()
+configure_logging(settings.log_level)
+logger = structlog.get_logger(__name__)
+
+REQUEST_COUNT = Counter(
+    "aida_http_requests_total",
+    "HTTP requests",
+    labelnames=("method", "path", "status"),
+)
+REQUEST_LATENCY = Histogram(
+    "aida_http_request_duration_seconds",
+    "HTTP request latency",
+    labelnames=("method", "path"),
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    app.state.temporal_client = None
+    if settings.temporal_enabled:
+        app.state.temporal_client = await Client.connect(
+            settings.temporal_address,
+            namespace=settings.temporal_namespace,
+        )
+    logger.info(
+        "service_started",
+        service=settings.service_name,
+        environment=settings.environment,
+        version=__version__,
+    )
+    yield
+    logger.info("service_stopped", service=settings.service_name)
+
+
+app = FastAPI(
+    title="Bank Data Intelligence Platform API",
+    version=__version__,
+    description="Governed metadata, semantic intelligence, and analytical control-plane API.",
+    lifespan=lifespan,
+)
+app.include_router(router)
+app.include_router(semantic_router)
+app.include_router(tool_router)
+app.include_router(operational_router)
+app.include_router(intelligence_router)
+app.include_router(ai_governance_router)
+app.include_router(dbt_router)
+app.include_router(openlineage_router)
+app.include_router(semantic_intelligence_router)
+app.include_router(quality_router)
+app.include_router(ingestion_router)
+app.include_router(glossary_router)
+app.include_router(stewardship_router)
+app.include_router(
+    mcp_router
+)  # MCP server: POST /mcp — governed tool & catalog access for AI agents
+
+
+@app.middleware("http")
+async def request_context(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    correlation_id = request.headers.get("X-Correlation-Id") or str(uuid4())
+    token = correlation_id_var.set(correlation_id)
+    started = perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        logger.exception(
+            "unhandled_request_error",
+            correlation_id=correlation_id,
+            method=request.method,
+            path=request.url.path,
+        )
+        response = JSONResponse(
+            status_code=500,
+            content={
+                "error": {
+                    "code": "INTERNAL_SERVER_ERROR",
+                    "message": "an unexpected error occurred",
+                    "correlation_id": correlation_id,
+                }
+            },
+        )
+    finally:
+        correlation_id_var.reset(token)
+    elapsed = perf_counter() - started
+    route = request.scope.get("route")
+    path_template = getattr(route, "path", request.url.path)
+    REQUEST_COUNT.labels(request.method, path_template, str(response.status_code)).inc()
+    REQUEST_LATENCY.labels(request.method, path_template).observe(elapsed)
+    response.headers["X-Correlation-Id"] = correlation_id
+    return response
+
+
+@app.get("/health/live", response_model=HealthResponse, tags=["health"])
+async def liveness() -> HealthResponse:
+    return HealthResponse(status="UP", service=settings.service_name, version=__version__)
+
+
+@app.get("/health/ready", response_model=HealthResponse, tags=["health"])
+async def readiness(request: Request, response: Response) -> HealthResponse:
+    dependencies: dict[str, str] = {}
+    try:
+        async with session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        dependencies["postgresql"] = "UP"
+    except Exception:
+        dependencies["postgresql"] = "DOWN"
+    dependencies["temporal"] = (
+        "UP" if not settings.temporal_enabled or request.app.state.temporal_client else "DOWN"
+    )
+    ready = all(value == "UP" for value in dependencies.values())
+    if not ready:
+        response.status_code = 503
+    return HealthResponse(
+        status="UP" if ready else "DOWN",
+        service=settings.service_name,
+        version=__version__,
+        dependencies=dependencies,
+    )
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics() -> Response:
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)

@@ -1,0 +1,629 @@
+import hashlib
+import hmac
+import json
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
+from aida.agent_runtime import RuntimeStage, RuntimeState
+from aida.config import Settings
+from aida.events import record_audit, record_outbox
+from aida.model_gateway import (
+    ApprovedModelRoute,
+    ModelGatewayError,
+    ProviderNeutralModelGateway,
+    SqlGenerationOutput,
+)
+from aida.models import (
+    AgentRun,
+    AnalysisRun,
+    DataSource,
+    GovernedToolVersion,
+    MetadataColumn,
+    MetadataConstraint,
+    MetadataSchema,
+    MetadataTable,
+    ModelRouteConfiguration,
+    SemanticModelVersion,
+    ToolExecution,
+)
+from aida.prompt_risk import DeterministicPromptRiskClassifier
+from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
+from aida.schemas import ToolParameterDefinition
+from aida.security import SecurityContext
+from aida.tool_rendering import ToolParameterError, render_tool_sql
+
+
+class ModelRouteUnavailable(RuntimeError):
+    pass
+
+
+class AgentClarificationRequired(RuntimeError):
+    pass
+
+
+class AgentPolicyRejected(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class AgentOrchestrationResult:
+    agent_run: AgentRun
+    gateway_result: GatewayResult
+    explanation: str
+
+
+def _trace(
+    state: RuntimeState, control_type: str, details: dict[str, object] | None = None
+) -> dict[str, object]:
+    trace: dict[str, object] = {
+        "sequence": state.step_count,
+        "stage": state.stage.value,
+        "control_type": control_type,
+    }
+    if details:
+        trace["details"] = details
+    return trace
+
+
+class GovernedAgentOrchestrator:
+    """Framework-neutral orchestrator with deterministic gates around model output."""
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.query_gateway = QueryExecutionGateway(settings)
+        self.retriever = GovernedRetriever(settings)
+        self.planner = GovernedPlanner(settings)
+        self.prompt_risk_classifier = DeterministicPromptRiskClassifier()
+        self.model_gateway = ProviderNeutralModelGateway(settings)
+
+    async def _approved_model_route(
+        self, session: AsyncSession, organization_id: UUID
+    ) -> ApprovedModelRoute | None:
+        if not self.settings.model_route:
+            return None
+        route = await session.scalar(
+            select(ModelRouteConfiguration)
+            .where(
+                ModelRouteConfiguration.organization_id == organization_id,
+                ModelRouteConfiguration.route_key == self.settings.model_route,
+                ModelRouteConfiguration.status == "APPROVED",
+            )
+            .order_by(ModelRouteConfiguration.version.desc())
+            .limit(1)
+        )
+        if (
+            route is None
+            or "SQL_GENERATION" not in route.capabilities
+            or not route.credential_reference
+        ):
+            return None
+        return ApprovedModelRoute(
+            route_key=route.route_key,
+            provider_type=route.provider_type,
+            model_id=route.model_id,
+            endpoint_alias=route.endpoint_alias,
+            credential_reference=route.credential_reference,
+            max_input_tokens=route.max_input_tokens,
+            max_output_tokens=route.max_output_tokens,
+            timeout_seconds=route.timeout_seconds,
+        )
+
+    async def _model_context(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        retrieval_hits: list[Any],
+    ) -> dict[str, Any]:
+        table_ids: set[UUID] = set()
+        for hit in retrieval_hits:
+            if hit.object_type == "TABLE":
+                table_ids.add(UUID(hit.object_id))
+            table_id = hit.metadata.get("table_id") or hit.metadata.get("source_table_id")
+            if table_id:
+                table_ids.add(UUID(str(table_id)))
+        bounded_ids = list(sorted(table_ids, key=str))[:25]
+        if not bounded_ids:
+            return {"dialect": datasource.dialect, "tables": [], "constraints": []}
+        table_rows = (
+            await session.execute(
+                select(MetadataTable, MetadataSchema)
+                .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+                .where(
+                    MetadataTable.id.in_(bounded_ids),
+                    MetadataTable.datasource_id == datasource.id,
+                    MetadataTable.status == "ACTIVE",
+                )
+                .order_by(MetadataSchema.name, MetadataTable.name)
+            )
+        ).all()
+        active_ids = [table.id for table, _schema in table_rows]
+        columns = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.table_id.in_(active_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+                .limit(1000)
+            )
+        ).all()
+        constraints = (
+            await session.scalars(
+                select(MetadataConstraint)
+                .where(
+                    MetadataConstraint.table_id.in_(active_ids),
+                    MetadataConstraint.status == "ACTIVE",
+                )
+                .order_by(MetadataConstraint.table_id, MetadataConstraint.name)
+                .limit(500)
+            )
+        ).all()
+        columns_by_table: dict[UUID, list[dict[str, Any]]] = {}
+        for column in columns:
+            columns_by_table.setdefault(column.table_id, []).append(
+                {
+                    "id": str(column.id),
+                    "name": column.name,
+                    "physical_type": column.physical_type,
+                    "nullable": column.nullable,
+                    "classification": column.classification,
+                }
+            )
+        table_names = {table.id: f"{schema.name}.{table.name}" for table, schema in table_rows}
+        return {
+            "dialect": datasource.dialect,
+            "tables": [
+                {
+                    "id": str(table.id),
+                    "qualified_name": table_names[table.id],
+                    "object_type": table.object_type,
+                    "columns": columns_by_table.get(table.id, []),
+                }
+                for table, _schema in table_rows
+            ],
+            "constraints": [
+                {
+                    "id": str(constraint.id),
+                    "type": constraint.constraint_type,
+                    "source_table": table_names.get(constraint.table_id),
+                    "source_columns": constraint.columns,
+                    "target_table": table_names.get(constraint.referenced_table_id),
+                    "target_columns": constraint.referenced_columns,
+                }
+                for constraint in constraints
+            ],
+        }
+
+    async def run(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        context: SecurityContext,
+        correlation_id: str,
+        question: str,
+        candidate_sql: str | None,
+        preferred_tool_version_id: UUID | None,
+        tool_parameters: dict[str, Any],
+        requested_limit: int | None,
+    ) -> AgentOrchestrationResult:
+        agent_run = AgentRun(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            principal_id=context.principal_id,
+            question_hash=hmac.new(
+                self.settings.audit_hmac_key.encode("utf-8"),
+                question.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest(),
+            generation_source="PENDING",
+        )
+        session.add(agent_run)
+        await session.flush()
+
+        state = RuntimeState(request_id=str(agent_run.id))
+        trace = [_trace(state, "DETERMINISTIC")]
+        state = state.transition(RuntimeStage.AUTHORIZED, policy_version=agent_run.policy_version)
+        trace.append(_trace(state, "DETERMINISTIC"))
+
+        prompt_risk = self.prompt_risk_classifier.assess(question)
+        state = state.transition(RuntimeStage.SCREENED)
+        trace.append(
+            _trace(
+                state,
+                "DETERMINISTIC",
+                {
+                    "decision": prompt_risk.decision,
+                    "risk_score": prompt_risk.score,
+                    "reason_codes": prompt_risk.reason_codes,
+                    "classifier_version": prompt_risk.classifier_version,
+                },
+            )
+        )
+        if prompt_risk.decision == "BLOCK":
+            plan = self.planner.plan(
+                retrieval_hits=[],
+                roles=context.roles,
+                candidate_sql_available=candidate_sql is not None,
+                tool_parameters=tool_parameters,
+                preferred_tool_version_id=preferred_tool_version_id,
+                prompt_risk=prompt_risk,
+            )
+            agent_run.generation_source = "POLICY_BLOCK"
+            agent_run.plan_evidence = plan.evidence()
+            await self._persist_rejection(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                "PROMPT_POLICY_DENIED",
+            )
+            raise AgentPolicyRejected("request rejected by deterministic prompt safety controls")
+
+        latest_analysis = await session.scalar(
+            select(AnalysisRun)
+            .where(
+                AnalysisRun.datasource_id == datasource.id,
+                AnalysisRun.organization_id == datasource.organization_id,
+                AnalysisRun.status == "COMPLETED",
+            )
+            .order_by(AnalysisRun.updated_at.desc())
+            .limit(1)
+        )
+        if latest_analysis is None:
+            return await self._reject(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                "NO_COMPLETED_METADATA_ANALYSIS",
+            )
+        published_semantic_model = await session.scalar(
+            select(SemanticModelVersion)
+            .where(
+                SemanticModelVersion.project_id == datasource.project_id,
+                SemanticModelVersion.organization_id == datasource.organization_id,
+                SemanticModelVersion.status == "PUBLISHED",
+            )
+            .order_by(SemanticModelVersion.version.desc())
+            .limit(1)
+        )
+        semantic_version = (
+            f"semantic-model:{published_semantic_model.id}:v{published_semantic_model.version}"
+            if published_semantic_model
+            else f"technical-metadata:{latest_analysis.id}"
+        )
+        agent_run.semantic_version = semantic_version
+        retrieval_hits = await self.retriever.retrieve(
+            session,
+            datasource=datasource,
+            question=question,
+            preferred_tool_version_id=preferred_tool_version_id,
+        )
+        retrieval_evidence = [hit.evidence() for hit in retrieval_hits]
+        agent_run.retrieval_evidence = retrieval_evidence
+        state = state.transition(RuntimeStage.RESOLVED, semantic_version=semantic_version)
+        trace.append(
+            _trace(
+                state,
+                "DETERMINISTIC",
+                {
+                    "semantic_version": semantic_version,
+                    "retrieval_evidence_count": len(retrieval_evidence),
+                },
+            )
+        )
+
+        plan = self.planner.plan(
+            retrieval_hits=retrieval_hits,
+            roles=context.roles,
+            candidate_sql_available=candidate_sql is not None,
+            tool_parameters=tool_parameters,
+            preferred_tool_version_id=preferred_tool_version_id,
+            prompt_risk=prompt_risk,
+        )
+        plan_evidence = plan.evidence()
+        agent_run.plan_evidence = plan_evidence
+        agent_run.recommended_tool_version_id = (
+            UUID(plan.selected_tool_version_id) if plan.selected_tool_version_id else None
+        )
+        state = state.transition(
+            RuntimeStage.PLANNED,
+            logical_plan={
+                "datasource_id": str(datasource.id),
+                "strategy": plan.strategy,
+                "confidence": plan.confidence,
+                "retrieval_evidence_count": len(retrieval_evidence),
+                "selected_tool_version_id": plan.selected_tool_version_id,
+            },
+        )
+        trace.append(
+            _trace(
+                state,
+                "HYBRID_BOUNDARY",
+                {
+                    "strategy": plan.strategy,
+                    "confidence": plan.confidence,
+                    "reason_codes": plan.reason_codes,
+                    "selected_tool_version_id": plan.selected_tool_version_id,
+                },
+            )
+        )
+
+        if plan.strategy == "CLARIFICATION":
+            reason = f"MISSING_TOOL_PARAMETERS:{','.join(plan.required_parameters)}"
+            await self._persist_rejection(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                reason,
+            )
+            raise AgentClarificationRequired(
+                f"approved tool requires parameters: {', '.join(plan.required_parameters)}"
+            )
+
+        tool_execution: ToolExecution | None = None
+        generation_source: str
+        generated_sql: str
+        if plan.strategy == "GOVERNED_TOOL" and plan.selected_tool_version_id:
+            version = await session.get(GovernedToolVersion, UUID(plan.selected_tool_version_id))
+            if version is None or version.status != "PUBLISHED":
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    state,
+                    trace,
+                    context,
+                    correlation_id,
+                    "PLANNED_TOOL_UNAVAILABLE",
+                )
+                raise ModelRouteUnavailable("planned governed tool is unavailable")
+            try:
+                rendered = render_tool_sql(
+                    version.sql_template,
+                    dialect=datasource.dialect,
+                    definitions=[
+                        ToolParameterDefinition.model_validate(item)
+                        for item in version.parameter_schema
+                    ],
+                    values=tool_parameters,
+                )
+            except ToolParameterError as exc:
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    state,
+                    trace,
+                    context,
+                    correlation_id,
+                    "INVALID_TOOL_PARAMETERS",
+                )
+                raise AgentClarificationRequired(str(exc)) from exc
+            fingerprint = hmac.new(
+                self.settings.audit_hmac_key.encode(),
+                json.dumps(
+                    rendered.normalized_parameters, sort_keys=True, separators=(",", ":")
+                ).encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            tool_execution = ToolExecution(
+                organization_id=datasource.organization_id,
+                tool_version_id=version.id,
+                principal_id=context.principal_id,
+                parameter_fingerprint=fingerprint,
+            )
+            session.add(tool_execution)
+            await session.flush()
+            generated_sql = rendered.sql
+            generation_source = "GOVERNED_TOOL"
+        elif plan.strategy == "DEVELOPMENT_SQL" and candidate_sql:
+            if not self.settings.allow_development_sql_override:
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    state,
+                    trace,
+                    context,
+                    correlation_id,
+                    "DEVELOPMENT_SQL_OVERRIDE_DISABLED",
+                )
+                raise ModelRouteUnavailable("development SQL override is disabled")
+            generated_sql = candidate_sql
+            generation_source = "DEVELOPMENT_OVERRIDE"
+        else:
+            try:
+                approved_route = await self._approved_model_route(
+                    session, datasource.organization_id
+                )
+                model_context = await self._model_context(
+                    session,
+                    datasource=datasource,
+                    retrieval_hits=retrieval_hits,
+                )
+                output, model_evidence = await self.model_gateway.structured_completion(
+                    route=approved_route,
+                    system_instruction=(
+                        "Return exactly one read-only SQL SELECT statement for the supplied "
+                        "dialect. "
+                        "Use only qualified tables, columns, and joins present in the supplied "
+                        "metadata context. Never invent an identifier or include source values."
+                    ),
+                    payload={
+                        "question": question,
+                        "datasource_id": str(datasource.id),
+                        "semantic_version": semantic_version,
+                        "retrieval_evidence": retrieval_evidence,
+                        "metadata_context": model_context,
+                    },
+                    output_schema=SqlGenerationOutput,
+                )
+                generated_sql = output.sql
+                generation_source = "MODEL_GATEWAY"
+                agent_run.model_route = model_evidence.route
+                plan_evidence["model_call_evidence"] = {
+                    "route": model_evidence.route,
+                    "provider_type": model_evidence.provider_type,
+                    "model_id": model_evidence.model_id,
+                    "endpoint_alias": model_evidence.endpoint_alias,
+                    "input_fingerprint": model_evidence.input_fingerprint,
+                    "output_fingerprint": model_evidence.output_fingerprint,
+                    "schema_name": model_evidence.schema_name,
+                }
+                agent_run.plan_evidence = plan_evidence
+            except ModelGatewayError as exc:
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    state,
+                    trace,
+                    context,
+                    correlation_id,
+                    "MODEL_ROUTE_NOT_CONFIGURED",
+                )
+                raise ModelRouteUnavailable(str(exc)) from exc
+
+        agent_run.generation_source = generation_source
+        state = state.transition(RuntimeStage.GENERATED, generated_sql=generated_sql)
+        trace.append(
+            _trace(
+                state,
+                generation_source,
+                {"selected_tool_version_id": plan.selected_tool_version_id},
+            )
+        )
+        try:
+            gateway_result = await self.query_gateway.execute(
+                session,
+                datasource=datasource,
+                context=context,
+                correlation_id=correlation_id,
+                sql=generated_sql,
+                requested_limit=requested_limit,
+                semantic_version=semantic_version,
+            )
+        except QueryRejected as exc:
+            state = state.transition(RuntimeStage.REJECTED, failure_reason=str(exc))
+            trace.append(_trace(state, "DETERMINISTIC"))
+            agent_run.status = state.stage.value
+            agent_run.failure_reason = str(exc)[:1000]
+            agent_run.query_execution_id = exc.execution_id
+            agent_run.step_trace = trace
+            if tool_execution:
+                tool_execution.status = "REJECTED"
+                tool_execution.query_execution_id = exc.execution_id
+                tool_execution.error_message = str(exc)[:1000]
+            await session.commit()
+            raise
+
+        for stage, control_type in (
+            (RuntimeStage.VALIDATED, "DETERMINISTIC"),
+            (RuntimeStage.COSTED, "DETERMINISTIC"),
+            (RuntimeStage.EXECUTED, "DETERMINISTIC"),
+            (RuntimeStage.EXPLAINED, "DETERMINISTIC"),
+            (RuntimeStage.COMPLETED, "DETERMINISTIC"),
+        ):
+            state = state.transition(stage)
+            trace.append(_trace(state, control_type))
+        agent_run.status = state.stage.value
+        agent_run.query_execution_id = gateway_result.execution.id
+        agent_run.step_trace = trace
+        if tool_execution:
+            tool_execution.status = "COMPLETED"
+            tool_execution.query_execution_id = gateway_result.execution.id
+        explanation = self._deterministic_explanation(gateway_result)
+        record_audit(
+            session,
+            context,
+            action="agent.analysis.complete",
+            resource_type="agent_run",
+            resource_id=str(agent_run.id),
+            outcome="SUCCESS",
+            correlation_id=correlation_id,
+            details={
+                "query_execution_id": str(gateway_result.execution.id),
+                "semantic_version": semantic_version,
+                "generation_source": generation_source,
+                "plan_strategy": plan.strategy,
+                "recommended_tool_version_id": plan.selected_tool_version_id,
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=datasource.organization_id,
+            aggregate_type="agent_run",
+            aggregate_id=str(agent_run.id),
+            event_type="agent.analysis.completed.v1",
+            payload={
+                "agent_run_id": str(agent_run.id),
+                "query_execution_id": str(gateway_result.execution.id),
+                "datasource_id": str(datasource.id),
+            },
+        )
+        await session.commit()
+        return AgentOrchestrationResult(agent_run, gateway_result, explanation)
+
+    async def _reject(
+        self,
+        session: AsyncSession,
+        agent_run: AgentRun,
+        state: RuntimeState,
+        trace: list[dict[str, object]],
+        context: SecurityContext,
+        correlation_id: str,
+        reason: str,
+    ) -> AgentOrchestrationResult:
+        await self._persist_rejection(
+            session, agent_run, state, trace, context, correlation_id, reason
+        )
+        raise ModelRouteUnavailable(reason)
+
+    async def _persist_rejection(
+        self,
+        session: AsyncSession,
+        agent_run: AgentRun,
+        state: RuntimeState,
+        trace: list[dict[str, object]],
+        context: SecurityContext,
+        correlation_id: str,
+        reason: str,
+    ) -> None:
+        state = state.transition(RuntimeStage.REJECTED, failure_reason=reason)
+        trace.append(_trace(state, "DETERMINISTIC", {"reason_code": reason}))
+        agent_run.status = state.stage.value
+        agent_run.failure_reason = reason
+        agent_run.step_trace = trace
+        record_audit(
+            session,
+            context,
+            action="agent.analysis",
+            resource_type="agent_run",
+            resource_id=str(agent_run.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={"reason": reason},
+        )
+        await session.commit()
+
+    @staticmethod
+    def _deterministic_explanation(result: GatewayResult) -> str:
+        masked = ", ".join(result.masked_columns) if result.masked_columns else "none"
+        tables = ", ".join(result.execution.referenced_tables)
+        return (
+            f"Returned {result.execution.row_count or 0} governed rows from {tables}. "
+            f"Masked sensitive output columns: {masked}. "
+            f"Execution evidence: {result.execution.id}."
+        )

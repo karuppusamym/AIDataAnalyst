@@ -1,0 +1,217 @@
+from datetime import UTC, datetime
+from uuid import UUID
+
+from fastapi import HTTPException
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aida.models import (
+    AssetCertification,
+    AssetTermLink,
+    BulkStewardshipOperation,
+    GlossaryConflict,
+    GlossaryLinkProposal,
+    GlossaryTerm,
+    GlossaryTermVersion,
+    OwnershipAssignment,
+)
+
+
+async def apply_bulk_operation(
+    session: AsyncSession,
+    operation: BulkStewardshipOperation,
+    *,
+    reviewer: str,
+    now: datetime,
+) -> tuple[str, int]:
+    applied = 0
+    parameters = operation.parameters
+    subject_ids = [UUID(value) for value in operation.subject_ids]
+    if operation.operation_type == "ASSIGN_OWNERSHIP":
+        for subject_id in subject_ids:
+            existing = await session.scalar(
+                select(OwnershipAssignment).where(
+                    OwnershipAssignment.organization_id == operation.organization_id,
+                    OwnershipAssignment.subject_type == operation.subject_type,
+                    OwnershipAssignment.subject_id == str(subject_id),
+                    OwnershipAssignment.owner_type == parameters["owner_type"],
+                    OwnershipAssignment.owner_principal == parameters["owner_principal"],
+                )
+            )
+            if existing is not None:
+                if existing.status != "ACTIVE":
+                    existing.status = "ACTIVE"
+                    existing.assigned_by = reviewer
+                    applied += 1
+                continue
+            session.add(
+                OwnershipAssignment(
+                    organization_id=operation.organization_id,
+                    subject_type=operation.subject_type,
+                    subject_id=str(subject_id),
+                    owner_type=parameters["owner_type"],
+                    owner_principal=parameters["owner_principal"],
+                    assignment_kind="RULE" if parameters.get("source_rule_id") else "MANUAL",
+                    source_rule_id=(
+                        UUID(parameters["source_rule_id"])
+                        if parameters.get("source_rule_id")
+                        else None
+                    ),
+                    assigned_by=reviewer,
+                )
+            )
+            applied += 1
+        event_type = "ownership.assigned.v1"
+    elif operation.operation_type == "LINK_TERM":
+        term_id = UUID(parameters["term_id"])
+        for table_id in subject_ids:
+            existing = await session.scalar(
+                select(AssetTermLink).where(
+                    AssetTermLink.table_id == table_id,
+                    AssetTermLink.term_id == term_id,
+                )
+            )
+            if existing is not None:
+                continue
+            session.add(
+                AssetTermLink(
+                    organization_id=operation.organization_id,
+                    table_id=table_id,
+                    term_id=term_id,
+                    linked_by=reviewer,
+                    link_type="BULK",
+                    confidence=1.0,
+                )
+            )
+            applied += 1
+        event_type = "glossary.term_linked_bulk.v1"
+    elif operation.operation_type == "DEPRECATE_TERM":
+        terms = (
+            await session.scalars(
+                select(GlossaryTerm).where(
+                    GlossaryTerm.organization_id == operation.organization_id,
+                    GlossaryTerm.id.in_(subject_ids),
+                )
+            )
+        ).all()
+        for term in terms:
+            if term.lifecycle_status == "DEPRECATED":
+                continue
+            term.lifecycle_status = "DEPRECATED"
+            term.deprecated_by = reviewer
+            term.deprecated_at = now
+            term.deprecation_reason = parameters["rationale"]
+            await session.execute(
+                update(GlossaryTermVersion)
+                .where(
+                    GlossaryTermVersion.term_id == term.id,
+                    GlossaryTermVersion.status == "APPROVED",
+                )
+                .values(status="DEPRECATED", updated_at=now)
+            )
+            applied += 1
+        event_type = "glossary.term_deprecated.v1"
+    elif operation.operation_type == "CERTIFY_ASSET":
+        expires_at = datetime.fromisoformat(parameters["expires_at"])
+        for table_id in subject_ids:
+            await session.execute(
+                update(AssetCertification)
+                .where(
+                    AssetCertification.table_id == table_id,
+                    AssetCertification.status == "ACTIVE",
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            session.add(
+                AssetCertification(
+                    organization_id=operation.organization_id,
+                    table_id=table_id,
+                    rationale=parameters["rationale"],
+                    certified_by=reviewer,
+                    expires_at=expires_at,
+                )
+            )
+            applied += 1
+        event_type = "certification.granted.v1"
+    else:
+        raise HTTPException(status_code=422, detail="unsupported stewardship operation")
+    operation.status = "APPLIED"
+    operation.applied_by = reviewer
+    operation.applied_at = now
+    operation.applied_count = applied
+    return event_type, applied
+
+
+async def apply_conflict_resolution(
+    conflict: GlossaryConflict,
+    *,
+    reviewer: str,
+    now: datetime,
+) -> str:
+    if conflict.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="conflict is no longer pending review")
+    conflict.status = "RESOLVED"
+    conflict.resolved_by = reviewer
+    conflict.resolved_at = now
+    return "glossary.conflict_resolved.v1"
+
+
+async def reject_conflict_resolution(conflict: GlossaryConflict) -> str:
+    if conflict.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="conflict is no longer pending review")
+    conflict.status = "OPEN"
+    conflict.proposed_resolution = None
+    conflict.proposed_definition = None
+    conflict.resolution_rationale = None
+    return "glossary.conflict_resolution_rejected.v1"
+
+
+async def apply_link_proposal(
+    session: AsyncSession,
+    proposal: GlossaryLinkProposal,
+    *,
+    reviewer: str,
+    now: datetime,
+) -> str:
+    if proposal.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="link proposal is no longer pending review")
+    existing = await session.scalar(
+        select(AssetTermLink).where(
+            AssetTermLink.table_id == proposal.table_id,
+            AssetTermLink.term_id == proposal.term_id,
+        )
+    )
+    if existing is None:
+        session.add(
+            AssetTermLink(
+                organization_id=proposal.organization_id,
+                table_id=proposal.table_id,
+                term_id=proposal.term_id,
+                linked_by=reviewer,
+                link_type="INFERRED",
+                confidence=proposal.confidence,
+                source_annotation_id=proposal.source_annotation_id,
+            )
+        )
+    proposal.status = "APPROVED"
+    proposal.reviewed_by = reviewer
+    proposal.reviewed_at = now
+    return "glossary.link_proposal_approved.v1"
+
+
+async def reject_link_proposal(
+    proposal: GlossaryLinkProposal,
+    *,
+    reviewer: str,
+    now: datetime,
+) -> str:
+    if proposal.status != "REVIEW_REQUIRED":
+        raise HTTPException(status_code=409, detail="link proposal is no longer pending review")
+    proposal.status = "REJECTED"
+    proposal.reviewed_by = reviewer
+    proposal.reviewed_at = now
+    return "glossary.link_proposal_rejected.v1"
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)

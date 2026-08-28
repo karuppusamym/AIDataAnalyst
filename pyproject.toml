@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bank-data-intelligence-platform"
+version = "0.1.0"
+description = "Governed enterprise metadata and agentic analytics platform"
+requires-python = ">=3.13"
+dependencies = [
+  "aiokafka==0.14.0",
+  "alembic==1.16.5",
+  "asyncpg==0.31.0",
+  "defusedxml==0.7.1",
+  "fastapi==0.141.1",
+  "google-cloud-bigquery==3.44.0",
+  "httpx==0.28.1",
+  "neo4j==5.28.2",
+  "opentelemetry-api==1.37.0",
+  "opentelemetry-sdk==1.37.0",
+  "oracledb==4.0.2",
+  "PyJWT[crypto]==2.10.1",
+  "prometheus-client==0.22.1",
+  "pydantic-settings==2.15.0",
+  "python-tds==1.17.1",
+  "redis==6.4.0",
+  "sqlalchemy[asyncio]==2.0.52",
+  "sqlglot==30.17.0",
+  "structlog==25.4.0",
+  "temporalio==1.32.0",
+  "uvicorn[standard]==0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.17.1",
+  "pytest==8.4.2",
+  "pytest-asyncio==1.1.0",
+  "pytest-cov==6.2.1",
+  "ruff==0.12.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aida"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "S"]
+ignore = ["B008", "S101"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+packages = ["aida"]
+
+[[tool.mypy.overrides]]
+ module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["google", "google.*"]
+ignore_missing_imports = true

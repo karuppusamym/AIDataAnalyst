@@ -1,0 +1,337 @@
+name: aida-platform
+
+x-app-environment: &app-environment
+  AIDA_ENVIRONMENT: development
+  AIDA_LOG_LEVEL: INFO
+  AIDA_DATABASE_URL: postgresql+asyncpg://aida:aida-local-only@postgres:5432/aida
+  AIDA_TEMPORAL_ADDRESS: temporal:7233
+  AIDA_TEMPORAL_NAMESPACE: default
+  AIDA_TEMPORAL_TASK_QUEUE: aida-metadata
+  AIDA_REDIS_URL: redis://redis:6379/0
+  AIDA_NEO4J_URI: bolt://neo4j:7687
+  AIDA_NEO4J_USER: neo4j
+  AIDA_NEO4J_PASSWORD: aida-local-only
+  AIDA_KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+  AIDA_OBJECT_STORE_ENDPOINT: http://minio:9000
+  AIDA_OBJECT_STORE_ACCESS_KEY: aida
+  AIDA_OBJECT_STORE_SECRET_KEY: aida-local-only
+  AIDA_AUDIT_HMAC_KEY: local-development-audit-hmac-key-only
+  AIDA_SAMPLE_SOURCE_DSN: postgresql://source:source-local-only@sample-source:5432/bank_demo
+  AIDA_SAMPLE_ORACLE_SOURCE_DSN: oracle://source:source-local-only@sample-oracle-source:1521/FREEPDB1
+  AIDA_SAMPLE_MSSQL_SOURCE_DSN: mssql://source:S0urce!LocalOnly1@sample-mssql-source:1433/bank_demo_mssql
+  AIDA_MODEL_GENERATION_ENABLED: ${AIDA_MODEL_GENERATION_ENABLED:-false}
+  AIDA_MODEL_ROUTE: ${AIDA_MODEL_ROUTE:-openai-bank-sql}
+  AIDA_OPENAI_BASE_URL: ${AIDA_OPENAI_BASE_URL:-https://api.openai.com/v1}
+  AIDA_GEMINI_BASE_URL: ${AIDA_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
+  AIDA_MODEL_PROVIDER_MAX_ATTEMPTS: ${AIDA_MODEL_PROVIDER_MAX_ATTEMPTS:-3}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: aida
+      POSTGRES_PASSWORD: aida-local-only
+      POSTGRES_DB: aida
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aida -d aida"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/aida-local-only
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  temporal:
+    image: temporalio/auto-setup:1.28.1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: aida
+      POSTGRES_PWD: aida-local-only
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  temporal-ui:
+    image: temporalio/ui:2.40.1
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  redpanda:
+    image: redpandadata/redpanda:v25.1.3
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=768M
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  redpanda-console:
+    image: redpandadata/console:v2.8.5
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+    ports:
+      - "8081:8080"
+    restart: unless-stopped
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: aida
+      MINIO_ROOT_PASSWORD: aida-local-only
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  sample-source:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: source
+      POSTGRES_PASSWORD: source-local-only
+      POSTGRES_DB: bank_demo
+    ports:
+      - "55432:5432"
+    volumes:
+      - sample-source-data:/var/lib/postgresql/data
+      - ./infra/sample-source/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U source -d bank_demo"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  sample-oracle-source:
+    image: gvenzl/oracle-free:23-slim
+    environment:
+      ORACLE_PASSWORD: "Sys-Local-Only1"
+      ORACLE_DATABASE: FREEPDB1
+    ports:
+      - "15210:1521"
+    volumes:
+      - sample-oracle-source-data:/opt/oracle/oradata
+      - ./infra/sample-oracle-source/init.sql:/container-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+
+  sample-mssql-source:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Source-Local-Only1"
+      MSSQL_PID: "Developer"
+    ports:
+      - "14330:1433"
+    volumes:
+      - sample-mssql-source-data:/var/opt/mssql
+    healthcheck:
+      test: ["CMD-SHELL", "(/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\") || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  sample-mssql-source-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      sample-mssql-source:
+        condition: service_healthy
+    volumes:
+      - ./infra/sample-mssql-source/init.sql:/init.sql:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then
+          SQLCMD="/opt/mssql-tools18/bin/sqlcmd -b -C -S sample-mssql-source -U sa -P Source-Local-Only1"
+        else
+          SQLCMD="/opt/mssql-tools/bin/sqlcmd -b -S sample-mssql-source -U sa -P Source-Local-Only1"
+        fi
+        $$SQLCMD -d master -Q "IF DB_ID(N'bank_demo_mssql') IS NULL CREATE DATABASE bank_demo_mssql"
+        $$SQLCMD -d bank_demo_mssql -i /init.sql
+        $$SQLCMD -d master -Q "IF SUSER_ID(N'source') IS NULL CREATE LOGIN source WITH PASSWORD = N'S0urce!LocalOnly1'"
+        $$SQLCMD -d bank_demo_mssql -Q "IF USER_ID(N'source') IS NULL CREATE USER source FOR LOGIN source; ALTER ROLE db_datareader ADD MEMBER source; GRANT SHOWPLAN TO source;"
+    restart: "no"
+
+  migrate:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment: *app-environment
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  api:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *app-environment
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  ui:
+    build: ./ui
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    restart: unless-stopped
+
+  metadata-worker:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+      sample-source:
+        condition: service_healthy
+    environment: *app-environment
+    command: ["python", "-m", "aida.workflows.worker"]
+    restart: unless-stopped
+
+  fleet-scheduler:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    environment: *app-environment
+    command: ["python", "-m", "aida.workflows.scheduler"]
+    restart: unless-stopped
+
+  outbox-publisher:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+    environment: *app-environment
+    command: ["python", "-m", "aida.projectors.outbox_publisher"]
+    restart: unless-stopped
+
+  graph-projector:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redpanda:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment: *app-environment
+    command: ["python", "-m", "aida.projectors.graph_projector"]
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  neo4j-data:
+  redpanda-data:
+  minio-data:
+  sample-source-data:
+  sample-oracle-source-data:
+  sample-mssql-source-data:
