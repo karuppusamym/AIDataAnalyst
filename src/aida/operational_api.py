@@ -12,6 +12,7 @@ from aida.events import record_audit
 from aida.models import (
     AnalysisRun,
     AuditEvent,
+    DataDomain,
     DataSource,
     Organization,
     OutboxEvent,
@@ -21,6 +22,7 @@ from aida.models import (
 from aida.schemas import (
     AnalysisRunRead,
     AuditEventRead,
+    DataDomainRead,
     DataSourceSummaryRead,
     FleetSummaryRead,
     OutboxEventRead,
@@ -40,6 +42,50 @@ async def _require_organization(
     if organization is None:
         raise HTTPException(status_code=404, detail="organization not found")
     return organization
+
+
+@router.get("/organizations/{organization_id}/data-domains", response_model=Page)
+async def list_organization_data_domains(
+    organization_id: UUID,
+    line_of_business_id: UUID | None = None,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "OrganizationAdmin",
+            "ProjectAdmin",
+            "DataAdmin",
+            "Operations",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """List a tenant's data domains without an N+1 traversal through every LOB --
+    same pattern as list_organization_projects, feeding the workspace tree
+    (Org -> LOB -> Domain -> Project -> Source) instead of a flat source picker.
+    """
+    await _require_organization(session, context, organization_id)
+    filters = [DataDomain.organization_id == organization_id]
+    if line_of_business_id:
+        filters.append(DataDomain.line_of_business_id == line_of_business_id)
+    total = await session.scalar(select(func.count()).select_from(DataDomain).where(*filters))
+    rows = (
+        await session.scalars(
+            select(DataDomain)
+            .where(*filters)
+            .order_by(DataDomain.name, DataDomain.id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[DataDomainRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
 
 
 @router.get("/organizations/{organization_id}/projects", response_model=Page)

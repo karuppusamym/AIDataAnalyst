@@ -16,7 +16,9 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.domain_service import check_cross_boundary_grant
 from aida.models import (
+    BusinessDomain,
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductRoleBinding,
@@ -26,6 +28,7 @@ from aida.models import (
     GovernanceReview,
     GovernedTool,
     GovernedToolVersion,
+    MetadataBusinessAnnotation,
     MetadataTable,
     Project,
     SemanticModelVersion,
@@ -34,6 +37,7 @@ from aida.schemas import (
     ContextProductCreate,
     ContextProductDefinition,
     ContextProductRead,
+    ContextProductScopeRead,
     ContextProductVersionCreate,
     ContextProductVersionRead,
     ContextProductVersionUpdate,
@@ -548,6 +552,85 @@ async def get_context_product_version(
         )
         await session.commit()
     return _version_read(product, version)
+
+
+@router.get(
+    "/context-product-versions/{version_id}/scope",
+    response_model=ContextProductScopeRead,
+)
+async def get_context_product_version_scope(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> ContextProductScopeRead:
+    """Compose both ADR-0017 SS9 axes for this version so an agent or MCP
+    client can see, before it retrieves anything, which tenancy boundaries and
+    which business domains the context product actually spans -- and whether
+    the product's own domain is missing a cross_boundary_grant into any of
+    them. Read-only and side-effect-free (no consumption edge, no purpose/
+    quality gate) -- it describes scope, it is not itself a retrieval.
+    """
+    product, version = await _version_scope(session, version_id, context)
+    if not _can_read_context_product_version(context, version):
+        raise HTTPException(status_code=404, detail="context product version not found")
+    project = await session.get(Project, product.project_id)
+    if project is None:
+        raise HTTPException(status_code=409, detail="context product project is unavailable")
+    product_data_domain_id = project.data_domain_id
+
+    table_ids = [UUID(value) for value in version.table_ids]
+    tables_by_id: dict[UUID, MetadataTable] = {}
+    domain_ids: set[UUID] = set()
+    if table_ids:
+        rows = (
+            await session.execute(
+                select(MetadataTable, DataSource.data_domain_id)
+                .join(DataSource, DataSource.id == MetadataTable.datasource_id)
+                .where(MetadataTable.id.in_(table_ids))
+            )
+        ).all()
+        for table, data_domain_id in rows:
+            tables_by_id[table.id] = table
+            domain_ids.add(data_domain_id)
+    unresolved_table_ids = [tid for tid in table_ids if tid not in tables_by_id]
+
+    ungranted_domain_ids: list[UUID] = []
+    for domain_id in domain_ids:
+        if domain_id == product_data_domain_id:
+            continue
+        allowed = await check_cross_boundary_grant(
+            session,
+            version.organization_id,
+            domain_id,
+            product_data_domain_id,
+        )
+        if not allowed:
+            ungranted_domain_ids.append(domain_id)
+
+    business_domain_names: set[str] = set()
+    if tables_by_id:
+        annotation_rows = (
+            await session.execute(
+                select(BusinessDomain.display_name)
+                .join(
+                    MetadataBusinessAnnotation,
+                    MetadataBusinessAnnotation.domain_id == BusinessDomain.id,
+                )
+                .where(MetadataBusinessAnnotation.table_id.in_(tables_by_id.keys()))
+            )
+        ).all()
+        business_domain_names = {row[0] for row in annotation_rows}
+
+    return ContextProductScopeRead(
+        context_product_version_id=version.id,
+        product_data_domain_id=product_data_domain_id,
+        data_domain_ids=sorted(domain_ids, key=str),
+        ungranted_data_domain_ids=sorted(ungranted_domain_ids, key=str),
+        business_domain_names=sorted(business_domain_names),
+        cross_domain=len(domain_ids - {product_data_domain_id}) > 0,
+        table_count=len(tables_by_id),
+        unresolved_table_ids=unresolved_table_ids,
+    )
 
 
 @router.post(

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -12,7 +12,7 @@ from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.logging import configure_logging
-from aida.models import AnalysisRun, ScanPolicy
+from aida.models import AnalysisRun, QueryExecution, ScanPolicy
 from aida.security import SecurityContext
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
@@ -46,6 +46,78 @@ def next_interval_at(policy: ScanPolicy, now: datetime) -> datetime:
     if candidate <= now:
         return now + timedelta(minutes=policy.interval_minutes)
     return candidate
+
+
+def usage_weighted_priority_boost(recent_query_count: int, max_boost: int) -> int:
+    """Turn recent query volume into a small, capped boost on top of
+    base_priority (ADR-0017 SS8). Deliberately coarse -- one boost point per
+    five recent queries -- because this nudges the admin-set base priority, it
+    does not replace it: a heavily-queried datasource should get scanned
+    sooner than an idle one with the same base priority, never leapfrog a
+    genuinely higher-priority one by an unbounded amount.
+    """
+    return min(max_boost, max(0, recent_query_count) // 5)
+
+
+def stale_usage_boost_policies_statement(settings: Settings, now: datetime) -> Select[tuple[UUID]]:
+    """Usage-boost-enabled policies whose computed_usage_boost has not been
+    refreshed recently, oldest-refreshed first. Bounded by usage_boost_batch_size
+    for the same reason due_scan_policies_statement is bounded by
+    scheduler_batch_size -- recomputing a usage signal for every enabled policy
+    on every tick does not scale to a large estate any better than scanning it
+    would.
+    """
+    stale_before = now - timedelta(minutes=settings.usage_boost_refresh_minutes)
+    return (
+        select(ScanPolicy.id)
+        .where(
+            ScanPolicy.usage_boost_enabled.is_(True),
+            (ScanPolicy.usage_boost_updated_at.is_(None))
+            | (ScanPolicy.usage_boost_updated_at <= stale_before),
+        )
+        .order_by(ScanPolicy.usage_boost_updated_at.asc().nulls_first())
+        .limit(settings.usage_boost_batch_size)
+    )
+
+
+async def rebalance_usage_weighted_priorities(settings: Settings, *, now: datetime | None = None) -> int:
+    """Recompute computed_usage_boost for a bounded batch of stale, opted-in
+    scan policies from recent query volume on their datasource, then set
+    `priority = base_priority + computed_usage_boost` (clamped to 0-100).
+    due_scan_policies_statement and reserve_analysis_run keep reading plain
+    `priority` completely unchanged -- only this function ever writes it once
+    usage boosting is enabled, and always relative to `base_priority` (the
+    admin's last explicit value, set on every scan-policy upsert), never
+    compounding on a previous boost.
+    """
+    effective_now = now or datetime.now(UTC)
+    updated = 0
+    async with session_factory() as session:
+        policy_ids = (
+            await session.scalars(stale_usage_boost_policies_statement(settings, effective_now))
+        ).all()
+        for policy_id in policy_ids:
+            policy = await session.get(ScanPolicy, policy_id)
+            if policy is None or not policy.usage_boost_enabled:
+                continue
+            window_start = effective_now - timedelta(days=settings.usage_boost_window_days)
+            recent_query_count = await session.scalar(
+                select(func.count())
+                .select_from(QueryExecution)
+                .where(
+                    QueryExecution.datasource_id == policy.datasource_id,
+                    QueryExecution.created_at >= window_start,
+                )
+            )
+            policy.computed_usage_boost = usage_weighted_priority_boost(
+                recent_query_count or 0, settings.usage_boost_max
+            )
+            policy.priority = max(0, min(100, policy.base_priority + policy.computed_usage_boost))
+            policy.usage_boost_updated_at = effective_now
+            updated += 1
+        if updated:
+            await session.commit()
+    return updated
 
 
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
@@ -164,6 +236,7 @@ def due_scan_policies_statement(settings: Settings, now: datetime) -> Select[tup
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await reconcile_cancellation_requests(client, settings)
     now = datetime.now(UTC)
+    await rebalance_usage_weighted_priorities(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

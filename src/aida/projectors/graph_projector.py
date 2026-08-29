@@ -45,6 +45,18 @@ async def ensure_graph_constraints(driver: AsyncDriver) -> None:
         "FOR (n:Constraint) REQUIRE n.platform_id IS UNIQUE",
         "CREATE CONSTRAINT unified_lineage_projection_key IF NOT EXISTS "
         "FOR (n:UnifiedLineageNode) REQUIRE n.projection_key IS UNIQUE",
+        # ADR-0017 SS2 -- tenancy-path indexes. A domain-scoped traversal filters
+        # by data_domain_id before it walks edges, rather than walking first and
+        # checking after; these are ordinary (non-unique) indexes since every
+        # tagged label shares the same organization/domain/project property names.
+        "CREATE INDEX table_data_domain_id IF NOT EXISTS "
+        "FOR (n:Table) ON (n.data_domain_id)",
+        "CREATE INDEX table_project_id IF NOT EXISTS "
+        "FOR (n:Table) ON (n.project_id)",
+        "CREATE INDEX unified_lineage_node_data_domain_id IF NOT EXISTS "
+        "FOR (n:UnifiedLineageNode) ON (n.data_domain_id)",
+        "CREATE INDEX unified_lineage_node_project_id IF NOT EXISTS "
+        "FOR (n:UnifiedLineageNode) ON (n.project_id)",
     )
     async with driver.session() as graph_session:
         for statement in statements:
@@ -55,6 +67,18 @@ async def load_projection(
     datasource_id: UUID, organization_id: UUID
 ) -> dict[str, list[dict[str, Any]]]:
     async with session_factory() as session:
+        # ADR-0017 SS2 -- every projected node carries its full tenancy path, not
+        # just organization_id, so a bounded traversal can be scoped to a domain.
+        datasource = await session.get(DataSource, datasource_id)
+        tenancy_path = (
+            {
+                "line_of_business_id": str(datasource.line_of_business_id),
+                "data_domain_id": str(datasource.data_domain_id),
+                "project_id": str(datasource.project_id),
+            }
+            if datasource is not None
+            else {}
+        )
         catalogs = (
             await session.scalars(
                 select(MetadataCatalog).where(
@@ -107,6 +131,7 @@ async def load_projection(
                 "datasource_id": str(datasource_id),
                 "name": item.name,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in catalogs
         ],
@@ -117,6 +142,7 @@ async def load_projection(
                 "catalog_id": str(item.catalog_id),
                 "name": item.name,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in schemas
         ],
@@ -128,6 +154,7 @@ async def load_projection(
                 "name": item.name,
                 "object_type": item.object_type,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in tables
         ],
@@ -141,6 +168,7 @@ async def load_projection(
                 "physical_type": item.physical_type,
                 "classification": item.classification,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in columns
         ],
@@ -157,6 +185,7 @@ async def load_projection(
                 ),
                 "referenced_columns": item.referenced_columns,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in constraints
         ],
@@ -266,6 +295,13 @@ async def load_unified_lineage_projection(
             suggestion_status="ALL",
             settings=None,
         )
+    # ADR-0017 SS2 -- same tenancy-path tagging as load_projection, so a domain-
+    # scoped unified-lineage traversal can filter before it walks edges.
+    tenancy_path = {
+        "line_of_business_id": str(datasource.line_of_business_id),
+        "data_domain_id": str(datasource.data_domain_id),
+        "project_id": str(datasource.project_id),
+    }
     prefix = f"{organization_id}:{datasource_id}:"
     nodes = [
         {
@@ -278,6 +314,7 @@ async def load_unified_lineage_projection(
             "qualified_name": node.qualified_name,
             "matched_table_id": str(node.matched_table_id) if node.matched_table_id else None,
             "resolved": node.resolved,
+            **tenancy_path,
         }
         for node in graph.nodes
     ]
@@ -294,6 +331,7 @@ async def load_unified_lineage_projection(
             "source_columns": edge.source_columns,
             "target_columns": edge.target_columns,
             "evidence": json.dumps(edge.evidence, sort_keys=True, separators=(",", ":")),
+            **tenancy_path,
         }
         for edge in graph.edges
     ]

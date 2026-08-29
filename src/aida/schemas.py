@@ -55,15 +55,66 @@ class LineOfBusinessRead(LineOfBusinessCreate):
     updated_at: datetime
 
 
+class DataDomainCreate(ApiModel):
+    name: str = Field(min_length=2, max_length=200)
+    code: str = Field(pattern=r"^[A-Z0-9][A-Z0-9_-]{1,49}$")
+    parent_domain_id: UUID | None = None
+
+
+class DataDomainRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    line_of_business_id: UUID
+    parent_domain_id: UUID | None
+    name: str
+    code: str
+    is_default: bool
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrossBoundaryGrantCreate(ApiModel):
+    target_data_domain_id: UUID
+    edge_kinds: list[str] = Field(default_factory=list, max_length=50)
+    reason: str = Field(min_length=3, max_length=500)
+    expires_at: datetime | None = None
+
+
+class CrossBoundaryGrantRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    source_data_domain_id: UUID
+    target_data_domain_id: UUID
+    edge_kinds: list[str]
+    reason: str
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectCreate(ApiModel):
     name: str = Field(min_length=2, max_length=200)
     slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    data_domain_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Governance domain this project belongs to. Omit to fall back to the line of "
+            "business's default (Ungoverned) domain — a project is never blocked on a "
+            "taxonomy existing yet; see ADR-0017."
+        ),
+    )
 
 
 class ProjectRead(ProjectCreate):
     id: UUID
     organization_id: UUID
     line_of_business_id: UUID
+    data_domain_id: UUID
     status: str
     created_at: datetime
     updated_at: datetime
@@ -83,6 +134,7 @@ class DataSourceRead(DataSourceCreate):
     id: UUID
     organization_id: UUID
     line_of_business_id: UUID
+    data_domain_id: UUID
     project_id: UUID
     status: str
     capabilities: dict[str, Any]
@@ -94,6 +146,7 @@ class DataSourceSummaryRead(ApiModel):
     id: UUID
     organization_id: UUID
     line_of_business_id: UUID
+    data_domain_id: UUID
     project_id: UUID
     name: str
     connector_type: str
@@ -386,6 +439,7 @@ class ScanPolicyUpsert(ApiModel):
     interval_minutes: int = Field(ge=5, le=525_600)
     mode: Literal["FULL", "INCREMENTAL"] = "INCREMENTAL"
     priority: int = Field(default=50, ge=0, le=100)
+    usage_boost_enabled: bool = False
     maintenance_start_hour_utc: int | None = Field(default=None, ge=0, le=23)
     maintenance_end_hour_utc: int | None = Field(default=None, ge=0, le=23)
     start_at: datetime | None = None
@@ -410,6 +464,10 @@ class ScanPolicyRead(ApiModel):
     interval_minutes: int
     mode: str
     priority: int
+    usage_boost_enabled: bool
+    base_priority: int
+    computed_usage_boost: int
+    usage_boost_updated_at: datetime | None
     maintenance_start_hour_utc: int | None
     maintenance_end_hour_utc: int | None
     next_run_at: datetime
@@ -865,10 +923,16 @@ class RelationshipCandidateDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=500, ge=1, le=5000)
 
 
+class CrossSourceRelationshipCandidateDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=500, ge=1, le=5000)
+    max_datasource_pairs: int = Field(default=50, ge=1, le=2000)
+
+
 class RelationshipCandidateRead(ApiModel):
     id: UUID
     organization_id: UUID
     datasource_id: UUID
+    target_datasource_id: UUID
     source_table_id: UUID
     source_column_id: UUID
     target_table_id: UUID
@@ -995,6 +1059,34 @@ class UnifiedLineageEdgeRead(ApiModel):
 
 class UnifiedLineageGraphRead(ApiModel):
     datasource_id: UUID
+    nodes: list[UnifiedLineageNodeRead]
+    edges: list[UnifiedLineageEdgeRead]
+    counts_by_source: dict[str, int]
+    returned_node_count: int = 0
+    returned_edge_count: int = 0
+    node_limit: int = 0
+    edge_limit: int = 0
+    truncated: bool = False
+    truncation_reasons: list[str] = Field(default_factory=list)
+
+
+class DomainLineageGraphRead(ApiModel):
+    """Same merged FK + suggested + dbt + OpenLineage graph as
+    UnifiedLineageGraphRead, federated across every datasource in one
+    data_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.
+
+    This is a federated bounded view, not a global graph query: each
+    contributing datasource's graph is built and capped by the existing,
+    unchanged single-datasource builder, then merged under the domain's
+    combined node_limit/edge_limit -- ADR-0010's bounded/lazy/value-free
+    contract holds at this wider scope exactly as it does at the narrower
+    one. Node and edge ids are prefixed per-datasource to guarantee no
+    false merge between two different datasources' same-named synthetic
+    (unmatched dbt/OpenLineage) nodes.
+    """
+
+    data_domain_id: UUID
+    datasource_ids: list[UUID]
     nodes: list[UnifiedLineageNodeRead]
     edges: list[UnifiedLineageEdgeRead]
     counts_by_source: dict[str, int]
@@ -1855,6 +1947,27 @@ class ContextProductRead(ApiModel):
     latest_version: ContextProductVersionRead
     created_at: datetime
     updated_at: datetime
+
+
+class ContextProductScopeRead(ApiModel):
+    """Both ADR-0017 SS9 axes for one context product version, composed for an
+    agent or MCP client deciding what it may actually retrieve: `data_domain_ids`
+    is the tenancy axis ("where am I allowed to look"), `business_domain_names`
+    is the business axis ("what does this represent") -- kept separate rather
+    than conflated into one list, per ADR-0017 SS9. `ungranted_data_domain_ids`
+    names any domain among them the product's own domain cannot see into today
+    (no ACTIVE cross_boundary_grant) -- present, not silently included, mirroring
+    the withheld:"no_grant" transparency ADR-0017 SS4 requires of graph traversal.
+    """
+
+    context_product_version_id: UUID
+    product_data_domain_id: UUID
+    data_domain_ids: list[UUID]
+    ungranted_data_domain_ids: list[UUID]
+    business_domain_names: list[str]
+    cross_domain: bool
+    table_count: int
+    unresolved_table_ids: list[UUID]
 
 
 class HealthResponse(ApiModel):

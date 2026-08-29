@@ -140,6 +140,29 @@ These two are the *only* upward-callable modules, and both are append-or-decide-
 
 These live in `pyproject.toml` and fail CI. See `40-engineering/03-coding-standards.md`.
 
+## 5.3 Known tension: `16 query-gateway`'s layer placement (unresolved, flagged 2026-08-29)
+
+Three L2 modules list `16 query-gateway` (L3) in their "may call" column: `05 profiling`,
+`09 lineage`, and `11 data-quality` (§3, §4). That's an L2-importing-L3 edge, which contradicts
+the layering rule in §5.2 (`L1 must not import L2-L5; L2 must not import L3-L5`, and so on
+upward). Separately, `09 lineage` and `16 query-gateway` list *each other* as callable (§3, §4),
+which is a cycle and contradicts the `no-cycles` contract this same document says CI will
+enforce (§5.2).
+
+Neither is a typo to silently fix — they're a real modelling question the extraction sequence
+(`40-engineering/06-refactor-plan.md` Phase 4) needs answered before `16`, `05`, `09`, and `11`
+can be cut into separate modules with an import-linter layers contract that actually passes:
+
+- Either `16 query-gateway` is more foundational than L3 and belongs alongside L1 (every module
+  that touches cost/execution needs it, which is most of L2) — in which case the layer diagram in
+  §3 needs redrawing, not just the register table — or
+- `05`/`09`/`11`'s dependency on `16` is really a narrower thing (e.g., just cost estimation, not
+  full execution) that should go through an event or a smaller shared interface instead of a
+  direct L2→L3 call.
+
+Either way, `09`↔`16`'s mutual edge needs one direction picked as authoritative before those two
+modules are extracted — see tracker ST-11.
+
 ## 6. Database schema ownership
 
 One PostgreSQL database, one schema per module. This gives boundary enforcement now and a clean extraction path later.

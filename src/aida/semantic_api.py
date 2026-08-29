@@ -18,6 +18,7 @@ from aida.models import (
     AssetDocumentationVersion,
     BulkStewardshipOperation,
     ContextProductVersion,
+    CrossBoundaryGrant,
     DataContractVersion,
     DataProduct,
     DataProductAccessRequest,
@@ -1065,6 +1066,28 @@ async def decide_governance_review(
             "table_id": str(link_proposal.table_id),
             "term_id": str(link_proposal.term_id),
             "confidence": link_proposal.confidence,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "CROSS_BOUNDARY_GRANT":
+        grant = await session.get(CrossBoundaryGrant, UUID(review.object_id))
+        if grant is None or grant.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if grant.status != "PENDING_APPROVAL":
+            raise HTTPException(status_code=409, detail="cross-boundary grant is no longer pending")
+        if body.decision == "APPROVE":
+            grant.status = "ACTIVE"
+            grant.approved_by = context.principal_id
+            grant.approved_at = now
+            event_type = "cross_boundary_grant.approved.v1"
+        else:
+            grant.status = "REJECTED"
+            event_type = "cross_boundary_grant.rejected.v1"
+        aggregate_type = "cross_boundary_grant"
+        aggregate_id = str(grant.id)
+        payload = {
+            "cross_boundary_grant_id": str(grant.id),
+            "source_data_domain_id": str(grant.source_data_domain_id),
+            "target_data_domain_id": str(grant.target_data_domain_id),
             "review_id": str(review.id),
         }
     else:

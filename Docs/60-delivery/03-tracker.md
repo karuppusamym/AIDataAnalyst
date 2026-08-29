@@ -3,7 +3,7 @@
 > Status: **Living document.** Owner: Engineering lead. Update at every increment.
 > This is the single place to answer "what is the state of everything." It consolidates the open-work IDs from every module spec, the security backlog, and the test gaps.
 
-**Last reviewed:** 2026-08-28
+**Last reviewed:** 2026-08-29
 
 ## How to use this
 
@@ -26,16 +26,17 @@
 
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
-| ST-01 | Target structure + module template | all | 0 | P0 | TODO | — | Generated module passes all contracts |
-| ST-02 | Import-linter ratchet in CI | all | 0 | P0 | TODO | — | New violations fail CI |
-| ST-03 | Tier 0 invariant suite (9 tests) | all | 0 | P0 | TODO | — | All nine exist, pass, unskippable |
-| ST-04 | Extract `platform/` | platform | 0 | P0 | TODO | — | `platform-purity` passes |
+| ST-01 | Target structure + module template | all | 0 | P0 | DONE | — | `scripts/generate_module.py` generates the full anatomy (§7); `identity_tenancy` scaffold generated from it; `platform-is-the-lowest-layer` import-linter contract (ST-02) passes against the generated tree — verified 2026-08-29 (`lint-imports`: 1 kept, 0 broken) |
+| ST-02 | Import-linter ratchet in CI | all | 0 | P0 | IN PROGRESS | — | `[tool.importlinter]` added to `pyproject.toml`, scoped to `root_packages = ["atlas"]` (permissive baseline — `aida` is out of scope until the strangler migration reaches it); `platform-is-the-lowest-layer` layers contract passes locally. Not yet `DONE`: this repo has no CI pipeline at all (no `.github/workflows`), so "new violations fail CI" isn't wired up yet — that's a separate, larger gap |
+| ST-03 | Tier 0 invariant suite (9 tests) | all | 0 | P0 | IN PROGRESS | — | `tests/test_tier0_invariants.py` formalizes 4 of 9 (INV-2, INV-3, INV-4, INV-8), all passing and unskipped. Remaining 5 need infrastructure this file's own docstring names: INV-1/INV-6 need a live Neo4j+search replay harness; INV-5/INV-7 need an all-endpoints-plus-workers fake-session harness; INV-9 needs a certification-result store that doesn't exist yet |
+| ST-04 | Extract `platform/` | platform | 0 | P0 | IN PROGRESS | — | `db.py`, `config.py`, `logging.py`, `context.py` moved to `atlas.platform`, each with a re-export shim left at the old `aida.*` path so every existing caller (40+ import sites) is unchanged; `platform-is-the-lowest-layer` passes; full local suite green except 3 pre-existing failures in `test_operational_behaviors.py` unrelated to this change (concurrent WIP on `computed_usage_boost` scheduling, ADR-0017 §8). Not yet moved: `events.py`, `main.py` (still imports nearly every domain router — deferred to Phase 5, the `api.py` router split, rather than moved as-is), and the not-yet-built pagination/idempotency/error-taxonomy/telemetry scaffolding |
 | ST-05 | Split `models.py` into module schemas | all | 0 | P0 | TODO | — | No cross-schema FKs except `identity` |
 | ST-06 | Split `schemas.py` → `schemas`/`contracts` | all | 0 | P0 | TODO | — | `module-privacy` passes |
 | ST-07 | Split `api.py` into routers | all | 0 | P0 | TODO | — | OpenAPI spec byte-identical after split |
 | ST-08 | Untangle `intelligence_api.py` | 06/07/09 | 0 | P1 | TODO | — | Each endpoint in its owning module |
 | ST-09 | Remove all import-linter exemptions | all | 0 | P1 | TODO | — | Zero exemptions |
 | ST-10 | Per-module standalone test jobs | all | 0 | P1 | TODO | — | Each module's tests run alone |
+| ST-11 | Resolve `16 query-gateway`'s layer placement and the `09`↔`16` cycle (`10-architecture/04-module-decomposition.md` §5.3) | 09,16 | 0 | P0 | TODO | — | Layers contract passes with 09 and 16 as separate modules; no import cycle |
 
 ## B. Connectors and ingestion
 

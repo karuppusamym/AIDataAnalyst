@@ -28,6 +28,7 @@ from aida.db import get_session
 from aida.lineage_cache import get_lineage_cache
 from aida.lineage_graph_store import load_projected_lineage_impact
 from aida.models import (
+    DataDomain,
     DataSource,
     DbtArtifactImport,
     DbtLineageEdge,
@@ -43,6 +44,7 @@ from aida.models import (
     RelationshipCandidate,
 )
 from aida.schemas import (
+    DomainLineageGraphRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
     UnifiedLineageImpactNodeRead,
@@ -419,6 +421,16 @@ async def _load_datasource(
     return datasource
 
 
+async def _load_domain(
+    session: AsyncSession, context: SecurityContext, domain_id: UUID
+) -> DataDomain:
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    return domain
+
+
 async def build_unified_lineage_graph_payload(
     session: AsyncSession,
     datasource: DataSource,
@@ -508,6 +520,173 @@ async def build_unified_lineage_graph_payload(
             settings.lineage_cache_ttl_seconds,
         )
     return result
+
+
+async def build_domain_unified_lineage_graph_payload(
+    session: AsyncSession,
+    domain: DataDomain,
+    *,
+    node_limit: int = 300,
+    edge_limit: int = 1_500,
+    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
+    settings: Settings | None = None,
+) -> DomainLineageGraphRead:
+    """Federate the per-datasource unified lineage graph (above) across every
+    datasource in one data_domain (ADR-0017 SS3, SS6).
+
+    Deliberately NOT a rewrite of _build_unified_graph to natively span
+    multiple datasources in one query -- that would duplicate ~300 lines of
+    tested traversal logic and widen its blast radius. Instead each
+    datasource's already-bounded graph is built by the unchanged single-
+    datasource path, then merged here under the domain's own combined
+    node_limit/edge_limit, stopping as soon as the budget is spent -- lazy,
+    same as ADR-0010 already requires at the single-datasource scope; this
+    is a federated bounded view, not a global graph query. Node/edge ids are
+    prefixed per-datasource before merging, since a synthetic OpenLineage
+    node id (`openlineage:{namespace}:{name}`) is not guaranteed globally
+    unique across two unrelated datasources that happen to share a
+    namespace -- prefixing removes the false-merge risk rather than hoping
+    it doesn't occur.
+    """
+
+    datasources = (
+        await session.scalars(
+            select(DataSource)
+            .where(DataSource.data_domain_id == domain.id)
+            .order_by(DataSource.name)
+        )
+    ).all()
+
+    merged_nodes: list[UnifiedLineageNodeRead] = []
+    merged_edges: list[UnifiedLineageEdgeRead] = []
+    counts_by_source: dict[str, int] = {}
+    truncation_reasons: list[str] = []
+    contributing_datasource_ids: list[UUID] = []
+
+    for datasource in datasources:
+        if len(merged_nodes) >= node_limit or len(merged_edges) >= edge_limit:
+            truncation_reasons.append("DOMAIN_DATASOURCE_LIMIT")
+            break
+        per_source_graph = await build_unified_lineage_graph_payload(
+            session,
+            datasource,
+            node_limit=node_limit - len(merged_nodes),
+            edge_limit=edge_limit - len(merged_edges),
+            suggestion_status=suggestion_status,
+            settings=settings,
+        )
+        contributing_datasource_ids.append(datasource.id)
+        prefix = f"{datasource.id}:"
+        node_id_map: dict[str, str] = {}
+        for node in per_source_graph.nodes:
+            prefixed_id = f"{prefix}{node.id}"
+            node_id_map[node.id] = prefixed_id
+            merged_nodes.append(node.model_copy(update={"id": prefixed_id}))
+        for edge in per_source_graph.edges:
+            merged_edges.append(
+                edge.model_copy(
+                    update={
+                        "id": f"{prefix}{edge.id}",
+                        "source_node_id": node_id_map.get(
+                            edge.source_node_id, f"{prefix}{edge.source_node_id}"
+                        ),
+                        "target_node_id": node_id_map.get(
+                            edge.target_node_id, f"{prefix}{edge.target_node_id}"
+                        ),
+                    }
+                )
+            )
+        for key, value in per_source_graph.counts_by_source.items():
+            counts_by_source[key] = counts_by_source.get(key, 0) + value
+        if per_source_graph.truncated:
+            truncation_reasons.extend(
+                f"{datasource.name}:{reason}" for reason in per_source_graph.truncation_reasons
+            )
+
+    # --- Cross-source suggested relationships (ADR-0017 phase 5) ---
+    # Candidates whose source and target tables live in two DIFFERENT datasources
+    # of this domain -- same-source candidates were already merged per-datasource
+    # above. Never crosses a data_domain boundary: both sides are always drawn
+    # from contributing_datasource_ids, which only ever holds this one domain's
+    # datasources (see discover_cross_source_relationship_candidates).
+    remaining_edge_budget = edge_limit - len(merged_edges)
+    if contributing_datasource_ids and remaining_edge_budget > 0:
+        cross_source_filters = [
+            RelationshipCandidate.datasource_id.in_(contributing_datasource_ids),
+            RelationshipCandidate.target_datasource_id.in_(contributing_datasource_ids),
+            RelationshipCandidate.datasource_id != RelationshipCandidate.target_datasource_id,
+        ]
+        if suggestion_status != "ALL":
+            cross_source_filters.append(RelationshipCandidate.status == suggestion_status)
+        cross_source_candidates = (
+            await session.scalars(
+                select(RelationshipCandidate)
+                .where(*cross_source_filters)
+                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
+                .limit(remaining_edge_budget)
+            )
+        ).all()
+        column_ids = {candidate.source_column_id for candidate in cross_source_candidates} | {
+            candidate.target_column_id for candidate in cross_source_candidates
+        }
+        columns_by_id = (
+            {
+                column.id: column.name
+                for column in (
+                    await session.scalars(
+                        select(MetadataColumn).where(MetadataColumn.id.in_(column_ids))
+                    )
+                ).all()
+            }
+            if column_ids
+            else {}
+        )
+        nodes_by_id = {node.id: node for node in merged_nodes}
+        for candidate in cross_source_candidates:
+            source_node_id = f"{candidate.datasource_id}:{candidate.source_table_id}"
+            target_node_id = f"{candidate.target_datasource_id}:{candidate.target_table_id}"
+            source_node = nodes_by_id.get(source_node_id)
+            target_node = nodes_by_id.get(target_node_id)
+            if source_node is None or target_node is None:
+                # One endpoint fell outside its own datasource's bounded graph
+                # (truncated, or not a resolved node) -- skip rather than render
+                # a dangling edge; this is itself a form of truncation.
+                continue
+            source_column = columns_by_id.get(candidate.source_column_id)
+            target_column = columns_by_id.get(candidate.target_column_id)
+            merged_edges.append(
+                UnifiedLineageEdgeRead(
+                    id=f"cross-source-candidate:{candidate.id}",
+                    edge_source="SUGGESTED_RELATIONSHIP",
+                    source_node_id=source_node_id,
+                    target_node_id=target_node_id,
+                    source_label=source_node.label,
+                    target_label=target_node.label,
+                    status=candidate.status,
+                    confidence=candidate.confidence,
+                    source_columns=[source_column] if source_column else [],
+                    target_columns=[target_column] if target_column else [],
+                    evidence=dict(candidate.evidence),
+                )
+            )
+        if len(cross_source_candidates) >= remaining_edge_budget:
+            truncation_reasons.append("DOMAIN_CROSS_SOURCE_EDGE_LIMIT")
+
+    merged_nodes.sort(key=lambda node: node.qualified_name)
+
+    return DomainLineageGraphRead(
+        data_domain_id=domain.id,
+        datasource_ids=contributing_datasource_ids,
+        nodes=merged_nodes,
+        edges=merged_edges,
+        counts_by_source=counts_by_source,
+        returned_node_count=len(merged_nodes),
+        returned_edge_count=len(merged_edges),
+        node_limit=node_limit,
+        edge_limit=edge_limit,
+        truncated=bool(truncation_reasons),
+        truncation_reasons=truncation_reasons,
+    )
 
 
 async def build_unified_lineage_impact_payload(
@@ -695,3 +874,37 @@ async def get_unified_lineage_impact(
         )
     except LineageNodeNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/data-domains/{domain_id}/unified-lineage/graph",
+    response_model=DomainLineageGraphRead,
+)
+async def get_domain_unified_lineage_graph(
+    domain_id: UUID,
+    node_limit: int = Query(default=600, ge=5, le=4_000),
+    edge_limit: int = Query(default=3_000, ge=5, le=20_000),
+    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = Query(
+        default="APPROVED"
+    ),
+    context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> DomainLineageGraphRead:
+    """Return the merged FK + suggested + dbt + OpenLineage graph across every
+    datasource in one data_domain (ADR-0017 SS3) -- the domain-scoped
+    traversal endpoint closing KG-2/RL-5's "cross-source traversal" gap for
+    sources sharing a governance boundary, without opening an unbounded
+    org-wide graph (ADR-0010's bounded/lazy/value-free contract still
+    applies at this wider scope; see build_domain_unified_lineage_graph_payload).
+    """
+
+    domain = await _load_domain(session, context, domain_id)
+    return await build_domain_unified_lineage_graph_payload(
+        session,
+        domain,
+        node_limit=node_limit,
+        edge_limit=edge_limit,
+        suggestion_status=suggestion_status,
+        settings=settings,
+    )

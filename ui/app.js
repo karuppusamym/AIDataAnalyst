@@ -22,14 +22,16 @@ async function loadOrganizations(preferredId=null) {
 }
 
 async function loadHierarchy() {
-  const [lobs, projects, sources] = await Promise.all([
+  const [lobs, domains, projects, sources] = await Promise.all([
     fetchAll(`/v1/organizations/${state.organizationId}/lines-of-business`),
+    fetchAll(`/v1/organizations/${state.organizationId}/data-domains`),
     fetchAll(`/v1/organizations/${state.organizationId}/projects`),
     fetchAll(`/v1/organizations/${state.organizationId}/datasources`)
   ]);
   const lobMap = new Map(lobs.map(item => [item.id, item]));
   const projectMap = new Map(projects.map(item => [item.id, item]));
   state.lobs = lobs;
+  state.domains = domains.map(item => ({...item, lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   state.projects = projects.map(item => ({...item, lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   state.sources = sources.map(item => ({...item, projectName: projectMap.get(item.project_id)?.name || "Unknown project", lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   populateSelectors();

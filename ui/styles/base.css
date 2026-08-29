@@ -81,6 +81,10 @@ main { min-width: 0; padding: 0 30px 50px; }
 .eyebrow { margin: 0 0 7px; color: #52647b; font-size: 9px; font-weight: 800; line-height: 1.2; letter-spacing: .13em; }
 .heading-actions { display: flex; align-items: end; gap: 9px; }
 .field-inline { min-width: 220px; display: grid; gap: 5px; color: var(--muted); font-size: 10px; font-weight: 700; }
+/* Author `display: grid` above beats the UA [hidden]{display:none} rule at equal
+   specificity, so a .field-inline toggled via the `hidden` attribute (e.g. the
+   unified-lineage domain/source scope switch) would stay visibly laid out. */
+.field-inline[hidden] { display: none; }
 .page-shell { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, .7fr); gap: 18px; align-items: start; }
 .control-plane-shell { grid-template-columns: minmax(0, 1.14fr) minmax(420px, .86fr); }
 .meaning-shell { grid-template-columns: minmax(0, 1.1fr) minmax(420px, .9fr); }

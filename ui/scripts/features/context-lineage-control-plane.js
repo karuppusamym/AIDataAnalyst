@@ -11,6 +11,16 @@
     preserveSelect("context-product-project", selectOptions(state.projects, item => item.name, "No projects"));
     preserveSelect("context-product-filter-project", selectOptions(state.projects, item => item.name, "No projects"));
     preserveSelect("unified-lineage-source", selectOptions(state.sources, item => item.name, "No sources"));
+    preserveSelect("unified-lineage-domain", selectOptions(state.domains, item => `${item.name} / ${item.lobName || ""}`, state.domains.length ? "" : "No domains"));
+    applyUnifiedLineageScopeVisibility();
+  }
+
+  function applyUnifiedLineageScopeVisibility() {
+    const isDomainScope = $("#unified-lineage-scope")?.value === "domain";
+    const sourceField = $("#unified-lineage-source-field");
+    const domainField = $("#unified-lineage-domain-field");
+    if (sourceField) sourceField.hidden = isDomainScope;
+    if (domainField) domainField.hidden = !isDomainScope;
   }
 
   function renderProducts() {
@@ -149,25 +159,43 @@
 
   async function loadUnifiedLineage() {
     populateSelectors();
-    const sourceId = $("#unified-lineage-source")?.value;
-    if (!sourceId) return renderLineageGraph();
-    message("unified-lineage-message", "Building bounded unified graph...");
+    const isDomainScope = $("#unified-lineage-scope")?.value === "domain";
+    const scopeId = isDomainScope ? $("#unified-lineage-domain")?.value : $("#unified-lineage-source")?.value;
+    if (!scopeId) return renderLineageGraph();
+    message("unified-lineage-message", isDomainScope ? "Federating bounded graphs across every source in this domain..." : "Building bounded unified graph...");
     try {
       const nodeLimit = Number($("#unified-lineage-node-limit")?.value || 300);
       const edgeLimit = Number($("#unified-lineage-edge-limit")?.value || 1500);
-      feature.graph = await api(`/v1/datasources/${sourceId}/unified-lineage/graph?node_limit=${nodeLimit}&edge_limit=${edgeLimit}`);
+      const path = isDomainScope
+        ? `/v1/data-domains/${scopeId}/unified-lineage/graph?node_limit=${nodeLimit}&edge_limit=${edgeLimit}`
+        : `/v1/datasources/${scopeId}/unified-lineage/graph?node_limit=${nodeLimit}&edge_limit=${edgeLimit}`;
+      feature.graph = await api(path);
       renderLineageGraph();
-      message("unified-lineage-message", feature.graph.truncated ? `Result bounded: ${feature.graph.truncation_reasons.join(", ")}.` : "Unified graph is within the requested budget.", feature.graph.truncated ? "warning" : "success");
+      const sourceNote = isDomainScope ? ` (${feature.graph.datasource_ids.length} sources)` : "";
+      message("unified-lineage-message", feature.graph.truncated ? `Result bounded: ${feature.graph.truncation_reasons.join(", ")}.` : `Unified graph is within the requested budget${sourceNote}.`, feature.graph.truncated ? "warning" : "success");
     } catch (error) {
       message("unified-lineage-message", error.message, "error");
     }
   }
 
   async function inspectImpact(nodeId) {
-    const sourceId = $("#unified-lineage-source")?.value;
+    // In domain scope every node id is prefixed "{datasourceId}:{originalId}"
+    // (build_domain_unified_lineage_graph_payload, ADR-0017 SS3) so impact -- still
+    // a per-datasource traversal, not yet extended to cross-source impact -- is
+    // requested against the node's own originating source rather than whatever
+    // source happens to be selected in the (hidden, in this scope) source picker.
+    const isDomainScope = $("#unified-lineage-scope")?.value === "domain";
+    let sourceId = $("#unified-lineage-source")?.value;
+    let originalNodeId = nodeId;
+    if (isDomainScope) {
+      const separatorIndex = nodeId.indexOf(":");
+      if (separatorIndex === -1) return message("unified-lineage-message", "Cannot resolve this node's source for impact analysis.", "error");
+      sourceId = nodeId.slice(0, separatorIndex);
+      originalNodeId = nodeId.slice(separatorIndex + 1);
+    }
     if (!sourceId) return;
     try {
-      feature.impact = await api(`/v1/datasources/${sourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?depth=5&node_limit=200`);
+      feature.impact = await api(`/v1/datasources/${sourceId}/unified-lineage/impact/${encodeURIComponent(originalNodeId)}?depth=5&node_limit=200`);
       const impact = feature.impact;
       const rows = [...impact.upstream.map(item => ["Upstream", item]), ...impact.downstream.map(item => ["Downstream", item])]
         .map(([direction, item]) => `<tr><td>${direction}</td><td><strong>${esc(item.label)}</strong><span class="secondary-cell">${esc(item.qualified_name)}</span></td><td>${item.depth}</td><td>${esc(item.contributing_edge_sources.join(", "))}</td></tr>`);
@@ -195,6 +223,7 @@
   document.addEventListener("change", event => {
     if (event.target.id === "context-product-filter-project") loadContextProducts();
     if (event.target.id === "organization-select") setTimeout(populateSelectors, 300);
+    if (event.target.id === "unified-lineage-scope") { applyUnifiedLineageScopeVisibility(); loadUnifiedLineage(); }
   });
   document.addEventListener("click", event => {
     const view = event.target.closest("[data-view]")?.dataset.view;

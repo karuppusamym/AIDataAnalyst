@@ -73,6 +73,81 @@ class LineOfBusiness(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
 
 
+class DataDomain(Base, TimestampMixin):
+    """Governance boundary between line_of_business and project (ADR-0017).
+
+    A steward-owned scope: relationship inference and graph traversal cross
+    project/datasource boundaries freely within one domain, and only cross a
+    domain boundary through an explicit, audited cross_boundary_grant.
+    `parent_domain_id` allows sub-domains to arbitrary depth. Every LOB gets a
+    lazily-created `is_default` "Ungoverned" domain so a newly connected
+    project or datasource is never left unscoped (see domain_service.py).
+    """
+
+    __tablename__ = "data_domain"
+    __table_args__ = (UniqueConstraint("line_of_business_id", "code"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    line_of_business_id: Mapped[UUID] = mapped_column(
+        ForeignKey("line_of_business.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    parent_domain_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class CrossBoundaryGrant(Base, TimestampMixin):
+    """Explicit, audited permission to traverse across a data_domain boundary (ADR-0017 SS4).
+
+    Graph traversal and relationship inference never cross a domain boundary on
+    their own (INV-5: deny-by-default, never inherited) -- a `target_data_domain`
+    only sees into a `source_data_domain` while an ACTIVE grant naming that pair
+    exists. Approval flows through the same maker-checker GovernanceReview queue
+    every other governed object in this platform uses
+    (object_type="CROSS_BOUNDARY_GRANT", see semantic_api.decide_governance_review),
+    so a grant starts PENDING_APPROVAL and only becomes ACTIVE once a second
+    principal approves it. `edge_kinds` scopes the grant to specific relationship
+    kinds (e.g. ["FOREIGN_KEY_INFERRED"]); an empty list grants all kinds. A
+    withheld edge at traversal time must be reported as `withheld:"no_grant"`,
+    never silently dropped.
+    """
+
+    __tablename__ = "cross_boundary_grant"
+    __table_args__ = (
+        Index(
+            "ix_cross_boundary_grant_org_pair",
+            "organization_id",
+            "source_data_domain_id",
+            "target_data_domain_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_data_domain_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_data_domain_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    edge_kinds: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Project(Base, TimestampMixin):
     __tablename__ = "project"
     __table_args__ = (UniqueConstraint("organization_id", "slug"),)
@@ -83,6 +158,9 @@ class Project(Base, TimestampMixin):
     )
     line_of_business_id: Mapped[UUID] = mapped_column(
         ForeignKey("line_of_business.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    data_domain_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     slug: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -99,6 +177,9 @@ class DataSource(Base, TimestampMixin):
     )
     line_of_business_id: Mapped[UUID] = mapped_column(
         ForeignKey("line_of_business.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    data_domain_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     project_id: Mapped[UUID] = mapped_column(
         ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
@@ -283,6 +364,19 @@ class ScanPolicy(Base, TimestampMixin):
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_triggered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Usage-weighted priority (ADR-0017 SS8): opt-in per policy. `priority` remains the
+    # single column the fleet scheduler orders by (due_scan_policies_statement is
+    # unchanged) -- when usage_boost_enabled, the scheduler periodically recomputes
+    # `priority = base_priority + computed_usage_boost` (clamped to 0-100) instead of
+    # adding the boost at query time, so admission ordering and scan-policy ordering stay
+    # on the exact same column they always were. `base_priority` is the admin's last
+    # explicitly-set value (captured on every upsert) and is never itself overwritten by
+    # the boost, so recomputation is always relative to the admin's real choice, never
+    # compounding on a previous boost.
+    usage_boost_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    base_priority: Mapped[int] = mapped_column(Integer, default=50, nullable=False)
+    computed_usage_boost: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    usage_boost_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class TableProfile(Base):
@@ -814,7 +908,16 @@ class RelationshipCandidate(Base, TimestampMixin):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    # datasource_id names the SOURCE side's datasource; target_datasource_id names the
+    # target's. Equal for a same-source candidate (the only kind before ADR-0017 phase 5),
+    # different for a cross-source candidate discovered within one data_domain -- inference
+    # never crosses a data_domain boundary here (ADR-0017 SS4/SS8: free within a domain,
+    # gated by cross_boundary_grant beyond it, and that gate is enforced by the domain-scoped
+    # discovery endpoint only ever pairing datasources it already loaded from one domain).
     datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_datasource_id: Mapped[UUID] = mapped_column(
         ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
     )
     source_table_id: Mapped[UUID] = mapped_column(

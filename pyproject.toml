@@ -20,7 +20,6 @@ dependencies = [
   "opentelemetry-sdk==1.37.0",
   "oracledb==4.0.2",
   "PyJWT[crypto]==2.10.1",
-  "PyYAML==6.0.2",
   "prometheus-client==0.22.1",
   "pydantic-settings==2.15.0",
   "python-tds==1.17.1",
@@ -35,16 +34,16 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "import-linter==2.14",
   "mypy==1.17.1",
   "pytest==8.4.2",
   "pytest-asyncio==1.1.0",
   "pytest-cov==6.2.1",
   "ruff==0.12.11",
-  "types-PyYAML==6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aida"]
+packages = ["src/aida", "src/atlas"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
@@ -72,3 +71,51 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["google", "google.*"]
 ignore_missing_imports = true
+
+# ST-02 (Docs/40-engineering/06-refactor-plan.md, Phase 0): import-linter with a
+# permissive baseline. The ratchet: contracts below are real and currently pass,
+# so from today the dependency shape cannot get worse, even before the rest of
+# `aida` is decomposed and stricter contracts become possible (Phase 2+).
+#
+# import-linter 2.14 has no formal `--create-baseline` / snapshot mechanism (checked
+# `lint-imports --help` and the installed package source) to auto-record today's
+# violations, so `aida` is intentionally NOT given a full layering/independence
+# contract yet — the package is still flat (~50 top-level modules) and a contract
+# covering all of it would either be vacuous or would have to hardcode a large
+# "existing violations" exemption list, which `05-ci-cd-and-release.md` explicitly
+# forbids ("import-linter | Any violation, including a new exemption" blocks the
+# merge gate). Instead `security_types` (a true dependency leaf: no internal `aida`
+# imports of its own, per `grep` of its imports) is pinned so it can never import
+# back from the top-level `api` module — a real, narrow, currently-true invariant.
+# Broader `aida` contracts land as the flat package is decomposed in later phases.
+[tool.importlinter]
+root_packages = ["aida", "atlas"]
+
+[[tool.importlinter.contracts]]
+name = "identity_tenancy module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.identity_tenancy.service",
+  "atlas.modules.identity_tenancy.repository",
+  "atlas.modules.identity_tenancy.models",
+  "atlas.modules.identity_tenancy.schemas",
+  "atlas.modules.identity_tenancy.router",
+  "atlas.modules.identity_tenancy.workers",
+]
+allowed_importers = [
+  "atlas.modules.identity_tenancy.api",
+  "atlas.modules.identity_tenancy.contracts",
+  "atlas.modules.identity_tenancy.service",
+  "atlas.modules.identity_tenancy.repository",
+  "atlas.modules.identity_tenancy.models",
+  "atlas.modules.identity_tenancy.schemas",
+  "atlas.modules.identity_tenancy.router",
+  "atlas.modules.identity_tenancy.workers",
+  "atlas.modules.identity_tenancy.tests",
+]
+
+[[tool.importlinter.contracts]]
+name = "security_types never depends on api (leaf-module ratchet)"
+type = "forbidden"
+source_modules = ["aida.security_types"]
+forbidden_modules = ["aida.api"]

@@ -4,7 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from neo4j import AsyncGraphDatabase
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
@@ -24,6 +24,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
+from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
@@ -31,7 +32,10 @@ from aida.models import (
     AgentRun,
     AnalysisRun,
     ColumnProfile,
+    CrossBoundaryGrant,
+    DataDomain,
     DataSource,
+    GovernanceReview,
     LineOfBusiness,
     MetadataCatalog,
     MetadataColumn,
@@ -58,6 +62,10 @@ from aida.schemas import (
     AnalysisRunCreate,
     AnalysisRunRead,
     ColumnProfileRead,
+    CrossBoundaryGrantCreate,
+    CrossBoundaryGrantRead,
+    DataDomainCreate,
+    DataDomainRead,
     DataSourceCreate,
     DataSourceRead,
     DataSourceSummaryRead,
@@ -396,6 +404,37 @@ async def list_lines_of_business(
     )
 
 
+@router.get("/lines-of-business/{lob_id}/data-domains", response_model=Page)
+async def list_data_domains(
+    lob_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    lob = await session.get(LineOfBusiness, lob_id)
+    if lob is None:
+        raise HTTPException(status_code=404, detail="line of business not found")
+    enforce_organization(context, lob.organization_id)
+    await ensure_default_domain(session, lob)
+    await session.commit()
+    filters = (DataDomain.line_of_business_id == lob.id,)
+    total = await session.scalar(select(func.count()).select_from(DataDomain).where(*filters))
+    rows = (
+        await session.scalars(
+            select(DataDomain).where(*filters).order_by(DataDomain.name).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[DataDomainRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
 @router.get("/lines-of-business/{lob_id}/projects", response_model=Page)
 async def list_projects(
     lob_id: UUID,
@@ -585,6 +624,187 @@ async def create_line_of_business(
 
 
 @router.post(
+    "/lines-of-business/{lob_id}/data-domains",
+    response_model=DataDomainRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_data_domain(
+    lob_id: UUID,
+    body: DataDomainCreate,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")),
+    session: AsyncSession = Depends(get_session),
+) -> DataDomain:
+    lob = await session.get(LineOfBusiness, lob_id)
+    if lob is None:
+        raise HTTPException(status_code=404, detail="line of business not found")
+    enforce_organization(context, lob.organization_id)
+    parent = None
+    if body.parent_domain_id is not None:
+        parent = await session.get(DataDomain, body.parent_domain_id)
+        if parent is None or parent.line_of_business_id != lob.id:
+            raise HTTPException(
+                status_code=422,
+                detail="parent_domain_id must reference an existing domain in the same line of business",
+            )
+    domain = DataDomain(
+        organization_id=lob.organization_id,
+        line_of_business_id=lob.id,
+        parent_domain_id=body.parent_domain_id,
+        name=body.name,
+        code=body.code,
+    )
+    session.add(domain)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=lob.organization_id),
+        action="data_domain.create",
+        resource_type="data_domain",
+        resource_id=str(domain.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"parent_domain_id": str(body.parent_domain_id) if body.parent_domain_id else None},
+    )
+    record_outbox(
+        session,
+        organization_id=lob.organization_id,
+        aggregate_type="data_domain",
+        aggregate_id=str(domain.id),
+        event_type="data_domain.created.v1",
+        payload={
+            "data_domain_id": str(domain.id),
+            "line_of_business_id": str(lob.id),
+            "parent_domain_id": str(body.parent_domain_id) if body.parent_domain_id else None,
+        },
+    )
+    await _commit_or_conflict(session, "data domain code already exists in this line of business")
+    return domain
+
+
+@router.get("/data-domains/{domain_id}/cross-boundary-grants", response_model=Page)
+async def list_cross_boundary_grants(
+    domain_id: UUID,
+    grant_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    filters = [
+        or_(
+            CrossBoundaryGrant.source_data_domain_id == domain.id,
+            CrossBoundaryGrant.target_data_domain_id == domain.id,
+        )
+    ]
+    if grant_status is not None:
+        filters.append(CrossBoundaryGrant.status == grant_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(CrossBoundaryGrant).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(CrossBoundaryGrant)
+            .where(*filters)
+            .order_by(CrossBoundaryGrant.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[CrossBoundaryGrantRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/data-domains/{domain_id}/cross-boundary-grants",
+    response_model=CrossBoundaryGrantRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_cross_boundary_grant(
+    domain_id: UUID,
+    body: CrossBoundaryGrantCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> CrossBoundaryGrant:
+    """Request permission for `body.target_data_domain_id` to see across the
+    boundary into `domain_id` (the source, owning domain). Creates the grant in
+    PENDING_APPROVAL and files it into the same governance review queue every
+    other governed object here uses (ADR-0017 SS4) — it only becomes ACTIVE once
+    a *different* principal approves it via POST /governance/reviews/{id}/decision.
+    """
+    source_domain = await session.get(DataDomain, domain_id)
+    if source_domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, source_domain.organization_id)
+    if body.target_data_domain_id == source_domain.id:
+        raise HTTPException(
+            status_code=422, detail="target_data_domain_id must differ from the source domain"
+        )
+    target_domain = await session.get(DataDomain, body.target_data_domain_id)
+    if target_domain is None or target_domain.organization_id != source_domain.organization_id:
+        raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+    grant = CrossBoundaryGrant(
+        organization_id=source_domain.organization_id,
+        source_data_domain_id=source_domain.id,
+        target_data_domain_id=target_domain.id,
+        edge_kinds=body.edge_kinds,
+        reason=body.reason,
+        requested_by=context.principal_id,
+        expires_at=body.expires_at,
+    )
+    session.add(grant)
+    await session.flush()
+    review = GovernanceReview(
+        organization_id=source_domain.organization_id,
+        object_type="CROSS_BOUNDARY_GRANT",
+        object_id=str(grant.id),
+        requested_action="GRANT",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=source_domain.organization_id),
+        action="cross_boundary_grant.request",
+        resource_type="governance_review",
+        resource_id=str(review.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "cross_boundary_grant_id": str(grant.id),
+            "source_data_domain_id": str(source_domain.id),
+            "target_data_domain_id": str(target_domain.id),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=source_domain.organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+        },
+    )
+    await session.commit()
+    return grant
+
+
+@router.post(
     "/lines-of-business/{lob_id}/projects",
     response_model=ProjectRead,
     status_code=status.HTTP_201_CREATED,
@@ -599,9 +819,18 @@ async def create_project(
     if lob is None:
         raise HTTPException(status_code=404, detail="line of business not found")
     enforce_organization(context, lob.organization_id)
+    if body.data_domain_id is not None:
+        explicit_domain = await session.get(DataDomain, body.data_domain_id)
+        if explicit_domain is None or explicit_domain.line_of_business_id != lob.id:
+            raise HTTPException(
+                status_code=422,
+                detail="data_domain_id must reference an existing domain in this line of business",
+            )
+    domain = await resolve_domain(session, lob, body.data_domain_id)
     project = Project(
         organization_id=lob.organization_id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         name=body.name,
         slug=body.slug,
     )
@@ -662,6 +891,7 @@ async def create_datasource(
     datasource = DataSource(
         organization_id=project.organization_id,
         line_of_business_id=project.line_of_business_id,
+        data_domain_id=project.data_domain_id,
         project_id=project.id,
         **body.model_dump(),
     )
@@ -765,6 +995,12 @@ async def upsert_scan_policy(
         select(ScanPolicy).where(ScanPolicy.datasource_id == datasource.id)
     )
     values = body.model_dump(exclude={"start_at"})
+    # base_priority tracks the admin's own explicit choice separately from the
+    # scheduler-visible `priority` column, so a later usage-weighted rebalance
+    # (workflows/scheduler.rebalance_usage_weighted_priorities) always computes
+    # from what the admin actually asked for, never from a previously-boosted
+    # value (ADR-0017 SS8).
+    values["base_priority"] = body.priority
     if policy is None:
         policy = ScanPolicy(
             organization_id=datasource.organization_id,

@@ -771,3 +771,98 @@ features in this list were subsequently closed by R35 below; shared-history clea
 - The remaining open items are still dedicated-environment gates rather than local code-path
   gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
   operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — Refactor Phase 0: import-linter ratchet + `platform/` extraction (ST-01–ST-04)
+
+### Completed
+
+- Added `[tool.importlinter]` to `pyproject.toml` with `root_packages = ["atlas"]` and a
+  `platform-is-the-lowest-layer` layers contract (`atlas.modules` → `atlas.platform`, never the
+  reverse). Scoped as a permissive baseline: only the target `atlas` package is checked, matching
+  Phase 0's ratchet design — `aida`, the pre-existing flat package, is intentionally out of scope
+  until the strangler migration reaches each module.
+- Extracted `db.py`, `config.py`, `logging.py`, and `context.py` from `aida` into
+  `atlas.platform`, adapting `db.py`'s internal `config` import to the new location. Left a
+  backward-compatible re-export shim at each old `aida.*` path so the 40+ existing import sites
+  across `src/aida/*` and `tests/*` needed no changes.
+- Added `src/atlas` to the `hatchling` wheel package list so the extracted modules are included
+  in production builds, not just the editable dev install.
+- Confirmed `scripts/generate_module.py` (tracker ST-01) and `tests/test_tier0_invariants.py`
+  (tracker ST-03, 4 of 9 invariants) already existed from prior work; the tracker had gone stale
+  and still listed both as `TODO` — corrected to reflect actual repo state.
+- Deliberately did **not** touch `models.py`, `schemas.py`, `api.py`, or any Phase 2+ work — a
+  concurrent session was actively editing those same files for ADR-0017 (domain-complete tenancy)
+  while this work was in progress, and the refactor plan itself calls Phase 2 (the models/schemas
+  split) the one phase needing a migration freeze.
+
+### Verification evidence
+
+- Built an isolated Python 3.13 verification environment (`uv venv` + `uv pip install -e ".[dev]"`)
+  outside the repo, since the checked-in `.venv` is a Windows venv not runnable from this session.
+- `python -m pytest -q`: baseline before any change was fully green (no failures). After the
+  change, all tests pass except 3 in `tests/test_operational_behaviors.py`
+  (`test_scheduler_commits_run_and_evidence_before_workflow_dispatch`,
+  `test_scheduler_defers_rejected_admission_without_dispatch`,
+  `test_due_scan_policies_statement_orders_by_priority_then_next_run_at`) — confirmed via
+  `git diff` to belong to the concurrent session's in-progress `computed_usage_boost` scheduling
+  feature (ADR-0017 §8), not this change: `scheduler.py` and `models.py` were mid-edit for that
+  feature throughout this verification, unrelated to `db`/`config`/`logging`/`context`.
+- `pytest -q src/atlas/modules/identity_tenancy` (standalone module execution) passes.
+- `lint-imports`: `platform-is-the-lowest-layer KEPT` — `Contracts: 1 kept, 0 broken`.
+- `ruff check` and `mypy` (strict) clean on every new and changed file.
+
+### Current limitations
+
+- ST-02's exit criterion ("new violations fail CI") is not fully met: this repo has no CI
+  pipeline at all yet (no `.github/workflows`), so the contract passes locally but isn't enforced
+  automatically. Setting up CI is a separate, larger gap.
+- ST-03 remains 4 of 9 invariants; the other 5 (INV-1, INV-5, INV-6, INV-7, INV-9) need
+  infrastructure that does not exist locally yet (live Neo4j/search replay, an all-endpoints fake
+  session harness, a certification-result store) — see the docstring in
+  `tests/test_tier0_invariants.py` for the reasoning per invariant.
+- ST-04 covers 4 of the ~10 files/areas Phase 1 names. `main.py` was deliberately left where it
+  is: it currently imports nearly every domain router (violating `platform-purity` as-is), and the
+  refactor plan's own sequencing defers untangling that to Phase 5 (the `api.py` router split)
+  rather than moving it in its current shape. `events.py` and the pagination/idempotency/
+  error-taxonomy/telemetry scaffolding remain unbuilt.
+- Phases 2 and onward (splitting `models.py`/`schemas.py`, extracting leaf/runtime modules) are
+  untouched — see `Docs/60-delivery/03-tracker.md` ST-05 onward.
+
+## 2026-08-29 (continued) — Refactor doc corrections found during ST-04 verification
+
+### Completed
+
+- Checked whether Phase 2 (models/schemas split) had unblocked since the last entry: it hadn't —
+  `models.py`, `schemas.py`, and `api.py` were still uncommitted and actively changing under the
+  concurrent session (a new file, `context_product_api.py`, picked up a modification between
+  checks). Left Phase 2+ untouched again; did documentation-only work instead that needed no code
+  freeze.
+- Corrected `40-engineering/06-refactor-plan.md` Phase 1: it listed `events.py` (outbox
+  mechanics) as moving to `platform/`. Read the file — it directly constructs and writes
+  `AuditEvent`/`OutboxEvent` (`aida.models`), module 20's owned tables per
+  `10-architecture/04-module-decomposition.md` §4 and §9, not domain-free infrastructure. Moving
+  it to `platform/` as written would have failed the `platform-purity` contract (ST-02) on day
+  one. `04-module-decomposition.md` §9 already had the correct target (module 20, Phase 3/4);
+  fixed the refactor plan to match, and fixed the same incorrect claim in
+  `src/atlas/platform/__init__.py`'s docstring (written in the previous entry).
+- Flagged a real, previously undocumented architectural tension in
+  `10-architecture/04-module-decomposition.md` (new §5.3): three L2 modules (`05` profiling, `09`
+  lineage, `11` data-quality) depend on `16 query-gateway`, an L3 module, contradicting the
+  document's own layering rule; separately, `09` and `16` list each other as callable, which is a
+  cycle contradicting the `no-cycles` contract the same document says CI will enforce. Added
+  tracker `ST-11` (P0, unassigned) so this is resolved before Phase 4 extracts those modules,
+  rather than being discovered mid-extraction.
+
+### Verification evidence
+
+- `ruff check` clean and `ast.parse` valid on the one `.py` docstring touched
+  (`src/atlas/platform/__init__.py`); `pytest -q src/atlas/modules/identity_tenancy` still passes.
+  No other code changed in this entry — documentation only.
+
+### Current limitations
+
+- ST-11 is flagged, not resolved — it needs an architecture-owner decision (redraw the layer
+  diagram to move `16` down, or narrow what `05`/`09`/`11` actually need from it), not something
+  to decide unilaterally.
+- Phase 2 (models/schemas split) and the leaf-module extraction it unblocks remain untouched;
+  still gated on the concurrent session's ADR-0017 work landing.

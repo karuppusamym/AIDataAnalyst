@@ -1,7 +1,7 @@
 /* Shared state and DOM rendering utilities for the static UI. */
 (function initializeAtlasUiCore() {
   const state = {
-    organizations: [], organizationId: null, lobs: [], projects: [], sources: [],
+    organizations: [], organizationId: null, lobs: [], domains: [], projects: [], sources: [],
     fleet: null, runs: [], reviews: [], audit: [], runtime: null, evaluations: [],
     agentRuns: [], tables: [], semanticModels: [], semanticMetrics: [], selectedSemantic: null,
     tools: [], selectedTool: null, graph: null, relationships: [], modelRoutes: [],
