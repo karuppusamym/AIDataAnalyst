@@ -1742,17 +1742,11 @@ class ContextProductVersion(Base, TimestampMixin):
     semantic_model_version_ids: Mapped[list[str]] = mapped_column(
         JSON, default=list, nullable=False
     )
-    glossary_term_version_ids: Mapped[list[str]] = mapped_column(
-        JSON, default=list, nullable=False
-    )
-    eligible_tool_version_ids: Mapped[list[str]] = mapped_column(
-        JSON, default=list, nullable=False
-    )
+    glossary_term_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    eligible_tool_version_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     allowed_consumer_roles: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     lineage_depth: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
-    quality_requirements: Mapped[dict[str, Any]] = mapped_column(
-        JSON, default=dict, nullable=False
-    )
+    quality_requirements: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     policy_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -1831,6 +1825,341 @@ class ContextProductConsumptionEdge(Base):
     consumed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class DataProduct(Base, TimestampMixin):
+    """Stable identity for a governed, marketplace-visible data product."""
+
+    __tablename__ = "data_product"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "product_key", name="uq_data_product_org_product_key"),
+        Index("ix_data_product_project_lifecycle", "project_id", "lifecycle_status"),
+        CheckConstraint(
+            "lifecycle_status IN ('CANDIDATE', 'ACTIVE', 'RETIRED')",
+            name="ck_data_product_lifecycle",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String(30), default="CANDIDATE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class DataProductVersion(Base, TimestampMixin):
+    __tablename__ = "data_product_version"
+    __table_args__ = (
+        UniqueConstraint("product_id", "version", name="uq_data_product_version_product_version"),
+        Index("ix_data_product_version_org_status", "organization_id", "status"),
+        Index(
+            "uq_data_product_version_one_published",
+            "product_id",
+            unique=True,
+            postgresql_where=text("status = 'PUBLISHED'"),
+        ),
+        CheckConstraint("version > 0", name="ck_data_product_version_positive"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'PUBLISHED', 'SUPERSEDED', "
+            "'REJECTED', 'RETIRED')",
+            name="ck_data_product_version_status",
+        ),
+        CheckConstraint(
+            "quality_score IS NULL OR (quality_score >= 0 AND quality_score <= 100)",
+            name="ck_data_product_quality_score",
+        ),
+        CheckConstraint(
+            "lineage_coverage >= 0 AND lineage_coverage <= 100",
+            name="ck_data_product_lineage_coverage",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    domain_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    usage_terms: Mapped[str] = mapped_column(Text, nullable=False)
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    certification_status: Mapped[str] = mapped_column(
+        String(30), default="UNCERTIFIED", nullable=False
+    )
+    quality_score: Mapped[int | None] = mapped_column(Integer)
+    lineage_coverage: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_product_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="SET NULL"), index=True
+    )
+    discoverable_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    consumer_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DataProductPort(Base):
+    __tablename__ = "data_product_port"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_product_version_id",
+            "port_key",
+            name="uq_data_product_port_version_key",
+        ),
+        Index("ix_data_product_port_org_asset", "organization_id", "asset_type", "asset_id"),
+        CheckConstraint("direction IN ('INPUT', 'OUTPUT')", name="ck_data_product_port_direction"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    data_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_product_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    port_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), nullable=False)
+    asset_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    asset_id: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class DataProductRoleBinding(Base):
+    __tablename__ = "data_product_role_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_product_version_id",
+            "role_kind",
+            "role_name",
+            name="uq_data_product_role_binding_version_kind_role",
+        ),
+        Index(
+            "ix_data_product_role_binding_lookup",
+            "organization_id",
+            "role_kind",
+            "role_name",
+            "data_product_version_id",
+        ),
+        CheckConstraint(
+            "role_kind IN ('DISCOVER', 'CONSUME')", name="ck_data_product_role_binding_kind"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    data_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_product_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    role_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class DataContractVersion(Base, TimestampMixin):
+    __tablename__ = "data_contract_version"
+    __table_args__ = (
+        UniqueConstraint("product_id", "version", name="uq_data_contract_version_product_version"),
+        Index("ix_data_contract_version_org_status", "organization_id", "status"),
+        Index(
+            "uq_data_contract_version_one_published",
+            "product_id",
+            unique=True,
+            postgresql_where=text("status = 'PUBLISHED'"),
+        ),
+        CheckConstraint("version > 0", name="ck_data_contract_version_positive"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'PUBLISHED', 'SUPERSEDED', 'REJECTED')",
+            name="ck_data_contract_version_status",
+        ),
+        CheckConstraint(
+            "compatibility_status IN ('INITIAL', 'COMPATIBLE', 'BREAKING')",
+            name="ck_data_contract_compatibility_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    compatibility_mode: Mapped[str] = mapped_column(String(30), nullable=False)
+    compatibility_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    compatibility_findings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    schema_definition: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    quality_rules: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    freshness_sla_minutes: Mapped[int | None] = mapped_column(Integer)
+    availability_sla_percent: Mapped[float | None] = mapped_column(Float)
+    producer_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    consumer_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class DataProductAccessRequest(Base, TimestampMixin):
+    __tablename__ = "data_product_access_request"
+    __table_args__ = (
+        Index("ix_data_product_access_org_status", "organization_id", "status"),
+        Index(
+            "ix_data_product_access_requester_product",
+            "organization_id",
+            "requested_by",
+            "data_product_version_id",
+        ),
+        Index(
+            "uq_data_product_access_one_pending",
+            "data_product_version_id",
+            "requested_by",
+            unique=True,
+            postgresql_where=text("status = 'PENDING'"),
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'APPROVED', 'REJECTED', 'REVOKED', 'EXPIRED')",
+            name="ck_data_product_access_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    data_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_product_version.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(2000), nullable=False)
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    governance_review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    decided_by: Mapped[str | None] = mapped_column(String(255))
+    decision_reason: Mapped[str | None] = mapped_column(String(2000))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AiAsset(Base, TimestampMixin):
+    __tablename__ = "ai_asset"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "asset_key", name="uq_ai_asset_org_key"),
+        Index(
+            "ix_ai_asset_org_kind_lifecycle", "organization_id", "asset_kind", "lifecycle_status"
+        ),
+        CheckConstraint("asset_kind IN ('AI_USE_CASE', 'MODEL', 'AGENT')", name="ck_ai_asset_kind"),
+        CheckConstraint("lifecycle_status IN ('ACTIVE', 'RETIRED')", name="ck_ai_asset_lifecycle"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    asset_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    asset_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AiAssetVersion(Base, TimestampMixin):
+    __tablename__ = "ai_asset_version"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "version", name="uq_ai_asset_version_asset_version"),
+        Index("ix_ai_asset_version_org_status", "organization_id", "status"),
+        Index(
+            "uq_ai_asset_version_one_approved",
+            "asset_id",
+            unique=True,
+            postgresql_where=text("status = 'APPROVED'"),
+        ),
+        CheckConstraint("version > 0", name="ck_ai_asset_version_positive"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'APPROVED', 'SUPERSEDED', "
+            "'REJECTED', 'RETIRED')",
+            name="ck_ai_asset_version_status",
+        ),
+        CheckConstraint(
+            "risk_tier IN ('LOW', 'MEDIUM', 'HIGH', 'PROHIBITED')", name="ck_ai_asset_risk_tier"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    asset_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    intended_use: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(30), nullable=False)
+    documentation_url: Mapped[str | None] = mapped_column(String(1000))
+    context_product_version_ids: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    model_route_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    policy_control_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evaluation_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    runtime_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AiAssessment(Base, TimestampMixin):
+    __tablename__ = "ai_assessment"
+    __table_args__ = (
+        Index("ix_ai_assessment_version_created", "ai_asset_version_id", "created_at"),
+        CheckConstraint("score >= 0 AND score <= 100", name="ck_ai_assessment_score"),
+        CheckConstraint(
+            "status IN ('PASS', 'NEEDS_REMEDIATION', 'FAIL')", name="ck_ai_assessment_status"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    framework: Mapped[str] = mapped_column(String(100), nullable=False)
+    framework_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    control_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    assessed_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class OutboxEvent(Base):

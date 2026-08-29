@@ -139,22 +139,22 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 | Per-read policy | Partial — tenancy, role, lifecycle, exact product scope, and quality gates are enforced | Add purpose-based ABAC once module 17 has it natively |
 | Consumption lineage | Partial — Context Product REST/MCP reads and product-scoped tool calls persist immutable edges; generic catalog and native-lineage reads retain audit/outbox evidence only | Extend edge capture to every MCP read |
 | Eligible tools exposure | **Implemented** — product-scoped discovery and invocation expose only approved tool-version identifiers and preserve anti-enumeration denials | Add fuzzy resolution without weakening exact authorization |
-| Consumer budgets | Not implemented | P1 |
+| Consumer budgets | **Implemented** -- optional Redis-backed atomic request, tool-call, and context-read budgets; production fails closed when the budget store is unavailable | Add organization-specific plans and administrative usage reporting |
 
 ## 14. Open work
 
 | ID | Item | Priority |
 |---|---|---|
-| CX-1 | MCP server with resource and tool surfaces | P0 -- **native lineage tools delivered 2026-08-29** (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`); governed-SQL-tool and context-product surfaces already implemented |
+| CX-1 | MCP server with resource and tool surfaces | P0 -- **native lineage tools delivered 2026-08-29** (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`); governed-SQL-tool and context-product surfaces already implemented |
 | CX-2 | Context product definition, versioning, maker-checker | **Implemented** -- `context_product_api.py`, `ContextProduct`/`ContextProductVersion` models, `tests/test_context_products.py` |
 | CX-3 | Per-read policy evaluation | **Partial** -- lifecycle, roles, exact scope, quality score, and critical-incident gates implemented; purpose ABAC remains |
-| CX-4 | Consumption recorded as lineage | **Partial** -- Context Product reads and product-scoped tool calls implemented; generic resources and native-lineage reads remain |
+| CX-4 | Consumption recorded as lineage | **Partial** -- Context Product reads and product-scoped tool calls create immutable `ContextProductConsumptionEdge` evidence; all native lineage tools emit audit/outbox evidence; generic catalog reads do not yet create consumption edges |
 | CX-5 | Eligible-tool exposure and governed invocation | **Implemented** -- Context Product scope and native lineage tools preserve anti-enumeration behavior |
-| CX-6 | Per-consumer rate limits and budgets | P1 |
+| CX-6 | Per-consumer rate limits and budgets | **Implemented 2026-08-29** -- atomic Redis request/minute, tool/day, and context/day buckets with hashed principal keys and production fail-closed behavior |
 | CX-7 | Workload identity for MCP consumers | P0 |
 | CX-8 | BI-surface context injection (Tableau, Power BI, Looker) | P1 |
-| MCP-2 | MCP write operations (asset create/edit, classification match add/remove, glossary term proposals) -- Collibra ships this, we only expose reads and governed SQL execution | P1 |
-| MCP-3 | Fuzzy entity resolution for MCP tool arguments (e.g. resolve "customers" to a table id) | P1 |
+| MCP-2 | MCP write operations | **Partial 2026-08-29** -- agents can create a governed data-product access request but cannot grant it; catalog edits, classification changes, and glossary proposals remain |
+| MCP-3 | Fuzzy entity resolution for MCP tool arguments (e.g. resolve "customers" to a table id) | **Closed 2026-08-29** for lineage tools via `resolve_entity`; governed-SQL and catalog tools still require exact UUIDs |
 
 ## 15. Enterprise AI control-plane expansion
 
@@ -183,13 +183,13 @@ governed context and action plane that those systems consume.
 | ID | Required capability | Atlas requirement | Acceptance evidence |
 |---|---|---|---|
 | CP-1 | Governed context products | Stable product identity, immutable versions, owner, purpose, bounded asset scope, semantic versions, glossary versions, quality requirements, policy summary, and eligible tools | Maker-checker lifecycle test; published versions are immutable; cross-tenant and draft-read denial tests |
-| CP-2 | Data product registry | Product, domain, owner, ports, lifecycle, certification, usage terms, quality posture, lineage coverage, and linked context products | Candidate through retired lifecycle; portfolio filters; ownership and certification queues |
-| CP-3 | Data contract registry | Versioned schema, quality, freshness, SLA, compatibility, producer, consumer, and product-port bindings using ODCS-compatible import/export | Compatibility check and maker-checker tests; a breaking change cannot publish without an approved exception |
-| CP-4 | Data marketplace | Consumer-facing discovery of published products with trust, ownership, usage terms, and governed access requests | Policy-filtered search; request/approve/expire flow; no unpublished product leakage |
-| CP-5 | Context compiler | Deterministic specifications map graph context to Snowflake Semantic Views, Databricks Metric Views, OSI, ODCS, and custom schemas | Repeatable output hash; schema validation; REST, MCP, and YAML delivery; drift report against deployed definitions |
-| CP-6 | Lineage MCP | Callable upstream, downstream, impact, entity resolution, and transformation-detail tools over technical and business lineage | Fuzzy resolution corpus; bounded depth; policy filtering before traversal; transformation evidence returned without values |
-| CP-7 | Unified AI registry | Register AI use cases, models, agents, versions, owners, datasets, policies, assessments, deployments, and runtime signals | Full lifecycle and dependency graph; CLI manifest registration; platform-neutral provider model |
-| CP-8 | AI trust and compliance | Explainable trust score from documentation, lifecycle, quality, policy, evaluation, and runtime posture; EU AI Act, NIST AI RMF, AI UC-1, and custom assessment templates | Every score factor inspectable; no opaque model-only score; approval, remediation, and retirement workflows |
+| CP-2 | Data product registry | **Implemented 2026-08-29** -- immutable versions, ports, normalized roles, ownership, publication/supersession/retirement, certification and usage terms | `tests/test_agentic_platform.py`; portfolio filters and OpenAPI route assertions |
+| CP-3 | Data contract registry | **Implemented 2026-08-29** -- versioned schema/quality/freshness/SLA definitions, structural compatibility checks, product-port binding, and independently approved breaking-change exception | Compatibility and maker-checker tests; add ODCS round-trip certification fixtures |
+| CP-4 | Data marketplace | **Implemented foundation 2026-08-29** -- policy-filtered published-product discovery plus request/approve/reject/expire/revoke access lifecycle | Add entitlement-provider fulfillment, SLA escalation, and adoption analytics |
+| CP-5 | Context compiler | **Implemented foundation 2026-08-29** -- MCP/REST/YAML/OSI/ODCS/Snowflake Semantic View/Databricks Metric View targets, stable artifact hash, structural drift report, quality gates, and REST delivery | Determinism/drift tests; add idiomatic YAML/file download and target-specific external validators |
+| CP-6 | Lineage MCP | **Implemented 2026-08-29** -- all four tools live (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`), bounded depth, org-scoped | Fuzzy-resolution corpus benchmark; dedicated leak test for the two newest tools |
+| CP-7 | Unified AI registry | **Implemented foundation 2026-08-29** -- tenant-scoped APIs register use cases, models, agents, versions, dependencies, policies, deployments, runtime signals, and independent assessments with maker-checker approval | Add CLI manifest registration, provider synchronizers, retirement endpoint, and dependency graph UI |
+| CP-8 | AI trust and compliance | **Implemented foundation 2026-08-29** -- deterministic 100-point trust computation exposes every documentation, accountability, lifecycle, policy, evaluation, runtime, and assessment factor plus hard blockers | Add managed assessment-template library, remediation workflow, historical score projection, and framework evidence export |
 | CP-9 | Quality and observability | Reusable rules, warehouse pushdown, anomaly monitors, scores, incident routing, ownership, SLAs, and lineage-aware blast radius | Rule execution evidence; deduplicated incidents; owner notification; quality signal shown on product and agent context |
 | CP-10 | Privacy operations | Purpose, legal basis, processing location, retention, sensitive-data flow, policy simulation, and external privacy-system integration | Purpose-limited access test; retention evidence; sensitive lineage impact report |
 | CP-11 | Workflow automation | Versioned workflow templates for reviews, access, certification, quality remediation, and compliance; fixed safety gates remain code-owned | Workflow audit trail; timers/escalations; no workflow can bypass maker-checker or execution policy |
@@ -246,11 +246,11 @@ versions before submission. Wildcard estate scope is not permitted.
 |---|---|---|---|
 | CP-S1 | Context product identity, immutable versions, validation, maker-checker, REST API, audit, outbox | A product can be created, submitted, independently approved, listed, and read with tenant isolation | **Implemented and hardened; live PostgreSQL integration proof pending** |
 | CP-S2 | Published context products as MCP resources; role eligibility and consumption evidence | External agents consume only eligible published products and every read is audited | **Implemented** |
-| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | **Partial: graph and impact MCP tools implemented; fuzzy resolution and transformation detail remain** |
-| CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | Planned |
-| CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | Planned |
-| CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | Planned |
-| CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | Planned |
+| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | **Implemented foundation: four native tools, Redis cache, and optional generation-stamped Neo4j projection/read path; scale certification remains** |
+| CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | **Implemented foundation** |
+| CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | **Implemented foundation** |
+| CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | **Implemented foundation** |
+| CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | **Implemented foundation** |
 | CP-S8 | Adoption, privacy, workflow, and ecosystem expansion | Portfolio operations are measurable and integrations are certified | Planned |
 
 ## 17. Implemented hardening controls (2026-08-29)

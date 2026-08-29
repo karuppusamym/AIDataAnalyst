@@ -13,9 +13,15 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
+    AiAsset,
+    AiAssetVersion,
     AssetDocumentationVersion,
     BulkStewardshipOperation,
     ContextProductVersion,
+    DataContractVersion,
+    DataProduct,
+    DataProductAccessRequest,
+    DataProductVersion,
     DataSource,
     GlossaryConflict,
     GlossaryLinkProposal,
@@ -31,6 +37,7 @@ from aida.models import (
     SemanticMetricVersion,
     SemanticModelVersion,
 )
+from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
     GovernanceDecisionRequest,
     GovernanceReviewRead,
@@ -554,9 +561,7 @@ async def decide_governance_review(
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReview:
     review = await session.scalar(
-        select(GovernanceReview)
-        .where(GovernanceReview.id == review_id)
-        .with_for_update()
+        select(GovernanceReview).where(GovernanceReview.id == review_id).with_for_update()
     )
     if review is None:
         raise HTTPException(status_code=404, detail="governance review not found")
@@ -681,10 +686,7 @@ async def decide_governance_review(
         }
     elif review.object_type == "CONTEXT_PRODUCT_VERSION":
         product_version = await session.get(ContextProductVersion, UUID(review.object_id))
-        if (
-            product_version is None
-            or product_version.organization_id != review.organization_id
-        ):
+        if product_version is None or product_version.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if review.requested_action == "DEPRECATE":
             if product_version.status != "PUBLISHED":
@@ -722,6 +724,151 @@ async def decide_governance_review(
             "context_product_version_id": str(product_version.id),
             "context_product_id": str(product_version.product_id),
             "version": product_version.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_PRODUCT_VERSION":
+        data_product_version = await session.get(DataProductVersion, UUID(review.object_id))
+        if (
+            data_product_version is None
+            or data_product_version.organization_id != review.organization_id
+        ):
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        data_product = await session.get(DataProduct, data_product_version.product_id)
+        if data_product is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if review.requested_action == "RETIRE":
+            if data_product_version.status != "PUBLISHED":
+                raise HTTPException(status_code=409, detail="data product is no longer published")
+            if body.decision == "APPROVE":
+                data_product_version.status = "RETIRED"
+                data_product.lifecycle_status = "RETIRED"
+                event_type = "data_product.retired.v1"
+            else:
+                event_type = "data_product.retirement_rejected.v1"
+        elif data_product_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="data product is no longer pending")
+        elif body.decision == "APPROVE":
+            await session.execute(
+                update(DataProductVersion)
+                .where(
+                    DataProductVersion.product_id == data_product_version.product_id,
+                    DataProductVersion.status == "PUBLISHED",
+                    DataProductVersion.id != data_product_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            data_product_version.status = "PUBLISHED"
+            data_product_version.approved_by = context.principal_id
+            data_product_version.approved_at = now
+            data_product_version.published_at = now
+            data_product.lifecycle_status = "ACTIVE"
+            event_type = "data_product.published.v1"
+        else:
+            data_product_version.status = "REJECTED"
+            event_type = "data_product.rejected.v1"
+        aggregate_type = "data_product_version"
+        aggregate_id = str(data_product_version.id)
+        payload = {
+            "data_product_version_id": str(data_product_version.id),
+            "data_product_id": str(data_product.id),
+            "version": data_product_version.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_CONTRACT_VERSION":
+        contract_version = await session.get(DataContractVersion, UUID(review.object_id))
+        if contract_version is None or contract_version.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if contract_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="data contract is no longer pending")
+        if body.decision == "APPROVE":
+            await session.execute(
+                update(DataContractVersion)
+                .where(
+                    DataContractVersion.product_id == contract_version.product_id,
+                    DataContractVersion.status == "PUBLISHED",
+                    DataContractVersion.id != contract_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            contract_version.status = "PUBLISHED"
+            contract_version.approved_by = context.principal_id
+            contract_version.approved_at = now
+            contract_version.published_at = now
+            event_type = (
+                "data_contract.breaking_exception_approved.v1"
+                if review.requested_action == "PUBLISH_BREAKING_EXCEPTION"
+                else "data_contract.published.v1"
+            )
+        else:
+            contract_version.status = "REJECTED"
+            event_type = "data_contract.rejected.v1"
+        aggregate_type = "data_contract_version"
+        aggregate_id = str(contract_version.id)
+        payload = {
+            "data_contract_version_id": str(contract_version.id),
+            "data_product_id": str(contract_version.product_id),
+            "version": contract_version.version,
+            "compatibility_status": contract_version.compatibility_status,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_PRODUCT_ACCESS_REQUEST":
+        access_request = await session.get(DataProductAccessRequest, UUID(review.object_id))
+        if access_request is None or access_request.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        try:
+            approve_access_request(
+                access_request,
+                reviewer=context.principal_id,
+                reason=body.reason,
+                approved=body.decision == "APPROVE",
+                now=now,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        event_type = (
+            "data_product.access_granted.v1"
+            if body.decision == "APPROVE"
+            else "data_product.access_rejected.v1"
+        )
+        aggregate_type = "data_product_access_request"
+        aggregate_id = str(access_request.id)
+        payload = {
+            "access_request_id": str(access_request.id),
+            "data_product_version_id": str(access_request.data_product_version_id),
+            "expires_at": access_request.expires_at,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "AI_ASSET_VERSION":
+        ai_version = await session.get(AiAssetVersion, UUID(review.object_id))
+        if ai_version is None or ai_version.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        ai_asset = await session.get(AiAsset, ai_version.asset_id)
+        if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="AI asset is no longer pending")
+        if body.decision == "APPROVE":
+            await session.execute(
+                update(AiAssetVersion)
+                .where(
+                    AiAssetVersion.asset_id == ai_version.asset_id,
+                    AiAssetVersion.status == "APPROVED",
+                    AiAssetVersion.id != ai_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            ai_version.status = "APPROVED"
+            ai_version.approved_by = context.principal_id
+            ai_version.approved_at = now
+            event_type = "ai_registry.asset_approved.v1"
+        else:
+            ai_version.status = "REJECTED"
+            event_type = "ai_registry.asset_rejected.v1"
+        aggregate_type = "ai_asset_version"
+        aggregate_id = str(ai_version.id)
+        payload = {
+            "ai_asset_version_id": str(ai_version.id),
+            "ai_asset_id": str(ai_asset.id),
+            "asset_kind": ai_asset.asset_kind,
+            "version": ai_version.version,
             "review_id": str(review.id),
         }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":

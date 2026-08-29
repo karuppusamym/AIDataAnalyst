@@ -12,9 +12,11 @@ from temporalio.client import Client
 
 from aida import __version__
 from aida.ai_governance_api import router as ai_governance_router
+from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.config import get_settings
 from aida.context import correlation_id_var
+from aida.context_compiler_api import router as context_compiler_router
 from aida.context_product_api import router as context_product_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
@@ -25,6 +27,7 @@ from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
+from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
 from aida.schemas import HealthResponse
 from aida.semantic_api import router as semantic_router
@@ -79,6 +82,7 @@ app.include_router(tool_router)
 app.include_router(operational_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
+app.include_router(ai_registry_router)
 app.include_router(dbt_router)
 app.include_router(openlineage_router)
 app.include_router(semantic_intelligence_router)
@@ -88,6 +92,8 @@ app.include_router(glossary_router)
 app.include_router(stewardship_router)
 app.include_router(unified_lineage_router)
 app.include_router(context_product_router)
+app.include_router(context_compiler_router)
+app.include_router(product_marketplace_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

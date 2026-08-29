@@ -413,29 +413,55 @@ view/procedure/BI nodes (LN-11), and graph export (LN-12).
 **Acceptance** — the certification harness is published and third-party runnable; a third-party adapter passes without core changes.
 
 ### EE.8 — Data product and data contract registries
-**Module:** 19 · **Type:** DIFF · **Priority:** P2
+**Module:** 19 · **Type:** DIFF · **Priority:** P2 · **Status:** FOUNDATION DELIVERED, 2026-08-29
 
 Delivers CP-2 and CP-3 from `20-modules/19-context-products-and-mcp.md` §15.2: versioned data
 products with owners/ports/lifecycle/certification, and a data contract registry (schema,
 quality, freshness, SLA, producer/consumer, ODCS-compatible) distinct from
 `data_contracts.py`'s ingestion-envelope validation.
 
-**Acceptance** — full lifecycle (candidate → retired) with portfolio filters and ownership
-queues; contract compatibility checks block a breaking change without an approved exception;
-maker-checker on publication.
+**Acceptance**
+- Candidate → active → retired product lifecycle with maker-checker on publish (`DataProduct`,
+  `DataProductVersion`, one-published-per-product constraint). — **met**,
+  `src/aida/product_marketplace_api.py`, `migrations/versions/b4e8f2a71c90_*.py`
+- Role-gated marketplace discovery (`DISCOVER`/`CONSUME` role bindings, `*` wildcard) filtered
+  at the SQL level, not post-filtered in application code. — **met**,
+  `search_marketplace` in `product_marketplace_api.py`
+- Access-request workflow (request → governance review → approve/reject → revoke, one pending
+  request per requester/version enforced by a partial unique index). — **met**
+- Contract compatibility checks (`compatibility_status` derived as
+  `INITIAL`/`COMPATIBLE`/`BREAKING` from field/rule diffs) block normal publication of a
+  breaking change and route an exception through independent maker-checker approval. — **met**
+- Pure compatibility, lifecycle, access-expiry, validation, and OpenAPI coverage is in
+  `tests/test_agentic_platform.py`. — **met**; live PostgreSQL integration proof remains
 
 ### EE.9 — Governed context compiler
-**Module:** 19 · **Type:** DIFF · **Priority:** P2
+**Module:** 19 · **Type:** DIFF · **Priority:** P2 · **Status:** FOUNDATION DELIVERED, 2026-08-29
 
 Delivers CP-5: deterministic mapping from the graph context (semantic models, metrics, terms,
 ownership, policy, quality) to Snowflake Semantic Views, Databricks Metric Views, OSI, ODCS,
 and custom YAML, delivered via REST, MCP, and file export.
 
-**Acceptance** — repeatable output hash for a given input state; schema validation per target
-format; a drift report against a previously deployed definition.
+**Acceptance**
+- Deterministic, version-pinned compilation (`compile_context_product`) with a stable
+  `artifact_hash` (canonical JSON, sorted keys) for a given input state. — **met**,
+  `src/aida/context_compiler.py`
+- Targets: MCP, REST, OSI, ODCS, Snowflake Semantic View, Databricks Metric View. — **met**
+- Custom YAML target. — **partial**: `YAML` is an accepted target and gets a distinct
+  `content_type: application/yaml`, but the emitted body is canonical JSON (a valid subset of
+  YAML 1.2, not idiomatic multi-line YAML) — no `pyyaml` dependency exists in the project yet.
+  Tracked as a documented simplification, not a defect.
+- Drift report against a previously deployed definition (by hash or by content, with per-path
+  diff). — **met**, `POST /v1/context-product-versions/{id}/compile/drift`
+- Quality-gated: compilation of an unpublished/non-quality-passing version is denied for
+  non-lifecycle roles, reusing `evaluate_context_product_quality_from_db`. — **met**
+- File export delivery mode. — **not met**
+- Determinism, target, drift, raw-evidence rejection, and OpenAPI coverage is in
+  `tests/test_agentic_platform.py`. — **met**; external target conformance fixtures remain
 
 ### EE.10 — Lineage MCP tools
-**Module:** 09, 19 · **Type:** DIFF (W2) · **Priority:** P1 · **Status:** PARTIAL, delivered 2026-08-29
+**Module:** 09, 19 · **Type:** DIFF (W2) · **Priority:** P1 · **Status:** DELIVERED, 2026-08-29
+(hardened further same day — see accomplishment log)
 
 Delivers CP-6, using EA.14's unified graph as the data source: expose upstream, downstream,
 impact, fuzzy entity resolution, and transformation-detail as MCP tools alongside the existing
@@ -454,25 +480,39 @@ Collibra's MCP Server page (25+ tools, read + write, fuzzy resolution).
 - Unit tested without a database (role gating, argument validation, org-scoping, payload
   shape), mirroring `test_mcp_server.py`'s existing convention. — **met**,
   `tests/test_mcp_server.py`
-- Fuzzy resolution corpus passes. — **not met**, tracked as `MCP-3`
-- Transformation-detail-as-a-tool. — **not met**, tracked separately from LN-10 (column mapping
-  is a prerequisite)
-- Policy filtering happens before traversal (a leak test proves it). — **not met**; the two new
-  tools inherit `enforce_organization`-equivalent scoping (datasource org match) but have no
-  dedicated leak test yet
-- Consumption recorded as lineage. — **not met**, same pre-existing gap as `resources/read`
-  (`CX-4`)
+- Fuzzy resolution (`resolve_entity` tool) and transformation-detail-as-a-tool
+  (`get_transformation_detail`) implemented alongside the graph/impact tools, same
+  authorization and dispatch path. — **met**, `src/aida/mcp_server.py`; corpus-scale fuzzy
+  match quality not separately benchmarked — tracked as `MCP-3`
+- Dedicated unit tests for `resolve_entity` and `get_transformation_detail` request/response
+  shape, and a leak test proving policy filtering happens before traversal for these two
+  tools specifically. — **not met** (2026-08-29 code review); only the tool-slug set is
+  currently asserted
+- Consumption recorded as lineage: every successful native lineage tool call now writes
+  `record_audit(action="mcp.lineage.read", ...)` and `record_outbox(event_type=
+  "lineage.consumed.v1", ...)`. — **met**, closes the gap this file previously tracked as open
+  (superseding the earlier "not met, same pre-existing gap as `resources/read`" note)
 
 ### EE.11 — Unified AI registry and trust scoring
-**Module:** 19 · **Type:** DIFF · **Priority:** P2
+**Module:** 19 · **Type:** DIFF · **Priority:** P2 · **Status:** FOUNDATION DELIVERED, 2026-08-29
 
 Delivers CP-7 and CP-8: register AI use cases, models, agents, datasets, and policies with
 full lifecycle and dependency graph; compute an explainable trust score from documentation,
 lifecycle, quality, policy, evaluation, and runtime posture.
 
-**Acceptance** — every trust-score contributing factor is inspectable, never opaque; approval,
-remediation, and retirement workflows exist; assessment templates cover at minimum EU AI Act
-and NIST AI RMF.
+**Acceptance**
+- Persistence for AI assets, versioned lifecycle, and assessments
+  (`ai_asset`/`ai_asset_version`/`ai_assessment`, risk tier, framework-scoped control results).
+  — **met**, `migrations/versions/b4e8f2a71c90_*.py`, `src/aida/models.py`
+- Request/response contracts including an explainable `AiTrustScoreRead` (score, grade,
+  per-factor breakdown, blockers). — **met**, `src/aida/platform_schemas.py`
+- Tenant-scoped create/version/list/submit/assessment/trust APIs and maker-checker approval are
+  mounted in `ai_registry_api.py` and `semantic_api.py`. — **met**
+- The deterministic trust service exposes seven factors with a true 100-point ceiling and hard
+  blockers for prohibited risk, critical incidents, failed/missing assessments, and weak
+  high-risk evaluations. — **met**, `ai_registry.py`, `tests/test_agentic_platform.py`
+- Managed EU AI Act/NIST template catalogs, remediation and retirement APIs, provider
+  synchronizers, score history, and dependency-graph visualization remain. — **not met**
 
 ## Related documents
 

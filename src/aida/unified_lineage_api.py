@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.lineage_cache import get_lineage_cache
+from aida.lineage_graph_store import load_projected_lineage_impact
 from aida.models import (
     DataSource,
     DbtArtifactImport,
@@ -156,14 +157,16 @@ async def _build_unified_graph(
     for table, schema, catalog in table_rows:
         node_id = str(table.id)
         table_ids.add(table.id)
-        register_node(_NodeInfo(
-            id=node_id,
-            node_kind="TABLE",
-            label=table.name,
-            qualified_name=f"{catalog.name}.{schema.name}.{table.name}",
-            matched_table_id=table.id,
-            resolved=True,
-        ))
+        register_node(
+            _NodeInfo(
+                id=node_id,
+                node_kind="TABLE",
+                label=table.name,
+                qualified_name=f"{catalog.name}.{schema.name}.{table.name}",
+                matched_table_id=table.id,
+                resolved=True,
+            )
+        )
 
     # --- Declared foreign keys ---
     constraints = (
@@ -296,13 +299,13 @@ async def _build_unified_graph(
                 continue
             node_id = f"dbt:{resource.id}"
             info = _NodeInfo(
-                    id=node_id,
-                    node_kind=node_kind,
-                    label=resource.name,
-                    qualified_name=resource.relation_name or resource.unique_id,
-                    matched_table_id=None,
-                    resolved=False,
-                )
+                id=node_id,
+                node_kind=node_kind,
+                label=resource.name,
+                qualified_name=resource.relation_name or resource.unique_id,
+                matched_table_id=None,
+                resolved=False,
+            )
             if register_node(info):
                 resource_node_id[resource.id] = node_id
         edges = (
@@ -533,6 +536,23 @@ async def build_unified_lineage_impact_payload(
         cached = await get_lineage_cache(settings.redis_url).get(cache_key)
         if cached is not None:
             return UnifiedLineageImpactRead.model_validate(cached)
+
+    if settings is not None and settings.lineage_neo4j_read_enabled:
+        projected = await load_projected_lineage_impact(
+            settings,
+            datasource,
+            node_id,
+            depth=depth,
+            node_limit=node_limit,
+        )
+        if projected is not None:
+            if settings.lineage_cache_enabled:
+                await get_lineage_cache(settings.redis_url).set(
+                    cache_key,
+                    projected.model_dump(mode="json"),
+                    settings.lineage_cache_ttl_seconds,
+                )
+            return projected
 
     graph = await _build_unified_graph(
         session,

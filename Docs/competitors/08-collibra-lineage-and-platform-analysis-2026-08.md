@@ -54,14 +54,14 @@ Collibra's platform page reframes the product away from "catalog" toward **prepa
 | Deterministic query/action controls | Strong — SQL validation, cost controls, masking, roles, audit |
 | Data quality and incidents | Partial |
 | Technical lineage | Partial → **stronger after this revision** (unified graph + transitive impact) |
-| MCP server | Implemented for catalog resources and governed tools |
-| **Natural-language lineage MCP tools** (upstream/downstream graph, fuzzy asset resolution, transformation detail, impact-as-a-tool) | **Missing** — tracked as new gap (§3) |
-| AI asset/use-case/agent registry | Missing |
-| AI assessments and Trust Scores | Missing |
-| Governed context compiler (semantic models → Snowflake Semantic Views / Databricks Metric Views / OSI / ODCS / YAML) | Missing |
-| Data product registry | Missing |
-| Data contract registry (products, schemas, SLAs, versions, producers/consumers — distinct from `data_contracts.py`'s ingestion-contract validation) | Missing |
-| Data marketplace and access requests | Missing |
+| MCP server | Implemented for resources, governed/native tools, prompts, budgets, and bounded access-request writes |
+| **Natural-language lineage MCP tools** (upstream/downstream graph, fuzzy asset resolution, transformation detail, impact-as-a-tool) | **Implemented foundation 2026-08-29**; corpus and estate-scale certification remain |
+| AI asset/use-case/agent registry | **Implemented foundation 2026-08-29**; provider sync and dependency visualization remain |
+| AI assessments and Trust Scores | **Implemented foundation 2026-08-29**; managed templates, remediation, retirement, and history remain |
+| Governed context compiler (semantic models → Snowflake Semantic Views / Databricks Metric Views / OSI / ODCS / YAML) | **Implemented foundation 2026-08-29**; external validators and file delivery remain |
+| Data product registry | **Implemented foundation 2026-08-29** |
+| Data contract registry (products, schemas, SLAs, versions, producers/consumers — distinct from `data_contracts.py`'s ingestion-contract validation) | **Implemented foundation 2026-08-29** |
+| Data marketplace and access requests | **Implemented foundation 2026-08-29**; entitlement-provider fulfillment remains |
 | Workflow designer | Missing — workflows are fixed application processes |
 
 ---
@@ -82,10 +82,10 @@ happened.
 | LN-10 *(new)* | Authoritative column-to-column mapping (replace dbt's identical-name matching) | Open — P1 |
 | LN-11 *(new)* | View/stored-procedure/BI nodes in the unified graph | Open — P1, depends on EA.9 |
 | LN-12 *(new)* | Graph export: SVG, PNG, PDF, CSV | Open — P2 |
-| CP-6 | Lineage MCP tools: upstream/downstream traversal, fuzzy asset resolution, transformation detail, impact-as-a-tool | Open — P1 (already specified in module 19 §15.2; now wired to `EE.10` in the epic backlog) |
-| CP-7 / CP-8 | Unified AI registry, assessments, and trust scoring | Open — P2, large (`EE.11`) |
-| CP-5 | Governed context compiler (semantic model → external context formats) | Open — P2, large (`EE.9`) |
-| CP-2 / CP-3 | Data product and data contract registries (versioned, lifecycle-managed) | Open — P2 (`EE.8`) |
+| CP-6 | Lineage MCP tools: upstream/downstream traversal, fuzzy asset resolution, transformation detail, impact-as-a-tool | **Delivered 2026-08-29** (`EE.10`) — all four tools live; fuzzy-resolution corpus benchmark and a dedicated leak test remain open |
+| CP-7 / CP-8 | Unified AI registry, assessments, and trust scoring | **Foundation delivered 2026-08-29** — mounted lifecycle/assessment APIs and deterministic explainable trust scoring; managed templates, remediation/retirement, sync, history, and graph UI remain |
+| CP-5 | Governed context compiler (semantic model → external context formats) | **Delivered 2026-08-29** (`EE.9`) — MCP/REST/OSI/ODCS/Snowflake/Databricks targets; YAML target is a valid-but-non-idiomatic subset |
+| CP-2 / CP-3 | Data product and data contract registries (versioned, lifecycle-managed) | **Foundation delivered and tested 2026-08-29** (`EE.8`) |
 
 Full epic-level acceptance criteria for LN-10 through LN-12 and EE.8 through EE.11 are recorded
 in `60-delivery/02-epic-backlog.md`. CP-1 through CP-14 acceptance criteria remain the

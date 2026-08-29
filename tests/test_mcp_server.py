@@ -294,7 +294,12 @@ class LineageToolSession:
 
 
 def test_native_lineage_tool_slugs_match_declared_definitions() -> None:
-    assert NATIVE_LINEAGE_TOOL_SLUGS == {"get_lineage_graph", "get_lineage_impact"}
+    assert NATIVE_LINEAGE_TOOL_SLUGS == {
+        "get_lineage_graph",
+        "get_lineage_impact",
+        "resolve_entity",
+        "get_transformation_detail",
+    }
 
 
 async def test_native_lineage_tool_denies_ineligible_caller_like_an_unknown_tool() -> None:

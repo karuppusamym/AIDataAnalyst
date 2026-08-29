@@ -74,6 +74,7 @@ def test_ui_entrypoint_loads_split_runtime_assets() -> None:
         "features/integration-policy.js",
         "features/transformation-workbench.js",
         "features/context-lineage-control-plane.js",
+        "features/product-ai-control-plane.js",
     )
     for name in assets:
         assert f'/scripts/{name}' in html
@@ -91,3 +92,20 @@ def test_context_product_and_unified_lineage_surfaces_are_wired() -> None:
     assert 'id="context-product-form"' in html
     assert "unified-lineage/impact" in script
     assert "deny_on_critical_incident" in script
+
+
+def test_marketplace_compiler_and_ai_registry_surfaces_are_wired() -> None:
+    html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
+    context_script = (UI_ROOT / "scripts/features/context-lineage-control-plane.js").read_text(
+        encoding="utf-8"
+    )
+    platform_script = (UI_ROOT / "scripts/features/product-ai-control-plane.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="marketplace-view"' in html
+    assert 'id="ai-registry-view"' in html
+    assert 'id="context-compiler-output"' in html
+    assert "context-product-versions/${versionId}/compile" in context_script
+    assert "/marketplace/products" in platform_script
+    assert "/ai-asset-versions/${versionId}/trust" in platform_script

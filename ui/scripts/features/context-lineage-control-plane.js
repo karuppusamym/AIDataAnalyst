@@ -22,6 +22,7 @@
       const actions = [
         version.status === "DRAFT" ? `<button class="button small" data-context-submit="${version.id}">Submit</button>` : "",
         version.status === "PUBLISHED" ? `<button class="button small secondary" data-context-deprecate="${version.id}">Deprecate</button>` : "",
+        `<button class="button small secondary" data-context-compile="${version.id}">Compile</button>`,
       ].join("");
       return `<tr><td><strong>${esc(version.name)}</strong><span class="secondary-cell">${esc(product.product_key)} / v${version.version}</span></td><td>${badge(version.status)}</td><td>${esc(version.owner_principal)}</td><td>${esc(version.allowed_consumer_roles.join(", "))}</td><td><code>${esc(version.fingerprint.slice(0, 12))}</code></td><td>${actions}</td></tr>`;
     });
@@ -87,6 +88,18 @@
     }
   }
 
+  async function compileVersion(versionId) {
+    const target = $("#context-compiler-target")?.value || "MCP";
+    message("context-product-message", `Compiling deterministic ${target} artifact...`);
+    try {
+      const artifact = await api(`/v1/context-product-versions/${versionId}/compile?target=${encodeURIComponent(target)}`);
+      setHtml("context-compiler-output", `<div class="compiler-meta"><span>${badge(target)}</span><code>artifact ${esc(artifact.artifact_hash)}</code><code>source ${esc(artifact.source_fingerprint)}</code></div><pre>${esc(artifact.content)}</pre>`);
+      message("context-product-message", "Artifact compiled. Repeating this request against the same version produces the same hash.", "success");
+    } catch (error) {
+      message("context-product-message", error.message, "error");
+    }
+  }
+
   function renderLineageGraph() {
     const graph = feature.graph;
     if (!graph?.nodes?.length) return setHtml("unified-lineage-canvas", empty("No lineage nodes", "Import catalog, dbt, or OpenLineage metadata first."));
@@ -145,10 +158,11 @@
     createContextProduct(event.target);
   });
   document.addEventListener("click", event => {
-    const target = event.target.closest("[data-context-submit], [data-context-deprecate], [data-lineage-node], #refresh-context-products, #load-unified-lineage");
+    const target = event.target.closest("[data-context-submit], [data-context-deprecate], [data-context-compile], [data-lineage-node], #refresh-context-products, #load-unified-lineage");
     if (!target) return;
     if (target.dataset.contextSubmit) return transitionVersion(target.dataset.contextSubmit, "submit");
     if (target.dataset.contextDeprecate) return transitionVersion(target.dataset.contextDeprecate, "deprecate");
+    if (target.dataset.contextCompile) return compileVersion(target.dataset.contextCompile);
     if (target.dataset.lineageNode) return inspectImpact(target.dataset.lineageNode);
     if (target.id === "refresh-context-products") return loadContextProducts();
     if (target.id === "load-unified-lineage") return loadUnifiedLineage();

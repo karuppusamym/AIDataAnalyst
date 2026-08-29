@@ -70,6 +70,13 @@ class Settings(BaseSettings):
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)
     lineage_cache_enabled: bool = False
     lineage_cache_ttl_seconds: int = Field(default=30, ge=1, le=3600)
+    lineage_projection_max_nodes: int = Field(default=20_000, ge=100, le=100_000)
+    lineage_projection_max_edges: int = Field(default=100_000, ge=500, le=500_000)
+    lineage_neo4j_read_enabled: bool = False
+    mcp_budget_enabled: bool = False
+    mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
+    mcp_tool_calls_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    mcp_context_reads_per_day: int = Field(default=5_000, ge=1, le=1_000_000)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)

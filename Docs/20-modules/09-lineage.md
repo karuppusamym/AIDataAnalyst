@@ -141,5 +141,6 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
   the node budget are not emitted.
 - Redis response caching is available through `AIDA_LINEAGE_CACHE_ENABLED=true` with a bounded
   `AIDA_LINEAGE_CACHE_TTL_SECONDS`; cache failures fall back to PostgreSQL.
-- PostgreSQL remains authoritative. The existing Kafka/Neo4j projector remains the intended
-  asynchronous estate-scale projection path; unified dbt/OpenLineage projection is still open.
+- PostgreSQL remains authoritative. The Kafka/Neo4j projector now rebuilds a generation-stamped
+  unified FK, relationship, dbt, and OpenLineage projection with bounded nodes/edges. Optional
+  Neo4j impact reads fail open to the authoritative PostgreSQL graph when projection reads fail.

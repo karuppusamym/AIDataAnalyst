@@ -501,3 +501,121 @@ every tool we expose needs an exact UUID). Full findings:
 transformation-detail-as-a-tool, consumption-lineage recording for the new tools (same
 pre-existing `CX-4` gap `resources/read` already has), and a dedicated cross-tenant leak test
 for the two new tools.
+
+
+## 2026-08-29 (continued) — Code review of a separately AI-generated build-out; router-wiring and type-safety fixes
+
+User ran a different AI model against this same repository in parallel with this session and
+asked for the result to be reviewed, the docs corrected to match reality, and any real bugs
+fixed. This entry supersedes several "not met" / "not built" notes from the two entries above
+it, which the other model's work closed.
+
+**Reviewed** (via `git diff`/`git show` against commits `2fa7667` "Harden context products and
+unified lineage" and `99cc556`, plus the working tree, which was still being actively written to
+during this review — see caveat below): `context_product_policy.py`, `lineage_cache.py`, the
+`unified_lineage_api.py` and `mcp_server.py` hardening diff, the `9a6d4f21c8b7` and
+`b4e8f2a71c90` migrations, `src/aida/models.py`'s new ORM classes, `platform_schemas.py`,
+`context_compiler.py` / `context_compiler_api.py`, and `product_marketplace_api.py`.
+
+**Findings — fixed:**
+- `src/aida/main.py` did not register the `product_marketplace_api` or `context_compiler_api`
+  routers. Both files were fully implemented (contract/product lifecycle, marketplace search,
+  access requests, context compilation, drift detection) but every one of their ~16 endpoints
+  was unreachable — confirmed by generating `app.openapi()` before and after. Fixed by adding
+  both imports and `include_router` calls in the correct alphabetical position.
+- `product_marketplace_api.py::_validate_product_references` assigned `session.get(...)` results
+  of three different ORM types to the same `asset` variable across an if/elif/else chain without
+  an explicit annotation; `mypy` narrowed it to the first branch's type and flagged the other two
+  as `arg-type` errors. Fixed with an explicit
+  `asset: MetadataTable | SemanticModelVersion | ContextProductVersion | None` annotation.
+  Runtime behavior was already correct — this was a type-checker-only defect, but a real one
+  (would fail a `mypy` CI gate).
+- My own `tests/test_mcp_server.py::test_native_lineage_tool_slugs_match_declared_definitions`
+  (written last session) hard-coded the expected native-tool slug set to only
+  `{"get_lineage_graph", "get_lineage_impact"}`. The other model legitimately added
+  `resolve_entity` and `get_transformation_detail` as real, fully-wired native tools (not
+  stubs — traced both handlers), so my test was failing against correct new behavior. Updated
+  the assertion to the current four-tool set.
+
+**Findings — verified as non-issues:**
+- The context-compiler's `YAML` target sets `content_type: application/yaml` but the body is
+  canonical JSON. Not a defect: JSON is a valid subset of YAML 1.2, so the content is valid
+  YAML, just not idiomatically formatted (no `pyyaml` dependency exists in the project to do
+  better yet). Documented as a simplification in `02-epic-backlog.md` (EE.9) rather than fixed.
+- The previously-noted flaky `tests/test_context_products.py` (`AttributeError: '_Result' object
+  has no attribute 'all'`, intermittent) did not reproduce across 6 consecutive runs (1 full run
+  + 5 targeted re-runs) after the other model's changes. Whatever caused it earlier appears to
+  already be resolved; no fix was needed or applied.
+- Org-scoping, role-gating, and maker-checker patterns across `product_marketplace_api.py` and
+  `context_compiler_api.py` consistently follow the codebase's existing conventions
+  (`enforce_organization` called before any read/write on every scoped lookup; role-based
+  discoverability filtered at the SQL level, not post-filtered in Python; cache/audit keys
+  scoped by organization before the caller's authorization is checked). No authorization gaps
+  found.
+- `context_product_policy.py`, `lineage_cache.py`, and the `unified_lineage_api.py`/
+  `mcp_server.py` hardening diff (bounded `register_node`/`register_link` helpers replacing my
+  original unbounded `nodes.setdefault(...)` calls, org+datasource-scoped Redis cache keys,
+  quality-gated context-product access, `ContextProductConsumptionEdge` tracking) are genuine
+  improvements over what this session shipped last time, not regressions.
+
+**Findings — flagged, not fixed (need a decision, not just an edit):**
+- `ai_asset` / `ai_asset_version` / `ai_assessment` have models, a migration, and Pydantic
+  schemas (including an `AiTrustScoreRead` contract) but no API/service layer and no trust-score
+  computation function anywhere in the codebase — the schema has no producer. `EE.11` downgraded
+  from "open" to "partial — data layer only" rather than claimed delivered.
+- `scratch/repo_bundle{3..8}.tar.gz` / `repo_live.tar.gz` (~5.4 MB of binary tarballs) and
+  `proof-gaps-round-*-report.md` files are committed to git history and `scratch/` is not in
+  `.gitignore`. Left alone: removing tracked history is a decision for the user, not something
+  to do unilaterally mid-review.
+- No dedicated unit tests exist yet for `resolve_entity`, `get_transformation_detail`,
+  `product_marketplace_api.py`, or `context_compiler_api.py` (only the slug-set test, now
+  fixed, indirectly touches the first two). No leak/cross-org test for the two newest MCP tools.
+
+**Verification:** built a fresh Linux `uv` venv (`UV_PROJECT_ENVIRONMENT=/tmp/aida-venv`), ran
+`ruff check` (clean on every file this pass touched or fixed; pre-existing `E501` line-length
+warnings in the other model's new files were left alone as cosmetic), `mypy --cache-dir=/tmp/mypy_cache`
+(clean on every file reviewed, after the one fix above), and the full `pytest` suite (all green,
+including 6 consecutive clean runs of the previously-flaky file).
+
+**Caveat this session flagged to the user directly:** the repository was being actively written
+to during this review — new untracked files (`context_compiler.py`, `product_marketplace_api.py`,
+the `b4e8f2a71c90` migration, `platform_schemas.py`) appeared with modification timestamps only
+seconds to minutes old partway through, and a `.git/index.lock` was present for over ten minutes
+without the index itself changing. No git write operations (commit, `rm --cached`, etc.) were
+performed this pass to avoid racing whatever process holds or held that lock; all fixes above are
+uncommitted working-tree edits only.
+
+**Not built, tracked as open work:** trust-score computation and AI-registry API layer (`EE.11`
+remainder), dedicated tests for the four new modules above, a leak test for `resolve_entity` /
+`get_transformation_detail`, idiomatic YAML compilation target, contract breaking-change
+approved-exception override, and the `scratch/` repo-hygiene cleanup.
+
+### R34 agentic data platform foundation completion
+
+- Completed the data product and contract control plane: immutable versions, typed ports,
+  normalized producer/consumer roles, structural compatibility checks, independent
+  breaking-change exceptions, publication/supersession/retirement, and audited access
+  request/approve/reject/expire/revoke lifecycle.
+- Added policy-filtered marketplace REST/UI surfaces and a deliberately bounded MCP write:
+  agents may request product access but cannot grant it or bypass maker-checker review.
+- Added the deterministic Context Compiler with stable hashes, structural drift evidence,
+  quality/lifecycle gates, and MCP, REST, YAML, OSI, ODCS, Snowflake Semantic View, and
+  Databricks Metric View targets.
+- Added a tenant-scoped AI asset registry, immutable versions, independent assessments,
+  maker-checker publication, and deterministic explainable trust scoring. Seven inspectable
+  factors total exactly 100 points; prohibited risk, critical runtime incidents, missing or
+  failed assessments, and weak high-risk evaluations are explicit blockers.
+- Completed MCP prompts, deterministic fuzzy entity resolution, redacted dbt transformation
+  detail, atomic Redis consumer budgets, and governed marketplace access requests. Budget keys
+  hash principals and production fails closed if an enabled budget store is unavailable.
+- Extended the Kafka/Neo4j projector with generation-stamped unified FK, approved-relationship,
+  dbt, and OpenLineage nodes/edges. Optional Neo4j impact reads are bounded and fail open to the
+  authoritative PostgreSQL graph; Redis remains an optional response cache.
+- Added marketplace, authoring, compiler, AI registry, assessment, and trust-factor UI surfaces;
+  added migration `b4e8f2a71c90`; and consolidated pure behavior/OpenAPI coverage in
+  `tests/test_agentic_platform.py`.
+- Remaining scale expansion is explicit rather than hidden: purpose ABAC/workload identity,
+  entitlement-provider fulfillment, managed compliance templates/remediation, provider sync,
+  idiomatic YAML/downloads/external validators, million-node projection certification,
+  broader MCP stewardship writes, privacy operations, adoption analytics, and CP-S8 ecosystem
+  integrations.

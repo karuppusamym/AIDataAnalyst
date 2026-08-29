@@ -41,7 +41,9 @@ _EXPECTED_ANATOMY_FILES = {
 def test_generated_module_has_the_full_anatomy_from_the_decomposition_doc(tmp_path: Path) -> None:
     written = generate_module("sample_module", dest_root=tmp_path)
 
-    relative_paths = {str(path.relative_to(tmp_path / "sample_module")) for path in written}
+    relative_paths = {
+        path.relative_to(tmp_path / "sample_module").as_posix() for path in written
+    }
     assert relative_paths == _EXPECTED_ANATOMY_FILES
 
 
