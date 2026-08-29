@@ -4,15 +4,19 @@ from dataclasses import replace
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from aida.context import get_correlation_id
+from aida.context_product_policy import evaluate_context_product_quality_from_db
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
     ContextProduct,
+    ContextProductConsumptionEdge,
+    ContextProductRoleBinding,
     ContextProductVersion,
     DataSource,
     GlossaryTermVersion,
@@ -65,6 +69,28 @@ def _can_read_context_product_version(
     return version.status == "PUBLISHED" and not context.roles.isdisjoint(
         version.allowed_consumer_roles
     )
+
+
+def _can_read_lifecycle(context: SecurityContext) -> bool:
+    return not context.roles.isdisjoint(CONTEXT_PRODUCT_LIFECYCLE_READERS)
+
+
+async def _replace_role_bindings(
+    session: AsyncSession, version: ContextProductVersion
+) -> None:
+    await session.execute(
+        delete(ContextProductRoleBinding).where(
+            ContextProductRoleBinding.context_product_version_id == version.id
+        )
+    )
+    for role_name in version.allowed_consumer_roles:
+        session.add(
+            ContextProductRoleBinding(
+                organization_id=version.organization_id,
+                context_product_version_id=version.id,
+                role_name=role_name,
+            )
+        )
 
 
 def _definition_from_version(version: ContextProductVersion) -> ContextProductDefinition:
@@ -288,6 +314,7 @@ async def create_context_product(
     )
     session.add(version)
     await session.flush()
+    await _replace_role_bindings(session, version)
     audit_context = replace(context, organization_id=project.organization_id)
     record_audit(
         session,
@@ -332,35 +359,54 @@ async def list_context_products(
         ContextProduct.organization_id == project.organization_id,
         ContextProduct.project_id == project.id,
     )
-    products = (
-        await session.scalars(
-            select(ContextProduct).where(*filters).order_by(ContextProduct.product_key)
+    statement = select(ContextProduct, ContextProductVersion).join(
+        ContextProductVersion,
+        ContextProductVersion.product_id == ContextProduct.id,
+    )
+    count_statement = select(func.count(func.distinct(ContextProduct.id))).select_from(
+        ContextProduct
+    ).join(ContextProductVersion, ContextProductVersion.product_id == ContextProduct.id)
+    if _can_read_lifecycle(context):
+        latest_version = (
+            select(func.max(ContextProductVersion.version))
+            .where(ContextProductVersion.product_id == ContextProduct.id)
+            .correlate(ContextProduct)
+            .scalar_subquery()
+        )
+        visibility: tuple[ColumnElement[bool], ...] = (
+            ContextProductVersion.version == latest_version,
+        )
+    else:
+        statement = statement.join(
+            ContextProductRoleBinding,
+            ContextProductRoleBinding.context_product_version_id
+            == ContextProductVersion.id,
+        ).distinct()
+        count_statement = count_statement.join(
+            ContextProductRoleBinding,
+            ContextProductRoleBinding.context_product_version_id
+            == ContextProductVersion.id,
+        )
+        visibility = (
+            ContextProductVersion.status == "PUBLISHED",
+            ContextProductRoleBinding.organization_id == project.organization_id,
+            ContextProductRoleBinding.role_name.in_(context.roles),
+        )
+    rows = (
+        await session.execute(
+            statement
+            .where(*filters, *visibility)
+            .order_by(ContextProduct.product_key)
+            .limit(limit)
+            .offset(offset)
         )
     ).all()
-    items: list[ContextProductRead] = []
-    for product in products:
-        versions = (
-            await session.scalars(
-                select(ContextProductVersion)
-                .where(ContextProductVersion.product_id == product.id)
-                .order_by(ContextProductVersion.version.desc())
-            )
-        ).all()
-        latest_visible = next(
-            (
-                version
-                for version in versions
-                if _can_read_context_product_version(context, version)
-            ),
-            None,
-        )
-        if latest_visible is not None:
-            items.append(_product_read(product, latest_visible))
+    total = await session.scalar(count_statement.where(*filters, *visibility))
     return Page(
-        items=items[offset : offset + limit],
+        items=[_product_read(product, version) for product, version in rows],
         limit=limit,
         offset=offset,
-        total=len(items),
+        total=total or 0,
     )
 
 
@@ -373,26 +419,42 @@ async def list_context_product_versions(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     product = await _product_scope(session, product_id, context)
+    statement = select(ContextProductVersion)
+    count_statement = select(func.count()).select_from(ContextProductVersion)
+    visibility: tuple[ColumnElement[bool], ...] = ()
+    if not _can_read_lifecycle(context):
+        statement = statement.join(
+            ContextProductRoleBinding,
+            ContextProductRoleBinding.context_product_version_id
+            == ContextProductVersion.id,
+        ).distinct()
+        count_statement = count_statement.join(
+            ContextProductRoleBinding,
+            ContextProductRoleBinding.context_product_version_id
+            == ContextProductVersion.id,
+        )
+        visibility = (
+            ContextProductVersion.status == "PUBLISHED",
+            ContextProductRoleBinding.organization_id == product.organization_id,
+            ContextProductRoleBinding.role_name.in_(context.roles),
+        )
     versions = (
         await session.scalars(
-            select(ContextProductVersion)
-            .where(ContextProductVersion.product_id == product.id)
+            statement
+            .where(ContextProductVersion.product_id == product.id, *visibility)
             .order_by(ContextProductVersion.version.desc())
+            .limit(limit)
+            .offset(offset)
         )
     ).all()
-    visible = [
-        version
-        for version in versions
-        if _can_read_context_product_version(context, version)
-    ]
+    total = await session.scalar(
+        count_statement.where(ContextProductVersion.product_id == product.id, *visibility)
+    )
     return Page(
-        items=[
-            _version_read(product, version)
-            for version in visible[offset : offset + limit]
-        ],
+        items=[_version_read(product, version) for version in versions],
         limit=limit,
         offset=offset,
-        total=len(visible),
+        total=total or 0,
     )
 
 
@@ -407,6 +469,65 @@ async def get_context_product_version(
     product, version = await _version_scope(session, version_id, context)
     if not _can_read_context_product_version(context, version):
         raise HTTPException(status_code=404, detail="context product version not found")
+    if not _can_read_lifecycle(context):
+        quality_decision = await evaluate_context_product_quality_from_db(
+            session,
+            organization_id=version.organization_id,
+            table_id_values=version.table_ids,
+            requirements=version.quality_requirements,
+        )
+        if not quality_decision.allowed:
+            record_audit(
+                session,
+                context,
+                action="context_product.read.quality_denied",
+                resource_type="context_product_version",
+                resource_id=str(version.id),
+                outcome="DENIED",
+                correlation_id=get_correlation_id(),
+                details={"quality": quality_decision.snapshot()},
+            )
+            await session.commit()
+            raise HTTPException(status_code=404, detail="context product version not found")
+        correlation_id = get_correlation_id()
+        session.add(
+            ContextProductConsumptionEdge(
+                organization_id=version.organization_id,
+                context_product_version_id=version.id,
+                principal_id=context.principal_id,
+                principal_type=context.principal_type,
+                channel="REST",
+                correlation_id=correlation_id,
+                product_fingerprint=version.fingerprint,
+                policy_decision="ALLOW",
+                quality_snapshot=quality_decision.snapshot(),
+            )
+        )
+        record_audit(
+            session,
+            context,
+            action="context_product.read",
+            resource_type="context_product_version",
+            resource_id=str(version.id),
+            outcome="SUCCESS",
+            correlation_id=correlation_id,
+            details={"fingerprint": version.fingerprint},
+        )
+        record_outbox(
+            session,
+            organization_id=version.organization_id,
+            aggregate_type="context_product_version",
+            aggregate_id=str(version.id),
+            event_type="context.product_consumed.v1",
+            payload={
+                "product_key": product.product_key,
+                "version": version.version,
+                "fingerprint": version.fingerprint,
+                "principal_id": context.principal_id,
+                "channel": "REST",
+            },
+        )
+        await session.commit()
     return _version_read(product, version)
 
 
@@ -447,6 +568,7 @@ async def create_context_product_version(
     )
     session.add(version)
     await session.flush()
+    await _replace_role_bindings(session, version)
     record_audit(
         session,
         replace(context, organization_id=product.organization_id),
@@ -492,6 +614,7 @@ async def update_context_product_version(
     project = await _project_scope(session, product.project_id, context)
     await _validate_references(session, project, body)
     _apply_definition(version, body)
+    await _replace_role_bindings(session, version)
     record_audit(
         session,
         replace(context, organization_id=product.organization_id),
@@ -561,6 +684,65 @@ async def submit_context_product_version(
             "review_id": str(review.id),
             "object_type": review.object_type,
             "object_id": review.object_id,
+        },
+    )
+    await session.commit()
+    return review
+
+
+@router.post(
+    "/context-product-versions/{version_id}/deprecate",
+    response_model=GovernanceReviewRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_context_product_deprecation(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReview:
+    product, version = await _version_scope(session, version_id, context)
+    existing = await session.scalar(
+        select(GovernanceReview).where(
+            GovernanceReview.object_type == "CONTEXT_PRODUCT_VERSION",
+            GovernanceReview.object_id == str(version.id),
+            GovernanceReview.requested_action == "DEPRECATE",
+            GovernanceReview.status == "PENDING",
+        )
+    )
+    if existing is not None:
+        return existing
+    if version.status != "PUBLISHED":
+        raise HTTPException(status_code=409, detail="only a published context product can retire")
+    review = GovernanceReview(
+        organization_id=product.organization_id,
+        object_type="CONTEXT_PRODUCT_VERSION",
+        object_id=str(version.id),
+        requested_action="DEPRECATE",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=product.organization_id),
+        action="context_product.version.deprecation_request",
+        resource_type="governance_review",
+        resource_id=str(review.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"context_product_version_id": str(version.id)},
+    )
+    record_outbox(
+        session,
+        organization_id=product.organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+            "requested_action": review.requested_action,
         },
     )
     await session.commit()

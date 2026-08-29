@@ -1764,11 +1764,17 @@ class ContextProductQualityRequirements(ApiModel):
     deny_on_critical_incident: bool = True
 
 
+def _default_context_product_actions() -> list[
+    Literal["READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS"]
+]:
+    return ["READ_CONTEXT"]
+
+
 class ContextProductPolicySummary(ApiModel):
     source_values: Literal["GATEWAY_ONLY"] = "GATEWAY_ONLY"
     retention: Literal["NO_RAW_CONTEXT"] = "NO_RAW_CONTEXT"
     permitted_actions: list[Literal["READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS"]] = Field(
-        default_factory=lambda: ["READ_CONTEXT"]
+        default_factory=_default_context_product_actions
     )
 
 

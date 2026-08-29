@@ -435,15 +435,33 @@ and custom YAML, delivered via REST, MCP, and file export.
 format; a drift report against a previously deployed definition.
 
 ### EE.10 — Lineage MCP tools
-**Module:** 09, 19 · **Type:** DIFF (W2) · **Priority:** P1
+**Module:** 09, 19 · **Type:** DIFF (W2) · **Priority:** P1 · **Status:** PARTIAL, delivered 2026-08-29
 
 Delivers CP-6, using EA.14's unified graph as the data source: expose upstream, downstream,
 impact, fuzzy entity resolution, and transformation-detail as MCP tools alongside the existing
-catalog resources and governed tools in `mcp_server.py`.
+catalog resources and governed tools in `mcp_server.py`. Opened further by
+`competitors/09-collibra-marketplace-catalog-integrations-mcp-governance-2026-08.md` against
+Collibra's MCP Server page (25+ tools, read + write, fuzzy resolution).
 
-**Acceptance** — fuzzy resolution corpus passes; traversal depth is policy-bounded; policy
-filtering happens before traversal (a leak test proves it); transformation evidence returned
-stays value-free.
+**Acceptance**
+- `atlas__get_lineage_graph` and `atlas__get_lineage_impact` are exposed as native MCP tools
+  (not `GovernedToolVersion`-backed), reusing `unified_lineage_api`'s payload builders so the
+  graph an MCP client sees can never drift from the REST one. — **met**
+- Eligible-tool exposure: only callers whose roles intersect
+  `UNIFIED_LINEAGE_READER_ROLES` see these tools in `tools/list`; an ineligible `tools/call`
+  gets the identical "not found or not published" response used for a genuinely-unknown tool
+  (same anti-enumeration shape as governed SQL tools). — **met**
+- Unit tested without a database (role gating, argument validation, org-scoping, payload
+  shape), mirroring `test_mcp_server.py`'s existing convention. — **met**,
+  `tests/test_mcp_server.py`
+- Fuzzy resolution corpus passes. — **not met**, tracked as `MCP-3`
+- Transformation-detail-as-a-tool. — **not met**, tracked separately from LN-10 (column mapping
+  is a prerequisite)
+- Policy filtering happens before traversal (a leak test proves it). — **not met**; the two new
+  tools inherit `enforce_organization`-equivalent scoping (datasource org match) but have no
+  dedicated leak test yet
+- Consumption recorded as lineage. — **not met**, same pre-existing gap as `resources/read`
+  (`CX-4`)
 
 ### EE.11 — Unified AI registry and trust scoring
 **Module:** 19 · **Type:** DIFF · **Priority:** P2

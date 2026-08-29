@@ -132,3 +132,14 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | LN-10 | Authoritative column-to-column mapping (replace dbt's identical-name matching) | P1 |
 | LN-11 | View/stored-procedure/BI nodes folded into the unified graph | P1, depends on LN-2/LN-4 |
 | LN-12 | Unified graph export: SVG, PNG, PDF, CSV | P2 |
+
+### 13.1 Runtime scaling controls
+
+- `node_limit` and `edge_limit` are global response/build budgets shared across FK,
+  relationship-candidate, dbt, and OpenLineage sources; synthetic nodes cannot bypass them.
+- dbt resource and edge reads are query-bounded, and edges whose endpoints were excluded by
+  the node budget are not emitted.
+- Redis response caching is available through `AIDA_LINEAGE_CACHE_ENABLED=true` with a bounded
+  `AIDA_LINEAGE_CACHE_TTL_SECONDS`; cache failures fall back to PostgreSQL.
+- PostgreSQL remains authoritative. The existing Kafka/Neo4j projector remains the intended
+  asynchronous estate-scale projection path; unified dbt/OpenLineage projection is still open.

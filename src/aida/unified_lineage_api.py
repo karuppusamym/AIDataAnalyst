@@ -23,7 +23,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings, get_settings
 from aida.db import get_session
+from aida.lineage_cache import get_lineage_cache
 from aida.models import (
     DataSource,
     DbtArtifactImport,
@@ -50,6 +52,16 @@ from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.unified_lineage import TraversalResult, UnifiedLink, traverse
 
 router = APIRouter(prefix="/v1", tags=["unified-lineage"])
+
+
+class LineageNodeNotFoundError(ValueError):
+    """Raised by the reusable payload builders (shared by the REST routes below
+    and the native MCP lineage tools in `mcp_server.py`) when a node id is not
+    part of the caller's unified graph. Kept independent of FastAPI's
+    `HTTPException` so it means the same thing over HTTP (404) and over MCP
+    (a tool-call error content block) without either caller special-casing the
+    other transport."""
+
 
 UNIFIED_LINEAGE_READER_ROLES = (
     "PlatformAdmin",
@@ -106,6 +118,25 @@ async def _build_unified_graph(
         "OPENLINEAGE_ETL": 0,
     }
 
+    def register_node(info: _NodeInfo) -> bool:
+        if info.id in nodes:
+            return True
+        if len(nodes) >= node_limit:
+            truncation_reasons.append("NODE_LIMIT")
+            return False
+        nodes[info.id] = info
+        return True
+
+    def register_link(link: UnifiedLink) -> bool:
+        if link.source_id not in nodes or link.target_id not in nodes:
+            return False
+        if len(links) >= edge_limit:
+            truncation_reasons.append("EDGE_LIMIT")
+            return False
+        links.append(link)
+        counts_by_source[link.edge_source] += 1
+        return True
+
     table_rows = (
         await session.execute(
             select(MetadataTable, MetadataSchema, MetadataCatalog)
@@ -125,14 +156,14 @@ async def _build_unified_graph(
     for table, schema, catalog in table_rows:
         node_id = str(table.id)
         table_ids.add(table.id)
-        nodes[node_id] = _NodeInfo(
+        register_node(_NodeInfo(
             id=node_id,
             node_kind="TABLE",
             label=table.name,
             qualified_name=f"{catalog.name}.{schema.name}.{table.name}",
             matched_table_id=table.id,
             resolved=True,
-        )
+        ))
 
     # --- Declared foreign keys ---
     constraints = (
@@ -155,7 +186,7 @@ async def _build_unified_graph(
     for constraint in constraints:
         if constraint.referenced_table_id is None:
             continue
-        links.append(
+        register_link(
             UnifiedLink(
                 edge_id=f"fk:{constraint.id}",
                 source_id=str(constraint.table_id),
@@ -168,8 +199,7 @@ async def _build_unified_graph(
                 evidence={"source": "DATABASE_CONSTRAINT", "source_values_inspected": False},
             )
         )
-    counts_by_source["FOREIGN_KEY"] = len(constraints)
-    if len(constraints) == edge_limit:
+    if len(constraints) >= edge_limit:
         truncation_reasons.append("EDGE_LIMIT")
 
     # --- Suggested / approved column relationships ---
@@ -208,7 +238,7 @@ async def _build_unified_graph(
     for candidate in candidates:
         source_column = columns_by_id.get(candidate.source_column_id)
         target_column = columns_by_id.get(candidate.target_column_id)
-        links.append(
+        register_link(
             UnifiedLink(
                 edge_id=f"candidate:{candidate.id}",
                 source_id=str(candidate.source_table_id),
@@ -221,8 +251,7 @@ async def _build_unified_graph(
                 evidence=dict(candidate.evidence),
             )
         )
-    counts_by_source["SUGGESTED_RELATIONSHIP"] = len(candidates)
-    if len(candidates) == edge_limit:
+    if len(candidates) >= edge_limit:
         truncation_reasons.append("EDGE_LIMIT")
 
     # --- dbt manifest dependency edges (latest imported snapshot per project) ---
@@ -251,9 +280,13 @@ async def _build_unified_graph(
             continue
         resources = (
             await session.scalars(
-                select(DbtResource).where(DbtResource.artifact_import_id == latest_import.id)
+                select(DbtResource)
+                .where(DbtResource.artifact_import_id == latest_import.id)
+                .limit(node_limit + 1)
             )
         ).all()
+        if len(resources) > node_limit:
+            truncation_reasons.append("NODE_LIMIT")
         for resource in resources:
             if resource.matched_table_id is not None and resource.matched_table_id in table_ids:
                 resource_node_id[resource.id] = str(resource.matched_table_id)
@@ -262,29 +295,31 @@ async def _build_unified_graph(
             if node_kind is None:
                 continue
             node_id = f"dbt:{resource.id}"
-            resource_node_id[resource.id] = node_id
-            nodes.setdefault(
-                node_id,
-                _NodeInfo(
+            info = _NodeInfo(
                     id=node_id,
                     node_kind=node_kind,
                     label=resource.name,
                     qualified_name=resource.relation_name or resource.unique_id,
                     matched_table_id=None,
                     resolved=False,
-                ),
-            )
+                )
+            if register_node(info):
+                resource_node_id[resource.id] = node_id
         edges = (
             await session.scalars(
-                select(DbtLineageEdge).where(DbtLineageEdge.artifact_import_id == latest_import.id)
+                select(DbtLineageEdge)
+                .where(DbtLineageEdge.artifact_import_id == latest_import.id)
+                .limit(edge_limit + 1)
             )
         ).all()
+        if len(edges) > edge_limit:
+            truncation_reasons.append("EDGE_LIMIT")
         for edge in edges:
             source_node = resource_node_id.get(edge.source_resource_id)
             target_node = resource_node_id.get(edge.target_resource_id)
             if source_node is None or target_node is None or source_node == target_node:
                 continue
-            links.append(
+            if register_link(
                 UnifiedLink(
                     edge_id=f"dbt:{edge.id}",
                     source_id=source_node,
@@ -294,9 +329,8 @@ async def _build_unified_graph(
                     confidence=1.0,
                     evidence={"source": "DBT_MANIFEST", "edge_type": edge.edge_type},
                 )
-            )
-            dbt_edge_total += 1
-    counts_by_source["DBT_DEPENDENCY"] = dbt_edge_total
+            ):
+                dbt_edge_total += 1
     if dbt_edge_total >= edge_limit:
         truncation_reasons.append("EDGE_LIMIT")
 
@@ -327,8 +361,7 @@ async def _build_unified_graph(
         )
         if input_node_id == output_node_id:
             continue
-        nodes.setdefault(
-            input_node_id,
+        input_registered = register_node(
             _NodeInfo(
                 id=input_node_id,
                 node_kind="UNRESOLVED_DATASET",
@@ -336,10 +369,9 @@ async def _build_unified_graph(
                 qualified_name=f"{ol_edge.input_dataset_namespace}.{ol_edge.input_dataset_name}",
                 matched_table_id=ol_edge.input_table_id,
                 resolved=ol_edge.input_table_id is not None,
-            ),
+            )
         )
-        nodes.setdefault(
-            output_node_id,
+        output_registered = register_node(
             _NodeInfo(
                 id=output_node_id,
                 node_kind="UNRESOLVED_DATASET",
@@ -347,9 +379,11 @@ async def _build_unified_graph(
                 qualified_name=f"{ol_edge.output_dataset_namespace}.{ol_edge.output_dataset_name}",
                 matched_table_id=ol_edge.output_table_id,
                 resolved=ol_edge.output_table_id is not None,
-            ),
+            )
         )
-        links.append(
+        if not input_registered or not output_registered:
+            continue
+        if register_link(
             UnifiedLink(
                 edge_id=f"openlineage:{ol_edge.id}",
                 source_id=output_node_id,
@@ -359,9 +393,8 @@ async def _build_unified_graph(
                 confidence=1.0,
                 evidence={"source": "OPENLINEAGE", "edge_kind": ol_edge.edge_kind},
             )
-        )
-        ol_edge_total += 1
-    counts_by_source["OPENLINEAGE_ETL"] = ol_edge_total
+        ):
+            ol_edge_total += 1
     if len(ol_rows) >= edge_limit:
         truncation_reasons.append("EDGE_LIMIT")
 
@@ -383,28 +416,32 @@ async def _load_datasource(
     return datasource
 
 
-@router.get(
-    "/datasources/{datasource_id}/unified-lineage/graph",
-    response_model=UnifiedLineageGraphRead,
-)
-async def get_unified_lineage_graph(
-    datasource_id: UUID,
-    node_limit: int = Query(default=300, ge=5, le=2_000),
-    edge_limit: int = Query(default=1_500, ge=5, le=10_000),
-    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = Query(
-        default="APPROVED"
-    ),
-    context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
-    session: AsyncSession = Depends(get_session),
+async def build_unified_lineage_graph_payload(
+    session: AsyncSession,
+    datasource: DataSource,
+    *,
+    node_limit: int = 300,
+    edge_limit: int = 1_500,
+    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
+    settings: Settings | None = None,
 ) -> UnifiedLineageGraphRead:
-    """Return the merged FK + suggested + dbt + OpenLineage graph for one datasource.
+    """Build the merged FK + suggested + dbt + OpenLineage graph for one datasource.
 
-    This is the canonical lineage graph called for in the Collibra-parity
-    plan: one node/edge set spanning every lineage source instead of
-    separate, unlinked workbenches.
+    Pulled out of the REST route so the exact same graph can also be served as
+    a native MCP tool (`atlas__get_lineage_graph` in `mcp_server.py`) without
+    duplicating the merge logic. The caller is responsible for loading and
+    authorizing `datasource` -- this function does no access control itself.
     """
 
-    datasource = await _load_datasource(session, context, datasource_id)
+    cache_key = (
+        f"aida:lineage:graph:{datasource.organization_id}:{datasource.id}:"
+        f"{node_limit}:{edge_limit}:{suggestion_status}"
+    )
+    if settings is not None and settings.lineage_cache_enabled:
+        cached = await get_lineage_cache(settings.redis_url).get(cache_key)
+        if cached is not None:
+            return UnifiedLineageGraphRead.model_validate(cached)
+
     graph = await _build_unified_graph(
         session,
         datasource,
@@ -449,7 +486,7 @@ async def get_unified_lineage_graph(
         if link.source_id in graph.nodes and link.target_id in graph.nodes
     ]
 
-    return UnifiedLineageGraphRead(
+    result = UnifiedLineageGraphRead(
         datasource_id=datasource.id,
         nodes=node_reads,
         edges=edge_reads,
@@ -461,29 +498,42 @@ async def get_unified_lineage_graph(
         truncated=bool(graph.truncation_reasons),
         truncation_reasons=graph.truncation_reasons,
     )
+    if settings is not None and settings.lineage_cache_enabled:
+        await get_lineage_cache(settings.redis_url).set(
+            cache_key,
+            result.model_dump(mode="json"),
+            settings.lineage_cache_ttl_seconds,
+        )
+    return result
 
 
-@router.get(
-    "/datasources/{datasource_id}/unified-lineage/impact/{node_id}",
-    response_model=UnifiedLineageImpactRead,
-)
-async def get_unified_lineage_impact(
-    datasource_id: UUID,
+async def build_unified_lineage_impact_payload(
+    session: AsyncSession,
+    datasource: DataSource,
     node_id: str,
-    depth: int = Query(default=5, ge=1, le=8),
-    node_limit: int = Query(default=200, ge=5, le=2_000),
-    context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
-    session: AsyncSession = Depends(get_session),
+    *,
+    depth: int = 5,
+    node_limit: int = 200,
+    settings: Settings | None = None,
 ) -> UnifiedLineageImpactRead:
-    """Transitive upstream/downstream impact across every merged lineage source.
+    """Compute transitive upstream/downstream impact for one node.
 
-    Replaces `GET /v1/metadata/tables/{table_id}/impact`'s direct-reference
-    count with a bounded multi-hop traversal: "what would break, N hops out,
-    if this node changed" -- the gap called out against Collibra's impact
-    analysis view.
+    Shared by the REST route and the native MCP tool
+    (`atlas__get_lineage_impact`); see `build_unified_lineage_graph_payload`
+    for why this is split out. Raises `LineageNodeNotFoundError` -- not
+    `HTTPException` -- so both callers can translate it into their own
+    transport's error shape.
     """
 
-    datasource = await _load_datasource(session, context, datasource_id)
+    cache_key = (
+        f"aida:lineage:impact:{datasource.organization_id}:{datasource.id}:"
+        f"{node_id}:{depth}:{node_limit}"
+    )
+    if settings is not None and settings.lineage_cache_enabled:
+        cached = await get_lineage_cache(settings.redis_url).get(cache_key)
+        if cached is not None:
+            return UnifiedLineageImpactRead.model_validate(cached)
+
     graph = await _build_unified_graph(
         session,
         datasource,
@@ -493,8 +543,8 @@ async def get_unified_lineage_impact(
     )
     focus = graph.nodes.get(node_id)
     if focus is None:
-        raise HTTPException(
-            status_code=404, detail="lineage node not found in this datasource's graph"
+        raise LineageNodeNotFoundError(
+            f"lineage node '{node_id}' not found in this datasource's graph"
         )
 
     upstream = traverse(
@@ -536,7 +586,7 @@ async def get_unified_lineage_impact(
             )
         return rows
 
-    return UnifiedLineageImpactRead(
+    result = UnifiedLineageImpactRead(
         datasource_id=datasource.id,
         focus_node_id=node_id,
         focus_node_kind=focus.node_kind,
@@ -548,3 +598,80 @@ async def get_unified_lineage_impact(
         upstream_truncated=upstream.truncated,
         downstream_truncated=downstream.truncated,
     )
+    if settings is not None and settings.lineage_cache_enabled:
+        await get_lineage_cache(settings.redis_url).set(
+            cache_key,
+            result.model_dump(mode="json"),
+            settings.lineage_cache_ttl_seconds,
+        )
+    return result
+
+
+@router.get(
+    "/datasources/{datasource_id}/unified-lineage/graph",
+    response_model=UnifiedLineageGraphRead,
+)
+async def get_unified_lineage_graph(
+    datasource_id: UUID,
+    node_limit: int = Query(default=300, ge=5, le=2_000),
+    edge_limit: int = Query(default=1_500, ge=5, le=10_000),
+    suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = Query(
+        default="APPROVED"
+    ),
+    context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> UnifiedLineageGraphRead:
+    """Return the merged FK + suggested + dbt + OpenLineage graph for one datasource.
+
+    This is the canonical lineage graph called for in the Collibra-parity
+    plan: one node/edge set spanning every lineage source instead of
+    separate, unlinked workbenches. Also served as the native MCP tool
+    `atlas__get_lineage_graph` (`mcp_server.py`).
+    """
+
+    datasource = await _load_datasource(session, context, datasource_id)
+    return await build_unified_lineage_graph_payload(
+        session,
+        datasource,
+        node_limit=node_limit,
+        edge_limit=edge_limit,
+        suggestion_status=suggestion_status,
+        settings=settings,
+    )
+
+
+@router.get(
+    "/datasources/{datasource_id}/unified-lineage/impact/{node_id}",
+    response_model=UnifiedLineageImpactRead,
+)
+async def get_unified_lineage_impact(
+    datasource_id: UUID,
+    node_id: str,
+    depth: int = Query(default=5, ge=1, le=8),
+    node_limit: int = Query(default=200, ge=5, le=2_000),
+    context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> UnifiedLineageImpactRead:
+    """Transitive upstream/downstream impact across every merged lineage source.
+
+    Replaces `GET /v1/metadata/tables/{table_id}/impact`'s direct-reference
+    count with a bounded multi-hop traversal: "what would break, N hops out,
+    if this node changed" -- the gap called out against Collibra's impact
+    analysis view. Also served as the native MCP tool
+    `atlas__get_lineage_impact` (`mcp_server.py`).
+    """
+
+    datasource = await _load_datasource(session, context, datasource_id)
+    try:
+        return await build_unified_lineage_impact_payload(
+            session,
+            datasource,
+            node_id,
+            depth=depth,
+            node_limit=node_limit,
+            settings=settings,
+        )
+    except LineageNodeNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

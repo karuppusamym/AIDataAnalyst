@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     knowledge_graph_max_nodes: int = Field(default=250, ge=25, le=2_000)
     knowledge_graph_max_edges: int = Field(default=1_000, ge=50, le=10_000)
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)
+    lineage_cache_enabled: bool = False
+    lineage_cache_ttl_seconds: int = Field(default=30, ge=1, le=3600)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)

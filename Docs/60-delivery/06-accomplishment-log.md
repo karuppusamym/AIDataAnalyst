@@ -450,3 +450,54 @@ LN-12, tracked as open work below.
   lineage-MCP, context-compiler, product/contract-registry, and AI-registry/trust gaps.
 - `Docs/20-modules/19-context-products-and-mcp.md` — cross-referenced the new competitors doc
   and the CP-* -> EE.* epic mapping.
+
+
+## 2026-08-29 (continued) — Lineage MCP tools (EE.10, partial) and 5-page Collibra review
+
+User pasted five more Collibra product page URLs (Data Marketplace, Data Catalog,
+Integrations & APIs, MCP Server, Data Governance) and asked for a further review and for the
+platform to keep being built out meaningfully.
+
+**Reviewed:** all five pages via WebFetch. Most of what they show was already anticipated by
+the CP-1..CP-14 requirements added to `Docs/20-modules/19-context-products-and-mcp.md` §15.2 in
+an earlier pass. Two genuinely new, concrete gaps came out of the MCP Server page specifically
+(it lists 25+ tools, both read and write, plus "fuzzy name matching and concept mapping"):
+`MCP-2` (no MCP write path to catalog stewardship) and `MCP-3` (no fuzzy entity resolution --
+every tool we expose needs an exact UUID). Full findings:
+`Docs/competitors/09-collibra-marketplace-catalog-integrations-mcp-governance-2026-08.md`.
+
+**Built — EE.10 (partial):**
+- Refactored `unified_lineage_api.py`'s two route bodies into reusable payload builders
+  (`build_unified_lineage_graph_payload`, `build_unified_lineage_impact_payload`) that take an
+  already-loaded, already-authorized `DataSource` rather than doing their own `Depends`-based
+  lookup, so the exact same merge/traversal logic can be called from a second transport. Added
+  `LineageNodeNotFoundError` (plain `ValueError` subclass, not `HTTPException`) so the REST
+  route and the new MCP tool can each translate a missing node into their own transport's error
+  shape from one raise site.
+- `mcp_server.py`: two new native MCP tools, `atlas__get_lineage_graph` and
+  `atlas__get_lineage_impact`, dispatched in `_handle_tools_call` before the
+  `GovernedToolVersion` lookup (native tools are not backed by a published tool row). Listed in
+  `tools/list` only for callers whose roles intersect `UNIFIED_LINEAGE_READER_ROLES` --
+  eligible-tool exposure applied the same way it already is for governed SQL tools, including
+  the anti-enumeration property (an ineligible call gets the identical "not found or not
+  published" text as a genuinely unknown tool name).
+- 7 new tests in `tests/test_mcp_server.py` (role denial, invalid UUID, cross-org datasource,
+  missing `node_id`, and two success-path tests that monkeypatch the payload builders --
+  consistent with this test file's existing no-database convention) plus 1 in
+  `tests/test_unified_lineage.py`'s neighborhood confirming the refactor didn't change route
+  behavior.
+- Full suite, `ruff check`, `ruff format`, `mypy` all clean for every file this session touched.
+  **Noted, not fixed** (out of scope -- belongs to the separate, already-uncommitted
+  `context_product_api.py`/`context_product_policy.py` work): `tests/test_context_products.py`
+  is flaky, failing a different test on about 1 in 3 runs with
+  `AttributeError: '_Result' object has no attribute 'all'` in `context_product_policy.py`,
+  independent of anything touched this session (confirmed by running it in isolation, repeatedly).
+- Also corrected stale text in `Docs/20-modules/19-context-products-and-mcp.md` §13: it still
+  said "no `ContextProduct` concept anywhere in the codebase," which predates the (uncommitted)
+  `context_product_api.py` work discovered while wiring these tools in -- `ContextProduct` /
+  `ContextProductVersion` models and their MCP resource-read path already exist.
+
+**Not built, tracked as open work:** MCP-2 (write operations), MCP-3 (fuzzy resolution),
+transformation-detail-as-a-tool, consumption-lineage recording for the new tools (same
+pre-existing `CX-4` gap `resources/read` already has), and a dedicated cross-tenant leak test
+for the two new tools.

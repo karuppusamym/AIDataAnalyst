@@ -11,11 +11,13 @@ from aida.context_product_api import (
     _can_read_context_product_version,
     context_product_fingerprint,
 )
+from aida.context_product_policy import evaluate_context_product_quality
 from aida.main import app
 from aida.mcp_server import _context_product_role_eligible, _read_context_product_resource
 from aida.models import (
     AuditEvent,
     ContextProduct,
+    ContextProductConsumptionEdge,
     ContextProductVersion,
     GovernanceReview,
     OutboxEvent,
@@ -35,6 +37,9 @@ class _GovernanceDecisionSession:
     async def get(self, _model: type[object], _identity: object) -> object:
         return self._get_queue.pop(0)
 
+    async def scalar(self, _statement: object) -> object:
+        return self._get_queue.pop(0)
+
     async def execute(self, statement: object) -> None:
         self.executed_statements.append(statement)
 
@@ -51,17 +56,29 @@ class _GovernanceDecisionSession:
 class _ContextProductReadSession:
     def __init__(self, row: object) -> None:
         self.row = row
+        self.execute_count = 0
         self.added: list[object] = []
         self.committed = False
 
     async def execute(self, _statement: object) -> object:
-        row = self.row
+        row = self.row if self.execute_count == 0 else None
+        self.execute_count += 1
 
         class _Result:
             def first(self_inner) -> object:
                 return row
 
+            def all(self_inner) -> list[object]:
+                return []
+
         return _Result()
+
+    async def scalars(self, _statement: object) -> object:
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return []
+
+        return _Scalars()
 
     def add(self, value: object) -> None:
         self.added.append(value)
@@ -186,6 +203,7 @@ def test_openapi_exposes_context_product_authoring_and_review_routes() -> None:
     assert "get" in paths["/v1/context-products/{product_id}/versions"]
     assert "put" in paths["/v1/context-product-versions/{version_id}"]
     assert "post" in paths["/v1/context-product-versions/{version_id}/submit"]
+    assert "post" in paths["/v1/context-product-versions/{version_id}/deprecate"]
 
 
 def test_context_product_role_binding_is_fail_closed_with_admin_exemption() -> None:
@@ -221,6 +239,39 @@ def test_rest_consumers_cannot_read_drafts_or_products_for_other_roles() -> None
     assert not _can_read_context_product_version(analyst, version)
 
 
+def test_quality_policy_fails_closed_for_missing_low_or_critical_evidence() -> None:
+    first, second = uuid4(), uuid4()
+    decision = evaluate_context_product_quality(
+        table_ids=[first, second],
+        minimum_score=85,
+        deny_on_critical_incident=True,
+        latest_scores={first: 72},
+        critical_incident_table_ids={second},
+    )
+
+    assert decision.allowed is False
+    assert decision.reasons == (
+        "MISSING_QUALITY_EVIDENCE",
+        "QUALITY_SCORE_BELOW_MINIMUM",
+        "ACTIVE_CRITICAL_INCIDENT",
+    )
+    assert decision.lowest_score == 72
+
+
+def test_quality_policy_allows_complete_healthy_evidence() -> None:
+    table_id = uuid4()
+    decision = evaluate_context_product_quality(
+        table_ids=[table_id],
+        minimum_score=85,
+        deny_on_critical_incident=True,
+        latest_scores={table_id: 96},
+        critical_incident_table_ids=set(),
+    )
+
+    assert decision.allowed is True
+    assert decision.reasons == ()
+
+
 async def test_mcp_read_returns_version_pinned_value_free_context_and_evidence() -> None:
     version, product = _published_product(allowed_roles=["Analyst"])
     context = SecurityContext(
@@ -248,6 +299,7 @@ async def test_mcp_read_returns_version_pinned_value_free_context_and_evidence()
         isinstance(value, OutboxEvent) and value.event_type == "context.product_consumed.v1"
         for value in session.added
     )
+    assert any(isinstance(value, ContextProductConsumptionEdge) for value in session.added)
     assert session.committed is True
 
 
@@ -332,5 +384,29 @@ async def test_rejection_does_not_modify_other_versions() -> None:
     assert session.executed_statements == []
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "context.product_rejected.v1"
+        for value in session.added
+    )
+
+
+async def test_approved_deprecation_retires_published_context_product() -> None:
+    organization_id = uuid4()
+    candidate = _candidate(organization_id=organization_id, product_id=uuid4())
+    candidate.status = "PUBLISHED"
+    review = _review(organization_id=organization_id, version_id=candidate.id)
+    review.requested_action = "DEPRECATE"
+    session = _GovernanceDecisionSession(get_results=[review, candidate])
+
+    result = await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _reviewer(organization_id=organization_id),
+        session,  # type: ignore[arg-type]
+    )
+
+    assert result.status == "APPROVED"
+    assert candidate.status == "DEPRECATED"
+    assert session.executed_statements == []
+    assert any(
+        isinstance(value, OutboxEvent) and value.event_type == "context.product_deprecated.v1"
         for value in session.added
     )

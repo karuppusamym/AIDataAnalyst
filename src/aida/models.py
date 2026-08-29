@@ -6,6 +6,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -1709,6 +1711,18 @@ class ContextProductVersion(Base, TimestampMixin):
             name="uq_context_product_version_product_id_version",
         ),
         Index("ix_context_product_version_org_status", "organization_id", "status"),
+        Index(
+            "uq_context_product_version_one_published",
+            "product_id",
+            unique=True,
+            postgresql_where=text("status = 'PUBLISHED'"),
+        ),
+        CheckConstraint("version > 0", name="ck_context_product_version_positive"),
+        CheckConstraint(
+            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'PUBLISHED', 'SUPERSEDED', "
+            "'REJECTED', 'DEPRECATION_REVIEW', 'DEPRECATED')",
+            name="ck_context_product_version_status",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -1747,6 +1761,75 @@ class ContextProductVersion(Base, TimestampMixin):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     based_on_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("context_product_version.id", ondelete="SET NULL"), index=True
+    )
+
+
+class ContextProductRoleBinding(Base):
+    """Indexed authorization binding for a Context Product version."""
+
+    __tablename__ = "context_product_role_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "context_product_version_id",
+            "role_name",
+            name="uq_context_product_role_binding_version_role",
+        ),
+        Index(
+            "ix_context_product_role_binding_org_role",
+            "organization_id",
+            "role_name",
+            "context_product_version_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    context_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
+class ContextProductConsumptionEdge(Base):
+    """Immutable consumer-to-version lineage edge emitted for every successful read."""
+
+    __tablename__ = "context_product_consumption_edge"
+    __table_args__ = (
+        Index(
+            "ix_context_product_consumption_version_time",
+            "context_product_version_id",
+            "consumed_at",
+        ),
+        Index(
+            "ix_context_product_consumption_org_principal_time",
+            "organization_id",
+            "principal_id",
+            "consumed_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    context_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    product_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_decision: Mapped[str] = mapped_column(String(30), nullable=False)
+    quality_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
     )
 
 

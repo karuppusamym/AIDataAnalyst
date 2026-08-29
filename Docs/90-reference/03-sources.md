@@ -19,6 +19,7 @@
 - [Alation — Agentic Data Intelligence Platform](https://www.alation.com/product/agentic-data-intelligence-platform/)
 - [Collibra Platform](https://www.collibra.com/products/collibra-platform)
 - [Collibra Data Lineage](https://www.collibra.com/products/data-lineage) — reviewed 2026-08-29; see `competitors/08-collibra-lineage-and-platform-analysis-2026-08.md`
+- [Collibra Data Marketplace](https://www.collibra.com/products/data-marketplace), [Data Catalog](https://www.collibra.com/products/data-catalog), [Integrations & APIs](https://www.collibra.com/products/integrations-apis), [MCP Server](https://www.collibra.com/products/mcp-server), [Data Governance](https://www.collibra.com/products/data-governance) — reviewed 2026-08-29; see `competitors/09-collibra-marketplace-catalog-integrations-mcp-governance-2026-08.md`
 - [Microsoft Purview Data Governance](https://www.microsoft.com/en-us/security/business/risk-management/microsoft-purview-data-governance)
 
 ### Warehouse-native context planes

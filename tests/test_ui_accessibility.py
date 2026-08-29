@@ -73,7 +73,21 @@ def test_ui_entrypoint_loads_split_runtime_assets() -> None:
         "virtual-table.js",
         "features/integration-policy.js",
         "features/transformation-workbench.js",
+        "features/context-lineage-control-plane.js",
     )
     for name in assets:
         assert f'/scripts/{name}' in html
         assert (UI_ROOT / "scripts" / name).is_file()
+
+
+def test_context_product_and_unified_lineage_surfaces_are_wired() -> None:
+    html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (UI_ROOT / "scripts/features/context-lineage-control-plane.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'id="context-products-view"' in html
+    assert 'id="unified-lineage-view"' in html
+    assert 'id="context-product-form"' in html
+    assert "unified-lineage/impact" in script
+    assert "deny_on_critical_incident" in script

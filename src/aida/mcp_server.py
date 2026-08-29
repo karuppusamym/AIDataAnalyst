@@ -48,6 +48,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Request
@@ -64,10 +65,15 @@ from aida.agent_orchestrator import (
 )
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
+from aida.context_product_policy import (
+    ContextProductQualityDecision,
+    evaluate_context_product_quality_from_db,
+)
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
     ContextProduct,
+    ContextProductConsumptionEdge,
     ContextProductVersion,
     DataSource,
     GovernedTool,
@@ -77,7 +83,14 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
 )
+from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
+from aida.unified_lineage_api import (
+    UNIFIED_LINEAGE_READER_ROLES,
+    LineageNodeNotFoundError,
+    build_unified_lineage_graph_payload,
+    build_unified_lineage_impact_payload,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -103,6 +116,78 @@ _ERR_NOT_FOUND = -32002
 # ---------------------------------------------------------------------------
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
+
+
+# ---------------------------------------------------------------------------
+# Native platform tools (not GovernedToolVersion-backed)
+# ---------------------------------------------------------------------------
+# CP-6 / EE.10 ("Lineage MCP"): Collibra's MCP server exposes upstream/
+# downstream lineage and impact as callable tools, not only as a REST API.
+# These wrap the exact same unified-lineage payload builders the REST routes
+# in `unified_lineage_api.py` use (EA.14), so the graph an agent gets here is
+# never allowed to drift from the one a human gets in the product. They are
+# read-only and value-free: table/column/dbt-resource names only, never row
+# values -- the same guarantee `resources/read` gives.
+#
+# Native lineage reads emit the same audit/outbox evidence as other MCP reads.
+
+NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "slug": "get_lineage_graph",
+        "description": (
+            "Return the unified lineage graph for a datasource: declared foreign keys, "
+            "approved/candidate relationship suggestions, dbt manifest dependencies, and "
+            "OpenLineage table edges merged into one node/edge set. Read-only and "
+            "value-free -- table, column, and dbt-resource names only, never row values."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource_id": {"type": "string", "description": "Datasource UUID"},
+                "node_limit": {
+                    "type": "integer",
+                    "description": "Max nodes to return, 5-2000 (default 300)",
+                },
+                "edge_limit": {
+                    "type": "integer",
+                    "description": "Max edges to return, 5-10000 (default 1500)",
+                },
+            },
+            "required": ["datasource_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "slug": "get_lineage_impact",
+        "description": (
+            "Compute transitive upstream and downstream lineage impact for one node -- a "
+            "table, an unmatched dbt model/source, or an unresolved OpenLineage dataset -- "
+            "across the unified lineage graph. Bounded multi-hop traversal, not a "
+            "direct-reference count: answers 'what would break, N hops out, if this "
+            "changed'."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource_id": {"type": "string", "description": "Datasource UUID"},
+                "node_id": {
+                    "type": "string",
+                    "description": (
+                        "A node id from get_lineage_graph: a table UUID, or a synthetic id "
+                        "such as 'dbt:<uuid>' or 'openlineage:<namespace>:<name>'"
+                    ),
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Max traversal hops, 1-8 (default 5)",
+                },
+            },
+            "required": ["datasource_id", "node_id"],
+            "additionalProperties": False,
+        },
+    },
+]
+NATIVE_LINEAGE_TOOL_SLUGS = frozenset(item["slug"] for item in NATIVE_LINEAGE_TOOL_DEFINITIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +224,64 @@ def _tool_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> 
     return not roles.isdisjoint(allowed_roles)
 
 
-def _context_product_role_eligible(
-    roles: frozenset[str], allowed_roles: Sequence[str]
-) -> bool:
+def _context_product_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> bool:
     """Apply the same fail-closed role binding used by governed tools."""
     return _tool_role_eligible(roles, allowed_roles)
+
+
+def _parse_context_product_uri(uri: str) -> tuple[str, int] | None:
+    prefix = "atlas://context-products/"
+    if not uri.startswith(prefix):
+        return None
+    parts = uri.removeprefix(prefix).split("/")
+    if len(parts) != 3 or parts[1] != "versions":
+        return None
+    try:
+        version_number = int(parts[2])
+    except ValueError:
+        return None
+    if not parts[0] or version_number < 1:
+        return None
+    return parts[0], version_number
+
+
+async def _resolve_context_product_scope(
+    uri: str,
+    session: AsyncSession,
+    context: SecurityContext,
+) -> tuple[ContextProductVersion, ContextProduct, ContextProductQualityDecision] | None:
+    parsed = _parse_context_product_uri(uri)
+    if parsed is None:
+        return None
+    product_key, version_number = parsed
+    row = (
+        await session.execute(
+            select(ContextProductVersion, ContextProduct)
+            .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+            .where(
+                ContextProductVersion.organization_id == context.organization_id,
+                ContextProduct.organization_id == context.organization_id,
+                ContextProduct.product_key == product_key,
+                ContextProduct.lifecycle_status == "ACTIVE",
+                ContextProductVersion.version == version_number,
+                ContextProductVersion.status == "PUBLISHED",
+            )
+        )
+    ).first()
+    if row is None:
+        return None
+    product_version, product = row
+    if not _context_product_role_eligible(context.roles, product_version.allowed_consumer_roles):
+        return None
+    quality = await evaluate_context_product_quality_from_db(
+        session,
+        organization_id=product_version.organization_id,
+        table_id_values=product_version.table_ids,
+        requirements=product_version.quality_requirements,
+    )
+    if not quality.allowed:
+        return None
+    return product_version, product, quality
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +313,7 @@ def _handle_initialize(params: dict[str, Any]) -> dict[str, Any]:
 async def _handle_tools_list(
     session: AsyncSession,
     context: SecurityContext,
+    params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Return all PUBLISHED governed tools visible to the caller's organization.
@@ -184,6 +323,19 @@ async def _handle_tools_list(
       - description: tool description + governance attestation
       - inputSchema: JSON Schema derived from parameter_schema
     """
+    context_uri = str((params or {}).get("contextProductUri") or "")
+    scoped_product = (
+        await _resolve_context_product_scope(context_uri, session, context)
+        if context_uri
+        else None
+    )
+    if context_uri and scoped_product is None:
+        return {"tools": []}
+    eligible_version_ids = (
+        {UUID(value) for value in scoped_product[0].eligible_tool_version_ids}
+        if scoped_product is not None
+        else None
+    )
     rows = (
         await session.execute(
             select(GovernedToolVersion, GovernedTool)
@@ -211,6 +363,8 @@ async def _handle_tools_list(
         # policy filtering happens before the candidate set is built, not
         # after.
         if not _tool_role_eligible(context.roles, version.allowed_roles):
+            continue
+        if eligible_version_ids is not None and version.id not in eligible_version_ids:
             continue
 
         # Build JSON Schema from parameter_schema
@@ -253,7 +407,138 @@ async def _handle_tools_list(
             }
         )
 
+    # Native platform tools (CP-6 / EE.10): eligible-tool exposure applies
+    # here exactly as it does above -- a caller whose roles are not bound to
+    # read lineage never sees these tools offered, mirroring the governed-
+    # tool role gate rather than introducing a second exposure rule.
+    if eligible_version_ids is None and context.roles & set(UNIFIED_LINEAGE_READER_ROLES):
+        for native in NATIVE_LINEAGE_TOOL_DEFINITIONS:
+            tools.append(
+                {
+                    "name": f"atlas__{native['slug']}",
+                    "description": native["description"],
+                    "inputSchema": native["inputSchema"],
+                    "_atlas_meta": {"kind": "NATIVE_PLATFORM_TOOL"},
+                }
+            )
+
     return {"tools": tools}
+
+
+async def _handle_native_lineage_tool_call(
+    slug: str,
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    correlation_id: str = "mcp-lineage",
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Execute one of the native lineage tools (CP-6 / EE.10).
+
+    Same eligibility rule as `_handle_tools_list`, re-checked here because a
+    tool call can arrive without a preceding `tools/list` in the same
+    session; same anti-enumeration shape as the governed-tool path (an
+    ineligible or unresolvable request gets the same wording either way, so
+    role eligibility is never distinguishable from a bad datasource id).
+    """
+
+    if not (context.roles & set(UNIFIED_LINEAGE_READER_ROLES)):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
+    raw_datasource_id = arguments.get("datasource_id")
+    try:
+        datasource_id = UUID(str(raw_datasource_id))
+    except (TypeError, ValueError):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "datasource_id must be a UUID."}],
+        }
+
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None or datasource.organization_id != context.organization_id:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Datasource not accessible."}],
+        }
+
+    payload: UnifiedLineageGraphRead | UnifiedLineageImpactRead
+    try:
+        if slug == "get_lineage_graph":
+            node_limit = min(max(int(arguments.get("node_limit", 300)), 5), 2_000)
+            edge_limit = min(max(int(arguments.get("edge_limit", 1_500)), 5), 10_000)
+            payload = await build_unified_lineage_graph_payload(
+                session,
+                datasource,
+                node_limit=node_limit,
+                edge_limit=edge_limit,
+                suggestion_status="APPROVED",
+                settings=settings,
+            )
+        else:
+            node_id = str(arguments.get("node_id") or "")
+            if not node_id:
+                return {
+                    "isError": True,
+                    "content": [{"type": "text", "text": "node_id is required."}],
+                }
+            depth = min(max(int(arguments.get("depth", 5)), 1), 8)
+            payload = await build_unified_lineage_impact_payload(
+                session,
+                datasource,
+                node_id,
+                depth=depth,
+                node_limit=200,
+                settings=settings,
+            )
+    except LineageNodeNotFoundError as exc:
+        return {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
+    except (TypeError, ValueError) as exc:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Invalid arguments: {exc}"}],
+        }
+
+    body = payload.model_dump(mode="json")
+    record_audit(
+        session,
+        context,
+        action="mcp.lineage.read",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={"tool_slug": slug, "value_free": True},
+    )
+    record_outbox(
+        session,
+        organization_id=context.organization_id,
+        aggregate_type="datasource",
+        aggregate_id=str(datasource.id),
+        event_type="lineage.consumed.v1",
+        payload={
+            "tool_slug": slug,
+            "principal_id": context.principal_id,
+            "channel": "MCP",
+        },
+    )
+    await session.commit()
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "\u2705 Unified lineage read (value-free: table/column names only, "
+                    "no row values).\n"
+                    f"- Tool: `atlas__{slug}`\n"
+                    f"- Datasource: `{datasource.id}`"
+                ),
+            },
+            {"type": "text", "text": f"```json\n{json.dumps(body, indent=2, default=str)}\n```"},
+        ]
+    }
 
 
 async def _handle_tools_call(
@@ -295,6 +580,29 @@ async def _handle_tools_call(
         }
 
     slug = tool_name.removeprefix("atlas__")
+    context_uri = str(params.get("contextProductUri") or "")
+    scoped_product = (
+        await _resolve_context_product_scope(context_uri, session, context)
+        if context_uri
+        else None
+    )
+    if context_uri and scoped_product is None:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
+    if slug in NATIVE_LINEAGE_TOOL_SLUGS:
+        if scoped_product is not None:
+            return {
+                "isError": True,
+                "content": [
+                    {"type": "text", "text": f"Tool '{slug}' not found or not published."}
+                ],
+            }
+        return await _handle_native_lineage_tool_call(
+            slug, arguments, session, context, correlation_id, settings
+        )
 
     # Resolve tool version
     row = (
@@ -318,6 +626,15 @@ async def _handle_tools_call(
         }
 
     version, tool = row
+    if scoped_product is not None:
+        eligible_ids = {UUID(value) for value in scoped_product[0].eligible_tool_version_ids}
+        if version.id not in eligible_ids:
+            return {
+                "isError": True,
+                "content": [
+                    {"type": "text", "text": f"Tool '{slug}' not found or not published."}
+                ],
+            }
 
     # Role-binding enforcement (CX-5, mirrors tool_api.py execute_tool).
     # A caller whose roles do not intersect the tool's allowed_roles gets
@@ -425,6 +742,36 @@ async def _handle_tools_call(
         }
     )
 
+    if scoped_product is not None:
+        product_version, product, quality_decision = scoped_product
+        session.add(
+            ContextProductConsumptionEdge(
+                organization_id=context.organization_id,
+                context_product_version_id=product_version.id,
+                principal_id=context.principal_id,
+                principal_type=context.principal_type,
+                channel="MCP_TOOL",
+                correlation_id=correlation_id,
+                product_fingerprint=product_version.fingerprint,
+                policy_decision="ALLOW",
+                quality_snapshot=quality_decision.snapshot(),
+            )
+        )
+        record_outbox(
+            session,
+            organization_id=context.organization_id,
+            aggregate_type="context_product_version",
+            aggregate_id=str(product_version.id),
+            event_type="context.product_tool_consumed.v1",
+            payload={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "tool_version_id": str(version.id),
+                "principal_id": context.principal_id,
+            },
+        )
+        await session.commit()
+
     return {"content": content}
 
 
@@ -485,15 +832,12 @@ async def _handle_resources_list(
         )
     ).all()
     for version, product in product_rows:
-        if not _context_product_role_eligible(
-            context.roles, version.allowed_consumer_roles
-        ):
+        if not _context_product_role_eligible(context.roles, version.allowed_consumer_roles):
             continue
         resources.append(
             {
                 "uri": (
-                    f"atlas://context-products/{product.product_key}/versions/"
-                    f"{version.version}"
+                    f"atlas://context-products/{product.product_key}/versions/{version.version}"
                 ),
                 "name": f"{version.name} v{version.version}",
                 "description": (
@@ -522,9 +866,7 @@ async def _handle_resources_read(
     """
     uri: str = params.get("uri", "")
     if uri.startswith("atlas://context-products/"):
-        return await _read_context_product_resource(
-            uri, session, context, correlation_id
-        )
+        return await _read_context_product_resource(uri, session, context, correlation_id)
     if not uri.startswith("atlas://catalog/"):
         return {"contents": [{"uri": uri, "text": "Unknown resource URI scheme."}]}
 
@@ -611,9 +953,7 @@ async def _read_context_product_resource(
     correlation_id: str,
 ) -> dict[str, Any]:
     """Return a published, version-pinned, value-free Context Product."""
-    inaccessible = {
-        "contents": [{"uri": uri, "text": "Resource not found or not accessible."}]
-    }
+    inaccessible = {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
     parts = uri.removeprefix("atlas://context-products/").split("/")
     if len(parts) != 3 or parts[1] != "versions":
         return {"contents": [{"uri": uri, "text": "Malformed resource URI."}]}
@@ -643,9 +983,7 @@ async def _read_context_product_resource(
         return inaccessible
 
     product_version, product = row
-    if not _context_product_role_eligible(
-        context.roles, product_version.allowed_consumer_roles
-    ):
+    if not _context_product_role_eligible(context.roles, product_version.allowed_consumer_roles):
         record_audit(
             session,
             context,
@@ -676,6 +1014,43 @@ async def _read_context_product_resource(
         await session.commit()
         return inaccessible
 
+    quality_decision = await evaluate_context_product_quality_from_db(
+        session,
+        organization_id=product_version.organization_id,
+        table_id_values=product_version.table_ids,
+        requirements=product_version.quality_requirements,
+    )
+    if not quality_decision.allowed:
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.quality_denied",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "quality": quality_decision.snapshot(),
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=context.organization_id,
+            aggregate_type="context_product_version",
+            aggregate_id=str(product_version.id),
+            event_type="context.product_consumption_denied.v1",
+            payload={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "principal_id": context.principal_id,
+                "reasons": list(quality_decision.reasons),
+            },
+        )
+        await session.commit()
+        return inaccessible
+
     payload = {
         "product_key": product.product_key,
         "version": product_version.version,
@@ -693,6 +1068,7 @@ async def _read_context_product_resource(
         "allowed_consumer_roles": product_version.allowed_consumer_roles,
         "lineage_depth": product_version.lineage_depth,
         "quality_requirements": product_version.quality_requirements,
+        "quality_evaluation": quality_decision.snapshot(),
         "policy_summary": product_version.policy_summary,
         "_governance": {
             "status": product_version.status,
@@ -729,6 +1105,19 @@ async def _read_context_product_resource(
             "fingerprint": product_version.fingerprint,
             "principal_id": context.principal_id,
         },
+    )
+    session.add(
+        ContextProductConsumptionEdge(
+            organization_id=context.organization_id,
+            context_product_version_id=product_version.id,
+            principal_id=context.principal_id,
+            principal_type=context.principal_type,
+            channel="MCP",
+            correlation_id=correlation_id,
+            product_fingerprint=product_version.fingerprint,
+            policy_decision="ALLOW",
+            quality_snapshot=quality_decision.snapshot(),
+        )
     )
     await session.commit()
     return {
@@ -806,7 +1195,7 @@ async def mcp_endpoint(
             result = {}
 
         elif method == "tools/list":
-            result = await _handle_tools_list(session, context)
+            result = await _handle_tools_list(session, context, params)
 
         elif method == "tools/call":
             result = await _handle_tools_call(params, session, context, settings, correlation_id)
@@ -815,9 +1204,7 @@ async def mcp_endpoint(
             result = await _handle_resources_list(session, context)
 
         elif method == "resources/read":
-            result = await _handle_resources_read(
-                params, session, context, correlation_id
-            )
+            result = await _handle_resources_read(params, session, context, correlation_id)
 
         else:
             return JSONResponse(

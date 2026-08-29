@@ -33,6 +33,9 @@ class _GovernanceDecisionSession:
     async def get(self, _model: type[object], _identity: object) -> object:
         return self._get_queue.pop(0)
 
+    async def scalar(self, _statement: object) -> object:
+        return self._get_queue.pop(0)
+
     async def execute(self, statement: object) -> None:
         self.executed_statements.append(statement)
         return None

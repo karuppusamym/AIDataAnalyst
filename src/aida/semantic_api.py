@@ -553,7 +553,11 @@ async def decide_governance_review(
     context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReview:
-    review = await session.get(GovernanceReview, review_id)
+    review = await session.scalar(
+        select(GovernanceReview)
+        .where(GovernanceReview.id == review_id)
+        .with_for_update()
+    )
     if review is None:
         raise HTTPException(status_code=404, detail="governance review not found")
     enforce_organization(context, review.organization_id)
@@ -682,9 +686,19 @@ async def decide_governance_review(
             or product_version.organization_id != review.organization_id
         ):
             raise HTTPException(status_code=409, detail="review target is unavailable")
-        if product_version.status != "REVIEW_REQUIRED":
+        if review.requested_action == "DEPRECATE":
+            if product_version.status != "PUBLISHED":
+                raise HTTPException(
+                    status_code=409, detail="context product is no longer published"
+                )
+            if body.decision == "APPROVE":
+                product_version.status = "DEPRECATED"
+                event_type = "context.product_deprecated.v1"
+            else:
+                event_type = "context.product_deprecation_rejected.v1"
+        elif product_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="context product is no longer pending")
-        if body.decision == "APPROVE":
+        elif body.decision == "APPROVE":
             await session.execute(
                 update(ContextProductVersion)
                 .where(
@@ -899,5 +913,11 @@ async def decide_governance_review(
         event_type=event_type,
         payload=payload,
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="governance decision conflicted with concurrent state"
+        ) from exc
     return review

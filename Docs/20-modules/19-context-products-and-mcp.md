@@ -130,29 +130,31 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 
 ## 13. Current state → target
 
-**Partially built, and previously under-reported.** `src/aida/mcp_server.py` implements a real JSON-RPC 2.0 MCP endpoint (`POST /mcp`, mounted in `src/aida/main.py`) with `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`. Tool calls do **not** bypass the gateway: `tools/call` runs through the same `GovernedAgentOrchestrator` → `QueryExecutionGateway` path as the native analyst (prompt-risk screening, AST guard, cost check, masking, audit). `tools/list` and `tools/call` now also enforce the tool's `allowed_roles` binding — an MCP caller is offered, and may invoke, only the governed tools its identity is bound to, mirroring the native `POST /v1/tool-versions/{id}/execute` check; an ineligible tool is denied with the same "not found or not published" response used for a genuinely-absent tool, so eligibility is never revealed as a distinguishable side channel. What is still missing is everything the *context product* abstraction itself was meant to provide: there is no `ContextProduct` concept anywhere in the codebase (no model, no versioning, no maker-checker, no scope/purpose curation) — the MCP server exposes raw catalog metadata and governed tools directly, not a reviewed, owned, versioned package. `resources/list` and `resources/read` (metadata reads) are not recorded as consumption/lineage evidence the way tool calls are. The server advertises a `"prompts": {}` capability in `initialize` but implements no `prompts/list` or `prompts/get` handler. There is no per-consumer rate limiting or budget enforcement. This file had previously reported the entire module as unbuilt; that was inaccurate — verify against the code, not this table, before re-scoping work here.
+**Implemented foundation.** `src/aida/mcp_server.py` provides a JSON-RPC 2.0 endpoint (`POST /mcp`, mounted in `src/aida/main.py`) with `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`. Tool calls do **not** bypass the gateway: `tools/call` runs through the same `GovernedAgentOrchestrator` → `QueryExecutionGateway` path as the native analyst (prompt-risk screening, AST guard, cost check, masking, and audit). Role eligibility uses anti-enumeration denials. Published Context Products add immutable, maker-checker-approved resource packages, quality-gated reads, exact eligible-tool scoping, and persisted consumption evidence for REST and MCP consumers. Generic catalog resource reads still lack consumption-lineage edges. The server advertises a `"prompts": {}` capability but does not yet implement `prompts/list` or `prompts/get`, and per-consumer rate limits and budgets remain open.
 
 | Aspect | Now | Target |
 |---|---|---|
 | MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`, mounted; tool calls route through the full governed gateway | Add MCP `prompts/*` (capability is advertised but unimplemented) |
-| Context products | Not implemented — no `ContextProduct` model, versioning, or maker-checker; MCP exposes raw catalog/tools instead | P0 |
-| Per-read policy | Partial — tenancy-scoped on every read/list; tool eligibility now enforced by role binding | ABAC / purpose-based evaluation once module 17 has it natively |
-| Consumption lineage | Partial — tool calls get the same audit/evidence trail as native runs; resource reads (`resources/list`/`read`) are not recorded at all | P0 |
-| Eligible tools exposure | **Implemented** — `tools/list` only returns role-eligible tools; an ineligible `tools/call` is denied without confirming the tool's existence | Extend to a real `ContextProduct.eligible_tools` once CX-2 exists |
+| Context products | **Implemented** — immutable versions, maker-checker publication/deprecation, REST/MCP reads, quality policy, UI | Add compiler and marketplace increments |
+| Per-read policy | Partial — tenancy, role, lifecycle, exact product scope, and quality gates are enforced | Add purpose-based ABAC once module 17 has it natively |
+| Consumption lineage | Partial — Context Product REST/MCP reads and product-scoped tool calls persist immutable edges; generic catalog and native-lineage reads retain audit/outbox evidence only | Extend edge capture to every MCP read |
+| Eligible tools exposure | **Implemented** — product-scoped discovery and invocation expose only approved tool-version identifiers and preserve anti-enumeration denials | Add fuzzy resolution without weakening exact authorization |
 | Consumer budgets | Not implemented | P1 |
 
 ## 14. Open work
 
 | ID | Item | Priority |
 |---|---|---|
-| CX-1 | MCP server with resource and tool surfaces | P0 |
-| CX-2 | Context product definition, versioning, maker-checker | P0 |
-| CX-3 | Per-read policy evaluation | P0 |
-| CX-4 | Consumption recorded as lineage | P0 |
-| CX-5 | Eligible-tool exposure and governed invocation | P0 |
+| CX-1 | MCP server with resource and tool surfaces | P0 -- **native lineage tools delivered 2026-08-29** (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`); governed-SQL-tool and context-product surfaces already implemented |
+| CX-2 | Context product definition, versioning, maker-checker | **Implemented** -- `context_product_api.py`, `ContextProduct`/`ContextProductVersion` models, `tests/test_context_products.py` |
+| CX-3 | Per-read policy evaluation | **Partial** -- lifecycle, roles, exact scope, quality score, and critical-incident gates implemented; purpose ABAC remains |
+| CX-4 | Consumption recorded as lineage | **Partial** -- Context Product reads and product-scoped tool calls implemented; generic resources and native-lineage reads remain |
+| CX-5 | Eligible-tool exposure and governed invocation | **Implemented** -- Context Product scope and native lineage tools preserve anti-enumeration behavior |
 | CX-6 | Per-consumer rate limits and budgets | P1 |
 | CX-7 | Workload identity for MCP consumers | P0 |
 | CX-8 | BI-surface context injection (Tableau, Power BI, Looker) | P1 |
+| MCP-2 | MCP write operations (asset create/edit, classification match add/remove, glossary term proposals) -- Collibra ships this, we only expose reads and governed SQL execution | P1 |
+| MCP-3 | Fuzzy entity resolution for MCP tool arguments (e.g. resolve "customers" to a table id) | P1 |
 
 ## 15. Enterprise AI control-plane expansion
 
@@ -202,7 +204,7 @@ DRAFT -> REVIEW_REQUIRED -> PUBLISHED -> SUPERSEDED
   |             |
   +-> REJECTED <-+
 
-PUBLISHED -> DEPRECATION_REVIEW -> DEPRECATED
+PUBLISHED -> pending DEPRECATE review -> DEPRECATED
 ```
 
 - A stable `context_product` identity owns a sequence of immutable
@@ -242,11 +244,29 @@ versions before submission. Wildcard estate scope is not permitted.
 
 | Slice | Scope | Exit condition | Status |
 |---|---|---|---|
-| CP-S1 | Context product identity, immutable versions, validation, maker-checker, REST API, audit, outbox | A product can be created, submitted, independently approved, listed, and read with tenant isolation | Backend implemented; database integration proof pending |
-| CP-S2 | Published context products as MCP resources; role eligibility and consumption evidence | External agents consume only eligible published products and every read is audited | **Backend implemented** |
-| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | Planned |
+| CP-S1 | Context product identity, immutable versions, validation, maker-checker, REST API, audit, outbox | A product can be created, submitted, independently approved, listed, and read with tenant isolation | **Implemented and hardened; live PostgreSQL integration proof pending** |
+| CP-S2 | Published context products as MCP resources; role eligibility and consumption evidence | External agents consume only eligible published products and every read is audited | **Implemented** |
+| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | **Partial: graph and impact MCP tools implemented; fuzzy resolution and transformation detail remain** |
 | CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | Planned |
 | CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | Planned |
 | CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | Planned |
 | CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | Planned |
 | CP-S8 | Adoption, privacy, workflow, and ecosystem expansion | Portfolio operations are measurable and integrations are certified | Planned |
+
+## 17. Implemented hardening controls (2026-08-29)
+
+- PostgreSQL guarantees at most one `PUBLISHED` version per Context Product through a partial
+  unique index and validates lifecycle/version bounds with check constraints.
+- Role bindings are normalized into `context_product_role_binding`, allowing tenant/role
+  authorization and pagination to execute in SQL instead of scanning every version in memory.
+- Governance decisions lock the review row. Conflicting publication transactions fail with a
+  deterministic `409` rather than publishing two versions.
+- Every REST or MCP product consumption evaluates the approved minimum quality score and
+  active-critical-incident policy. Missing required quality evidence fails closed.
+- Successful consumption persists an immutable `context_product_consumption_edge` in addition
+  to audit and outbox records. Context-scoped MCP tool discovery and invocation expose only the
+  exact governed tool-version identifiers approved by the product.
+- Deprecation uses the same maker-checker queue; a product remains published while the review
+  is pending and becomes unavailable only after approval.
+- The UI provides Context Product authoring/lifecycle controls and a bounded unified-lineage
+  explorer with transitive impact inspection.

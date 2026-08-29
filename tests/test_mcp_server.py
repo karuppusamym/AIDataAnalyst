@@ -20,17 +20,22 @@ from __future__ import annotations
 from typing import Any
 from uuid import uuid4
 
+from aida import mcp_server
 from aida.config import Settings
 from aida.mcp_server import (
     MCP_PROTOCOL_VERSION,
+    NATIVE_LINEAGE_TOOL_SLUGS,
     _err,
     _handle_initialize,
+    _handle_native_lineage_tool_call,
     _handle_tools_call,
     _ok,
     _tool_role_eligible,
 )
-from aida.models import AuditEvent, GovernedTool, GovernedToolVersion
+from aida.models import AuditEvent, DataSource, GovernedTool, GovernedToolVersion
+from aida.schemas import UnifiedLineageGraphRead
 from aida.security import SecurityContext
+from aida.unified_lineage_api import LineageNodeNotFoundError
 
 # ---------------------------------------------------------------------------
 # _tool_role_eligible -- mirrors the native role-binding check in
@@ -255,3 +260,234 @@ async def test_tools_call_reaches_datasource_resolution_when_role_is_eligible() 
     )
 
     assert result["content"] == [{"type": "text", "text": "Datasource not accessible."}]
+
+
+# ---------------------------------------------------------------------------
+# Native lineage tools (CP-6 / EE.10) -- atlas__get_lineage_graph and
+# atlas__get_lineage_impact, wired through _handle_native_lineage_tool_call.
+# These wrap unified_lineage_api.build_unified_lineage_*_payload, which do
+# real ORM queries; rather than stand up a database (this suite's
+# established convention avoids that -- see the module docstring), success
+# paths monkeypatch the payload builders and only exercise this function's
+# own decision logic: role gating, argument parsing, and datasource scoping.
+# ---------------------------------------------------------------------------
+
+
+class LineageToolSession:
+    """Fake session: only `.get()` is used by _handle_native_lineage_tool_call
+    itself (the payload builders are monkeypatched in success-path tests, so
+    they never see this session)."""
+
+    def __init__(self, datasource: object) -> None:
+        self.datasource = datasource
+        self.added: list[object] = []
+        self.committed = False
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        return self.datasource
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def test_native_lineage_tool_slugs_match_declared_definitions() -> None:
+    assert NATIVE_LINEAGE_TOOL_SLUGS == {"get_lineage_graph", "get_lineage_impact"}
+
+
+async def test_native_lineage_tool_denies_ineligible_caller_like_an_unknown_tool() -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),  # disjoint from UNIFIED_LINEAGE_READER_ROLES
+    )
+    session = LineageToolSession(None)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_graph",
+        {"datasource_id": str(uuid4())},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result["isError"] is True
+    assert result["content"] == [
+        {"type": "text", "text": "Tool 'get_lineage_graph' not found or not published."}
+    ]
+
+
+async def test_native_lineage_tool_rejects_a_non_uuid_datasource_id() -> None:
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset({"Analyst"}),
+    )
+    session = LineageToolSession(None)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_graph",
+        {"datasource_id": "not-a-uuid"},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "datasource_id must be a UUID."}],
+    }
+
+
+async def test_native_lineage_tool_rejects_a_datasource_in_another_organization() -> None:
+    caller_org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=caller_org,
+        roles=frozenset({"Analyst"}),
+    )
+    foreign_datasource = DataSource(
+        id=uuid4(),
+        organization_id=uuid4(),  # different org
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="someone else's warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(foreign_datasource)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_graph",
+        {"datasource_id": str(foreign_datasource.id)},
+        session,  # type: ignore[arg-type]
+        caller,
+    )
+
+    assert result["content"] == [{"type": "text", "text": "Datasource not accessible."}]
+
+
+async def test_native_lineage_tool_requires_node_id_for_impact() -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_impact",
+        {"datasource_id": str(datasource.id)},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "node_id is required."}],
+    }
+
+
+async def test_native_lineage_tool_get_lineage_graph_returns_the_payload_as_json(
+    monkeypatch: object,
+) -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+    canned = UnifiedLineageGraphRead(
+        datasource_id=datasource.id,
+        nodes=[],
+        edges=[],
+        counts_by_source={
+            "FOREIGN_KEY": 0,
+            "SUGGESTED_RELATIONSHIP": 0,
+            "DBT_DEPENDENCY": 0,
+            "OPENLINEAGE_ETL": 0,
+        },
+        returned_node_count=0,
+        returned_edge_count=0,
+        node_limit=300,
+        edge_limit=1_500,
+        truncated=False,
+    )
+
+    async def _fake_builder(*_args: object, **_kwargs: object) -> UnifiedLineageGraphRead:
+        return canned
+
+    monkeypatch.setattr(mcp_server, "build_unified_lineage_graph_payload", _fake_builder)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_graph",
+        {"datasource_id": str(datasource.id)},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result["content"][0]["text"].startswith("\u2705 Unified lineage read")
+    assert str(datasource.id) in result["content"][1]["text"]
+    assert '"returned_node_count": 0' in result["content"][1]["text"]
+
+
+async def test_native_lineage_tool_get_lineage_impact_surfaces_node_not_found(
+    monkeypatch: object,
+) -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    async def _fake_builder(*_args: object, **_kwargs: object) -> None:
+        raise LineageNodeNotFoundError("lineage node 'bogus' not found in this datasource's graph")
+
+    monkeypatch.setattr(mcp_server, "build_unified_lineage_impact_payload", _fake_builder)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_lineage_impact",
+        {"datasource_id": str(datasource.id), "node_id": "bogus"},
+        session,  # type: ignore[arg-type]
+        caller,
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [
+            {"type": "text", "text": "lineage node 'bogus' not found in this datasource's graph"}
+        ],
+    }
