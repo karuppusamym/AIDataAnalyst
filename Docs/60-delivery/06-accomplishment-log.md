@@ -743,3 +743,31 @@ features in this list were subsequently closed by R35 below; shared-history clea
 - The remaining open items are still dedicated-environment gates rather than local code-path
   gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
   operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — AI registry dependency graph UI completion
+
+### Completed
+
+- Extended the `ai-registry` portal view to render governed AI dependency topology using the
+  shared graph engine already used by Knowledge Graph and Unified Lineage.
+- Added operator actions for dependency inspection and retirement requests directly from the AI
+  asset portfolio table, reusing the existing `/ai-asset-versions/{version_id}/dependencies`
+  and `/ai-assets/{asset_id}/retire` API paths.
+- Added a value-free side panel that shows the selected asset or dependency node's status,
+  owner, provider, dependency counts, and approved references without exposing prompts or source
+  values.
+
+### Verification evidence
+
+- Repo-wide gates remained green on Saturday, August 29, 2026 after the UI change:
+  `python -m pytest -q`, `python -m ruff check .`, and `python -m mypy src`.
+- The full local verifier passed again on Saturday, August 29, 2026 with `status = PASS`,
+  `ui_status = HEALTHY`, and `ui_url = http://localhost:3000`, preserving the same end-to-end
+  workflow evidence for Context Products, marketplace access, AI registry/trust, and portfolio
+  analytics.
+
+### Current limitations
+
+- The remaining open items are still dedicated-environment gates rather than local code-path
+  gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.

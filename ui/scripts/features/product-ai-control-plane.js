@@ -1,7 +1,17 @@
 /* Data-product marketplace, contracts, AI registry, assessments, and trust factors. */
 (function initializeProductAiControlPlane() {
   const { state, $, setHtml, esc, when, human, badge, empty, api, selectOptions, preserveSelect } = window.AtlasUI;
-  const feature = { products: [], contracts: [], marketplace: [], access: [], aiAssets: [] };
+  const feature = {
+    products: [],
+    contracts: [],
+    marketplace: [],
+    access: [],
+    aiAssets: [],
+    aiGraph: null,
+    aiGraphEngine: null,
+    aiSelectedAsset: null,
+    aiSelectedNodeId: null,
+  };
   const split = value => String(value || "").split(",").map(item => item.trim()).filter(Boolean);
 
   function message(target, text, kind="neutral") {
@@ -122,9 +132,175 @@
     } catch (error) { message("marketplace-message", error.message, "error"); }
   }
 
+  function aiNodeHtml(data, meta) {
+    const classes = ["atlas-node-card", "compact"];
+    if (meta.selected) classes.push("is-selected");
+    if (data.is_root) classes.push("is-focus");
+    if (data.agMatch) classes.push("is-match");
+    if (data.agDim) classes.push("is-dim");
+    const kindClass = String(data.kind || "").toLowerCase().replace(/_/g, "-");
+    classes.push(`type-${kindClass}`);
+    return `<div class="${classes.join(" ")}" data-ai-dependency-node="${esc(data.id)}" tabindex="0" role="button" aria-label="Inspect ${esc(data.label || data.reference || data.id)}">`
+      + `<div class="ag-card-head"><span class="ag-type-tag">${esc(human(data.kind || "dependency"))}</span>${data.is_root ? '<span class="ag-pill matched">Selected</span>' : ""}</div>`
+      + `<span class="ag-title">${esc(data.label || data.reference || data.id)}</span>`
+      + `<span class="ag-sub">${esc(data.reference || data.status || "Governed dependency")}</span>`
+      + `</div>`;
+  }
+
+  function resetAiDependencyView() {
+    feature.aiGraph = null;
+    feature.aiSelectedAsset = null;
+    feature.aiSelectedNodeId = null;
+    if (feature.aiGraphEngine) {
+      try { feature.aiGraphEngine.destroy(); } catch (error) { /* detached instance */ }
+      feature.aiGraphEngine = null;
+    }
+    setHtml("ai-dependency-canvas", empty("Select an AI asset", "Dependency topology will appear here."));
+    setHtml("ai-dependency-detail", empty("Select an AI asset", "Version facts, dependency counts, and governance-safe references will appear here."));
+  }
+
+  function renderAiDependencyDetail(nodeId) {
+    const node = feature.aiGraph?.nodes?.find(item => item.id === nodeId);
+    if (!node) {
+      setHtml("ai-dependency-detail", empty("Dependency unavailable", "Select another asset or refresh the registry."));
+      return;
+    }
+    feature.aiSelectedNodeId = nodeId;
+    feature.aiGraphEngine?.select(nodeId);
+    const selectedAsset = feature.aiSelectedAsset;
+    const incoming = feature.aiGraph.edges.filter(edge => edge.target === nodeId).length;
+    const outgoing = feature.aiGraph.edges.filter(edge => edge.source === nodeId).length;
+    const chips = [];
+    if (node.kind === "POLICY_CONTROL") chips.push(`<span class="ai-chip">${esc(node.reference || "policy control")}</span>`);
+    if (node.kind === "MODEL_ROUTE") chips.push(`<span class="ai-chip">Approved route reference</span>`);
+    if (node.kind === "CONTEXT_PRODUCT_VERSION") chips.push(`<span class="ai-chip">Published context dependency</span>`);
+    if (node.is_root && selectedAsset) {
+      selectedAsset.policy_control_ids.forEach(item => chips.push(`<span class="ai-chip">${esc(item)}</span>`));
+    }
+    const narrative = node.is_root && selectedAsset
+      ? `<p>${esc(selectedAsset.description)}</p><p class="form-note spaced">${esc(selectedAsset.intended_use)}</p>`
+      : `<p>${esc(node.reference || "Value-free governed dependency reference.")}</p>`;
+    const facts = node.is_root && selectedAsset
+      ? [
+          ["Status", badge(selectedAsset.status)],
+          ["Risk tier", badge(selectedAsset.risk_tier)],
+          ["Provider", esc(selectedAsset.provider_type)],
+          ["Owner", esc(selectedAsset.owner_principal)],
+          ["Dependencies", String(feature.aiGraph.edges.length)],
+          ["Updated", esc(when(selectedAsset.updated_at))],
+        ]
+      : [
+          ["Kind", esc(human(node.kind || "dependency"))],
+          ["Inbound", String(incoming)],
+          ["Outbound", String(outgoing)],
+          ["Reference", esc(node.reference || node.id)],
+        ];
+    setHtml(
+      "ai-dependency-detail",
+      `<div class="panel-heading"><div><p class="eyebrow">DEPENDENCY EVIDENCE</p><h2>${esc(node.label || node.reference || node.id)}</h2></div>${node.is_root && selectedAsset ? badge(selectedAsset.asset_kind) : badge(node.kind || "DEPENDENCY")}</div>`
+      + `${narrative}`
+      + `<div class="ai-dependency-facts">${facts.map(([label, value]) => `<div><span>${label}</span><strong>${value}</strong></div>`).join("")}</div>`
+      + (chips.length ? `<div class="ai-chip-list">${chips.join("")}</div>` : "")
+      + (node.is_root && selectedAsset?.documentation_url ? `<p class="form-note spaced">Documentation: <a href="${esc(selectedAsset.documentation_url)}" target="_blank" rel="noreferrer">${esc(selectedAsset.documentation_url)}</a></p>` : ""),
+    );
+  }
+
+  function renderAiDependencyGraph() {
+    const graph = feature.aiGraph;
+    if (!graph?.nodes?.length) return resetAiDependencyView();
+    setHtml("ai-dependency-canvas", '<div class="lineage-summary" id="ai-dependency-summary"></div><div id="ai-dependency-stage"></div>');
+    setHtml(
+      "ai-dependency-summary",
+      `<span>${graph.nodes.length} nodes</span><span>${graph.edges.length} edges</span><span>Value-free dependency evidence</span>`,
+    );
+    feature.aiGraphEngine = window.AtlasUI.AtlasGraph.mount(
+      "ai-dependency-stage",
+      {
+        direction: "LR",
+        nodeSep: 30,
+        rankSep: 120,
+        nodeHtml: aiNodeHtml,
+        matchNode: (data, q) => `${data.label || ""} ${data.reference || ""} ${data.kind || ""}`.toLowerCase().includes(q),
+        onNodeExpand: data => renderAiDependencyDetail(data.id),
+      },
+      feature,
+      "aiGraphEngine",
+    );
+    if (!feature.aiGraphEngine) return;
+    const nodes = graph.nodes.map(node => ({
+      id: node.id,
+      w: node.is_root ? 168 : 150,
+      h: 68,
+      data: {
+        id: node.id,
+        label: node.label,
+        kind: node.kind,
+        reference: node.reference,
+        status: node.status,
+        is_root: Boolean(node.is_root),
+      },
+    }));
+    const edges = graph.edges.map((edge, index) => ({
+      id: `ai-dependency-${index}`,
+      source: edge.source,
+      target: edge.target,
+      classes: "declared",
+      data: { relationship: edge.relationship },
+    }));
+    feature.aiGraphEngine.setData(nodes, edges, {
+      emptyHtml: empty("No dependency graph", "This AI asset version has no governed dependencies."),
+      selectId: feature.aiSelectedNodeId,
+    });
+  }
+
+  async function loadAiDependencyGraph(versionId) {
+    const selected = feature.aiAssets.find(item => item.id === versionId);
+    if (!selected) return message("ai-registry-message", "AI asset version is no longer available.", "error");
+    feature.aiSelectedAsset = selected;
+    feature.aiSelectedNodeId = String(versionId);
+    message("ai-registry-message", "Loading governed dependency graph...");
+    try {
+      const graph = await api(`/v1/ai-asset-versions/${versionId}/dependencies`);
+      feature.aiGraph = {
+        nodes: (graph.nodes || []).map(node => ({
+          ...node,
+          label: node.name || node.reference || node.id,
+          is_root: node.id === String(versionId),
+        })),
+        edges: graph.edges || [],
+      };
+      renderAiDependencyGraph();
+      renderAiDependencyDetail(String(versionId));
+      message("ai-registry-message", "Dependency graph loaded from governed AI registry references.", "success");
+    } catch (error) {
+      message("ai-registry-message", error.message, "error");
+    }
+  }
+
+  async function requestAiRetirement(assetId) {
+    try {
+      await api(`/v1/ai-assets/${assetId}/retire`, { method: "POST" });
+      message("ai-registry-message", "AI asset retirement entered independent review.", "success");
+      await loadAiRegistry();
+    } catch (error) {
+      message("ai-registry-message", error.message, "error");
+    }
+  }
+
   function renderAiAssets() {
-    if (!feature.aiAssets.length) return setHtml("ai-assets-table", empty("No AI assets", "Register an AI use case, model, or agent as an immutable draft."));
-    const rows = feature.aiAssets.map(item => `<tr><td><strong>${esc(item.name)}</strong><span class="secondary-cell">${esc(item.asset_key)} / ${human(item.asset_kind)} v${item.version}</span></td><td>${badge(item.status)}</td><td>${badge(item.risk_tier)}</td><td>${esc(item.owner_principal)}</td><td>${item.policy_control_ids.length}</td><td><button class="button small secondary" data-ai-trust="${item.id}">Trust</button>${item.status === "DRAFT" ? `<button class="button small" data-ai-submit="${item.id}">Submit</button>` : ""}</td></tr>`);
+    if (!feature.aiAssets.length) {
+      resetAiDependencyView();
+      return setHtml("ai-assets-table", empty("No AI assets", "Register an AI use case, model, or agent as an immutable draft."));
+    }
+    const rows = feature.aiAssets.map(item => {
+      const actions = [
+        `<button class="button small secondary" data-ai-graph="${item.id}">Graph</button>`,
+        `<button class="button small secondary" data-ai-trust="${item.id}">Trust</button>`,
+        item.status === "DRAFT" ? `<button class="button small" data-ai-submit="${item.id}">Submit</button>` : "",
+        item.status !== "DRAFT" ? `<button class="button small danger" data-ai-retire="${item.asset_id}">Retire</button>` : "",
+      ].join("");
+      return `<tr><td><strong>${esc(item.name)}</strong><span class="secondary-cell">${esc(item.asset_key)} / ${human(item.asset_kind)} v${item.version}</span></td><td>${badge(item.status)}</td><td>${badge(item.risk_tier)}</td><td>${esc(item.owner_principal)}</td><td>${item.policy_control_ids.length}</td><td>${actions}</td></tr>`;
+    });
     setHtml("ai-assets-table", `<div class="result-scroll"><table class="data-table"><thead><tr><th>AI asset</th><th>Status</th><th>Risk</th><th>Owner</th><th>Controls</th><th>Actions</th></tr></thead><tbody>${rows.join("")}</tbody></table></div>`);
     preserveSelect("assessment-ai-version", feature.aiAssets.map(item => `<option value="${item.id}">${esc(item.name)} v${item.version}</option>`).join(""));
   }
@@ -133,7 +309,17 @@
     if (!state.organizationId) { feature.aiAssets = []; return renderAiAssets(); }
     try {
       const page = await api(`/v1/organizations/${state.organizationId}/ai-assets?limit=200&offset=0`);
-      feature.aiAssets = page.items || []; renderAiAssets();
+      feature.aiAssets = page.items || [];
+      renderAiAssets();
+      if (feature.aiSelectedAsset) {
+        const current = feature.aiAssets.find(item => item.id === feature.aiSelectedAsset.id);
+        if (current) {
+          feature.aiSelectedAsset = current;
+          await loadAiDependencyGraph(current.id);
+        } else {
+          resetAiDependencyView();
+        }
+      }
     } catch (error) { message("ai-registry-message", error.message, "error"); }
   }
 
@@ -166,14 +352,17 @@
   document.addEventListener("change", event => {
     if (event.target.id === "data-product-project-filter") loadDataProducts();
     if (event.target.id === "contract-data-product") loadContracts();
-    if (event.target.id === "organization-select") setTimeout(() => { populateProjectSelectors(); loadAiRegistry(); }, 250);
+    if (event.target.id === "organization-select") setTimeout(() => { populateProjectSelectors(); resetAiDependencyView(); loadAiRegistry(); }, 250);
   });
   document.addEventListener("click", event => {
-    const target = event.target.closest("[data-product-submit], [data-contract-submit], [data-ai-submit], [data-ai-trust], #refresh-marketplace, #refresh-ai-registry"); if (!target) return;
+    const target = event.target.closest("[data-product-submit], [data-contract-submit], [data-ai-submit], [data-ai-trust], [data-ai-graph], [data-ai-retire], [data-ai-dependency-node], #refresh-marketplace, #refresh-ai-registry"); if (!target) return;
     if (target.dataset.productSubmit) return submitLifecycle(`/v1/data-product-versions/${target.dataset.productSubmit}/submit`, "Product publication review requested.");
     if (target.dataset.contractSubmit) return submitLifecycle(`/v1/data-contract-versions/${target.dataset.contractSubmit}/submit`, "Contract review requested. Breaking findings require an explicit exception approval.");
     if (target.dataset.aiSubmit) return api(`/v1/ai-asset-versions/${target.dataset.aiSubmit}/submit`, {method:"POST"}).then(() => { message("ai-registry-message", "AI asset approval requested.", "success"); loadAiRegistry(); }).catch(error => message("ai-registry-message", error.message, "error"));
     if (target.dataset.aiTrust) return inspectTrust(target.dataset.aiTrust);
+    if (target.dataset.aiGraph) return loadAiDependencyGraph(target.dataset.aiGraph);
+    if (target.dataset.aiRetire) return requestAiRetirement(target.dataset.aiRetire);
+    if (target.dataset.aiDependencyNode) return renderAiDependencyDetail(target.dataset.aiDependencyNode);
     if (target.id === "refresh-marketplace") return Promise.all([loadDataProducts(), loadMarketplace()]);
     if (target.id === "refresh-ai-registry") return loadAiRegistry();
   });
