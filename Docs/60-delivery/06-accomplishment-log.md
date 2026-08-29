@@ -676,3 +676,70 @@ features in this list were subsequently closed by R35 below; shared-history clea
   checks for MCP, REST, YAML, OSI, ODCS, Snowflake, and Databricks compiler targets.
 - Enabled Redis lineage caching, MCP budgets, and Neo4j lineage reads in the local integration
   stack while retaining production fail-closed/fallback behavior defined in code.
+
+
+## 2026-08-29 (continued) — Local portfolio analytics completion and verifier hardening
+
+### Completed
+
+- Added tenant-scoped portfolio analytics summary and trend APIs in `product_marketplace_api.py`
+  over existing product, contract, context-read, MCP, tool, query, quality, and agent evidence.
+- Extended `scripts/verify-local.ps1` to create and publish a Context Product, publish a linked
+  Data Product and Data Contract, request and approve marketplace access, provision the
+  entitlement through the outbox-backed local path, and verify the new portfolio analytics
+  endpoints end to end.
+- Fixed three real local defects uncovered by that verifier pass: marketplace search used
+  `DISTINCT` across JSON-backed version rows and failed on PostgreSQL; marketplace access
+  requests could flush before their governance-review row existed and misreport the resulting
+  foreign-key failure as "already pending"; and governance approval/outbox plus marketplace
+  access-request listing both returned non-JSON-safe payloads.
+- Added regression coverage in `tests/test_agentic_platform.py` for portfolio trend bucketing,
+  marketplace access-request flush ordering, and governance outbox expiry serialization.
+
+### Verification evidence
+
+- Repo-wide static and test gates passed on Saturday, August 29, 2026: `379` tests passed, Ruff
+  clean, and strict mypy clean.
+- Final local verifier run passed on Saturday, August 29, 2026 with organization
+  `abe5877e-e12e-4095-88a4-411562a763f6`, datasource `d623616a-9df9-48d4-bbc5-3b4e51d20208`,
+  analysis run `0545b916-bd88-4e46-b322-a0bfde07bfcb`, Context Product version
+  `cf6ebf7b-2d69-48a4-b001-015f0ecbb13d`, Data Product version
+  `3e18b674-dba8-4f46-9f45-6c24764ea8fb`, Data Contract version
+  `cd5308d0-44ca-4756-82d3-8094c951ebf6`, marketplace access request
+  `dff2bda5-f0ed-4e2c-ab18-3817efb7a885`, and tool-first agent run
+  `eacc8511-28c8-4d41-8c92-c5ae3179f3e6`.
+- The same verifier proved `portfolio_access_requests = 1`, `portfolio_context_reads = 1`,
+  `portfolio_agent_runs = 3`, `portfolio_top_product_key = customer_portfolio_1788039914`, and
+  an outbox-backed entitlement state of `PENDING`, which is the correct local fail-safe posture
+  without an external fulfillment provider.
+
+### Current limitations
+
+- The remaining open items are the dedicated-environment gates rather than local code-path gaps:
+  million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — MCP lineage-tool coverage completion
+
+### Completed
+
+- Added dedicated unit coverage in `tests/test_mcp_server.py` for the two newest native
+  lineage MCP tools, `resolve_entity` and `get_transformation_detail`.
+- The new tests cover input validation, anti-enumeration denial symmetry for ineligible callers,
+  successful value-free JSON payload rendering, and the not-found branch for transformation
+  detail reads.
+- This closes the local code-review gap that previously noted the tools existed in production
+  code but only had slug-level coverage in the test suite.
+
+### Verification evidence
+
+- Focused MCP verification passed on Saturday, August 29, 2026:
+  `python -m pytest tests/test_mcp_server.py -q` (`29` passed),
+  `python -m ruff check tests/test_mcp_server.py src/aida/mcp_server.py`, and
+  `python -m mypy src/aida/mcp_server.py`.
+
+### Current limitations
+
+- The remaining open items are still dedicated-environment gates rather than local code-path
+  gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.

@@ -835,7 +835,9 @@ async def decide_governance_review(
         payload = {
             "access_request_id": str(access_request.id),
             "data_product_version_id": str(access_request.data_product_version_id),
-            "expires_at": access_request.expires_at,
+            "expires_at": access_request.expires_at.isoformat()
+            if access_request.expires_at is not None
+            else None,
             "review_id": str(review.id),
         }
     elif review.object_type == "AI_ASSET":

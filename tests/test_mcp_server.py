@@ -337,6 +337,36 @@ async def test_native_lineage_tool_denies_ineligible_caller_like_an_unknown_tool
     ]
 
 
+async def test_newest_native_lineage_tools_deny_ineligible_caller_like_unknown_tools() -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),
+    )
+    session = LineageToolSession(None)
+    scenarios = [
+        ("resolve_entity", {"datasource_id": str(uuid4()), "query": "customers"}),
+        (
+            "get_transformation_detail",
+            {"datasource_id": str(uuid4()), "entity_id": str(uuid4())},
+        ),
+    ]
+
+    for slug, arguments in scenarios:
+        result = await _handle_native_lineage_tool_call(
+            slug,
+            arguments,
+            session,
+            caller,  # type: ignore[arg-type]
+        )
+
+        assert result["isError"] is True
+        assert result["content"] == [
+            {"type": "text", "text": f"Tool '{slug}' not found or not published."}
+        ]
+
+
 async def test_native_lineage_tool_rejects_a_non_uuid_datasource_id() -> None:
     caller = SecurityContext(
         principal_id="analyst",
@@ -418,6 +448,125 @@ async def test_native_lineage_tool_requires_node_id_for_impact() -> None:
     }
 
 
+async def test_native_lineage_tool_resolve_entity_validates_query_length() -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    result = await _handle_native_lineage_tool_call(
+        "resolve_entity",
+        {"datasource_id": str(datasource.id), "query": "x"},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "query must contain 2-200 characters."}],
+    }
+
+
+async def test_native_lineage_tool_resolve_entity_validates_entity_type() -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    result = await _handle_native_lineage_tool_call(
+        "resolve_entity",
+        {
+            "datasource_id": str(datasource.id),
+            "query": "customers",
+            "entity_type": "procedure",
+        },
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "entity_type is invalid."}],
+    }
+
+
+async def test_native_lineage_tool_resolve_entity_returns_the_payload_as_json(
+    monkeypatch: object,
+) -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+    canned = {
+        "query": "customers",
+        "matches": [
+            {
+                "entity_id": str(uuid4()),
+                "entity_type": "TABLE",
+                "name": "customers",
+                "qualified_name": "analytics.public.customers",
+                "score": 1.0,
+            }
+        ],
+        "candidate_scan_limit": 1_000,
+        "truncated": False,
+    }
+
+    async def _fake_resolver(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return canned
+
+    monkeypatch.setattr(mcp_server, "_resolve_governed_entities", _fake_resolver)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "resolve_entity",
+        {"datasource_id": str(datasource.id), "query": "customers"},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result["content"][0]["text"].startswith("\u2705 Unified lineage read")
+    assert '"entity_type": "TABLE"' in result["content"][1]["text"]
+    assert '"qualified_name": "analytics.public.customers"' in result["content"][1]["text"]
+    assert session.committed is True
+    assert len(session.added) == 2
+
+
 async def test_native_lineage_tool_get_lineage_graph_returns_the_payload_as_json(
     monkeypatch: object,
 ) -> None:
@@ -469,6 +618,145 @@ async def test_native_lineage_tool_get_lineage_graph_returns_the_payload_as_json
     assert result["content"][0]["text"].startswith("\u2705 Unified lineage read")
     assert str(datasource.id) in result["content"][1]["text"]
     assert '"returned_node_count": 0' in result["content"][1]["text"]
+
+
+async def test_native_lineage_tool_get_transformation_detail_rejects_a_non_uuid_entity_id() -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(datasource.id), "entity_id": "not-a-uuid"},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "entity_id must be a UUID."}],
+    }
+
+
+async def test_native_lineage_tool_get_transformation_detail_returns_the_payload_as_json(
+    monkeypatch: object,
+) -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+    dbt_resource_id = uuid4()
+    table_id = uuid4()
+    canned = {
+        "dbt_resource_id": str(dbt_resource_id),
+        "lineage_node_id": str(table_id),
+        "unique_id": "model.analytics.customers",
+        "resource_type": "model",
+        "name": "customers",
+        "relation_name": "analytics.public.customers",
+        "materialization": "table",
+        "description": "Customer dimension",
+        "compiled_sql_hash": "sha256:abc123",
+        "compiled_sql_redacted": "select * from redacted_source",
+        "sql_parse_status": "REDACTED",
+        "depends_on_unique_ids": ["source.analytics.raw_customers"],
+        "test_status": "PASS",
+        "test_failures": 0,
+        "artifact": {
+            "artifact_import_id": str(uuid4()),
+            "manifest_fingerprint": "manifest-123",
+            "dbt_version": "1.9.0",
+        },
+        "governance": {
+            "value_free": True,
+            "compiled_sql_literals_redacted": True,
+            "raw_artifact_persisted": False,
+        },
+    }
+
+    async def _fake_detail(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        return canned
+
+    monkeypatch.setattr(mcp_server, "_transformation_detail", _fake_detail)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(datasource.id), "entity_id": str(dbt_resource_id)},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result["content"][0]["text"].startswith("\u2705 Unified lineage read")
+    assert (
+        '"compiled_sql_redacted": "select * from redacted_source"'
+        in result["content"][1]["text"]
+    )
+    assert '"value_free": true' in result["content"][1]["text"]
+    assert session.committed is True
+    assert len(session.added) == 2
+
+
+async def test_native_lineage_tool_get_transformation_detail_surfaces_not_found(
+    monkeypatch: object,
+) -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    session = LineageToolSession(datasource)
+
+    async def _fake_detail(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(mcp_server, "_transformation_detail", _fake_detail)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(datasource.id), "entity_id": str(uuid4())},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "Transformation not found or accessible."}],
+    }
 
 
 async def test_native_lineage_tool_get_lineage_impact_surfaces_node_not_found(

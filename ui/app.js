@@ -1,4 +1,6 @@
-const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, applyDbtDagZoom, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource } = window.AtlasUI;
+const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource } = window.AtlasUI;
+
+let knowledgeGraphEngine = null;
 
 function notify(message, success=false) {
   const region = document.getElementById("alert-region");
@@ -322,7 +324,7 @@ function renderRuntime() {
   $("#analyst-route-badge").innerHTML = badge(runtime.model_route_status);
   setHtml("runtime-controls", runtime.deterministic_controls.slice(0, 8).map((control,index) => `<div><span class="control-icon">${String(index + 1).padStart(2,"0")}</span><p><strong>${esc(human(control))}</strong><small>Enforced outside model output</small></p><b>ENFORCED</b></div>`).join(""));
   const values = [["Orchestration",runtime.orchestration_mode,runtime.runtime],["Model route",runtime.model_route_status,`${runtime.available_model_providers.join(" / ")} adapters; generation enabled: ${runtime.model_generation_enabled}`],["Identity",runtime.identity_provider,human(runtime.identity_verification)],["Secrets",runtime.credential_provider,runtime.credential_provider_available ? "Adapter available" : "Adapter registration required"]];
-  setHtml("ai-runtime", `<div class="metric-grid">${values.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong class="metric-text ${["NOT_CONFIGURED","development","env"].includes(b) ? "warn-text" : ""}">${esc(human(b))}</strong><small>${esc(c)}</small></div>`).join("")}</div>`);
+  setHtml("ai-runtime", values.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong class="metric-text ${["NOT_CONFIGURED","development","env"].includes(b) ? "warn-text" : ""}">${esc(human(b))}</strong><small>${esc(c)}</small></div>`).join(""));
 }
 
 function renderEvaluations() {
@@ -664,10 +666,9 @@ async function loadRelationships(options={}) {
   const path = focusId
     ? `/v1/datasources/${sourceId}/knowledge-graph/neighborhood?focus_table_id=${encodeURIComponent(focusId)}&depth=${encodeURIComponent($("#graph-depth").value)}&direction=${encodeURIComponent($("#graph-direction").value)}&node_limit=100&edge_limit=500`
     : `/v1/datasources/${sourceId}/knowledge-graph?limit=500`;
-  setHtml("graph-nodes", '<div class="loading">Loading bounded graph neighborhood</div>');
   state.graph = await api(path);
   state.relationships = state.graph.edges.filter(edge => edge.edge_type === "SUGGESTED_RELATIONSHIP");
-  state.graphSelectedNodeId = focusId || null; state.graphZoom = 1;
+  state.graphSelectedNodeId = focusId || null;
   renderGraph();
   if (state.graphSelectedNodeId) await selectGraphNode(state.graphSelectedNodeId, false);
   else setHtml("graph-node-detail", empty("Select a table node", "Columns, classifications, edge evidence and downstream impact will appear here."));
@@ -681,7 +682,7 @@ function visibleGraphEdges() {
 
 function renderGraph() {
   const graph = state.graph;
-  if (!graph) { setHtml("graph-metrics", ""); setHtml("graph-nodes", ""); setHtml("relationships-table", empty("No source selected")); return; }
+  if (!graph) { setHtml("graph-metrics", ""); knowledgeGraphEngine?.setData([], [], {emptyHtml: empty("No source selected")}); setHtml("relationships-table", empty("No source selected")); return; }
   const visibleCount = graph.returned_node_count || graph.nodes.length; const visibleEdges = graph.returned_edge_count || graph.edges.length;
   const metrics = [[graph.focus_node_id ? "Visible nodes" : "Tables",graph.focus_node_id ? visibleCount : graph.total_tables,graph.focus_node_id ? `${graph.requested_depth} hop governed neighborhood` : "Current source"],["Visible edges",visibleEdges,`${graph.total_declared_edges} declared estate-wide`],["Suggestions",graph.total_suggested_edges,"Metadata-only"],["Pending",graph.pending_suggestions,"Checker queue"]];
   setHtml("graph-metrics", metrics.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
@@ -693,59 +694,61 @@ function renderGraph() {
   setHtml("graph-boundary-note", `<strong>Safe exploration boundary</strong><span>This graph contains metadata, classifications, aggregate profile evidence and approved relationships. It never renders raw customer, account or transaction values.</span>${graph.truncation_reasons?.length ? `<div class="graph-truncation">Bounded by ${esc(graph.truncation_reasons.map(human).join(", "))}. Refine the search or focus a nearby node.</div>` : ""}`);
   const rows = state.relationships.map(edge => `<tr><td><span class="primary-cell">${esc(edge.source_label)}</span><span class="secondary-cell">${esc(edge.source_columns.join(", "))}</span></td><td><span class="primary-cell">${esc(edge.target_label)}</span><span class="secondary-cell">${esc(edge.target_columns.join(", "))}</span></td><td>${Math.round(edge.confidence * 100)}%</td><td>${badge(edge.status)}</td><td>${esc(edge.evidence.source_values_inspected === false ? "Metadata only / no values" : "Bounded evidence")}</td><td>${edge.status === "PENDING" ? `<button class="row-action" data-relationship="${edge.candidate_id}" data-decision="APPROVE">Approve</button><button class="row-action danger" data-relationship="${edge.candidate_id}" data-decision="REJECT">Reject</button>` : "Decision retained"}</td></tr>`);
   renderTable("relationships-table", ["Source","Target","Confidence","Status","Evidence boundary","Checker"], rows, "No relationship suggestions");
-  window.requestAnimationFrame(drawGraph);
+  renderGraphStage(graph);
 }
 
-function graphPositions(nodes, width, height, focusId) {
-  const positions = new Map();
-  if (focusId && nodes.some(node => node.id === focusId)) {
-    const center = {x:width / 2, y:height / 2}; positions.set(focusId, center);
-    const groups = new Map();
-    nodes.filter(node => node.id !== focusId).forEach(node => { const depth = Math.max(1, node.depth || 1); if (!groups.has(depth)) groups.set(depth, []); groups.get(depth).push(node); });
-    const maxDepth = Math.max(1, ...groups.keys()); const maxRadius = Math.max(100, Math.min(width, height) / 2 - 82);
-    [...groups.entries()].sort(([a],[b]) => a-b).forEach(([depth,group]) => { const radius = Math.max(95, maxRadius * depth / maxDepth); group.forEach((node,index) => { const angle = -Math.PI / 2 + index * Math.PI * 2 / group.length + (depth % 2 ? .12 : 0); positions.set(node.id, {x:center.x + Math.cos(angle) * radius, y:center.y + Math.sin(angle) * radius}); }); });
-    return positions;
+function knowledgeGraphNodeHtml(data, meta) {
+  const classes = ["atlas-node-card"];
+  if (data.sensitive_column_count) classes.push("is-sensitive");
+  if (data.isFocus) classes.push("is-focus");
+  if (meta.selected) classes.push("is-selected");
+  if (data.agMatch) classes.push("is-match");
+  if (data.agDim) classes.push("is-dim");
+  return `<button type="button" class="${classes.join(" ")}" data-graph-node="${data.id}" title="${esc(data.qualified_name || "")}" aria-pressed="${meta.selected}">`
+    + `<span class="ag-title">${esc(data.label || data.id)}</span>`
+    + `<span class="ag-sub">${data.column_count || 0} columns \u00b7 ${data.sensitive_column_count || 0} sensitive</span>`
+    + `<span class="ag-meta"><span class="ag-pill">${data.inbound_edge_count || 0} in</span><span class="ag-pill">${data.outbound_edge_count || 0} out</span>${data.depth ? `<span class="ag-pill">hop ${data.depth}</span>` : ""}</span>`
+    + `</button>`;
+}
+
+function renderGraphStage(graph) {
+  if (!knowledgeGraphEngine) {
+    knowledgeGraphEngine = new window.AtlasUI.AtlasGraph("graph-stage", {
+      direction: "LR",
+      nodeHtml: knowledgeGraphNodeHtml,
+      matchNode: (data, q) => `${data.label || ""} ${data.qualified_name || ""}`.toLowerCase().includes(q),
+      onNodeExpand: data => loadRelationships({focusId:data.id, pushHistory:true}).catch(error => notify(error.message))
+    });
   }
-  const columns = Math.max(2, Math.ceil(Math.sqrt(nodes.length * width / height))); const rows = Math.max(1, Math.ceil(nodes.length / columns));
-  nodes.forEach((node,index) => positions.set(node.id, {x:(index % columns + .5) * width / columns, y:(Math.floor(index / columns) + .5) * height / rows}));
-  return positions;
-}
-
-function applyGraphZoom() {
-  [$("#graph-canvas"), $("#graph-nodes")].forEach(node => { if (node) node.style.transform = `scale(${state.graphZoom})`; });
-  $("#graph-zoom-fit").textContent = `${Math.round(state.graphZoom * 100)}%`;
-}
-
-function drawGraph() {
-  const graph = state.graph; const stage = $("#graph-stage"); const canvas = $("#graph-canvas");
-  if (!graph || !stage || stage.offsetWidth === 0) return;
   const edges = visibleGraphEdges();
   const connectedIds = new Set(edges.flatMap(edge => [edge.source_node_id, edge.target_node_id]));
   let nodes = graph.nodes.filter(node => connectedIds.has(node.id));
   if (!nodes.length) nodes = graph.nodes;
-  nodes = nodes.slice(0, 60);
-  const width = stage.clientWidth, height = stage.clientHeight, ratio = window.devicePixelRatio || 1;
-  canvas.width = width * ratio; canvas.height = height * ratio; canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
-  const context = canvas.getContext("2d"); context.scale(ratio, ratio); context.clearRect(0, 0, width, height);
-  const positions = graphPositions(nodes, width, height, graph.focus_node_id);
+  nodes = nodes.slice(0, 90);
   const allowed = new Set(nodes.map(node => node.id));
-  edges.filter(edge => allowed.has(edge.source_node_id) && allowed.has(edge.target_node_id)).forEach(edge => {
-    const start = positions.get(edge.source_node_id), end = positions.get(edge.target_node_id);
-    context.beginPath(); context.moveTo(start.x, start.y); context.lineTo(end.x, end.y);
-    const selected = state.graphSelectedNodeId && [edge.source_node_id,edge.target_node_id].includes(state.graphSelectedNodeId);
-    context.strokeStyle = edge.edge_type === "DECLARED_FOREIGN_KEY" ? "#47769d" : "#b86e00";
-    context.lineWidth = selected ? 3 : edge.edge_type === "DECLARED_FOREIGN_KEY" ? 2 : 1.5;
-    context.setLineDash(edge.edge_type === "DECLARED_FOREIGN_KEY" ? [] : [6,4]); context.stroke();
-    const angle = Math.atan2(end.y-start.y, end.x-start.x); const arrowX = start.x + (end.x-start.x) * .66, arrowY = start.y + (end.y-start.y) * .66;
-    context.beginPath(); context.moveTo(arrowX, arrowY); context.lineTo(arrowX-7*Math.cos(angle-.45), arrowY-7*Math.sin(angle-.45)); context.lineTo(arrowX-7*Math.cos(angle+.45), arrowY-7*Math.sin(angle+.45)); context.closePath(); context.fillStyle = context.strokeStyle; context.fill();
+  const cyNodes = nodes.map(node => ({
+    id: node.id, w: 190, h: 96,
+    data: {
+      label: node.label, qualified_name: node.qualified_name, column_count: node.column_count,
+      sensitive_column_count: node.sensitive_column_count, inbound_edge_count: node.inbound_edge_count,
+      outbound_edge_count: node.outbound_edge_count, depth: node.depth || 0,
+      isFocus: node.id === graph.focus_node_id
+    }
+  }));
+  const cyEdges = edges.filter(edge => allowed.has(edge.source_node_id) && allowed.has(edge.target_node_id)).map(edge => ({
+    id: edge.candidate_id || `${edge.source_node_id}->${edge.target_node_id}`,
+    source: edge.source_node_id, target: edge.target_node_id,
+    classes: edge.edge_type === "DECLARED_FOREIGN_KEY" ? "declared" : (edge.status || "suggested").toLowerCase()
+  }));
+  knowledgeGraphEngine.setData(cyNodes, cyEdges, {
+    selectId: state.graphSelectedNodeId,
+    emptyHtml: empty("No relationships in view", "Broaden the edge filter or focus a different table.")
   });
-  setHtml("graph-nodes", nodes.map(node => { const pos = positions.get(node.id); const classes = ["topology-node",node.sensitive_column_count ? "sensitive" : "",node.id === state.graphSelectedNodeId ? "selected" : "",node.id === graph.focus_node_id ? "focus" : ""].filter(Boolean).join(" "); return `<button class="${classes}" data-graph-node="${node.id}" style="left:${pos.x}px;top:${pos.y}px" title="${esc(node.qualified_name)}" aria-pressed="${node.id === state.graphSelectedNodeId}"><strong>${esc(node.label)}</strong><small>${node.column_count} columns · ${node.sensitive_column_count} sensitive</small><em>${node.inbound_edge_count || 0} in · ${node.outbound_edge_count || 0} out${node.depth ? ` · hop ${node.depth}` : ""}</em></button>`; }).join(""));
-  applyGraphZoom();
 }
 
 async function selectGraphNode(nodeId, redraw=true) {
   const node = state.graph?.nodes.find(item => item.id === nodeId); if (!node) return;
-  state.graphSelectedNodeId = nodeId; if (redraw) window.requestAnimationFrame(drawGraph);
+  state.graphSelectedNodeId = nodeId; if (redraw && knowledgeGraphEngine) knowledgeGraphEngine.select(nodeId);
   setHtml("graph-node-detail", '<div class="loading">Loading governed node evidence</div>');
   try {
     const [columns,impact,annotation,profile] = await Promise.all([
@@ -1038,7 +1041,7 @@ function showView(name) {
   });
   const titles = {home:"Home",analyst:"Ask Atlas",catalog:"All assets",transformations:"Transformation metadata",meaning:"Business meaning",semantics:"Semantic layer",tools:"Tool registry",relationships:"Knowledge graph",governance:"Review center",agents:"AI governance",sources:"Sources",quality:"Data quality",operations:"Operations",administration:"Administration",audit:"Audit evidence"};
   $("#page-title").textContent = titles[name] || human(name); history.replaceState(null, "", `#${name}`);
-  if (name === "relationships") window.requestAnimationFrame(drawGraph);
+  if (name === "relationships") window.requestAnimationFrame(() => knowledgeGraphEngine?.resizeAndFit());
   if (name === "operations" && $("#ops-memory").classList.contains("active")) loadMemory().catch(error => notify(error.message));
   if (name === "operations" && $("#ops-outbox").classList.contains("active")) loadOutbox().catch(error => notify(error.message));
   document.body.classList.remove("nav-open");
@@ -1185,21 +1188,13 @@ function bindDirectEvents() {
       renderDbtArtifact();
     });
   });
-  $("#dbt-dag-zoom-in")?.addEventListener("click", () => {
-    state.dbtDagZoom = Math.min(2.0, state.dbtDagZoom + 0.15);
-    applyDbtDagZoom();
-  });
-  $("#dbt-dag-zoom-out")?.addEventListener("click", () => {
-    state.dbtDagZoom = Math.max(0.5, state.dbtDagZoom - 0.15);
-    applyDbtDagZoom();
-  });
-  $("#dbt-dag-zoom-fit")?.addEventListener("click", () => {
-    state.dbtDagZoom = 1.0;
-    applyDbtDagZoom();
-  });
+  $("#dbt-dag-zoom-in")?.addEventListener("click", () => state.dbtGraphEngine?.zoomBy(1.25));
+  $("#dbt-dag-zoom-out")?.addEventListener("click", () => state.dbtGraphEngine?.zoomBy(1 / 1.25));
+  $("#dbt-dag-zoom-fit")?.addEventListener("click", () => state.dbtGraphEngine?.fit());
   $("#dbt-dag-search")?.addEventListener("input", event => {
     state.dbtDagSearch = event.target.value;
-    renderDbtArtifact();
+    if (state.dbtDagMode === "dag" && state.dbtGraphEngine) state.dbtGraphEngine.applySearch(state.dbtDagSearch);
+    else renderDbtArtifact();
   });
   $("#dbt-resource-type").addEventListener("change", renderDbtArtifact); $("#dbt-match-filter").addEventListener("change", renderDbtArtifact);
   $("#refresh-dbt").addEventListener("click", () => loadDbtProjects().then(() => notify("Transformation evidence refreshed.", true)).catch(error => notify(error.message)));
@@ -1213,10 +1208,7 @@ function bindDirectEvents() {
   ["graph-depth","graph-direction"].forEach(id => $("#"+id).addEventListener("change", () => { const focusId = state.graph?.focus_node_id; if (focusId) loadRelationships({focusId}).catch(error => notify(error.message)); }));
   $("#graph-overview").addEventListener("click", () => { state.graphFocusHistory = []; loadRelationships().catch(error => notify(error.message)); });
   $("#graph-back").addEventListener("click", () => { const focusId = state.graphFocusHistory.pop(); if (focusId && focusId !== "OVERVIEW") loadRelationships({focusId}).catch(error => notify(error.message)); else loadRelationships().catch(error => notify(error.message)); });
-  $("#graph-zoom-in").addEventListener("click", () => { state.graphZoom = Math.min(1.6, state.graphZoom + .15); applyGraphZoom(); });
-  $("#graph-zoom-out").addEventListener("click", () => { state.graphZoom = Math.max(.55, state.graphZoom - .15); applyGraphZoom(); });
-  $("#graph-zoom-fit").addEventListener("click", () => { state.graphZoom = 1; applyGraphZoom(); });
-  $("#graph-stage").addEventListener("keydown", event => { if (!["+","-","0"].includes(event.key)) return; event.preventDefault(); state.graphZoom = event.key === "0" ? 1 : Math.max(.55, Math.min(1.6, state.graphZoom + (event.key === "+" ? .15 : -.15))); applyGraphZoom(); });
+  $("#graph-stage")?.addEventListener("keydown", event => { if (!["+","-","0"].includes(event.key)) return; event.preventDefault(); if (event.key === "0") knowledgeGraphEngine?.fit(); else knowledgeGraphEngine?.zoomBy(event.key === "+" ? 1.25 : 1 / 1.25); });
   $("#schedule-source").addEventListener("change", loadSchedule); $("#run-status-filter").addEventListener("change", () => renderRuns("runs-table", 500)); $("#run-source-filter").addEventListener("change", () => renderRuns("runs-table", 500));
   $("#certification-source").addEventListener("change", () => loadEnterpriseIngestion().catch(error => notify(error.message)));
   $("#ingestion-source").addEventListener("change", () => loadEnterpriseIngestion().catch(error => notify(error.message)));
@@ -1247,7 +1239,7 @@ function bindDirectEvents() {
     try { await api(`/v1/quality-incidents/${incidentId}/transition`, {method:"POST", body:JSON.stringify({status:data.get("status"), reason:data.get("reason")})}); $("#quality-transition-dialog").close(); form.reset(); notify("Quality incident lifecycle updated with audit evidence.", true); await loadQuality(); } catch (error) { notify(error.message); }
   });
   $("#tool-form").addEventListener("submit", event => { event.preventDefault(); executeSelectedTool(event.target); });
-  window.addEventListener("resize", () => window.requestAnimationFrame(drawGraph));
+  window.addEventListener("resize", () => window.requestAnimationFrame(() => { knowledgeGraphEngine?.resizeAndFit(); state.dbtGraphEngine?.resizeAndFit(); }));
 
   $("#semantic-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.target; const data = new FormData(form); const projectId = $("#semantic-project").value;
@@ -1430,11 +1422,9 @@ function bindDelegatedEvents() {
     const toggleCols = event.target.closest("[data-toggle-dbt-columns]");
     if (toggleCols) {
       const nodeId = toggleCols.dataset.toggleDbtColumns;
-      if (state.dbtDagExpandedNodes.has(nodeId)) {
-        state.dbtDagExpandedNodes.delete(nodeId);
-      } else {
-        state.dbtDagExpandedNodes.add(nodeId);
-      }
+      if (state.dbtDagExpandedNodes.has(nodeId)) state.dbtDagExpandedNodes.delete(nodeId);
+      else state.dbtDagExpandedNodes.add(nodeId);
+      if (state.dbtDagMode === "dag" && state.dbtGraphEngine) { state.dbtGraphEngine.updateNodeData(nodeId, {expanded: state.dbtDagExpandedNodes.has(nodeId)}); return; }
       return renderDbtArtifact();
     }
     const dagNode = event.target.closest("[data-dbt-dag-node]");

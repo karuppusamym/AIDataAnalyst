@@ -196,6 +196,9 @@ input:focus, select:focus, textarea:focus { border-color: #758ee3; box-shadow: 0
 .glossary-card-foot span { color: var(--muted); font-size: 8px; }
 .glossary-card.muted-card { opacity: .72; background: repeating-linear-gradient(-45deg, #fff, #fff 8px, #f7f8fa 8px, #f7f8fa 16px); }
 .chip-list.compact { margin-bottom: 12px; }
+.meaning-shell .page-rail .glossary-panel { margin-bottom: 0; }
+.meaning-shell .page-rail .glossary-grid { grid-template-columns: 1fr; }
+.meaning-shell .page-rail .glossary-card { min-height: 0; }
 .stewardship-panel { overflow: hidden; background: linear-gradient(145deg, #fff 55%, #f5f8ff); }
 .coverage-board { margin: 4px 0 18px; display: grid; grid-template-columns: 210px minmax(0, 1fr); border: 1px solid #dfe5f1; border-radius: 14px; overflow: hidden; background: #fff; }
 .coverage-score { padding: 22px; color: #fff; background: linear-gradient(145deg, #183b75, #2866b5); }
@@ -219,6 +222,27 @@ input:focus, select:focus, textarea:focus { border-color: #758ee3; box-shadow: 0
 .stewardship-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .stewardship-grid > section { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.86); }
 .stewardship-grid .data-table { font-size: 8px; }
+.stewardship-section { min-width: 0; border: 1px solid var(--line); border-radius: 12px; background: rgba(255,255,255,.9); overflow: hidden; }
+.stewardship-section[open] { box-shadow: inset 0 0 0 1px rgba(21, 94, 239, .08); }
+.stewardship-section summary { list-style: none; padding: 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+.stewardship-section summary::-webkit-details-marker { display: none; }
+.stewardship-section summary::after { content: "+"; width: 22px; height: 22px; border: 1px solid var(--line-strong); border-radius: 50%; display: grid; place-items: center; color: var(--muted); background: #fff; font-size: 12px; font-weight: 700; flex: 0 0 auto; }
+.stewardship-section[open] summary::after { content: "−"; color: var(--blue); border-color: #bfd2f4; background: var(--blue-soft); }
+.stewardship-section summary strong,
+.stewardship-section summary small { display: block; }
+.stewardship-section summary strong { font-size: 10px; color: var(--ink); }
+.stewardship-section summary small { margin-top: 4px; font-size: 8px; color: var(--muted); }
+.stewardship-section > div { padding: 0 14px 14px; }
+.stewardship-section .empty-state { min-height: 92px; }
+.stewardship-section .table-panel,
+.stewardship-section .data-table { min-width: 0; }
+.meaning-shell .page-rail .stewardship-panel .heading-actions { flex-wrap: wrap; justify-content: flex-start; }
+.meaning-shell .page-rail .coverage-board { grid-template-columns: 1fr; }
+.meaning-shell .page-rail .coverage-score { padding: 18px; }
+.meaning-shell .page-rail .coverage-dimensions { grid-template-columns: 1fr; }
+.meaning-shell .page-rail .stewardship-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.meaning-shell .page-rail .stewardship-grid { grid-template-columns: 1fr; }
+.meaning-shell .page-rail .glossary-panel .empty-state { min-height: 108px; }
 .asset-readme { white-space: pre-wrap; }
 .linked-terms { display: grid; gap: 8px; }
 .linked-terms > div { padding: 11px; border: 1px solid var(--line); border-radius: 9px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #fafbfc; }

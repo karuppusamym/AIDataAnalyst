@@ -55,6 +55,7 @@ The observable condition under which this should be reconsidered.
 | [0014](ADR-0014-value-free-control-plane.md) | Source values are not platform memory | Accepted | Classification-specific retention approval |
 | [0015](ADR-0015-schema-per-module.md) | One PostgreSQL schema per module, no cross-schema FKs | Accepted | Never — this is the extraction insurance |
 | [0016](ADR-0016-quality-freshness-fails-closed.md) | Quality baselines are value-free; source freshness fails closed | Accepted | An approved connector watermark and retention contract exists |
+| [0017](ADR-0017-domain-complete-tenancy-and-cross-source-graph.md) | Domain-complete tenancy and boundary-aware cross-source graph traversal | Proposed | Domain taxonomy turns out not to nest cleanly (a table genuinely needs two sibling domains) |
 
 ## Superseded decision history
 

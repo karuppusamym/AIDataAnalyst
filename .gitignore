@@ -13,4 +13,8 @@ build/
 .idea/
 .vscode/
 node_modules/
+artifacts/
 
+
+# Local scratch space for ad hoc reports and repo bundles - never commit these
+scratch/

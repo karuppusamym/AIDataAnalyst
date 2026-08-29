@@ -24,113 +24,77 @@ function renderDbtImports() {
   renderTable("dbt-imports-table", ["Artifact","Status","Models / sources / tests","Edges","Catalog coverage"], rows, "No manifest imports yet");
 }
 
-function applyDbtDagZoom() {
-  const viewport = $("#dbt-dag-viewport");
-  if (viewport) viewport.style.transform = `scale(${state.dbtDagZoom})`;
-  const fitBtn = $("#dbt-dag-zoom-fit");
-  if (fitBtn) fitBtn.textContent = `${Math.round(state.dbtDagZoom * 100)}%`;
+function dbtNodeHtml(data, meta) {
+  const rType = (data.resource_type || "MODEL").toLowerCase().replace(/_/g, "-");
+  const classes = ["atlas-node-card", `type-${rType}`];
+  if (meta.selected) classes.push("is-selected");
+  if (data.agMatch) classes.push("is-match");
+  if (data.agDim) classes.push("is-dim");
+  let statusPill = "";
+  if (data.test_status) {
+    const t = String(data.test_status).toLowerCase();
+    statusPill = `<span class="ag-pill ${t === "pass" ? "pass" : t === "fail" ? "fail" : ""}">${esc(data.test_status)}${data.test_failures ? ` (${data.test_failures})` : ""}</span>`;
+  } else if (data.matched_table_id) {
+    statusPill = '<span class="ag-pill matched">Matched</span>';
+  }
+  const columnNames = data.column_names || [];
+  const isExpanded = Boolean(data.expanded);
+  const popover = (isExpanded && columnNames.length) ? `<div class="atlas-col-popover">${columnNames.slice(0, 40).map(name => `<div class="col-row"><span class="col-name">${esc(name)}</span>${data.column_types && data.column_types[name] ? `<span class="col-type">${esc(data.column_types[name])}</span>` : ""}</div>`).join("")}${columnNames.length > 40 ? `<div class="col-row"><span class="col-name">+${columnNames.length - 40} more</span></div>` : ""}</div>` : "";
+  return `<div class="${classes.join(" ")}" data-dbt-dag-node="${data.id}">`
+    + `<div class="ag-card-head"><span class="ag-type-tag">${esc(data.resource_type || "MODEL")}</span>${statusPill}</div>`
+    + `<span class="ag-title">${esc(data.label || data.id)}</span>`
+    + (data.materialization ? `<span class="ag-sub">${esc(data.materialization)}</span>` : "")
+    + (columnNames.length ? `<button type="button" class="ag-expand" data-toggle-dbt-columns="${data.id}">${columnNames.length} columns ${isExpanded ? "\u25b2" : "\u25bc"}</button>` : "")
+    + popover
+    + `</div>`;
+}
+
+function dbtMatchNode(data, q) {
+  if (String(data.label || "").toLowerCase().includes(q)) return true;
+  if ((data.column_names || []).some(c => c.toLowerCase().includes(q))) return true;
+  if ((data.tags || []).some(t => t.toLowerCase().includes(q))) return true;
+  return false;
 }
 
 function renderDbtLineageDAG(artifact) {
   const nodes = state.dbtLineage?.nodes || [];
   const edges = state.dbtLineage?.edges || [];
   if (!nodes.length) {
+    if (state.dbtGraphEngine) { try { state.dbtGraphEngine.destroy(); } catch (error) { /* already detached */ } state.dbtGraphEngine = null; }
     setHtml("dbt-lineage", empty("No lineage graph", "This artifact has no declared resources or dependency nodes."));
     return;
   }
+  const engine = window.AtlasUI.AtlasGraph.mount("dbt-lineage", {
+    direction: "LR", nodeSep: 30, rankSep: 150,
+    nodeHtml: dbtNodeHtml, matchNode: dbtMatchNode,
+    onNodeExpand: data => showDbtResource(data.id)
+  }, state, "dbtGraphEngine");
+  if (!engine) return;
+
   const resourceMap = new Map(state.dbtResources.map(r => [r.id, r]));
-  const nodeMap = new Map(nodes.map(n => [n.id, n]));
-  const searchQuery = (state.dbtDagSearch || "").trim().toLowerCase();
-
-  const tiers = [[], [], [], [], []];
-  const tierTitles = ["Sources & Seeds", "Staging & Prep", "Marts & Transforms", "Tests & Metrics", "Exposures & BI"];
-
-  nodes.forEach(node => {
-    const resource = resourceMap.get(node.id);
-    const rType = (node.resource_type || "").toUpperCase();
-    if (searchQuery) {
-      const matchName = node.label.toLowerCase().includes(searchQuery);
-      const matchCol = resource?.column_names?.some(c => c.toLowerCase().includes(searchQuery));
-      const matchTag = resource?.tags?.some(t => t.toLowerCase().includes(searchQuery));
-      if (!matchName && !matchCol && !matchTag) return;
-    }
-    if (rType === "SOURCE" || rType === "SEED") {
-      tiers[0].push({node, resource});
-    } else if (rType === "TEST" || rType === "METRIC" || rType === "SEMANTIC_MODEL") {
-      tiers[3].push({node, resource});
-    } else if (rType === "EXPOSURE") {
-      tiers[4].push({node, resource});
-    } else if (rType === "SNAPSHOT") {
-      tiers[2].push({node, resource});
-    } else {
-      const hasIncomingFromSource = edges.some(e => {
-        if (e.target_resource_id !== node.id) return false;
-        const srcNode = nodeMap.get(e.source_resource_id);
-        return srcNode && ["SOURCE", "SEED"].includes(srcNode.resource_type);
-      });
-      if (hasIncomingFromSource) {
-        tiers[1].push({node, resource});
-      } else {
-        tiers[2].push({node, resource});
+  const nodeIds = new Set(nodes.map(n => n.id));
+  const cyNodes = nodes.map(node => {
+    const resource = resourceMap.get(node.id) || {};
+    return {
+      id: node.id, w: 210, h: 98,
+      data: {
+        label: node.label, resource_type: node.resource_type, materialization: node.materialization,
+        matched_table_id: node.matched_table_id, test_status: resource.test_status, test_failures: resource.test_failures,
+        column_names: resource.column_names || [], column_types: resource.column_types || {}, tags: resource.tags || [],
+        expanded: state.dbtDagExpandedNodes.has(node.id)
       }
-    }
+    };
   });
+  const cyEdges = edges.filter(edge => nodeIds.has(edge.source_resource_id) && nodeIds.has(edge.target_resource_id)).map(edge => ({
+    id: `${edge.source_resource_id}->${edge.target_resource_id}`,
+    source: edge.source_resource_id, target: edge.target_resource_id, classes: "dbt"
+  }));
 
-  const tierHtml = tiers.map((tierList, tierIdx) => {
-    if (!tierList.length) return "";
-    const cards = tierList.map(({node, resource}) => {
-      const rType = (node.resource_type || "MODEL").toLowerCase().replace("_", "-");
-      const isSelected = state.dbtDagSelectedNodeId === node.id;
-      const isExpanded = state.dbtDagExpandedNodes.has(node.id);
-
-      let testPill = "";
-      if (resource?.test_status) {
-        const tStatus = resource.test_status.toLowerCase();
-        testPill = `<span class="dbt-test-pill ${tStatus}">${esc(resource.test_status)}${resource.test_failures ? ` (${resource.test_failures})` : ""}</span>`;
-      }
-
-      let colHtml = "";
-      if (resource?.column_names?.length && isExpanded) {
-        const colItems = resource.column_names.slice(0, 30).map(colName => {
-          const dtype = resource.column_types?.[colName] || "";
-          const desc = resource.column_descriptions?.[colName] || "";
-          const descIcon = desc ? `<span class="dbt-col-desc-indicator" title="${esc(desc)}">&#9432;</span>` : "";
-          return `<div class="dbt-col-item"><span class="dbt-col-name">${esc(colName)}${descIcon}</span>${dtype ? `<span class="dbt-col-type">${esc(dtype)}</span>` : ""}</div>`;
-        }).join("");
-        colHtml = `<div class="dbt-dag-card-columns">${colItems}${resource.column_names.length > 30 ? `<div class="secondary-cell">+${resource.column_names.length - 30} more</div>` : ""}</div>`;
-      }
-
-      return `
-        <div class="dbt-dag-card ${rType} ${isSelected ? 'selected' : ''}" data-dbt-dag-node="${node.id}">
-          <div class="dbt-dag-card-head">
-            <span class="type-tag">${esc(node.resource_type)}</span>
-            ${testPill || (node.matched_table_id ? '<span class="status">MATCHED</span>' : '')}
-          </div>
-          <div class="dbt-dag-card-body">
-            <div class="dbt-dag-card-name">${esc(node.label)}</div>
-            <div class="dbt-dag-card-meta">
-              ${node.materialization ? `<span>${esc(node.materialization)}</span>` : ''}
-              ${resource?.column_names?.length ? `<button type="button" class="link-button" data-toggle-dbt-columns="${node.id}">${resource.column_names.length} cols ${isExpanded ? '▲' : '▼'}</button>` : ''}
-            </div>
-          </div>
-          ${colHtml}
-        </div>
-      `;
-    }).join("");
-
-    return `
-      <div class="dbt-dag-tier">
-        <div class="dbt-dag-tier-title"><span>${tierTitles[tierIdx]}</span><small>${tierList.length}</small></div>
-        ${cards}
-      </div>
-    `;
-  }).filter(Boolean).join("");
-
-  setHtml("dbt-lineage", `
-    <div id="dbt-dag-viewport" class="dbt-dag-viewport" style="transform: scale(${state.dbtDagZoom})">
-      <div class="dbt-dag-columns-wrapper">${tierHtml || empty("No matching DAG nodes found")}</div>
-    </div>
-  `);
+  engine.setData(cyNodes, cyEdges, {
+    selectId: state.dbtDagSelectedNodeId,
+    emptyHtml: empty("No dependency graph", "This artifact has no declared node dependencies.")
+  });
+  engine.applySearch(state.dbtDagSearch || "");
 }
 
 function renderDbtColumnFlows(artifact) {
@@ -362,5 +326,5 @@ function showDbtResource(resourceId) {
   `;
   setHtml("record-content", details); $("#record-dialog").showModal();
 }
-  Object.assign(window.AtlasUI, { renderDbtProjects, renderOpenLineageHistory, renderDbtImports, applyDbtDagZoom, renderDbtLineageDAG, renderDbtColumnFlows, renderDbtEdgeList, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource });
+  Object.assign(window.AtlasUI, { renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtLineageDAG, renderDbtColumnFlows, renderDbtEdgeList, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource });
 })();

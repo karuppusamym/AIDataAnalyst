@@ -1,9 +1,10 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
+import aida.product_marketplace_api as product_marketplace_api
 from aida.ai_registry import compute_ai_trust_score, score_assessment_controls
 from aida.config import Settings
 from aida.context_compiler import (
@@ -22,14 +23,26 @@ from aida.models import (
     AiAssetVersion,
     ContextProduct,
     ContextProductVersion,
+    DataProduct,
     DataProductAccessRequest,
+    DataProductVersion,
+    GovernanceReview,
+    OutboxEvent,
 )
-from aida.platform_schemas import AiAssetDefinition, DataProductCreate
+from aida.platform_schemas import (
+    AiAssetDefinition,
+    DataProductCreate,
+    MarketplaceAccessRequestCreate,
+)
 from aida.product_marketplace_api import (
+    _build_portfolio_trend_points,
     approve_access_request,
     evaluate_contract_compatibility,
+    request_marketplace_access,
 )
+from aida.schemas import GovernanceDecisionRequest
 from aida.security import SecurityContext
+from aida.semantic_api import decide_governance_review
 
 
 def test_contract_compatibility_reports_removed_and_changed_fields() -> None:
@@ -103,6 +116,210 @@ def test_marketplace_access_approval_sets_bounded_expiry() -> None:
     assert request.decided_by == "independent-reviewer"
     assert request.expires_at is not None
     assert (request.expires_at - now).days == 30
+
+
+class _MarketplaceAccessSession:
+    def __init__(self) -> None:
+        self.added: list[object] = []
+        self.timeline: list[str] = []
+        self.committed = False
+
+    async def scalar(self, _statement: object) -> object:
+        self.timeline.append("scalar")
+        return None
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+        self.timeline.append(type(value).__name__)
+
+    async def flush(self) -> None:
+        self.timeline.append("flush")
+
+    async def commit(self) -> None:
+        self.committed = True
+        self.timeline.append("commit")
+
+    async def rollback(self) -> None:
+        self.timeline.append("rollback")
+
+
+class _GovernanceDecisionSession:
+    def __init__(self, *, get_results: list[object]) -> None:
+        self._get_queue = list(get_results)
+        self.added: list[object] = []
+        self.committed = False
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        return self._get_queue.pop(0)
+
+    async def scalar(self, _statement: object) -> object:
+        return self._get_queue.pop(0)
+
+    async def execute(self, _statement: object) -> None:
+        return None
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        return None
+
+
+async def test_request_marketplace_access_flushes_review_before_access_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    organization_id = uuid4()
+    product = DataProduct(
+        id=uuid4(),
+        organization_id=organization_id,
+        project_id=uuid4(),
+        product_key="customer_portfolio",
+        lifecycle_status="ACTIVE",
+        created_by="owner",
+    )
+    version = DataProductVersion(
+        id=uuid4(),
+        organization_id=organization_id,
+        product_id=product.id,
+        version=1,
+        status="PUBLISHED",
+        name="Customer portfolio",
+        description="Published customer portfolio data product.",
+        domain_name="Customer",
+        owner_principal="owner",
+        usage_terms="Approved use only.",
+        classification="CONFIDENTIAL",
+        certification_status="CERTIFIED",
+        quality_score=92,
+        lineage_coverage=80,
+        discoverable_roles=["Analyst"],
+        consumer_roles=["DataConsumer"],
+        fingerprint="portfolio-fingerprint",
+        created_by="owner",
+    )
+
+    async def _fake_version_scope(_session: object, _version_id: object, _context: object) -> tuple[
+        DataProduct, DataProductVersion
+    ]:
+        return product, version
+
+    monkeypatch.setattr(product_marketplace_api, "_version_scope", _fake_version_scope)
+    session = _MarketplaceAccessSession()
+    context = SecurityContext(
+        principal_id="marketplace-analyst",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+
+    result = await request_marketplace_access(
+        version.id,
+        MarketplaceAccessRequestCreate(
+            purpose="Approved customer analytics for verification.",
+            duration_days=30,
+        ),
+        context,
+        session,  # type: ignore[arg-type]
+    )
+
+    assert result.data_product_version_id == version.id
+    assert session.committed is True
+    assert session.timeline[:4] == [
+        "scalar",
+        "GovernanceReview",
+        "flush",
+        "DataProductAccessRequest",
+    ]
+
+
+async def test_governance_access_approval_outbox_serializes_expiry() -> None:
+    organization_id = uuid4()
+    review = GovernanceReview(
+        id=uuid4(),
+        organization_id=organization_id,
+        object_type="DATA_PRODUCT_ACCESS_REQUEST",
+        object_id=str(uuid4()),
+        requested_action="GRANT_ACCESS",
+        status="PENDING",
+        requested_by="marketplace-analyst",
+    )
+    access_request = DataProductAccessRequest(
+        id=uuid4(),
+        organization_id=organization_id,
+        data_product_version_id=uuid4(),
+        requested_by="marketplace-analyst",
+        purpose="Approved customer analytics for verification.",
+        duration_days=30,
+        status="PENDING",
+        governance_review_id=review.id,
+    )
+    session = _GovernanceDecisionSession(get_results=[review, access_request])
+    context = SecurityContext(
+        principal_id="reviewer",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"PlatformAdmin"}),
+    )
+
+    result = await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE", reason="Time-bounded access approved."),
+        context,
+        session,  # type: ignore[arg-type]
+    )
+
+    outbox = next(item for item in session.added if isinstance(item, OutboxEvent))
+
+    assert result.status == "APPROVED"
+    assert access_request.status == "APPROVED"
+    assert access_request.expires_at is not None
+    assert session.committed is True
+    assert outbox.payload["expires_at"] == access_request.expires_at.isoformat()
+
+
+def test_portfolio_trend_points_are_bounded_and_deterministic() -> None:
+    now = datetime(2026, 8, 29, 12, 0, tzinfo=UTC)
+
+    points = _build_portfolio_trend_points(
+        now=now,
+        window_days=14,
+        bucket_days=7,
+        access_request_times=[now - timedelta(days=13), now - timedelta(days=2)],
+        context_read_times=[now - timedelta(days=8)],
+        mcp_operation_times=[now - timedelta(days=8), now - timedelta(days=1)],
+        mcp_tool_call_times=[now - timedelta(days=1)],
+        agent_runs=[
+            (now - timedelta(days=10), "GOVERNED_TOOL"),
+            (now - timedelta(days=1), "MODEL_GATEWAY"),
+        ],
+        query_execution_times=[now - timedelta(days=10), now - timedelta(hours=1)],
+    )
+
+    assert len(points) == 2
+    assert points[0].bucket_start == now - timedelta(days=14)
+    assert points[0].bucket_end == now - timedelta(days=7)
+    assert points[0].access_requests == 1
+    assert points[0].context_reads == 1
+    assert points[0].mcp_operations == 1
+    assert points[0].mcp_tool_calls == 0
+    assert points[0].agent_runs == 1
+    assert points[0].governed_tool_runs == 1
+    assert points[0].model_gateway_runs == 0
+    assert points[0].query_executions == 1
+    assert points[1].access_requests == 1
+    assert points[1].context_reads == 0
+    assert points[1].mcp_operations == 1
+    assert points[1].mcp_tool_calls == 1
+    assert points[1].agent_runs == 1
+    assert points[1].governed_tool_runs == 0
+    assert points[1].model_gateway_runs == 1
+    assert points[1].query_executions == 1
 
 
 def _compiler_fixture() -> tuple[
@@ -327,6 +544,8 @@ def test_agentic_platform_routes_are_published() -> None:
 
     assert "/v1/projects/{project_id}/data-products" in paths
     assert "/v1/marketplace/products" in paths
+    assert "/v1/organizations/{organization_id}/portfolio-analytics/summary" in paths
+    assert "/v1/organizations/{organization_id}/portfolio-analytics/trends" in paths
     assert "/v1/data-products/{product_id}/contracts" in paths
     assert "/v1/context-product-versions/{version_id}/compile" in paths
     assert "/v1/organizations/{organization_id}/ai-assets" in paths

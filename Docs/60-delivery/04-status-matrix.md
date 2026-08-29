@@ -3,7 +3,7 @@
 > Status: **Living document.** Owner: Engineering lead.
 > The single source for what is implemented, partial, pending, needs retesting, or blocked on a bank decision. Design lives in `10-architecture/` and `20-modules/`; material completion evidence is append-only in `06-accomplishment-log.md`.
 
-**Last reviewed:** 2026-08-28
+**Last reviewed:** 2026-08-29
 
 ## Status definitions
 
@@ -54,7 +54,7 @@
 | Data-quality observability | 11 | Implemented for profile-baseline controls | Source/table policies; deterministic volume, null-rate, schema-fingerprint comparison; immutable value-free observations; fingerprinted incident lifecycle with auto-recovery; audited acknowledge/resolve; metadata scan-age posture; automatic Temporal integration; Atlas investigation workspace | Approved watermark contracts for freshness; rule scheduling beyond scans; notification routing; SLOs; bank-scale incident certification; **runtime coupling** |
 | Policy and governance | 17 | Partial | RBAC role gates, organization enforcement, unified cross-object review queue with filters, rationale capture, independent decisions, platform-enforced maker≠checker | ABAC; purpose-based access; agent-vs-human context; bulk decisions; delegation; entitlements; full decision logging |
 | Audit and event delivery | 20 | Implemented | Attributable audit ledger, transactional outbox, idempotent publication, retry/backoff, dead-letter, authorized requeue | WORM archive; retention; SIEM/SOC routing; OpenTelemetry; access review |
-| Context products and MCP | 19 | Partial | Real JSON-RPC 2.0 MCP endpoint (`POST /mcp`): `initialize`/`ping`/`tools.list`/`tools.call`/`resources.list`/`resources.read`; tool exposure and invocation are role-filtered and route through the same governed orchestrator/query-gateway stack as the native REST path, denying ineligible tools without leaking their existence, with audit/outbox evidence | Context products with maker-checker (CX-2); per-read policy evaluation and consumption-lineage edges for `resources/read` (CX-3/CX-4); per-consumer budgets (CX-6); `prompts/*` handlers |
+| Context products and MCP | 19 | Partial | JSON-RPC 2.0 MCP endpoint (`POST /mcp`); immutable Context Products with maker-checker publication/deprecation; policy-gated REST/MCP reads; role-filtered tools; Redis budgets; marketplace request/approve/provision-pending lifecycle; deterministic compiler; AI registry/trust; and tenant-scoped portfolio analytics summary/trend APIs, all with local end-to-end evidence | Million-node lineage/load certification; authoritative BI/procedure lineage; privacy operations; workflow templates; workload identity; external provider certification; browser/accessibility and bank-scale security certification |
 | Studio | 18 | **Pending** | Form-based authoring exists in the portal (metric composer, tool authoring) | Change sets, test harness, diff view, parameter designer, Git binding |
 | Agentic product portal | 21 | Implemented for current API scope | Role-oriented product at port 3000: asset-first shell and explorer; tabbed asset workspace; glossary term authoring/review; versioned aliases/README ownership and approved term linking; analyst workflow, catalog/impact, dbt transformations, business meaning, semantics, tools, graph, model routes, sources, quality, operations, governance and audit; ARIA roles/labels, roving-tabindex tab/command-palette keyboard navigation, focus management and restoration, live-region status/error announcements, `prefers-reduced-motion` support and a verified body-text contrast fix | Persona bound to OIDC groups; interactive screen-reader/axe-core WCAG AA accessibility certification; million-node visual certification |
 | Production platform / network | — | **Bank decision** | Reproducible local Docker engineering topology | Kubernetes/managed services, regions, private endpoints, mTLS, egress, residency |
@@ -78,7 +78,7 @@
 Three patterns are worth naming:
 
 1. **The control plane is strong; the operational evidence is absent.** Everything in the "Implemented" column has local end-to-end evidence and nothing has bank-scale evidence. That gap is Phase D.
-2. **One module is entirely pending** — studio (18). Glossary (08) now implements the governed table-stewardship slice; context products and MCP (19) now implements a governed MCP tool surface; broader asset types, operational automation, and bank-scale certification remain for both.
+2. **One module is entirely pending** — studio (18). Glossary (08) now implements the governed table-stewardship slice; context products and MCP (19) now covers governed Context Products, marketplace access, compiler, AI registry/trust, and portfolio analytics locally; broader operational automation and bank-scale certification remain.
 3. **Several "Partial" rows are partial in the same way**: the safe slice exists, the breadth does not. Connectors, retrieval, lineage, and policy all follow this shape, which is a deliberate consequence of building vertically rather than broadly.
 
 ## Related documents

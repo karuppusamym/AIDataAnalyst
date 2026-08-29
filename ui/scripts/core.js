@@ -9,7 +9,7 @@
     dbtProjects: [], dbtImports: [], dbtResources: [], dbtLineage: null,
     selectedDbtProjectId: null, selectedDbtImportId: null,
     dbtDagMode: "dag", dbtDagZoom: 1.0, dbtDagSearch: "",
-    dbtDagExpandedNodes: new Set(), dbtDagSelectedNodeId: null,
+    dbtDagExpandedNodes: new Set(), dbtDagSelectedNodeId: null, dbtGraphEngine: null,
     openlineageEvents: [], integrationPolicy: null,
     semanticInferenceRuns: [], enrichmentProposals: [], businessAnnotations: [],
     businessMap: null, graphFocusHistory: [], graphSelectedNodeId: null,

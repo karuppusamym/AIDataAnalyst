@@ -171,6 +171,121 @@ class MarketplaceProductRead(DataProductVersionRead):
     access_status: Literal["ROLE_GRANTED", "REQUEST_APPROVED", "REQUEST_PENDING", "NOT_REQUESTED"]
 
 
+class PortfolioLifecycleRead(PlatformApiModel):
+    data_products_total: int
+    data_products_active: int
+    data_products_candidate: int
+    data_products_retired: int
+    data_product_versions_draft: int
+    data_product_versions_review_required: int
+    data_product_versions_published: int
+    data_product_versions_retired: int
+    data_contract_versions_draft: int
+    data_contract_versions_review_required: int
+    data_contract_versions_published: int
+    context_products_total: int
+    context_product_versions_draft: int
+    context_product_versions_review_required: int
+    context_product_versions_published: int
+    context_product_versions_deprecated: int
+
+
+class PortfolioAccessRead(PlatformApiModel):
+    requests_created: int
+    requests_pending: int
+    requests_approved: int
+    requests_rejected: int
+    requests_revoked: int
+    requests_expired: int
+    active_grants: int
+    grants_expiring_within_30_days: int
+    fulfillment_pending: int
+    fulfillment_provisioned: int
+    fulfillment_failed: int
+    fulfillment_revoked: int
+
+
+class PortfolioUsageRead(PlatformApiModel):
+    unique_context_consumers: int
+    unique_mcp_consumers: int
+    unique_agent_principals: int
+    context_product_reads: int
+    mcp_operations: int
+    mcp_resource_reads: int
+    mcp_prompt_reads: int
+    mcp_tool_calls: int
+    mcp_control_operations: int
+    agent_runs: int
+    governed_tool_agent_runs: int
+    model_gateway_agent_runs: int
+    development_override_agent_runs: int
+    policy_blocked_agent_runs: int
+    query_executions: int
+    governed_tool_executions: int
+
+
+class PortfolioQualityRead(PlatformApiModel):
+    published_products: int
+    scored_products: int
+    average_quality_score: float | None
+    low_quality_products: int
+    certified_products: int
+    uncertified_products: int
+    average_lineage_coverage: float | None
+
+
+class PortfolioQueueRead(PlatformApiModel):
+    review_required_data_product_versions: int
+    review_required_data_contract_versions: int
+    review_required_context_product_versions: int
+    pending_marketplace_access_requests: int
+
+
+class PortfolioTopProductRead(PlatformApiModel):
+    data_product_version_id: UUID
+    product_key: str
+    name: str
+    domain_name: str
+    certification_status: str
+    quality_score: int | None
+    lineage_coverage: int
+    access_request_count: int
+    approved_access_count: int
+    context_read_count: int
+
+
+class PortfolioAnalyticsSummaryRead(PlatformApiModel):
+    generated_at: datetime
+    window_days: int
+    low_quality_threshold: int
+    lifecycle: PortfolioLifecycleRead
+    access: PortfolioAccessRead
+    usage: PortfolioUsageRead
+    quality: PortfolioQualityRead
+    queues: PortfolioQueueRead
+    top_products: list[PortfolioTopProductRead]
+
+
+class PortfolioTrendPointRead(PlatformApiModel):
+    bucket_start: datetime
+    bucket_end: datetime
+    access_requests: int
+    context_reads: int
+    mcp_operations: int
+    mcp_tool_calls: int
+    agent_runs: int
+    governed_tool_runs: int
+    model_gateway_runs: int
+    query_executions: int
+
+
+class PortfolioAnalyticsTrendsRead(PlatformApiModel):
+    generated_at: datetime
+    window_days: int
+    bucket_days: int
+    points: list[PortfolioTrendPointRead]
+
+
 ContextCompilerTarget = Literal[
     "MCP",
     "REST",

@@ -1,7 +1,7 @@
 /* Governed Context Products and unified lineage operator surfaces. */
 (function initializeContextLineageControlPlane() {
   const { state, $, setHtml, esc, human, badge, empty, api, selectOptions, preserveSelect } = window.AtlasUI;
-  const feature = { products: [], graph: null, impact: null };
+  const feature = { products: [], graph: null, impact: null, engine: null };
 
   function message(target, text, kind="neutral") {
     setHtml(target, text ? `<div class="feature-message ${kind}">${esc(text)}</div>` : "");
@@ -100,26 +100,51 @@
     }
   }
 
+  function unifiedNodeHtml(data, meta) {
+    const classes = ["atlas-node-card", "compact"];
+    if (meta.selected) classes.push("is-selected");
+    if (data.agMatch) classes.push("is-match");
+    if (data.agDim) classes.push("is-dim");
+    if (data.resolved === false) classes.push("is-dim");
+    const kindLabel = String(data.node_kind || "").replace(/_/g, " ");
+    return `<div class="${classes.join(" ")}" data-lineage-node="${esc(data.id)}" tabindex="0" role="button" aria-label="Inspect ${esc(data.qualified_name || data.label || data.id)}">`
+      + `<div class="ag-card-head"><span class="ag-type-tag">${esc(kindLabel)}</span>${data.resolved === false ? '<span class="ag-pill">Unresolved</span>' : ""}</div>`
+      + `<span class="ag-title">${esc(data.label || data.id)}</span>`
+      + `<span class="ag-sub">${esc(data.qualified_name || "")}</span>`
+      + `</div>`;
+  }
+
+  const UNIFIED_EDGE_CLASS = { FOREIGN_KEY: "declared", SUGGESTED_RELATIONSHIP: "suggested", DBT_DEPENDENCY: "dbt", OPENLINEAGE_ETL: "openlineage" };
+
   function renderLineageGraph() {
     const graph = feature.graph;
-    if (!graph?.nodes?.length) return setHtml("unified-lineage-canvas", empty("No lineage nodes", "Import catalog, dbt, or OpenLineage metadata first."));
-    const nodes = graph.nodes.slice(0, 80);
-    const width = 960, height = 540, centerX = width / 2, centerY = height / 2;
-    const positions = new Map(nodes.map((node, index) => {
-      const ring = index < 16 ? 150 : 225;
-      const angle = (Math.PI * 2 * index) / nodes.length - Math.PI / 2;
-      return [node.id, {x:centerX + Math.cos(angle) * ring, y:centerY + Math.sin(angle) * ring}];
+    if (!graph?.nodes?.length) {
+      if (feature.engine) { try { feature.engine.destroy(); } catch (error) { /* already detached */ } feature.engine = null; }
+      return setHtml("unified-lineage-canvas", empty("No lineage nodes", "Import catalog, dbt, or OpenLineage metadata first."));
+    }
+    setHtml("unified-lineage-canvas", '<div class="lineage-summary" id="unified-lineage-summary"></div><div id="unified-lineage-stage"></div>');
+    setHtml("unified-lineage-summary", `<span>${graph.returned_node_count} nodes</span><span>${graph.returned_edge_count} edges</span><span>${graph.truncated ? "Bounded result" : "Complete result"}</span>`);
+
+    feature.engine = window.AtlasUI.AtlasGraph.mount("unified-lineage-stage", {
+      direction: "LR",
+      layout: graph.nodes.length > 220 ? "cose" : undefined,
+      nodeSep: 26, rankSep: 120,
+      nodeHtml: unifiedNodeHtml,
+      matchNode: (data, q) => `${data.label || ""} ${data.qualified_name || ""}`.toLowerCase().includes(q),
+      onNodeExpand: data => inspectImpact(data.id)
+    }, feature, "engine");
+    if (!feature.engine) return;
+
+    const nodes = graph.nodes.slice(0, 400);
+    const nodeIds = new Set(nodes.map(node => node.id));
+    const cyNodes = nodes.map(node => ({
+      id: node.id, w: 150, h: 64,
+      data: { label: node.label, node_kind: node.node_kind, qualified_name: node.qualified_name, resolved: node.resolved, depth: node.depth }
     }));
-    const edges = graph.edges.filter(edge => positions.has(edge.source_node_id) && positions.has(edge.target_node_id));
-    const edgeMarkup = edges.map(edge => {
-      const start = positions.get(edge.source_node_id), end = positions.get(edge.target_node_id);
-      return `<line x1="${start.x}" y1="${start.y}" x2="${end.x}" y2="${end.y}" class="lineage-edge lineage-${edge.edge_source.toLowerCase()}" />`;
-    }).join("");
-    const nodeMarkup = nodes.map(node => {
-      const point = positions.get(node.id);
-      return `<g class="lineage-node" data-lineage-node="${esc(node.id)}" tabindex="0" role="button" aria-label="Inspect ${esc(node.qualified_name)}"><circle cx="${point.x}" cy="${point.y}" r="28"></circle><text x="${point.x}" y="${point.y + 4}" text-anchor="middle">${esc(node.node_kind.slice(0, 3))}</text><title>${esc(node.qualified_name)}</title></g>`;
-    }).join("");
-    setHtml("unified-lineage-canvas", `<div class="lineage-summary"><span>${graph.returned_node_count} nodes</span><span>${graph.returned_edge_count} edges</span><span>${graph.truncated ? "Bounded result" : "Complete result"}</span></div><div class="lineage-svg-wrap"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Unified lineage graph">${edgeMarkup}${nodeMarkup}</svg></div>`);
+    const cyEdges = graph.edges.filter(edge => nodeIds.has(edge.source_node_id) && nodeIds.has(edge.target_node_id)).map(edge => ({
+      id: edge.id, source: edge.source_node_id, target: edge.target_node_id, classes: UNIFIED_EDGE_CLASS[edge.edge_source] || ""
+    }));
+    feature.engine.setData(cyNodes, cyEdges, { emptyHtml: empty("No connected nodes in view") });
   }
 
   async function loadUnifiedLineage() {
