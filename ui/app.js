@@ -35,12 +35,12 @@ async function loadHierarchy() {
 }
 
 function populateSelectors() {
-  const sourceHtml = selectOptions(state.sources, item => `${item.name} / ${item.projectName}`, "No sources");
+  const sourceHtml = selectOptions(state.sources, item => `${item.name} / ${item.projectName}`, state.sources.length ? "" : "No sources");
   ["analyst-source","catalog-source","meaning-source","relationship-source","schedule-source","memory-source","quality-source","certification-source","ingestion-source","batch-source"].forEach(id => preserveSelect(id, sourceHtml));
   preserveSelect("run-source-filter", `<option value="ALL">All sources</option>${selectOptions(state.sources, item => item.name)}`);
-  const projectHtml = selectOptions(state.projects, item => `${item.name} / ${item.lobName}`, "No projects");
+  const projectHtml = selectOptions(state.projects, item => `${item.name} / ${item.lobName}`, state.projects.length ? "" : "No projects");
   ["semantic-project","tools-project","transform-project","datasource-project"].forEach(id => preserveSelect(id, projectHtml));
-  preserveSelect("project-lob", selectOptions(state.lobs, item => `${item.name} (${item.code})`, "No lines of business"));
+  preserveSelect("project-lob", selectOptions(state.lobs, item => `${item.name} (${item.code})`, state.lobs.length ? "" : "No lines of business"));
   populateProjectSources("tool-author-source", $("#tools-project")?.value);
   populateProjectSources("metric-source", $("#semantic-project")?.value);
   populateProjectSources("dbt-source", $("#transform-project")?.value);
@@ -170,7 +170,7 @@ function renderEnterpriseIngestion() {
   renderTable("ingestion-history", ["Producer / key","Status","Delivery","Tables / columns","Created / changed / retired","Completed"], ingestionRows, "No canonical metadata deliveries for this source");
 
   const openBatches = state.metadataBatches.filter(item => ["DRAFT","FAILED","SUBMISSION_FAILED"].includes(item.status));
-  preserveSelect("batch-select", selectOptions(openBatches, item => `${item.batch_key} · ${item.received_chunks}/${item.expected_chunks} chunks`, "No open batches"));
+  preserveSelect("batch-select", selectOptions(openBatches, item => `${item.batch_key} · ${item.received_chunks}/${item.expected_chunks} chunks`, openBatches.length ? "" : "No open batches"));
   if (state.selectedBatchId && openBatches.some(item => item.id === state.selectedBatchId)) $("#batch-select").value = state.selectedBatchId;
   const selected = state.metadataBatches.find(item => item.id === state.selectedBatchId);
   if (!selected) setHtml("batch-progress", empty("No batch selected", "Create a manifest or select a batch from the history."));
@@ -553,7 +553,7 @@ async function prepareMetricComposer() {
 async function loadMetricTables() {
   const sourceId = $("#metric-source").value;
   state.metricTables = sourceId ? await fetchAll(`/v1/datasources/${sourceId}/tables`) : [];
-  preserveSelect("metric-table", selectOptions(state.metricTables, item => item.name, "No active tables"));
+  preserveSelect("metric-table", selectOptions(state.metricTables, item => item.name, state.metricTables.length ? "" : "No active tables"));
   await loadMetricColumns();
 }
 

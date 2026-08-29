@@ -5,7 +5,7 @@
 function renderDbtProjects() {
   const rows = state.dbtProjects.map(item => `<tr><td><button class="link-button" data-dbt-project="${item.id}">${esc(item.display_name)}</button><span class="secondary-cell">${esc(item.project_key)}</span></td><td>${badge(item.status)}</td><td>${esc(item.target_name)}</td><td>${esc(state.sources.find(source => source.id === item.datasource_id)?.name || item.datasource_id)}</td></tr>`);
   renderTable("dbt-projects-table", ["Project","Status","Target","Warehouse source"], rows, "No dbt projects registered for this delivery project");
-  const options = selectOptions(state.dbtProjects, item => `${item.display_name} / ${item.target_name}`, "No dbt projects");
+  const options = selectOptions(state.dbtProjects, item => `${item.display_name} / ${item.target_name}`, state.dbtProjects.length ? "" : "No dbt projects");
   preserveSelect("dbt-import-project", options);
   if (state.selectedDbtProjectId && state.dbtProjects.some(item => item.id === state.selectedDbtProjectId)) $("#dbt-import-project").value = state.selectedDbtProjectId;
 }

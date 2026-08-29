@@ -841,7 +841,8 @@ async def test_datasource(
         dsn = SecretResolver(settings).resolve(datasource.credential_reference)
         connector = connector_registry.create(datasource.connector_type, dsn)
         await connector.test_connection()
-        datasource.status = "CONNECTION_VERIFIED"
+        if datasource.status != "ACTIVE":
+            datasource.status = "CONNECTION_VERIFIED"
         datasource.capabilities = asdict(connector.capabilities)
         outcome = "SUCCESS"
     except Exception as exc:

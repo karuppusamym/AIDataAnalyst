@@ -48,7 +48,7 @@
   };
   const populateProjectSources = (id, projectId) => {
     const items = state.sources.filter(item => item.project_id === projectId);
-    preserveSelect(id, selectOptions(items, item => item.name, "No sources in project"));
+    preserveSelect(id, selectOptions(items, item => item.name, items.length ? "" : "No sources in project"));
   };
 
   window.AtlasUI = { state, roles, $, $$, setHtml, esc, when, human, statusClass, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources };
