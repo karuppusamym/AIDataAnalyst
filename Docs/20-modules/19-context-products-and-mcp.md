@@ -153,3 +153,100 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 | CX-6 | Per-consumer rate limits and budgets | P1 |
 | CX-7 | Workload identity for MCP consumers | P0 |
 | CX-8 | BI-surface context injection (Tableau, Power BI, Looker) | P1 |
+
+## 15. Enterprise AI control-plane expansion
+
+### 15.1 Market reference and product boundary
+
+The Collibra Platform and its August 2026 product announcements are a market reference for
+expected enterprise surfaces, not a design to copy. The relevant public references are:
+
+- `https://www.collibra.com/products/collibra-platform`
+- `https://www.collibra.com/blog/data-lineage-read-apis-mcp-server-lineage-on-demand`
+- `https://www.collibra.com/blog/data-products-application-centralized-oversight-for-all-your-data-products`
+- `https://www.collibra.com/blog/a-single-governed-source-of-truth-for-every-ai-agent-and-platform-introducing-collibra-s`
+- `https://www.collibra.com/products/ai-command-center`
+- `https://www.collibra.com/products/data-quality-and-observability`
+
+**Wired to the epic backlog 2026-08-29**: CP-2/CP-3 -> `60-delivery/02-epic-backlog.md` EE.8, CP-5 -> EE.9, CP-6 -> EE.10, CP-7/CP-8 -> EE.11. See also `competitors/08-collibra-lineage-and-platform-analysis-2026-08.md`.
+
+The reference set was reviewed on 2026-08-29. It establishes that buyers now expect a
+platform to govern data products, context, lineage, quality, policies, models, and agents as
+one connected system. Atlas keeps a narrower boundary: it does not become a BI tool,
+notebook, pipeline authoring environment, or general-purpose ticketing system. It becomes the
+governed context and action plane that those systems consume.
+
+### 15.2 Required platform capabilities
+
+| ID | Required capability | Atlas requirement | Acceptance evidence |
+|---|---|---|---|
+| CP-1 | Governed context products | Stable product identity, immutable versions, owner, purpose, bounded asset scope, semantic versions, glossary versions, quality requirements, policy summary, and eligible tools | Maker-checker lifecycle test; published versions are immutable; cross-tenant and draft-read denial tests |
+| CP-2 | Data product registry | Product, domain, owner, ports, lifecycle, certification, usage terms, quality posture, lineage coverage, and linked context products | Candidate through retired lifecycle; portfolio filters; ownership and certification queues |
+| CP-3 | Data contract registry | Versioned schema, quality, freshness, SLA, compatibility, producer, consumer, and product-port bindings using ODCS-compatible import/export | Compatibility check and maker-checker tests; a breaking change cannot publish without an approved exception |
+| CP-4 | Data marketplace | Consumer-facing discovery of published products with trust, ownership, usage terms, and governed access requests | Policy-filtered search; request/approve/expire flow; no unpublished product leakage |
+| CP-5 | Context compiler | Deterministic specifications map graph context to Snowflake Semantic Views, Databricks Metric Views, OSI, ODCS, and custom schemas | Repeatable output hash; schema validation; REST, MCP, and YAML delivery; drift report against deployed definitions |
+| CP-6 | Lineage MCP | Callable upstream, downstream, impact, entity resolution, and transformation-detail tools over technical and business lineage | Fuzzy resolution corpus; bounded depth; policy filtering before traversal; transformation evidence returned without values |
+| CP-7 | Unified AI registry | Register AI use cases, models, agents, versions, owners, datasets, policies, assessments, deployments, and runtime signals | Full lifecycle and dependency graph; CLI manifest registration; platform-neutral provider model |
+| CP-8 | AI trust and compliance | Explainable trust score from documentation, lifecycle, quality, policy, evaluation, and runtime posture; EU AI Act, NIST AI RMF, AI UC-1, and custom assessment templates | Every score factor inspectable; no opaque model-only score; approval, remediation, and retirement workflows |
+| CP-9 | Quality and observability | Reusable rules, warehouse pushdown, anomaly monitors, scores, incident routing, ownership, SLAs, and lineage-aware blast radius | Rule execution evidence; deduplicated incidents; owner notification; quality signal shown on product and agent context |
+| CP-10 | Privacy operations | Purpose, legal basis, processing location, retention, sensitive-data flow, policy simulation, and external privacy-system integration | Purpose-limited access test; retention evidence; sensitive lineage impact report |
+| CP-11 | Workflow automation | Versioned workflow templates for reviews, access, certification, quality remediation, and compliance; fixed safety gates remain code-owned | Workflow audit trail; timers/escalations; no workflow can bypass maker-checker or execution policy |
+| CP-12 | Adoption and portfolio intelligence | Product views, context reads, agent/tool consumption, access requests, lifecycle queues, quality posture, and value-free usage trends | Tenant-scoped dashboards; bounded retention; no question text or source values stored |
+| CP-13 | Integration ecosystem | Certified adapters for databases, warehouses, BI, transformation, quality, model registries, and ITSM; canonical envelope and SDK remain the scaling mechanism | Capability certification per adapter; unsupported capabilities fail closed; version compatibility report |
+| CP-14 | Unstructured context | Govern metadata for documents and knowledge assets without becoming a document-chat product | Metadata-only ingestion, classification, ownership, policy, and references; content retrieval delegated to an approved provider |
+
+### 15.3 Context product lifecycle
+
+```text
+DRAFT -> REVIEW_REQUIRED -> PUBLISHED -> SUPERSEDED
+  |             |
+  +-> REJECTED <-+
+
+PUBLISHED -> DEPRECATION_REVIEW -> DEPRECATED
+```
+
+- A stable `context_product` identity owns a sequence of immutable
+  `context_product_version` records.
+- Only drafts may be edited. A new change creates a new version instead of mutating a
+  published definition.
+- Submission creates a `CONTEXT_PRODUCT_VERSION` item in the unified governance queue.
+- The requester cannot approve their own version.
+- Publishing supersedes the previous published version for the same product atomically.
+- MCP and REST consumers see only published versions for which their roles and purpose are
+  eligible. Unauthorized and nonexistent products have indistinguishable external responses.
+
+### 15.4 Minimum context product contract
+
+```json
+{
+  "product_key": "consumer-risk-analysis",
+  "version": 3,
+  "purpose": "Approved context for consumer credit-risk analysis",
+  "owner_principal": "consumer-risk-stewards",
+  "table_ids": ["tbl_..."],
+  "semantic_model_version_ids": ["sem_..."],
+  "glossary_term_version_ids": ["termv_..."],
+  "eligible_tool_version_ids": ["toolv_..."],
+  "allowed_consumer_roles": ["RiskAnalyst"],
+  "lineage_depth": 2,
+  "quality_requirements": {"minimum_score": 85, "deny_on_critical_incident": true},
+  "policy_summary": {"source_values": "GATEWAY_ONLY", "retention": "NO_RAW_CONTEXT"}
+}
+```
+
+Every referenced object is resolved in the product's organization and project before a draft
+is accepted. Semantic, glossary, and tool references must identify approved or published
+versions before submission. Wildcard estate scope is not permitted.
+
+## 16. Delivery slices
+
+| Slice | Scope | Exit condition | Status |
+|---|---|---|---|
+| CP-S1 | Context product identity, immutable versions, validation, maker-checker, REST API, audit, outbox | A product can be created, submitted, independently approved, listed, and read with tenant isolation | Backend implemented; database integration proof pending |
+| CP-S2 | Published context products as MCP resources; role eligibility and consumption evidence | External agents consume only eligible published products and every read is audited | **Backend implemented** |
+| CP-S3 | Lineage MCP tools and unified lineage projection | Upstream, downstream, impact, and transformation questions return bounded governed evidence | Planned |
+| CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | Planned |
+| CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | Planned |
+| CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | Planned |
+| CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | Planned |
+| CP-S8 | Adoption, privacy, workflow, and ecosystem expansion | Portfolio operations are measurable and integrations are certified | Planned |

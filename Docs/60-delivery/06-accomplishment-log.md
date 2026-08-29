@@ -393,3 +393,60 @@
 - `Docs/20-modules/15-model-gateway.md` §14/§15: "Route versions" row and the `MG-3` open-work line both still described "bank-approved route selection" as entirely un-implemented target work; corrected to note the config-selected `route_key` gating is real (since R9/R11) and only private-endpoint routing remains open, matching the tracker's `MG-3` correction.
 - Checked and found already accurate, no change needed: `Docs/20-modules/10-knowledge-graph.md` (Graph Explorer V2 already marked Implemented), `Docs/20-modules/06-relationship-intelligence.md` (RL-4/"projection of approvals to Neo4j" already correctly listed as outstanding), `Docs/20-modules/19-context-products-and-mcp.md` (already carries the detailed, accurate MCP partial-build breakdown from R28).
 - This closes out the "go through all the files" audit request. Standing open item, unrelated to documentation accuracy: no live Docker verification has been performed against a real Oracle/BigQuery/Snowflake backend in this session (blocked on this session's network egress allowlist blocking the user's local Docker host); the user has taken over verification themselves via `/tmp/verify_oracle.ps1` for Oracle and asked this session to move on from requesting manual debugging steps.
+
+
+## 2026-08-29 — Unified Lineage Explorer (EA.14) and Collibra platform gap wiring
+
+User shared the Collibra Data Lineage and Collibra Platform product pages and asked for the
+findings to be captured as feature requirements with references, and for the highest-value
+gap to actually be built rather than only documented.
+
+**Built:**
+- `src/aida/unified_lineage.py` — pure, database-free graph module: `UnifiedLink`,
+  `expand_frontier`, and `traverse`, generalizing `aida/knowledge_graph.py`'s BFS to string
+  node ids (needed because dbt resources and OpenLineage datasets without a matched catalog
+  table get a synthetic id, e.g. `dbt:<uuid>`, `openlineage:<namespace>:<name>`, instead of
+  disappearing from the graph).
+- `src/aida/unified_lineage_api.py` — `GET /v1/datasources/{id}/unified-lineage/graph` (merges
+  `MetadataConstraint` FKs, `RelationshipCandidate` suggestions, `DbtLineageEdge` dependencies
+  from each project's latest imported manifest, and `OpenLineageTableEdge` ETL edges into one
+  node/edge set, bounded and truncation-flagged like the existing knowledge-graph endpoints)
+  and `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` (bounded transitive
+  upstream/downstream traversal — replaces `/v1/metadata/tables/{id}/impact`'s direct-reference
+  count for the nodes reachable in the unified graph; that endpoint is left in place since it
+  also covers metrics/tools not part of the lineage graph).
+- New schemas in `schemas.py`: `UnifiedLineageNodeRead`, `UnifiedLineageEdgeRead`,
+  `UnifiedLineageGraphRead`, `UnifiedLineageImpactNodeRead`, `UnifiedLineageImpactRead`.
+- Wired into `src/aida/main.py`.
+- `tests/test_unified_lineage.py` — 8 tests: pure BFS/traversal behavior (direction semantics,
+  bounding, transitive multi-hop depth across mixed edge sources) with no database, plus
+  OpenAPI-contract and schema-serialization tests mirroring `tests/test_knowledge_graph.py`'s
+  style. Full suite (165 tests before and after) plus `ruff check`, `ruff format`, and
+  `mypy --cache-dir=/tmp/mypy_cache` all pass. Verified by installing dependencies into an
+  ephemeral `uv` environment at `/tmp/aida-venv` (`UV_PROJECT_ENVIRONMENT=/tmp/aida-venv uv
+  sync --frozen --extra dev`) since the checked-in `.venv` is a Windows venv unusable from the
+  Linux device-bridge shell, and its directory can't be overwritten from that shell
+  (`Operation not permitted` on `.venv/.gitignore`).
+
+**Known limitation, documented rather than silently accepted:** column-level edges are still
+name-matched (dbt UI) or absent (unified graph is table-level only); view/procedure and BI
+nodes are not yet in the unified graph; there is no export. These are exactly LN-10, LN-11,
+LN-12, tracked as open work below.
+
+**Documentation:**
+- New `Docs/competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` — the
+  screenshot-driven capability comparison for both pages, with source URLs, and the resulting
+  gap list.
+- `Docs/90-reference/03-sources.md` — added the Collibra Data Lineage URL.
+- `Docs/20-modules/09-lineage.md` — Impact row and HTTP surface updated for the delivered
+  endpoints; LN-7 marked delivered; LN-9 (delivered) through LN-12 (open) added to open work.
+- `Docs/60-delivery/02-epic-backlog.md` — added `EA.14` (delivered, full acceptance detail) and
+  `EE.8`–`EE.11`, wiring the CP-2/CP-3/CP-5/CP-6/CP-7/CP-8 platform requirements that
+  `Docs/20-modules/19-context-products-and-mcp.md` §15.2 had already specified in detail (from
+  an earlier pass over the same Collibra platform material) but that had not yet been turned
+  into epic-backlog or gap-register entries.
+- `Docs/60-delivery/05-gap-register.md` — updated the "Relationship and lineage evidence" and
+  "Context products and MCP" rows, and added four new rows to "Newly identified gaps" for the
+  lineage-MCP, context-compiler, product/contract-registry, and AI-registry/trust gaps.
+- `Docs/20-modules/19-context-products-and-mcp.md` — cross-referenced the new competitors doc
+  and the CP-* -> EE.* epic mapping.

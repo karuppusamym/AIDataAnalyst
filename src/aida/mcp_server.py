@@ -67,6 +67,8 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
+    ContextProduct,
+    ContextProductVersion,
     DataSource,
     GovernedTool,
     GovernedToolVersion,
@@ -135,6 +137,13 @@ def _tool_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> 
     if "PlatformAdmin" in roles:
         return True
     return not roles.isdisjoint(allowed_roles)
+
+
+def _context_product_role_eligible(
+    roles: frozenset[str], allowed_roles: Sequence[str]
+) -> bool:
+    """Apply the same fail-closed role binding used by governed tools."""
+    return _tool_role_eligible(roles, allowed_roles)
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +435,9 @@ async def _handle_resources_list(
     """
     List value-free catalog metadata assets as MCP resources.
 
-    Each resource URI follows: atlas://catalog/{datasource_id}/{schema}/{table}
+    Catalog URIs follow: atlas://catalog/{datasource_id}/{schema}/{table}
+    Context Product URIs follow:
+    atlas://context-products/{product_key}/versions/{version}
     """
     rows = (
         await session.execute(
@@ -460,6 +471,39 @@ async def _handle_resources_list(
             }
         )
 
+    product_rows = (
+        await session.execute(
+            select(ContextProductVersion, ContextProduct)
+            .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+            .where(
+                ContextProductVersion.organization_id == context.organization_id,
+                ContextProductVersion.status == "PUBLISHED",
+                ContextProduct.lifecycle_status == "ACTIVE",
+            )
+            .order_by(ContextProduct.product_key, ContextProductVersion.version.desc())
+            .limit(200)
+        )
+    ).all()
+    for version, product in product_rows:
+        if not _context_product_role_eligible(
+            context.roles, version.allowed_consumer_roles
+        ):
+            continue
+        resources.append(
+            {
+                "uri": (
+                    f"atlas://context-products/{product.product_key}/versions/"
+                    f"{version.version}"
+                ),
+                "name": f"{version.name} v{version.version}",
+                "description": (
+                    f"Governed Context Product: {version.description} | "
+                    f"Owner: {version.owner_principal} | Fingerprint: {version.fingerprint}"
+                ),
+                "mimeType": "application/json",
+            }
+        )
+
     return {"resources": resources}
 
 
@@ -467,6 +511,7 @@ async def _handle_resources_read(
     params: dict[str, Any],
     session: AsyncSession,
     context: SecurityContext,
+    correlation_id: str,
 ) -> dict[str, Any]:
     """
     Return value-free metadata for a specific atlas:// resource URI.
@@ -476,6 +521,10 @@ async def _handle_resources_read(
     No raw source values are ever returned.
     """
     uri: str = params.get("uri", "")
+    if uri.startswith("atlas://context-products/"):
+        return await _read_context_product_resource(
+            uri, session, context, correlation_id
+        )
     if not uri.startswith("atlas://catalog/"):
         return {"contents": [{"uri": uri, "text": "Unknown resource URI scheme."}]}
 
@@ -555,6 +604,144 @@ async def _handle_resources_read(
     }
 
 
+async def _read_context_product_resource(
+    uri: str,
+    session: AsyncSession,
+    context: SecurityContext,
+    correlation_id: str,
+) -> dict[str, Any]:
+    """Return a published, version-pinned, value-free Context Product."""
+    inaccessible = {
+        "contents": [{"uri": uri, "text": "Resource not found or not accessible."}]
+    }
+    parts = uri.removeprefix("atlas://context-products/").split("/")
+    if len(parts) != 3 or parts[1] != "versions":
+        return {"contents": [{"uri": uri, "text": "Malformed resource URI."}]}
+    product_key, _, version_text = parts
+    try:
+        version_number = int(version_text)
+    except ValueError:
+        return {"contents": [{"uri": uri, "text": "Malformed resource URI."}]}
+    if version_number < 1:
+        return {"contents": [{"uri": uri, "text": "Malformed resource URI."}]}
+
+    row = (
+        await session.execute(
+            select(ContextProductVersion, ContextProduct)
+            .join(ContextProduct, ContextProduct.id == ContextProductVersion.product_id)
+            .where(
+                ContextProductVersion.organization_id == context.organization_id,
+                ContextProduct.organization_id == context.organization_id,
+                ContextProduct.product_key == product_key,
+                ContextProduct.lifecycle_status == "ACTIVE",
+                ContextProductVersion.version == version_number,
+                ContextProductVersion.status == "PUBLISHED",
+            )
+        )
+    ).first()
+    if row is None:
+        return inaccessible
+
+    product_version, product = row
+    if not _context_product_role_eligible(
+        context.roles, product_version.allowed_consumer_roles
+    ):
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.role_binding_denied",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "allowed_roles": sorted(product_version.allowed_consumer_roles),
+                "principal_roles": sorted(context.roles),
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=context.organization_id,
+            aggregate_type="context_product_version",
+            aggregate_id=str(product_version.id),
+            event_type="context.product_consumption_denied.v1",
+            payload={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "principal_id": context.principal_id,
+            },
+        )
+        await session.commit()
+        return inaccessible
+
+    payload = {
+        "product_key": product.product_key,
+        "version": product_version.version,
+        "name": product_version.name,
+        "description": product_version.description,
+        "purpose": product_version.purpose,
+        "owner_principal": product_version.owner_principal,
+        "fingerprint": product_version.fingerprint,
+        "governed_references": {
+            "table_ids": product_version.table_ids,
+            "semantic_model_version_ids": product_version.semantic_model_version_ids,
+            "glossary_term_version_ids": product_version.glossary_term_version_ids,
+            "eligible_tool_version_ids": product_version.eligible_tool_version_ids,
+        },
+        "allowed_consumer_roles": product_version.allowed_consumer_roles,
+        "lineage_depth": product_version.lineage_depth,
+        "quality_requirements": product_version.quality_requirements,
+        "policy_summary": product_version.policy_summary,
+        "_governance": {
+            "status": product_version.status,
+            "published_at": product_version.published_at,
+            "note": (
+                "This immutable resource contains governed metadata references only. "
+                "Source values are available only through eligible governed tools."
+            ),
+        },
+    }
+    record_audit(
+        session,
+        context,
+        action="mcp.context_product.read",
+        resource_type="context_product_version",
+        resource_id=str(product_version.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={
+            "product_key": product.product_key,
+            "version": product_version.version,
+            "fingerprint": product_version.fingerprint,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=context.organization_id,
+        aggregate_type="context_product_version",
+        aggregate_id=str(product_version.id),
+        event_type="context.product_consumed.v1",
+        payload={
+            "product_key": product.product_key,
+            "version": product_version.version,
+            "fingerprint": product_version.fingerprint,
+            "principal_id": context.principal_id,
+        },
+    )
+    await session.commit()
+    return {
+        "contents": [
+            {
+                "uri": uri,
+                "mimeType": "application/json",
+                "text": json.dumps(payload, indent=2, default=str),
+            }
+        ]
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main HTTP endpoint
 # ---------------------------------------------------------------------------
@@ -628,7 +815,9 @@ async def mcp_endpoint(
             result = await _handle_resources_list(session, context)
 
         elif method == "resources/read":
-            result = await _handle_resources_read(params, session, context)
+            result = await _handle_resources_read(
+                params, session, context, correlation_id
+            )
 
         else:
             return JSONResponse(

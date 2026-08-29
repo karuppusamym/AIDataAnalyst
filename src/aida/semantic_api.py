@@ -15,6 +15,7 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     AssetDocumentationVersion,
     BulkStewardshipOperation,
+    ContextProductVersion,
     DataSource,
     GlossaryConflict,
     GlossaryLinkProposal,
@@ -672,6 +673,41 @@ async def decide_governance_review(
             "model_route_id": str(route.id),
             "route_key": route.route_key,
             "version": route.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "CONTEXT_PRODUCT_VERSION":
+        product_version = await session.get(ContextProductVersion, UUID(review.object_id))
+        if (
+            product_version is None
+            or product_version.organization_id != review.organization_id
+        ):
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if product_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="context product is no longer pending")
+        if body.decision == "APPROVE":
+            await session.execute(
+                update(ContextProductVersion)
+                .where(
+                    ContextProductVersion.product_id == product_version.product_id,
+                    ContextProductVersion.status == "PUBLISHED",
+                    ContextProductVersion.id != product_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            product_version.status = "PUBLISHED"
+            product_version.approved_by = context.principal_id
+            product_version.approved_at = now
+            product_version.published_at = now
+            event_type = "context.product_published.v1"
+        else:
+            product_version.status = "REJECTED"
+            event_type = "context.product_rejected.v1"
+        aggregate_type = "context_product_version"
+        aggregate_id = str(product_version.id)
+        payload = {
+            "context_product_version_id": str(product_version.id),
+            "context_product_id": str(product_version.product_id),
+            "version": product_version.version,
             "review_id": str(review.id),
         }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":

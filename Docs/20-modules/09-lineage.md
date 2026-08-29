@@ -6,6 +6,8 @@
 
 Answers *where did this data come from* — and, uniquely, *why did the agent choose this path*. Data lineage is table stakes; **AI decision lineage is whitespace W3** and no competitor models it.
 
+See `../competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` for the Collibra Data Lineage feature comparison that opened LN-9 through LN-12.
+
 ## 2. Jobs served
 
 A2 (can I trust this), S4 (what breaks if this changes), U1/U2 (audit), P2.
@@ -88,6 +90,8 @@ def ingest_dbt_manifest(scope, project_id, manifest) -> DbtImportDTO
 |---|---|
 | GET | `/v1/lineage/upstream`, `/v1/lineage/downstream` |
 | GET | `/v1/tables/{id}/impact` |
+| GET | `/v1/datasources/{id}/unified-lineage/graph` — merged FK + suggested + dbt + OpenLineage graph |
+| GET | `/v1/datasources/{id}/unified-lineage/impact/{node_id}` — transitive upstream/downstream impact |
 | POST | `/v1/lineage/openlineage` |
 | POST | `/v1/dbt-projects`, `/v1/dbt-projects/{id}/manifests` |
 | GET | `/v1/agent-runs/{id}/decision-lineage` |
@@ -110,7 +114,7 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | ETL / OpenLineage | Partial — `POST /v1/lineage/openlineage` ingests RunEvents, extracts column-lineage edges from the `columnLineage` facet, matches against the catalog, and persists idempotently (`openlineage.py`, `openlineage_api.py`); **zero test coverage**, and no Airflow-sourced event has ever been verified producing real edges | Test coverage; live Airflow e2e evidence |
 | BI | **Not implemented** | Entry-ticket gap |
 | AI_DECISION | Partial — traces exist; not modelled as lineage edges | **Differentiator — model as first-class edges** |
-| Impact | Implemented — physical table to metrics, tools, relationships | Transitive traversal across all edge kinds |
+| Impact | Implemented (direct) — physical table to metrics, tools, relationships. **Transitive impact delivered 2026-08-29** — `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` does bounded upstream/downstream BFS over a graph merged from FK + suggested + dbt + OpenLineage edges (`unified_lineage.py`, `unified_lineage_api.py`) | Column-level edges; view/procedure and BI edges folded in (LN-2, LN-4, LN-11) |
 
 ## 13. Open work
 
@@ -122,5 +126,9 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | LN-4 | BI tool lineage (Tableau, Power BI, Looker) | P1 |
 | LN-5 | Column-level dbt manifest lineage | P1 |
 | LN-6 | dbt `run_results.json` operational evidence | P1 |
-| LN-7 | Transitive cross-kind impact traversal | P1 |
+| LN-7 | Transitive cross-kind impact traversal | **Delivered 2026-08-29** (table-level; see LN-10/LN-11 for the remaining edge kinds) |
 | LN-8 | Large-DAG virtualization | P1 |
+| LN-9 | One canonical graph merging FK + suggested + dbt + OpenLineage edges | **Delivered 2026-08-29** — `unified_lineage_api.py` |
+| LN-10 | Authoritative column-to-column mapping (replace dbt's identical-name matching) | P1 |
+| LN-11 | View/stored-procedure/BI nodes folded into the unified graph | P1, depends on LN-2/LN-4 |
+| LN-12 | Unified graph export: SVG, PNG, PDF, CSV | P2 |

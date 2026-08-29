@@ -18,6 +18,7 @@
 - [Atlan — The Context Layer for AI](https://atlan.com/)
 - [Alation — Agentic Data Intelligence Platform](https://www.alation.com/product/agentic-data-intelligence-platform/)
 - [Collibra Platform](https://www.collibra.com/products/collibra-platform)
+- [Collibra Data Lineage](https://www.collibra.com/products/data-lineage) — reviewed 2026-08-29; see `competitors/08-collibra-lineage-and-platform-analysis-2026-08.md`
 - [Microsoft Purview Data Governance](https://www.microsoft.com/en-us/security/business/risk-management/microsoft-purview-data-governance)
 
 ### Warehouse-native context planes

@@ -48,6 +48,7 @@ flowchart LR
 | Lineage breadth | OpenLineage ingestion, view and procedure lineage, BI lineage | 09 |
 | Quality basics | Notification and escalation routing, approved watermark contracts, data SLAs | 11 |
 | **MCP context products** | MCP server, context products, per-read policy, consumption lineage, eligible tools | 19 |
+| **AI control-plane products** | Data product and contract registries, marketplace, lineage MCP, deterministic context compiler, AI asset registry | 19, 09, 17, 20 |
 | Catalog UX | Bulk actions, virtualization | 04, 21 |
 
 **Exit criteria**
@@ -55,6 +56,7 @@ flowchart LR
 - Atlas is no longer dismissed as "Postgres-only" or "prototype breadth."
 - A steward can govern a domain end to end without leaving Atlas.
 - An external Claude or ChatGPT agent can consume governed context over MCP, with policy enforced at every read.
+- A producer can publish a versioned context product and an eligible external agent can consume that exact version with attributable evidence.
 
 **Note on module 19.** It appears in Phase A because MCP is now the distribution channel — but it is simultaneously whitespace W2. Building it early is the clearest example of an entry-ticket gap and a differentiator being the same work.
 

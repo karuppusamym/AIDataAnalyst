@@ -142,11 +142,43 @@ Create the target structure, the module template, and the import-linter ratchet.
 
 **Acceptance**
 - MCP server exposing context products as resources and eligible tools as MCP tools.
+- Stable context-product identity with immutable versions, declared purpose, owner, bounded asset scope, semantic and glossary versions, quality requirements, policy summary, and eligible tools.
+- Draft, review, publish, supersede, reject, and deprecate lifecycle through the unified governance queue with maker-checker separation.
 - **Policy evaluated on every read**, not only at connection.
 - Consumption recorded as lineage edges.
 - Tool invocation by an external agent goes through the **same query gateway** as a native run.
 - Workload identity required; per-consumer rate limits and budgets.
 - Value-freedom at the boundary verified by a sentinel test.
+
+### EA.10a — Data products, contracts, and marketplace
+**Module:** 19, 17 · **Jobs:** B1, B2, S1, S4, P5 · **Type:** ENTRY · **Priority:** P0
+
+**Acceptance**
+- Data product registry covers candidate, development, published, deprecated, and retired lifecycle states with domain, owner, ports, certification, quality posture, lineage coverage, and linked context products.
+- Data contract registry versions schema, quality, freshness, SLA, producer, consumer, and product-port bindings and supports ODCS-compatible import/export.
+- Breaking contract changes require compatibility evidence and an independently approved exception before publication.
+- Marketplace lists only published, policy-visible products and exposes ownership, trust, usage terms, lineage, and quality without source values.
+- Access requests are attributable, time-bound, independently approved where policy requires it, revocable, and audited.
+
+### EA.10b — Deterministic governed context compiler
+**Module:** 19, 07, 10 · **Jobs:** A1, S1, P5 · **Type:** ENTRY + DIFF · **Priority:** P0
+
+**Acceptance**
+- Versioned context specifications define graph traversal, included fields, target schema mapping, and delivery policy.
+- The same approved inputs and specification produce the same canonical output hash.
+- Built-in targets cover Snowflake Semantic Views, Databricks Metric Views, OSI, and ODCS; custom JSON/YAML schemas are supported without executable user code.
+- Output is available through REST, MCP, and YAML export and never includes unapproved drafts or source values.
+- Imported platform definitions can be reconciled against the governed version and produce an inspectable drift report.
+
+### EA.10c — Unified AI registry and operational trust
+**Module:** 15, 17, 19, 20 · **Jobs:** P5, U2, U4 · **Type:** ENTRY + DIFF · **Priority:** P1
+
+**Acceptance**
+- AI use cases, models, agents, versions, deployments, datasets, policies, owners, assessments, and runtime signals share one tenant-scoped registry.
+- CLI/API manifests provide code-first registration without accepting credentials or source values.
+- Trust scores are deterministic composites with every factor, input version, and missing signal visible.
+- Assessment templates cover EU AI Act, NIST AI RMF, AI UC-1, and organization-defined controls.
+- Runtime degradation can create remediation work, suspend a route or tool through existing deterministic controls, and retain evidence.
 
 ### EA.11 — Quality notification and escalation
 **Module:** 11 · **Jobs:** P2, S5 · **Type:** ENTRY · **Priority:** P0
@@ -175,6 +207,31 @@ Create the target structure, the module template, and the import-linter ratchet.
 - 1M-row lists virtualized without browser lockup.
 
 ---
+
+### EA.14 — Unified lineage graph and transitive impact
+**Module:** 09 · **Jobs:** A2, S4 · **Type:** ENTRY · **Priority:** P0 · **Status:** DELIVERED 2026-08-29
+
+Merges declared foreign keys, approved/candidate relationship edges, dbt manifest
+dependencies, and OpenLineage table edges into one graph, and replaces direct-reference
+counting with bounded transitive upstream/downstream traversal. Opened by
+`competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` against Collibra's
+Catalog Lineage / Impact Analysis views.
+
+**Acceptance**
+- `GET /v1/datasources/{id}/unified-lineage/graph` returns one node/edge set spanning all four
+  lineage sources, tagged by `edge_source`, bounded by `node_limit`/`edge_limit` with
+  `truncation_reasons`. — **met**
+- Nodes without a matched catalog table (unmatched dbt resources, unresolved OpenLineage
+  datasets) are surfaced as synthetic nodes instead of silently dropped. — **met**
+- `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` computes upstream and downstream
+  impact by bounded multi-hop traversal (`aida.unified_lineage.traverse`), not direct-edge
+  counting, with per-node contributing edge sources and depth. — **met**
+- Pure traversal logic (`aida/unified_lineage.py`) is unit tested without a database, mirroring
+  `aida/knowledge_graph.py`; contract tests assert the two routes are published and the
+  response schemas carry no source values. — **met**, `tests/test_unified_lineage.py`
+
+**Not yet delivered** (tracked separately): authoritative column-level mapping (LN-10),
+view/procedure/BI nodes (LN-11), and graph export (LN-12).
 
 ## Phase B — Regulated-enterprise trust
 
@@ -354,6 +411,50 @@ Create the target structure, the module template, and the import-linter ratchet.
 **Module:** 02 · **Type:** DIFF (W6) · **Priority:** P1
 
 **Acceptance** — the certification harness is published and third-party runnable; a third-party adapter passes without core changes.
+
+### EE.8 — Data product and data contract registries
+**Module:** 19 · **Type:** DIFF · **Priority:** P2
+
+Delivers CP-2 and CP-3 from `20-modules/19-context-products-and-mcp.md` §15.2: versioned data
+products with owners/ports/lifecycle/certification, and a data contract registry (schema,
+quality, freshness, SLA, producer/consumer, ODCS-compatible) distinct from
+`data_contracts.py`'s ingestion-envelope validation.
+
+**Acceptance** — full lifecycle (candidate → retired) with portfolio filters and ownership
+queues; contract compatibility checks block a breaking change without an approved exception;
+maker-checker on publication.
+
+### EE.9 — Governed context compiler
+**Module:** 19 · **Type:** DIFF · **Priority:** P2
+
+Delivers CP-5: deterministic mapping from the graph context (semantic models, metrics, terms,
+ownership, policy, quality) to Snowflake Semantic Views, Databricks Metric Views, OSI, ODCS,
+and custom YAML, delivered via REST, MCP, and file export.
+
+**Acceptance** — repeatable output hash for a given input state; schema validation per target
+format; a drift report against a previously deployed definition.
+
+### EE.10 — Lineage MCP tools
+**Module:** 09, 19 · **Type:** DIFF (W2) · **Priority:** P1
+
+Delivers CP-6, using EA.14's unified graph as the data source: expose upstream, downstream,
+impact, fuzzy entity resolution, and transformation-detail as MCP tools alongside the existing
+catalog resources and governed tools in `mcp_server.py`.
+
+**Acceptance** — fuzzy resolution corpus passes; traversal depth is policy-bounded; policy
+filtering happens before traversal (a leak test proves it); transformation evidence returned
+stays value-free.
+
+### EE.11 — Unified AI registry and trust scoring
+**Module:** 19 · **Type:** DIFF · **Priority:** P2
+
+Delivers CP-7 and CP-8: register AI use cases, models, agents, datasets, and policies with
+full lifecycle and dependency graph; compute an explainable trust score from documentation,
+lifecycle, quality, policy, evaluation, and runtime posture.
+
+**Acceptance** — every trust-score contributing factor is inspectable, never opaque; approval,
+remediation, and retirement workflows exist; assessment templates cover at minimum EU AI Act
+and NIST AI RMF.
 
 ## Related documents
 

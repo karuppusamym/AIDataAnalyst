@@ -952,6 +952,85 @@ class GraphSearchRead(ApiModel):
     truncated: bool
 
 
+UnifiedLineageNodeKind = Literal[
+    "TABLE", "DBT_MODEL", "DBT_SOURCE", "DBT_SEED", "DBT_SNAPSHOT", "UNRESOLVED_DATASET"
+]
+UnifiedLineageEdgeSource = Literal[
+    "FOREIGN_KEY", "SUGGESTED_RELATIONSHIP", "DBT_DEPENDENCY", "OPENLINEAGE_ETL"
+]
+
+
+class UnifiedLineageNodeRead(ApiModel):
+    """One node in the merged lineage graph: a catalog table, or -- when a dbt
+    resource or OpenLineage dataset has not been matched to one -- a synthetic
+    node so the graph stays connected instead of silently dropping it."""
+
+    id: str
+    node_kind: UnifiedLineageNodeKind
+    label: str
+    qualified_name: str
+    matched_table_id: UUID | None = None
+    resolved: bool = True
+    depth: int = 0
+    inbound_edge_count: int = 0
+    outbound_edge_count: int = 0
+
+
+class UnifiedLineageEdgeRead(ApiModel):
+    """One typed edge merged from declared FKs, approved/candidate column
+    relationships, dbt manifest dependencies, or OpenLineage table edges."""
+
+    id: str
+    edge_source: UnifiedLineageEdgeSource
+    source_node_id: str
+    target_node_id: str
+    source_label: str
+    target_label: str
+    status: str
+    confidence: float
+    source_columns: list[str] = Field(default_factory=list)
+    target_columns: list[str] = Field(default_factory=list)
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class UnifiedLineageGraphRead(ApiModel):
+    datasource_id: UUID
+    nodes: list[UnifiedLineageNodeRead]
+    edges: list[UnifiedLineageEdgeRead]
+    counts_by_source: dict[str, int]
+    returned_node_count: int = 0
+    returned_edge_count: int = 0
+    node_limit: int = 0
+    edge_limit: int = 0
+    truncated: bool = False
+    truncation_reasons: list[str] = Field(default_factory=list)
+
+
+class UnifiedLineageImpactNodeRead(ApiModel):
+    node_id: str
+    node_kind: UnifiedLineageNodeKind
+    label: str
+    qualified_name: str
+    depth: int
+    contributing_edge_sources: list[UnifiedLineageEdgeSource]
+
+
+class UnifiedLineageImpactRead(ApiModel):
+    """Transitive upstream/downstream impact, replacing direct-reference
+    counting with a bounded multi-hop traversal of the unified graph."""
+
+    datasource_id: UUID
+    focus_node_id: str
+    focus_node_kind: UnifiedLineageNodeKind
+    focus_label: str
+    upstream: list[UnifiedLineageImpactNodeRead]
+    downstream: list[UnifiedLineageImpactNodeRead]
+    requested_depth: int
+    node_limit: int
+    upstream_truncated: bool
+    downstream_truncated: bool
+
+
 class SemanticInferenceRequest(ApiModel):
     max_tables: int = Field(default=100, ge=1, le=100)
     use_model: bool = True
@@ -1678,6 +1757,98 @@ class DataQualitySummaryRead(ApiModel):
     metadata_scan_age_minutes: float | None
     metadata_scan_status: str
     source_freshness_status: Literal["NOT_CONFIGURED"]
+
+
+class ContextProductQualityRequirements(ApiModel):
+    minimum_score: int = Field(default=0, ge=0, le=100)
+    deny_on_critical_incident: bool = True
+
+
+class ContextProductPolicySummary(ApiModel):
+    source_values: Literal["GATEWAY_ONLY"] = "GATEWAY_ONLY"
+    retention: Literal["NO_RAW_CONTEXT"] = "NO_RAW_CONTEXT"
+    permitted_actions: list[Literal["READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS"]] = Field(
+        default_factory=lambda: ["READ_CONTEXT"]
+    )
+
+
+class ContextProductDefinition(ApiModel):
+    name: str = Field(min_length=3, max_length=200)
+    description: str = Field(min_length=3, max_length=10_000)
+    purpose: str = Field(min_length=10, max_length=1000)
+    owner_principal: str = Field(min_length=2, max_length=255)
+    table_ids: list[UUID] = Field(default_factory=list, max_length=1000)
+    semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    glossary_term_version_ids: list[UUID] = Field(default_factory=list, max_length=500)
+    eligible_tool_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
+    allowed_consumer_roles: list[str] = Field(min_length=1, max_length=50)
+    lineage_depth: int = Field(default=2, ge=0, le=4)
+    quality_requirements: ContextProductQualityRequirements = Field(
+        default_factory=ContextProductQualityRequirements
+    )
+    policy_summary: ContextProductPolicySummary = Field(
+        default_factory=ContextProductPolicySummary
+    )
+
+    @model_validator(mode="after")
+    def validate_bounded_definition(self) -> "ContextProductDefinition":
+        reference_groups = (
+            self.table_ids,
+            self.semantic_model_version_ids,
+            self.glossary_term_version_ids,
+            self.eligible_tool_version_ids,
+        )
+        if not any(reference_groups):
+            raise ValueError("a context product must include at least one governed reference")
+        for values in reference_groups:
+            if len(values) != len(set(values)):
+                raise ValueError("context product reference identifiers must be unique")
+        if len(self.allowed_consumer_roles) != len(set(self.allowed_consumer_roles)):
+            raise ValueError("allowed consumer roles must be unique")
+        if any(not role.strip() or len(role) > 100 for role in self.allowed_consumer_roles):
+            raise ValueError("allowed consumer roles must be non-empty and at most 100 characters")
+        return self
+
+
+class ContextProductCreate(ContextProductDefinition):
+    product_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+
+
+class ContextProductVersionCreate(ContextProductDefinition):
+    based_on_version_id: UUID | None = None
+
+
+class ContextProductVersionUpdate(ContextProductDefinition):
+    pass
+
+
+class ContextProductVersionRead(ContextProductDefinition):
+    id: UUID
+    organization_id: UUID
+    product_id: UUID
+    product_key: str
+    version: int
+    status: str
+    fingerprint: str
+    created_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    published_at: datetime | None
+    based_on_version_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContextProductRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    product_key: str
+    lifecycle_status: str
+    created_by: str
+    latest_version: ContextProductVersionRead
+    created_at: datetime
+    updated_at: datetime
 
 
 class HealthResponse(ApiModel):

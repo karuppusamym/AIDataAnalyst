@@ -1673,6 +1673,83 @@ class ConnectorCertificationRun(Base, TimestampMixin):
     completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ContextProduct(Base, TimestampMixin):
+    """Stable identity for a governed package of context exposed to AI consumers."""
+
+    __tablename__ = "context_product"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "product_key",
+            name="uq_context_product_organization_id_product_key",
+        ),
+        Index("ix_context_product_project_status", "project_id", "lifecycle_status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    lifecycle_status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ContextProductVersion(Base, TimestampMixin):
+    """Immutable once submitted; a pinned, value-free context product definition."""
+
+    __tablename__ = "context_product_version"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "version",
+            name="uq_context_product_version_product_id_version",
+        ),
+        Index("ix_context_product_version_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
+    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    semantic_model_version_ids: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    glossary_term_version_ids: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    eligible_tool_version_ids: Mapped[list[str]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    allowed_consumer_roles: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    lineage_depth: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    quality_requirements: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    policy_summary: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    based_on_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="SET NULL"), index=True
+    )
+
+
 class OutboxEvent(Base):
     __tablename__ = "outbox_event"
     __table_args__ = (

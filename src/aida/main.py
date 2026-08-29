@@ -15,6 +15,7 @@ from aida.ai_governance_api import router as ai_governance_router
 from aida.api import router
 from aida.config import get_settings
 from aida.context import correlation_id_var
+from aida.context_product_api import router as context_product_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
 from aida.glossary_api import router as glossary_router
@@ -30,6 +31,7 @@ from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.stewardship_api import router as stewardship_router
 from aida.tool_api import router as tool_router
+from aida.unified_lineage_api import router as unified_lineage_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -84,6 +86,8 @@ app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
+app.include_router(unified_lineage_router)
+app.include_router(context_product_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents
