@@ -55,7 +55,7 @@ from aida.schemas import (
     StewardshipCoverageRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
-from aida.stewardship_service import build_stewardship_coverage
+from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -1112,15 +1112,12 @@ async def _coverage(
             .distinct()
         )
     )
-    certified = set(
+    certification_rows = (
         await session.scalars(
-            select(AssetCertification.table_id).where(
-                AssetCertification.table_id.in_(table_ids),
-                AssetCertification.status == "ACTIVE",
-                AssetCertification.expires_at > datetime.now(UTC),
-            )
+            select(AssetCertification).where(AssetCertification.table_id.in_(table_ids))
         )
-    )
+    ).all()
+    certified = active_certified_table_ids(list(certification_rows), now=datetime.now(UTC))
     policies = (
         await session.scalars(
             select(DataQualityPolicy).where(

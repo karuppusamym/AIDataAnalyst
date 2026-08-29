@@ -17,13 +17,20 @@ any test in this suite.
 
 from __future__ import annotations
 
+from typing import Any
+from uuid import uuid4
+
+from aida.config import Settings
 from aida.mcp_server import (
     MCP_PROTOCOL_VERSION,
     _err,
     _handle_initialize,
+    _handle_tools_call,
     _ok,
     _tool_role_eligible,
 )
+from aida.models import AuditEvent, GovernedTool, GovernedToolVersion
+from aida.security import SecurityContext
 
 # ---------------------------------------------------------------------------
 # _tool_role_eligible -- mirrors the native role-binding check in
@@ -118,3 +125,133 @@ def test_handle_initialize_result_is_independent_of_params() -> None:
     # server's declared capabilities must not vary with client-supplied
     # params.
     assert _handle_initialize({}) == _handle_initialize({"clientInfo": {"name": "anything"}})
+
+
+# ---------------------------------------------------------------------------
+# tools/call -- anti-enumeration (CX-5): a caller must not be able to tell,
+# from the response shape, whether a tool name doesn't exist at all or
+# exists but is bound to roles the caller doesn't hold.
+# ---------------------------------------------------------------------------
+
+
+class ToolCallSession:
+    """A fake session answering `_handle_tools_call`'s lookup-then-decide shape."""
+
+    def __init__(self, row: object) -> None:
+        self.row = row
+        self.added: list[object] = []
+        self.timeline: list[str] = []
+
+    async def execute(self, _statement: object) -> object:
+        row = self.row
+
+        class _Result:
+            def first(self_inner) -> object:
+                return row
+
+        return _Result()
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        return None
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.timeline.append("commit")
+
+
+def _published_tool_version(
+    *, slug: str, allowed_roles: list[str]
+) -> tuple[GovernedToolVersion, GovernedTool]:
+    organization_id = uuid4()
+    tool = GovernedTool(id=uuid4(), organization_id=organization_id, project_id=uuid4(), slug=slug)
+    version = GovernedToolVersion(
+        id=uuid4(),
+        organization_id=organization_id,
+        tool_id=tool.id,
+        version=1,
+        status="PUBLISHED",
+        name="Quarterly revenue by region",
+        description="A sample governed tool.",
+        datasource_id=uuid4(),
+        sql_template="SELECT 1",
+        referenced_tables=[],
+        parameter_schema=[],
+        allowed_roles=allowed_roles,
+        fingerprint="tool-fingerprint",
+        created_by="admin",
+    )
+    return version, tool
+
+
+async def test_tools_call_reports_identical_response_for_unknown_and_denied_tool_names() -> None:
+    slug = "quarterly_revenue_by_region"
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset({"Viewer"}),
+    )
+    settings = Settings(_env_file=None)
+
+    unknown_session = ToolCallSession(None)
+    unknown_result = await _handle_tools_call(
+        {"name": f"atlas__{slug}", "arguments": {}},
+        unknown_session,  # type: ignore[arg-type]
+        caller,
+        settings,
+        "corr-unknown",
+    )
+
+    version, tool = _published_tool_version(slug=slug, allowed_roles=["RiskAnalyst"])
+    denied_session = ToolCallSession((version, tool))
+    denied_result = await _handle_tools_call(
+        {"name": f"atlas__{slug}", "arguments": {}},
+        denied_session,  # type: ignore[arg-type]
+        caller,
+        settings,
+        "corr-denied",
+    )
+
+    # Byte-for-byte identical envelopes for the same requested name -- a
+    # caller cannot distinguish "doesn't exist" from "exists, not for you".
+    assert unknown_result == denied_result
+    assert unknown_result["isError"] is True
+    assert unknown_result["content"] == [
+        {"type": "text", "text": f"Tool '{slug}' not found or not published."}
+    ]
+
+    # But the two cases are NOT actually identical server-side: the denial
+    # is still recorded as operator evidence, unlike the true-unknown case.
+    assert unknown_session.timeline == []
+    assert unknown_session.added == []
+    assert denied_session.timeline == ["commit"]
+    audit = next(value for value in denied_session.added if isinstance(value, AuditEvent))
+    assert audit.action == "mcp.tool_call.role_binding_denied"
+    assert audit.outcome == "DENIED"
+    assert audit.details["tool_slug"] == slug
+
+
+async def test_tools_call_reaches_datasource_resolution_when_role_is_eligible() -> None:
+    # Confirms the collapsed "not found" response above is specific to the
+    # denial path, not a blanket bug that returns it for every request.
+    slug = "quarterly_revenue_by_region"
+    version, tool = _published_tool_version(slug=slug, allowed_roles=["Viewer"])
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=version.organization_id,
+        roles=frozenset({"Viewer"}),
+    )
+    session = ToolCallSession((version, tool))  # .get() returns None => datasource missing
+
+    result: dict[str, Any] = await _handle_tools_call(
+        {"name": f"atlas__{slug}", "arguments": {}},
+        session,  # type: ignore[arg-type]
+        caller,
+        Settings(_env_file=None),
+        "corr-eligible",
+    )
+
+    assert result["content"] == [{"type": "text", "text": "Datasource not accessible."}]

@@ -2,20 +2,24 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import Request
+import pytest
+from fastapi import HTTPException, Request
 
 import aida.api as api_module
+import aida.intelligence_api as intelligence_api
 from aida.config import Settings
 from aida.connectors.base import DiscoveredCatalog, DiscoveredTable
 from aida.models import (
     AnalysisRun,
     AuditEvent,
     DataSource,
+    GovernedToolVersion,
     MetadataCatalog,
     MetadataSchema,
     MetadataTable,
     OutboxEvent,
 )
+from aida.query_gateway import audit_sql_hash
 from aida.security import SecurityContext
 from aida.stewardship_service import build_stewardship_coverage
 from aida.workflows import discovery
@@ -408,3 +412,182 @@ async def test_discovery_workflow_heartbeats_retryable_stages_and_aggregates_pro
     assert len([call for call in calls if call[0] == "profile_table_task"]) == 3
     assert all(call[2]["heartbeat_timeout"] == timedelta(seconds=30) for call in heartbeat_calls)
     assert all("retry_policy" in call[2] for call in heartbeat_calls)
+
+
+def test_audit_sql_hash_is_deterministic_key_bound_and_tamper_evident() -> None:
+    sql = "SELECT customer_id FROM payments WHERE amount > 100"
+
+    # Determinism: the same key and SQL always produce the same digest, so a
+    # stored execution record's hash can be recomputed and compared later.
+    assert audit_sql_hash("key-a", sql) == audit_sql_hash("key-a", sql)
+    # Key-bound: a caller (or attacker) without the server's audit_hmac_key
+    # cannot mint a matching digest, unlike a bare, unkeyed hash.
+    assert audit_sql_hash("key-a", sql) != audit_sql_hash("key-b", sql)
+    # Tamper-evident: altering the recorded SQL invalidates the digest.
+    assert audit_sql_hash("key-a", sql) != audit_sql_hash("key-a", sql + " -- tampered")
+    assert len(audit_sql_hash("key-a", sql)) == 64  # sha256 hex digest
+
+
+class _ScalarResult:
+    """Wraps a preset list so it satisfies both ``.all()`` and ``list(...)`` call sites."""
+
+    def __init__(self, values: list[Any]) -> None:
+        self._values = values
+
+    def all(self) -> list[Any]:
+        return self._values
+
+    def __iter__(self) -> Any:
+        return iter(self._values)
+
+
+class ImpactSession:
+    """A fake session that answers `table_impact_analysis`'s fixed query sequence:
+    one `execute(...).one_or_none()` for the table/schema/catalog join, then four
+    `scalars(...)` calls (metrics, tools, relationships, dbt resources) in that order.
+    """
+
+    def __init__(
+        self,
+        row: tuple[MetadataTable, MetadataSchema, MetadataCatalog] | None,
+        *,
+        metric_ids: list[UUID],
+        tool_versions: list[GovernedToolVersion],
+        relationship_ids: list[UUID],
+        dbt_resource_ids: list[UUID],
+    ) -> None:
+        self.row = row
+        self.scalars_queue: list[list[Any]] = [
+            list(metric_ids),
+            list(tool_versions),
+            list(relationship_ids),
+            list(dbt_resource_ids),
+        ]
+
+    async def execute(self, _statement: object) -> object:
+        row = self.row
+
+        class _Result:
+            def one_or_none(self_inner) -> object:
+                return row
+
+        return _Result()
+
+    async def scalars(self, _statement: object) -> _ScalarResult:
+        return _ScalarResult(self.scalars_queue.pop(0))
+
+
+def _sample_governed_tool_version(
+    *, datasource_id: UUID, organization_id: UUID, referenced_tables: list[str]
+) -> GovernedToolVersion:
+    return GovernedToolVersion(
+        id=uuid4(),
+        organization_id=organization_id,
+        tool_id=uuid4(),
+        version=1,
+        status="PUBLISHED",
+        name="Sample governed tool",
+        description="A sample tool for impact-analysis testing.",
+        datasource_id=datasource_id,
+        sql_template="SELECT 1",
+        referenced_tables=referenced_tables,
+        parameter_schema=[],
+        allowed_roles=["Viewer"],
+        fingerprint="tool-fingerprint",
+        created_by="admin",
+    )
+
+
+async def test_impact_analysis_aggregates_downstream_objects_and_filters_tools_by_table_name() -> (
+    None
+):
+    organization_id = uuid4()
+    datasource_id = uuid4()
+    catalog = MetadataCatalog(
+        id=uuid4(),
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        name="warehouse",
+        fingerprint="catalog-fingerprint",
+    )
+    schema = MetadataSchema(
+        id=uuid4(),
+        organization_id=organization_id,
+        catalog_id=catalog.id,
+        name="finance",
+        fingerprint="schema-fingerprint",
+    )
+    table = MetadataTable(
+        id=uuid4(),
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        schema_id=schema.id,
+        name="payments",
+        object_type="TABLE",
+        fingerprint="table-fingerprint",
+    )
+    metric_ids = [uuid4()]
+    relationship_ids = [uuid4()]
+    dbt_resource_ids = [uuid4()]
+    matching_tool = _sample_governed_tool_version(
+        datasource_id=datasource_id,
+        organization_id=organization_id,
+        referenced_tables=["finance.payments"],
+    )
+    unrelated_tool = _sample_governed_tool_version(
+        datasource_id=datasource_id,
+        organization_id=organization_id,
+        referenced_tables=["finance.unrelated_table"],
+    )
+    session = ImpactSession(
+        (table, schema, catalog),
+        metric_ids=metric_ids,
+        tool_versions=[matching_tool, unrelated_tool],
+        relationship_ids=relationship_ids,
+        dbt_resource_ids=dbt_resource_ids,
+    )
+    context = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"Viewer"}),
+    )
+
+    result = await intelligence_api.table_impact_analysis(
+        table.id,
+        context,
+        session,  # type: ignore[arg-type]
+    )
+
+    assert result.table_id == table.id
+    assert result.table_name == "warehouse.finance.payments"
+    assert result.semantic_metric_version_ids == metric_ids
+    assert result.governed_tool_version_ids == [matching_tool.id]
+    assert result.approved_relationship_candidate_ids == relationship_ids
+    assert result.dbt_resource_ids == dbt_resource_ids
+    assert result.downstream_object_count == 4
+
+
+async def test_impact_analysis_returns_404_for_unknown_table() -> None:
+    session = ImpactSession(
+        None,
+        metric_ids=[],
+        tool_versions=[],
+        relationship_ids=[],
+        dbt_resource_ids=[],
+    )
+    context = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset({"Viewer"}),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await intelligence_api.table_impact_analysis(
+            uuid4(),
+            context,
+            session,  # type: ignore[arg-type]
+        )
+
+    assert exc.value.status_code == 404

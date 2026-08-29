@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import Select, select
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -145,18 +145,27 @@ async def process_scan_policy(
     return True
 
 
+def due_scan_policies_statement(settings: Settings, now: datetime) -> Select[tuple[UUID]]:
+    """Due, enabled policies ordered highest-priority-first, oldest-due as tiebreaker.
+
+    Higher ``priority`` policies are admitted ahead of lower-priority ones whenever more
+    policies are due than a single scheduler batch can process -- this is the platform's
+    priority claim for fleet scheduling. ``next_run_at`` only breaks ties within a priority
+    tier, so it never lets an older, lower-priority scan jump ahead of a newer, higher one.
+    """
+    return (
+        select(ScanPolicy.id)
+        .where(ScanPolicy.enabled.is_(True), ScanPolicy.next_run_at <= now)
+        .order_by(ScanPolicy.priority.desc(), ScanPolicy.next_run_at)
+        .limit(settings.scheduler_batch_size)
+    )
+
+
 async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await reconcile_cancellation_requests(client, settings)
     now = datetime.now(UTC)
     async with session_factory() as session:
-        policy_ids = (
-            await session.scalars(
-                select(ScanPolicy.id)
-                .where(ScanPolicy.enabled.is_(True), ScanPolicy.next_run_at <= now)
-                .order_by(ScanPolicy.priority.desc(), ScanPolicy.next_run_at)
-                .limit(settings.scheduler_batch_size)
-            )
-        ).all()
+        policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0
     for policy_id in policy_ids:
         try:

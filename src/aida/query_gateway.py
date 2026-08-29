@@ -59,6 +59,18 @@ def redact_sql_literals(sql: str, *, dialect: str) -> str:
     return redacted.sql(dialect=dialect, pretty=True)
 
 
+def audit_sql_hash(key: str, sql: str) -> str:
+    """HMAC-SHA256 the raw SQL text under the configured audit key.
+
+    Keyed (not a bare hash) so the digest is both tamper-evident and
+    unforgeable without the server's ``audit_hmac_key``: an attacker who can
+    read a stored execution record still cannot mint a matching hash for
+    different SQL, and the digest changes if the recorded SQL is altered
+    after the fact.
+    """
+    return hmac.new(key.encode("utf-8"), sql.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def extract_column_lineage(sql: str, *, dialect: str) -> list[dict[str, Any]]:
     """Extract value-free output-to-source column evidence from SELECT projections."""
     statement = parse_one(sql, read=dialect)
@@ -225,11 +237,7 @@ class QueryExecutionGateway:
             datasource_id=datasource.id,
             principal_id=context.principal_id,
             dialect=datasource.dialect,
-            sql_hash=hmac.new(
-                self.settings.audit_hmac_key.encode("utf-8"),
-                sql.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest(),
+            sql_hash=audit_sql_hash(self.settings.audit_hmac_key, sql),
             semantic_version=semantic_version,
         )
         session.add(execution)

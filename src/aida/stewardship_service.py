@@ -66,6 +66,23 @@ def build_stewardship_coverage(
     )
 
 
+def active_certified_table_ids(
+    certifications: list[AssetCertification], *, now: datetime
+) -> set[UUID]:
+    """Table IDs whose certification is currently ACTIVE and not expired.
+
+    Certification is a time-bound attestation, not a permanent one: a certification
+    that has passed its ``expires_at`` must stop counting toward the "certified"
+    stewardship-coverage dimension even though its ``status`` row hasn't separately
+    been flipped -- expiry, not just status, gates whether it still counts.
+    """
+    return {
+        certification.table_id
+        for certification in certifications
+        if certification.status == "ACTIVE" and certification.expires_at > now
+    }
+
+
 async def apply_bulk_operation(
     session: AsyncSession,
     operation: BulkStewardshipOperation,
