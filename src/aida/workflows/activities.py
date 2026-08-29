@@ -75,6 +75,17 @@ class SnapshotScope:
         }
 
 
+def missing_snapshot_scope(existing: SnapshotScope, observed: SnapshotScope) -> SnapshotScope:
+    """Return only inventory identities absent from an authoritative full snapshot."""
+    return SnapshotScope(
+        catalog_ids=existing.catalog_ids - observed.catalog_ids,
+        schema_ids=existing.schema_ids - observed.schema_ids,
+        table_ids=existing.table_ids - observed.table_ids,
+        column_ids=existing.column_ids - observed.column_ids,
+        constraint_ids=existing.constraint_ids - observed.constraint_ids,
+    )
+
+
 def fingerprint(value: object) -> str:
     payload = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -305,63 +316,49 @@ async def _deprecate_missing(
             select(MetadataTable.id).where(MetadataTable.datasource_id == datasource.id)
         )
     )
-
+    existing = SnapshotScope(
+        catalog_ids=catalog_ids,
+        schema_ids=set(
+            await session.scalars(
+                select(MetadataSchema.id).where(MetadataSchema.catalog_id.in_(catalog_ids))
+            )
+        ),
+        table_ids=table_ids,
+        column_ids=set(
+            await session.scalars(
+                select(MetadataColumn.id).where(MetadataColumn.table_id.in_(table_ids))
+            )
+        ),
+        constraint_ids=set(
+            await session.scalars(
+                select(MetadataConstraint.id).where(
+                    MetadataConstraint.datasource_id == datasource.id
+                )
+            )
+        ),
+    )
+    missing = missing_snapshot_scope(
+        existing,
+        SnapshotScope(
+            catalog_ids=seen_catalog_ids,
+            schema_ids=seen_schema_ids,
+            table_ids=seen_table_ids,
+            column_ids=seen_column_ids,
+            constraint_ids=seen_constraint_ids,
+        ),
+    )
     statements = [
-        update(MetadataCatalog)
-        .where(
-            MetadataCatalog.datasource_id == datasource.id,
-            MetadataCatalog.status == "ACTIVE",
-            (
-                ~MetadataCatalog.id.in_(seen_catalog_ids)
-                if seen_catalog_ids
-                else MetadataCatalog.id.is_not(None)
-            ),
+        update(model)
+        .where(model.id.in_(object_ids), model.status == "ACTIVE")
+        .values(status="DEPRECATED", deprecated_at=now, updated_at=now)
+        for model, object_ids in (
+            (MetadataCatalog, missing.catalog_ids),
+            (MetadataSchema, missing.schema_ids),
+            (MetadataTable, missing.table_ids),
+            (MetadataColumn, missing.column_ids),
+            (MetadataConstraint, missing.constraint_ids),
         )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataSchema)
-        .where(
-            MetadataSchema.catalog_id.in_(catalog_ids),
-            MetadataSchema.status == "ACTIVE",
-            (
-                ~MetadataSchema.id.in_(seen_schema_ids)
-                if seen_schema_ids
-                else MetadataSchema.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataTable)
-        .where(
-            MetadataTable.datasource_id == datasource.id,
-            MetadataTable.status == "ACTIVE",
-            (
-                ~MetadataTable.id.in_(seen_table_ids)
-                if seen_table_ids
-                else MetadataTable.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataColumn)
-        .where(
-            MetadataColumn.table_id.in_(table_ids),
-            MetadataColumn.status == "ACTIVE",
-            (
-                ~MetadataColumn.id.in_(seen_column_ids)
-                if seen_column_ids
-                else MetadataColumn.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataConstraint)
-        .where(
-            MetadataConstraint.datasource_id == datasource.id,
-            MetadataConstraint.status == "ACTIVE",
-            (
-                ~MetadataConstraint.id.in_(seen_constraint_ids)
-                if seen_constraint_ids
-                else MetadataConstraint.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
+        if object_ids
     ]
     deprecated = 0
     for statement in statements:

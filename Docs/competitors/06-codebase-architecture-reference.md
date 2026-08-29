@@ -74,10 +74,12 @@ User / Agent Question
 | [`postgres.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/postgres.py) | PostgreSQL | BETA | `asyncpg`, EXPLAIN cost, constraint discovery, column profiling |
 | [`sqlserver.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/sqlserver.py) | SQL Server | BETA | SHOWPLAN_XML cost, column profiling |
 | [`oracle.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/oracle.py) | Oracle | BETA | Pull discovery, governed read; no EXPLAIN path yet |
-| [`registry.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/registry.py) | Registry | — | `ConnectorRegistry`, `declare_planned()` for BigQuery / Snowflake / Databricks |
+| [`bigquery.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/bigquery.py) | BigQuery | BETA | INFORMATION_SCHEMA discovery, dry-run cost estimate, governed execution |
+| [`snowflake.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/snowflake.py) | Snowflake | BETA | Multi-database INFORMATION_SCHEMA discovery, EXPLAIN USING JSON cost estimate, governed execution (`sfqid`), bounded profiling |
+| [`registry.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/registry.py) | Registry | — | `ConnectorRegistry`, `register()` for postgres/sqlserver/oracle/bigquery/snowflake; `declare_planned()` for Databricks / Teradata / Db2 |
 | [`discovery.py`](file:///c:/Users/karup/AGProjects/AIDataAnalyst/src/aida/connectors/discovery.py) | Shared helpers | — | DDL row assembly, constraint parsing shared across connectors |
 
-**Planned but not yet implemented**: `bigquery`, `snowflake`, `databricks`, `teradata`, `db2`.
+**Implemented (BETA, unverified against a live source outside test fixtures)**: `oracle`, `bigquery`, `snowflake`. **Planned but not yet implemented**: `databricks`, `teradata`, `db2`.
 
 ### 2.4 Key Service Modules
 
@@ -138,9 +140,9 @@ The `GovernedRetriever` in [`agent_intelligence.py`](file:///c:/Users/karup/AGPr
 
 | # | Gap | Impact | Files to Create / Modify |
 |---|---|---|---|
-| 1 | **No MCP Server** | External AI agents (Claude, Cursor) cannot consume Atlas context | `src/aida/mcp_server.py`, `main.py` |
+| 1 | **MCP Server implemented but not verified with an external client** | `src/aida/mcp_server.py` (652 lines, tested, mounted in `main.py`) implements the JSON-RPC MCP protocol with role-eligible tool/resource exposure, but has never been driven by a real external agent client | `src/aida/mcp_server.py`, `main.py` |
 | 2 | **Lexical retrieval only** | LLM plans miss semantically relevant tables when names are cryptic | `src/aida/retrieval.py` (new hybrid engine), `agent_intelligence.py` |
-| 3 | **No BigQuery / Snowflake pull adapters** | Connector breadth gap vs. Atlan 80+, Collibra 100+ | `src/aida/connectors/bigquery.py`, `snowflake.py` |
+| 3 | **No Databricks / Teradata / Db2 pull adapters** | Connector breadth gap vs. Atlan 80+, Collibra 100+ (BigQuery and Snowflake adapters now exist but are unverified against a live warehouse) | `src/aida/connectors/registry.py` (`declare_planned` entries) |
 | 4 | **UI lineage DAG is basic** | Atlan field-level lineage is top sales feature | `ui/app.js` |
 | 5 | **No data contracts engine** | Banks need schema-drift and SLA assertions | `src/aida/data_contracts.py` |
 

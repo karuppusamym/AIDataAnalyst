@@ -4,6 +4,12 @@ from pathlib import Path
 UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
 
 
+def ui_styles() -> str:
+    """Read the stylesheet entry point and its split source files."""
+    paths = [UI_ROOT / "styles.css", *sorted((UI_ROOT / "styles").glob("*.css"))]
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 class DialogAuditParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -44,7 +50,7 @@ def test_dialogs_have_visible_titles_and_accessible_close_controls() -> None:
 
 def test_ui_declares_responsive_and_reduced_motion_boundaries() -> None:
     html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
-    css = (UI_ROOT / "styles.css").read_text(encoding="utf-8")
+    css = ui_styles()
     assert 'name="viewport"' in html
     assert ":focus-visible" in css
     assert "prefers-reduced-motion: reduce" in css
@@ -57,3 +63,17 @@ def test_dynamic_dialog_names_and_stewardship_live_regions_are_initialized() -> 
     assert 'dialog.setAttribute("aria-labelledby", title.id)' in script
     assert 'setAttribute("aria-live", "polite")' in script
     assert "prepareAccessibility();" in script
+
+
+def test_ui_entrypoint_loads_split_runtime_assets() -> None:
+    html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
+    assets = (
+        "core.js",
+        "api.js",
+        "virtual-table.js",
+        "features/integration-policy.js",
+        "features/transformation-workbench.js",
+    )
+    for name in assets:
+        assert f'/scripts/{name}' in html
+        assert (UI_ROOT / "scripts" / name).is_file()

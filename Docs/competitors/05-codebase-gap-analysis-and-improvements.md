@@ -38,8 +38,8 @@ src/aida/
 | **SQL Execution Interception** | **None** (Out-of-band catalogs relying on external DB GRANTs) | **Implemented** (`query_gateway.py`, `sql_guard.py`) | **WINNER**: Hard AST parser, row masking, and execution safety before DB hit. |
 | **Maker-Checker Approval** | Basic term tagging or heavy BPMN workflows | **Implemented** (`semantic_api.py`) | **WINNER**: 2-person human promotion requirement for business terms & tools. |
 | **Governed AI Execution** | External LLMs query DB directly | **Implemented** (`agent_orchestrator.py`, `model_gateway.py`) | **WINNER**: Approved-tool-first planning with fail-closed LLM route boundaries. |
-| **Connector Coverage** | **80+ to 100+ native connectors** | PostgreSQL & SQL Server (Beta) | **BEHIND**: Missing Snowflake, BigQuery, Databricks, and Oracle adapters. |
-| **Context API / MCP Server** | **Native MCP Servers** (Atlan MCP, Collibra MCP) | Internal REST API only | **BEHIND**: No standard Model Context Protocol (MCP) server for external agents. |
+| **Connector Coverage** | **80+ to 100+ native connectors** | PostgreSQL, SQL Server, Oracle, BigQuery, Snowflake (all Beta) | **PARTIAL**: Databricks, Teradata, Db2 still missing; none of the five implemented connectors are certified against a live production source yet. |
+| **Context API / MCP Server** | **Native MCP Servers** (Atlan MCP, Collibra MCP) | Implemented (`src/aida/mcp_server.py`, mounted in `main.py`) | **PARTIAL**: JSON-RPC MCP endpoint with role-eligible tool/resource exposure exists and is tested (`tests/test_mcp_server.py`); not yet verified against an external MCP client (Claude Desktop, Cursor) in a live session. |
 | **Search & Retrieval Depth**| **Hybrid Vector + Graph** (Iceberg Context Lakehouse) | Basic SQL keyword queries | **BEHIND**: Missing vector embeddings (pgvector) and hybrid BM25 search. |
 | **UI Graph Virtualization**| Interactive field-level DAGs | Basic canvas graph render | **BEHIND**: Needs column-level zoom, node highlights, and dbt DAG expansion. |
 

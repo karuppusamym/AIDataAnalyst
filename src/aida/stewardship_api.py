@@ -38,7 +38,6 @@ from aida.models import (
 from aida.schemas import (
     BulkStewardshipOperationCreate,
     BulkStewardshipOperationRead,
-    CoverageDimensionRead,
     CoverageSnapshotRead,
     GlossaryCategoryCreate,
     GlossaryCategoryRead,
@@ -56,6 +55,7 @@ from aida.schemas import (
     StewardshipCoverageRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.stewardship_service import build_stewardship_coverage
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -1055,26 +1055,13 @@ async def _coverage(
     tables = (await session.scalars(select(MetadataTable).where(*filters).limit(10_000))).all()
     table_ids = {table.id for table in tables}
     if not table_ids:
-        empty = CoverageDimensionRead(covered=0, total=0, percentage=0.0)
-        return StewardshipCoverageRead(
+        return build_stewardship_coverage(
             organization_id=organization_id,
             datasource_id=datasource_id,
             domain_id=domain_id,
             line_of_business_id=line_of_business_id,
-            table_count=0,
-            overall_score=0.0,
-            dimensions={
-                name: empty
-                for name in (
-                    "documented",
-                    "owned",
-                    "classified",
-                    "certified",
-                    "quality_monitored",
-                    "semantically_mapped",
-                )
-            },
-            unowned_table_ids=[],
+            table_ids=set(),
+            evidence_sets={},
             computed_at=datetime.now(UTC),
         )
     documented = set(
@@ -1164,24 +1151,13 @@ async def _coverage(
         "quality_monitored": quality_monitored,
         "semantically_mapped": semantically_mapped,
     }
-    dimensions: dict[str, CoverageDimensionRead] = {}
-    for name, evidence in evidence_sets.items():
-        count = len(evidence & table_ids)
-        dimensions[name] = CoverageDimensionRead(
-            covered=count,
-            total=len(table_ids),
-            percentage=round(count * 100 / len(table_ids), 2),
-        )
-    overall = round(sum(value.percentage for value in dimensions.values()) / len(dimensions), 2)
-    return StewardshipCoverageRead(
+    return build_stewardship_coverage(
         organization_id=organization_id,
         datasource_id=datasource_id,
         domain_id=domain_id,
         line_of_business_id=line_of_business_id,
-        table_count=len(table_ids),
-        overall_score=overall,
-        dimensions=dimensions,
-        unowned_table_ids=sorted(table_ids - owned, key=str)[:500],
+        table_ids=table_ids,
+        evidence_sets=evidence_sets,
         computed_at=datetime.now(UTC),
     )
 

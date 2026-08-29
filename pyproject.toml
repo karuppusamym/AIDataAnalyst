@@ -64,7 +64,7 @@ plugins = ["pydantic.mypy"]
 packages = ["aida"]
 
 [[tool.mypy.overrides]]
- module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*"]
+module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*", "snowflake", "snowflake.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

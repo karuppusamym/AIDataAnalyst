@@ -105,9 +105,9 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | Edge kind | Now | Target |
 |---|---|---|
 | QUERY | Implemented — value-free output-to-source, direct/derived, transformation names, tool dependencies | Historical lineage search |
-| DBT | Implemented — manifest v12-compatible, model/source/test inventory, catalog matching, SQL hash + redacted SQL, dependency DAG, impact | CI/dbt Cloud auth, `run_results.json`, column-level manifest lineage, retention, large-DAG virtualization |
+| DBT | Implemented — manifest v12-compatible, model/source/test inventory, catalog matching, SQL hash + redacted SQL, dependency DAG, impact; `run_results.json` test-outcome ingestion now reconciles into `DataQualityIncident` rows (`dbt_quality_bridge.py`) | CI/dbt Cloud auth, column-level manifest lineage, retention, large-DAG virtualization |
 | VIEW / PROCEDURE | **Not implemented** | Entry-ticket gap |
-| ETL / OpenLineage | **Not implemented** | Entry-ticket gap |
+| ETL / OpenLineage | Partial — `POST /v1/lineage/openlineage` ingests RunEvents, extracts column-lineage edges from the `columnLineage` facet, matches against the catalog, and persists idempotently (`openlineage.py`, `openlineage_api.py`); **zero test coverage**, and no Airflow-sourced event has ever been verified producing real edges | Test coverage; live Airflow e2e evidence |
 | BI | **Not implemented** | Entry-ticket gap |
 | AI_DECISION | Partial — traces exist; not modelled as lineage edges | **Differentiator — model as first-class edges** |
 | Impact | Implemented — physical table to metrics, tools, relationships | Transitive traversal across all edge kinds |
