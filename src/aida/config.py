@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     oidc_roles_claim: str = "roles"
     oidc_organization_claim: str = "organization_id"
     oidc_principal_type_claim: str = "principal_type"
+    oidc_business_purpose_claim: str = "business_purpose"
     oidc_role_mappings: dict[str, list[str]] = Field(default_factory=dict)
     oidc_jwks_cache_seconds: int = Field(default=300, ge=30, le=86_400)
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
@@ -74,9 +75,14 @@ class Settings(BaseSettings):
     lineage_projection_max_edges: int = Field(default=100_000, ge=500, le=500_000)
     lineage_neo4j_read_enabled: bool = False
     mcp_budget_enabled: bool = False
+    mcp_require_workload_identity: bool = True
     mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
     mcp_tool_calls_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
     mcp_context_reads_per_day: int = Field(default=5_000, ge=1, le=1_000_000)
+    entitlement_provider: Literal["outbox", "webhook"] = "outbox"
+    entitlement_webhook_url: str | None = None
+    entitlement_webhook_token: SecretStr | None = None
+    entitlement_timeout_seconds: int = Field(default=10, ge=1, le=60)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)

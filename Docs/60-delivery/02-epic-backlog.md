@@ -447,15 +447,14 @@ and custom YAML, delivered via REST, MCP, and file export.
   `artifact_hash` (canonical JSON, sorted keys) for a given input state. — **met**,
   `src/aida/context_compiler.py`
 - Targets: MCP, REST, OSI, ODCS, Snowflake Semantic View, Databricks Metric View. — **met**
-- Custom YAML target. — **partial**: `YAML` is an accepted target and gets a distinct
-  `content_type: application/yaml`, but the emitted body is canonical JSON (a valid subset of
-  YAML 1.2, not idiomatic multi-line YAML) — no `pyyaml` dependency exists in the project yet.
-  Tracked as a documented simplification, not a defect.
+- Custom YAML target. — **met**: `YAML` emits deterministic idiomatic YAML with an
+  `application/yaml` content type; JSON and YAML deployments are both accepted for drift.
 - Drift report against a previously deployed definition (by hash or by content, with per-path
   diff). — **met**, `POST /v1/context-product-versions/{id}/compile/drift`
 - Quality-gated: compilation of an unpublished/non-quality-passing version is denied for
   non-lifecycle roles, reusing `evaluate_context_product_quality_from_db`. — **met**
-- File export delivery mode. — **not met**
+- File export delivery mode. — **met**, via the validated attachment endpoint with artifact
+  hash and content-disposition headers
 - Determinism, target, drift, raw-evidence rejection, and OpenAPI coverage is in
   `tests/test_agentic_platform.py`. — **met**; external target conformance fixtures remain
 
@@ -511,8 +510,9 @@ lifecycle, quality, policy, evaluation, and runtime posture.
 - The deterministic trust service exposes seven factors with a true 100-point ceiling and hard
   blockers for prohibited risk, critical incidents, failed/missing assessments, and weak
   high-risk evaluations. — **met**, `ai_registry.py`, `tests/test_agentic_platform.py`
-- Managed EU AI Act/NIST template catalogs, remediation and retirement APIs, provider
-  synchronizers, score history, and dependency-graph visualization remain. — **not met**
+- Managed EU AI Act/NIST template catalogs, remediation and maker-checker retirement APIs,
+  provider evidence synchronization, deduplicated score history, and dependency graph APIs.
+  — **met**; provider-specific certification and interactive graph visualization remain
 
 ## Related documents
 

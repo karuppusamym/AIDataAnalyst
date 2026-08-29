@@ -11,6 +11,7 @@ class SecurityContext:
     organization_id: UUID | None
     roles: frozenset[str]
     source_ip: str | None = None
+    business_purpose: str | None = None
 
     def require_organization(self) -> UUID:
         if self.organization_id is None:

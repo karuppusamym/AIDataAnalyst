@@ -154,8 +154,17 @@ class MarketplaceAccessRequestRead(PlatformApiModel):
     expires_at: datetime | None
     revoked_by: str | None
     revoked_at: datetime | None
+    fulfillment_status: str
+    fulfillment_provider: str | None
+    fulfillment_reference: str | None
+    fulfillment_error: str | None
+    fulfilled_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class EntitlementOperation(PlatformApiModel):
+    action: Literal["PROVISION", "REVOKE"]
 
 
 class MarketplaceProductRead(DataProductVersionRead):
@@ -200,6 +209,17 @@ class ContextCompilationDriftRead(PlatformApiModel):
     expected_hash: str
     deployed_hash: str
     changed_paths: list[str]
+
+
+class ContextCompilationValidateRequest(PlatformApiModel):
+    target: ContextCompilerTarget
+    content: str = Field(min_length=2, max_length=5_000_000)
+
+
+class ContextCompilationValidationRead(PlatformApiModel):
+    target: ContextCompilerTarget
+    valid: bool
+    findings: list[str]
 
 
 class AiAssetDefinition(PlatformApiModel):
@@ -304,3 +324,76 @@ class AiTrustScoreRead(PlatformApiModel):
     factors: list[AiTrustFactorRead]
     blockers: list[str]
     computed_at: datetime
+
+
+class AiAssessmentTemplateRead(PlatformApiModel):
+    template_key: str
+    framework: str
+    framework_version: str
+    title: str
+    controls: list[AiAssessmentControlResult]
+
+
+class AiRemediationCreate(PlatformApiModel):
+    finding_key: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]{1,99}$")
+    title: str = Field(min_length=3, max_length=500)
+    description: str = Field(min_length=10, max_length=10_000)
+    owner_principal: str = Field(min_length=2, max_length=255)
+    due_at: datetime | None = None
+
+
+class AiRemediationUpdate(PlatformApiModel):
+    status: Literal["OPEN", "IN_PROGRESS", "RESOLVED", "ACCEPTED_RISK"]
+    resolution_evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_raw_remediation_evidence(self) -> "AiRemediationUpdate":
+        forbidden = {"prompt", "question", "sql", "raw_value", "token"}
+        if any(str(key).lower() in forbidden for key in self.resolution_evidence):
+            raise ValueError("remediation evidence must be value-free")
+        return self
+
+
+class AiRemediationRead(AiRemediationCreate):
+    id: UUID
+    organization_id: UUID
+    ai_asset_version_id: UUID
+    status: str
+    resolution_evidence: dict[str, Any]
+    created_by: str
+    resolved_by: str | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class AiTrustSnapshotRead(PlatformApiModel):
+    id: UUID
+    ai_asset_version_id: UUID
+    score: int
+    grade: str
+    factors: list[dict[str, Any]]
+    blockers: list[str]
+    input_fingerprint: str
+    computed_at: datetime
+
+
+class AiProviderSyncRequest(PlatformApiModel):
+    provider_type: str = Field(min_length=2, max_length=50)
+    external_reference: str = Field(min_length=2, max_length=500)
+    documentation_url: str | None = Field(default=None, max_length=1000)
+    evaluation_evidence: dict[str, Any] = Field(default_factory=dict)
+    runtime_evidence: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_raw_provider_evidence(self) -> "AiProviderSyncRequest":
+        forbidden = {"prompt", "question", "sql", "raw_value", "token", "secret"}
+        for evidence in (self.evaluation_evidence, self.runtime_evidence):
+            if any(str(key).lower() in forbidden for key in evidence):
+                raise ValueError("provider evidence must be value-free")
+        return self
+
+
+class AiDependencyGraphRead(PlatformApiModel):
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]]

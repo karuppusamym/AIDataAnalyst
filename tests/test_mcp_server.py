@@ -29,6 +29,7 @@ from aida.mcp_server import (
     _handle_initialize,
     _handle_native_lineage_tool_call,
     _handle_tools_call,
+    _is_successful_consumption,
     _ok,
     _tool_role_eligible,
 )
@@ -81,6 +82,18 @@ def test_tool_role_eligible_multiple_overlapping_roles() -> None:
         )
         is True
     )
+
+
+def test_consumption_evidence_excludes_denied_reads_and_failed_tools() -> None:
+    assert not _is_successful_consumption(
+        "resources/read", {"contents": [{"text": "Resource not found or not accessible."}]}
+    )
+    assert not _is_successful_consumption("prompts/get", {"messages": []})
+    assert not _is_successful_consumption("tools/call", {"isError": True})
+    assert _is_successful_consumption(
+        "resources/read", {"contents": [{"mimeType": "application/json", "text": "{}"}]}
+    )
+    assert _is_successful_consumption("prompts/get", {"messages": [{"role": "user"}]})
 
 
 # ---------------------------------------------------------------------------

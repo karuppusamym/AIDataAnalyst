@@ -3,8 +3,14 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+import yaml
+
 from aida.models import ContextProduct, ContextProductVersion
-from aida.platform_schemas import ContextCompilationRead, ContextCompilerTarget
+from aida.platform_schemas import (
+    ContextCompilationRead,
+    ContextCompilationValidationRead,
+    ContextCompilerTarget,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +156,11 @@ def compile_context_product(
     payload = _artifact_payload(
         product, version, target, sorted(tables, key=lambda item: item.table_id)
     )
-    content = _canonical_json(payload)
+    content = (
+        yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)
+        if target == "YAML"
+        else _canonical_json(payload)
+    )
     artifact_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return ContextCompilationRead(
         target=target,
@@ -167,11 +177,48 @@ def compile_context_product(
     )
 
 
+def validate_compiled_artifact(
+    target: ContextCompilerTarget, content: str
+) -> ContextCompilationValidationRead:
+    """Perform bounded structural conformance checks before external deployment."""
+    try:
+        parsed = yaml.safe_load(content) if target == "YAML" else json.loads(content)
+    except (yaml.YAMLError, json.JSONDecodeError):
+        return ContextCompilationValidationRead(
+            target=target, valid=False, findings=["CONTENT_PARSE_FAILED"]
+        )
+    if not isinstance(parsed, dict):
+        return ContextCompilationValidationRead(
+            target=target, valid=False, findings=["ROOT_OBJECT_REQUIRED"]
+        )
+    required: dict[str, tuple[str, ...]] = {
+        "MCP": ("kind", "apiVersion", "resourceUri", "context"),
+        "REST": ("kind", "apiVersion", "resource", "etag", "context"),
+        "YAML": ("apiVersion", "kind", "spec"),
+        "OSI": ("specification", "specificationVersion", "semanticContext"),
+        "ODCS": ("apiVersion", "kind", "id", "version", "servers"),
+        "SNOWFLAKE_SEMANTIC_VIEW": ("kind", "specVersion", "name", "tables"),
+        "DATABRICKS_METRIC_VIEW": ("version", "kind", "name", "sourceTables"),
+    }
+    findings = [f"MISSING_REQUIRED_FIELD:{key}" for key in required[target] if key not in parsed]
+    if target == "ODCS" and parsed.get("kind") != "DataContract":
+        findings.append("ODCS_KIND_INVALID")
+    if target == "SNOWFLAKE_SEMANTIC_VIEW" and not isinstance(parsed.get("tables"), list):
+        findings.append("SNOWFLAKE_TABLES_INVALID")
+    if target == "DATABRICKS_METRIC_VIEW" and not isinstance(
+        parsed.get("sourceTables"), list
+    ):
+        findings.append("DATABRICKS_SOURCE_TABLES_INVALID")
+    return ContextCompilationValidationRead(
+        target=target, valid=not findings, findings=findings[:100]
+    )
+
+
 def compilation_drift_paths(expected_content: str, deployed_content: str) -> list[str]:
     try:
-        expected = json.loads(expected_content)
-        deployed = json.loads(deployed_content)
-    except json.JSONDecodeError:
+        expected = yaml.safe_load(expected_content)
+        deployed = yaml.safe_load(deployed_content)
+    except yaml.YAMLError:
         return [] if expected_content == deployed_content else ["$content"]
 
     changed: list[str] = []

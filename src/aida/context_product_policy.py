@@ -26,6 +26,46 @@ class ContextProductQualityDecision:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class ContextProductPurposeDecision:
+    allowed: bool
+    reason: str
+    requested_purpose: str | None
+    allowed_purposes: tuple[str, ...]
+
+    def snapshot(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def evaluate_context_product_purpose(
+    requested_purpose: str | None,
+    policy_summary: dict[str, Any],
+) -> ContextProductPurposeDecision:
+    """Apply exact, normalized purpose ABAC when a product declares allowed purposes."""
+    configured = policy_summary.get("allowed_purposes", [])
+    allowed_purposes = tuple(
+        sorted(
+            {
+                str(value).strip().casefold()
+                for value in configured
+                if isinstance(value, str) and value.strip()
+            }
+        )
+    )
+    normalized = requested_purpose.strip().casefold() if requested_purpose else None
+    if not allowed_purposes:
+        return ContextProductPurposeDecision(True, "NOT_RESTRICTED", normalized, ())
+    if normalized is None:
+        return ContextProductPurposeDecision(
+            False, "BUSINESS_PURPOSE_REQUIRED", None, allowed_purposes
+        )
+    if normalized not in allowed_purposes:
+        return ContextProductPurposeDecision(
+            False, "BUSINESS_PURPOSE_NOT_ALLOWED", normalized, allowed_purposes
+        )
+    return ContextProductPurposeDecision(True, "ALLOWED", normalized, allowed_purposes)
+
+
 def evaluate_context_product_quality(
     *,
     table_ids: list[UUID],

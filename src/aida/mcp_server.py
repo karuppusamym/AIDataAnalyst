@@ -71,6 +71,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
     ContextProductQualityDecision,
+    evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
 )
 from aida.db import get_session
@@ -86,6 +87,7 @@ from aida.models import (
     DbtResource,
     GovernedTool,
     GovernedToolVersion,
+    McpConsumptionEvidence,
     MetadataCatalog,
     MetadataColumn,
     MetadataSchema,
@@ -1357,6 +1359,23 @@ async def _read_context_product_resource(
         await session.commit()
         return inaccessible
 
+    purpose_decision = evaluate_context_product_purpose(
+        context.business_purpose, product_version.policy_summary
+    )
+    if "PlatformAdmin" not in context.roles and not purpose_decision.allowed:
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.purpose_denied",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={"purpose": purpose_decision.snapshot()},
+        )
+        await session.commit()
+        return inaccessible
+
     quality_decision = await evaluate_context_product_quality_from_db(
         session,
         organization_id=product_version.organization_id,
@@ -1563,6 +1582,19 @@ def _budget_error_data(decision: McpBudgetDecision) -> dict[str, Any]:
     }
 
 
+def _is_successful_consumption(method: str, result: dict[str, Any]) -> bool:
+    """Exclude anti-enumeration and validation responses from consumption evidence."""
+    if bool(result.get("isError", False)):
+        return False
+    if method == "resources/read":
+        contents = result.get("contents")
+        return bool(contents and isinstance(contents, list) and "mimeType" in contents[0])
+    if method == "prompts/get":
+        messages = result.get("messages")
+        return bool(messages and isinstance(messages, list))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main HTTP endpoint
 # ---------------------------------------------------------------------------
@@ -1609,6 +1641,27 @@ async def mcp_endpoint(
         return JSONResponse(
             content=_err(rpc_id, _ERR_INVALID_REQUEST, "Invalid Request: jsonrpc must be '2.0'"),
             status_code=400,
+        )
+
+    if (
+        settings.mcp_require_workload_identity
+        and settings.environment != "development"
+        and context.principal_type not in {"AGENT", "SERVICE_ACCOUNT"}
+    ):
+        record_audit(
+            session,
+            context,
+            action="mcp.workload_identity.denied",
+            resource_type="mcp_consumer",
+            resource_id=context.principal_id,
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={"principal_type": context.principal_type},
+        )
+        await session.commit()
+        return JSONResponse(
+            content=_err(rpc_id, _ERR_ACCESS_DENIED, "MCP workload identity is required."),
+            status_code=403,
         )
 
     logger.info(
@@ -1693,4 +1746,31 @@ async def mcp_endpoint(
             status_code=500,
         )
 
+    if context.organization_id is not None and _is_successful_consumption(method, result):
+        operation_kind = {
+            "resources/read": "RESOURCE",
+            "prompts/get": "PROMPT",
+            "tools/call": "TOOL",
+        }.get(method, "CONTROL")
+        target = None
+        if method == "tools/call":
+            target = str(params.get("name") or "")[:500] or None
+        elif method == "resources/read":
+            target = str(params.get("uri") or "")[:500] or None
+        elif method == "prompts/get":
+            target = str(params.get("name") or "")[:500] or None
+        session.add(
+            McpConsumptionEvidence(
+                organization_id=context.organization_id,
+                principal_id=context.principal_id,
+                principal_type=context.principal_type,
+                operation_kind=operation_kind,
+                method=method[:100],
+                target_reference=target,
+                business_purpose=context.business_purpose,
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+            )
+        )
+        await session.commit()
     return JSONResponse(content=_ok(rpc_id, result))

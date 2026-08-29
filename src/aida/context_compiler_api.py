@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import replace
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,8 +11,12 @@ from aida.context_compiler import (
     ResolvedTableReference,
     compilation_drift_paths,
     compile_context_product,
+    validate_compiled_artifact,
 )
-from aida.context_product_policy import evaluate_context_product_quality_from_db
+from aida.context_product_policy import (
+    evaluate_context_product_purpose,
+    evaluate_context_product_quality_from_db,
+)
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -27,6 +31,8 @@ from aida.platform_schemas import (
     ContextCompilationDriftRead,
     ContextCompilationDriftRequest,
     ContextCompilationRead,
+    ContextCompilationValidateRequest,
+    ContextCompilationValidationRead,
     ContextCompilerTarget,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -61,6 +67,9 @@ async def _load_source(
     if not lifecycle_reader and (
         version.status != "PUBLISHED" or context.roles.isdisjoint(version.allowed_consumer_roles)
     ):
+        raise HTTPException(status_code=404, detail="context product version not found")
+    purpose = evaluate_context_product_purpose(context.business_purpose, version.policy_summary)
+    if not lifecycle_reader and not purpose.allowed:
         raise HTTPException(status_code=404, detail="context product version not found")
     quality = await evaluate_context_product_quality_from_db(
         session,
@@ -144,6 +153,68 @@ async def compile_context_product_version(
         )
     await session.commit()
     return compiled
+
+
+@router.get("/context-product-versions/{version_id}/compile/download")
+async def download_context_compilation(
+    version_id: UUID,
+    target: ContextCompilerTarget = Query(default="YAML"),
+    context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    product, version, tables, quality_snapshot = await _load_source(
+        session, version_id, context
+    )
+    compiled = compile_context_product(product, version, target, tables)
+    validation = validate_compiled_artifact(target, compiled.content)
+    if not validation.valid:
+        raise HTTPException(status_code=409, detail={"findings": validation.findings})
+    extension = "yaml" if target == "YAML" else "json"
+    correlation_id = get_correlation_id()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="context_product.compile_download",
+        resource_type="context_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={"target": target, "artifact_hash": compiled.artifact_hash},
+    )
+    if version.status == "PUBLISHED":
+        session.add(
+            ContextProductConsumptionEdge(
+                organization_id=version.organization_id,
+                context_product_version_id=version.id,
+                principal_id=context.principal_id,
+                principal_type=context.principal_type,
+                channel="COMPILER_DOWNLOAD",
+                correlation_id=correlation_id,
+                product_fingerprint=version.fingerprint,
+                policy_decision="ALLOW",
+                quality_snapshot=quality_snapshot,
+            )
+        )
+    await session.commit()
+    return Response(
+        content=compiled.content,
+        media_type=compiled.content_type,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{product.product_key}-{version.version}-'
+                f'{target.lower()}.{extension}"'
+            ),
+            "X-Artifact-SHA256": compiled.artifact_hash,
+        },
+    )
+
+
+@router.post("/context-compiler/validate", response_model=ContextCompilationValidationRead)
+async def validate_context_compilation(
+    body: ContextCompilationValidateRequest,
+    _: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
+) -> ContextCompilationValidationRead:
+    return validate_compiled_artifact(body.target, body.content)
 
 
 @router.post(

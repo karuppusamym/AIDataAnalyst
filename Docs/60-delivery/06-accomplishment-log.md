@@ -619,3 +619,60 @@ approved-exception override, and the `scratch/` repo-hygiene cleanup.
   idiomatic YAML/downloads/external validators, million-node projection certification,
   broader MCP stewardship writes, privacy operations, adoption analytics, and CP-S8 ecosystem
   integrations.
+
+
+## 2026-08-29 (continued) — Second review pass: AI registry / MCP budget, and a correction
+
+User repeated the "review the code / update the document / fix if needed" request. By this
+point the repo had settled (the other model's process finished; `.git/index.lock` was gone) and
+everything from the prior entry had been committed in `434e98d "Build agentic data marketplace
+and AI trust platform"`, including this session's router-wiring and `mypy` fixes.
+
+**Correction to the entry above:** it claimed "no dedicated tests exist yet" for
+`product_marketplace_api.py`, `context_compiler_api.py`, `ai_registry_api.py`, and
+`mcp_budget.py`. That was wrong — `tests/test_agentic_platform.py` (282 lines, 10 tests)
+already covered contract compatibility, product-port validation, marketplace access-expiry,
+context-compiler determinism and drift, trust-score explainability with an incident blocker,
+assessment scoring, raw-evidence rejection, fuzzy-entity scoring, disabled-budget behavior, and
+an OpenAPI route-publication smoke test — the search that missed it only grepped for
+`ai_registry|mcp_budget|marketplace|compiler` in filenames, which `test_agentic_platform.py`
+doesn't match. `02-epic-backlog.md` and `05-gap-register.md` have since been corrected (by the
+same process that built this code) to credit that file; no further doc fix was needed there.
+
+**Reviewed this pass:** `ai_registry.py` (`compute_ai_trust_score`, `score_assessment_controls`)
+and `ai_registry_api.py` (full AI-asset lifecycle: create/version/submit/assess/trust, wired
+into `semantic_api.py`'s maker-checker dispatcher under `AI_ASSET_VERSION`, including the
+one-approved-per-asset supersede-on-approve logic), and `mcp_budget.py` (Redis
+`INCR`+`EXPIRE` Lua-script token counter, wired into `mcp_endpoint` for `REQUEST_MINUTE` /
+`TOOL_DAY` / `CONTEXT_DAY` buckets, fail-closed in staging/production, fail-open in
+development). No bugs found — `ruff` and `mypy` clean, and the maker-checker approval path
+correctly supersedes the prior approved version.
+
+**Added:** `tests/test_ai_registry.py`, 11 tests giving `compute_ai_trust_score` and
+`score_assessment_controls` edge-case coverage `test_agentic_platform.py` didn't have:
+`PROHIBITED` risk tier, `HIGH` risk below the evaluation threshold, a missing assessment alone
+(vs. bundled with an incident), a failed assessment alone, and `score_assessment_controls` with
+empty and `NOT_APPLICABLE`-only control lists. Full suite green (was already green; this only
+added coverage, changed no behavior).
+
+**Open at that review point:** idiomatic YAML compilation, file-export delivery,
+entitlement-provider fulfillment, managed compliance templates/remediation/retirement APIs,
+provider sync, score history, dependency-graph visualization, and repo hygiene. The production
+features in this list were subsequently closed by R35 below; shared-history cleanup remains.
+
+### R35 production acceptance and control-plane hardening
+
+- Applied migrations `b4e8f2a71c90` and `c8a4d3e91f02` to live PostgreSQL and verified the
+  expected evidence tables. Redis and Neo4j live probes passed; the rebuilt API reported ready.
+- Enforced OIDC-backed MCP workload principal types outside development, propagated bounded
+  business-purpose claims, added exact purpose ABAC to Context Product REST/compiler/MCP reads,
+  and persisted generic immutable MCP consumption evidence without prompts, SQL, or values.
+- Added idempotent entitlement fulfillment state and outbox/webhook adapters. Governance remains
+  authoritative when providers fail; provisioning and revocation are independently retryable.
+- Added managed EU AI Act, NIST AI RMF, and AI-UC assessment templates; durable remediation and
+  independent risk acceptance; maker-checker retirement; immutable trust history; value-free
+  provider evidence sync; and dependency graph APIs.
+- Added idiomatic deterministic YAML, validated attachment downloads, and structural conformance
+  checks for MCP, REST, YAML, OSI, ODCS, Snowflake, and Databricks compiler targets.
+- Enabled Redis lineage caching, MCP budgets, and Neo4j lineage reads in the local integration
+  stack while retaining production fail-closed/fallback behavior defined in code.

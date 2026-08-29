@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -18,6 +18,8 @@ from aida.models import (
     AiAssessment,
     AiAsset,
     AiAssetVersion,
+    AiRemediation,
+    AiTrustSnapshot,
     ContextProductVersion,
     GovernanceReview,
     ModelRouteConfiguration,
@@ -26,10 +28,17 @@ from aida.models import (
 from aida.platform_schemas import (
     AiAssessmentCreate,
     AiAssessmentRead,
+    AiAssessmentTemplateRead,
     AiAssetCreate,
     AiAssetDefinition,
     AiAssetVersionRead,
+    AiDependencyGraphRead,
+    AiProviderSyncRequest,
+    AiRemediationCreate,
+    AiRemediationRead,
+    AiRemediationUpdate,
     AiTrustScoreRead,
+    AiTrustSnapshotRead,
 )
 from aida.schemas import GovernanceReviewRead, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -39,6 +48,66 @@ router = APIRouter(prefix="/v1", tags=["ai-registry"])
 AI_AUTHORS = ("PlatformAdmin", "AgentDeveloper", "ModelRiskManager", "DataScientist")
 AI_READERS = (*AI_AUTHORS, "Reviewer", "Auditor", "DataSteward", "Viewer")
 AI_ASSESSORS = ("PlatformAdmin", "Reviewer", "Auditor", "ModelRiskManager")
+
+ASSESSMENT_TEMPLATES: tuple[dict[str, Any], ...] = (
+    {
+        "template_key": "eu-ai-act-high-risk-v1",
+        "framework": "EU_AI_ACT",
+        "framework_version": "2026.1",
+        "title": "EU AI Act high-risk system controls",
+        "controls": [
+            ("risk.management", "Risk management system", 3),
+            ("data.governance", "Data and data-governance controls", 3),
+            ("human.oversight", "Effective human oversight", 3),
+            ("logging.monitoring", "Logging and post-market monitoring", 2),
+        ],
+    },
+    {
+        "template_key": "nist-ai-rmf-core-v1",
+        "framework": "NIST_AI_RMF",
+        "framework_version": "1.0",
+        "title": "NIST AI RMF core functions",
+        "controls": [
+            ("govern", "Govern organizational AI risk", 3),
+            ("map", "Map context and impacts", 2),
+            ("measure", "Measure and evaluate risk", 3),
+            ("manage", "Manage prioritized risk", 3),
+        ],
+    },
+    {
+        "template_key": "ai-uc-1-v1",
+        "framework": "AI_UC_1",
+        "framework_version": "1.0",
+        "title": "Enterprise AI use-case approval",
+        "controls": [
+            ("accountability", "Named accountable owner", 3),
+            ("purpose", "Bounded approved purpose", 3),
+            ("evaluation", "Independent evaluation evidence", 3),
+            ("runtime", "Runtime monitoring and kill switch", 3),
+        ],
+    },
+)
+
+
+def assessment_template_reads() -> list[AiAssessmentTemplateRead]:
+    return [
+        AiAssessmentTemplateRead(
+            template_key=str(template["template_key"]),
+            framework=str(template["framework"]),
+            framework_version=str(template["framework_version"]),
+            title=str(template["title"]),
+            controls=[
+                {
+                    "control_key": key,
+                    "title": title,
+                    "weight": weight,
+                    "outcome": "NOT_APPLICABLE",
+                }
+                for key, title, weight in template["controls"]
+            ],
+        )
+        for template in ASSESSMENT_TEMPLATES
+    ]
 
 
 def ai_asset_fingerprint(definition: AiAssetDefinition) -> str:
@@ -367,6 +436,204 @@ async def assess_ai_asset_version(
     return assessment
 
 
+@router.get("/ai-assessment-templates", response_model=list[AiAssessmentTemplateRead])
+async def list_ai_assessment_templates(
+    _: SecurityContext = Depends(require_roles(*AI_READERS)),
+) -> list[AiAssessmentTemplateRead]:
+    return assessment_template_reads()
+
+
+@router.post(
+    "/ai-asset-versions/{version_id}/remediations",
+    response_model=AiRemediationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_ai_remediation(
+    version_id: UUID,
+    body: AiRemediationCreate,
+    context: SecurityContext = Depends(require_roles(*AI_ASSESSORS)),
+    session: AsyncSession = Depends(get_session),
+) -> AiRemediation:
+    _, version = await _version_scope(session, version_id, context)
+    remediation = AiRemediation(
+        organization_id=version.organization_id,
+        ai_asset_version_id=version.id,
+        finding_key=body.finding_key,
+        title=body.title,
+        description=body.description,
+        owner_principal=body.owner_principal,
+        due_at=body.due_at,
+        created_by=context.principal_id,
+    )
+    session.add(remediation)
+    await session.flush()
+    record_outbox(
+        session,
+        organization_id=version.organization_id,
+        aggregate_type="ai_remediation",
+        aggregate_id=str(remediation.id),
+        event_type="ai_registry.remediation_opened.v1",
+        payload={"ai_asset_version_id": str(version.id), "finding_key": body.finding_key},
+    )
+    await session.commit()
+    return remediation
+
+
+@router.get("/ai-asset-versions/{version_id}/remediations", response_model=Page)
+async def list_ai_remediations(
+    version_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*AI_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    _, version = await _version_scope(session, version_id, context)
+    filters = (AiRemediation.ai_asset_version_id == version.id,)
+    rows = (
+        await session.scalars(
+            select(AiRemediation)
+            .where(*filters)
+            .order_by(AiRemediation.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    total = await session.scalar(select(func.count()).select_from(AiRemediation).where(*filters))
+    return Page(items=rows, limit=limit, offset=offset, total=total or 0)
+
+
+@router.put("/ai-remediations/{remediation_id}", response_model=AiRemediationRead)
+async def update_ai_remediation(
+    remediation_id: UUID,
+    body: AiRemediationUpdate,
+    context: SecurityContext = Depends(require_roles(*AI_ASSESSORS)),
+    session: AsyncSession = Depends(get_session),
+) -> AiRemediation:
+    remediation = await session.get(AiRemediation, remediation_id)
+    if remediation is None:
+        raise HTTPException(status_code=404, detail="AI remediation not found")
+    enforce_organization(context, remediation.organization_id)
+    if body.status == "ACCEPTED_RISK" and context.roles.isdisjoint(
+        {"PlatformAdmin", "Reviewer", "ModelRiskManager"}
+    ):
+        raise HTTPException(status_code=403, detail="independent risk acceptance is required")
+    remediation.status = body.status
+    remediation.resolution_evidence = body.resolution_evidence
+    if body.status in {"RESOLVED", "ACCEPTED_RISK"}:
+        remediation.resolved_by = context.principal_id
+        remediation.resolved_at = datetime.now(UTC)
+    else:
+        remediation.resolved_by = None
+        remediation.resolved_at = None
+    record_outbox(
+        session,
+        organization_id=remediation.organization_id,
+        aggregate_type="ai_remediation",
+        aggregate_id=str(remediation.id),
+        event_type=f"ai_registry.remediation_{body.status.lower()}.v1",
+        payload={"ai_asset_version_id": str(remediation.ai_asset_version_id)},
+    )
+    await session.commit()
+    return remediation
+
+
+@router.post(
+    "/ai-assets/{asset_id}/retire",
+    response_model=GovernanceReviewRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_ai_asset_retirement(
+    asset_id: UUID,
+    context: SecurityContext = Depends(require_roles(*AI_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReview:
+    asset = await session.get(AiAsset, asset_id)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="AI asset not found")
+    enforce_organization(context, asset.organization_id)
+    if asset.lifecycle_status != "ACTIVE":
+        raise HTTPException(status_code=409, detail="AI asset is already retired")
+    review = GovernanceReview(
+        organization_id=asset.organization_id,
+        object_type="AI_ASSET",
+        object_id=str(asset.id),
+        requested_action="RETIRE",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.commit()
+    return review
+
+
+@router.post("/ai-asset-versions/{version_id}/provider-sync", response_model=AiAssetVersionRead)
+async def sync_ai_provider_evidence(
+    version_id: UUID,
+    body: AiProviderSyncRequest,
+    context: SecurityContext = Depends(require_roles(*AI_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> AiAssetVersionRead:
+    asset, version = await _version_scope(session, version_id, context)
+    if version.status != "DRAFT":
+        raise HTTPException(status_code=409, detail="provider sync requires a draft version")
+    version.provider_type = body.provider_type
+    version.documentation_url = body.documentation_url or version.documentation_url
+    version.evaluation_evidence = {
+        **body.evaluation_evidence,
+        "provider_reference": body.external_reference,
+    }
+    version.runtime_evidence = {
+        **body.runtime_evidence,
+        "provider_reference": body.external_reference,
+    }
+    version.fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "prior": version.fingerprint,
+                "provider_type": body.provider_type,
+                "external_reference": body.external_reference,
+                "evaluation": version.evaluation_evidence,
+                "runtime": version.runtime_evidence,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    record_outbox(
+        session,
+        organization_id=version.organization_id,
+        aggregate_type="ai_asset_version",
+        aggregate_id=str(version.id),
+        event_type="ai_registry.provider_evidence_synced.v1",
+        payload={"provider_type": body.provider_type},
+    )
+    await session.commit()
+    return _version_read(asset, version)
+
+
+@router.get("/ai-asset-versions/{version_id}/dependencies", response_model=AiDependencyGraphRead)
+async def get_ai_dependency_graph(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*AI_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> AiDependencyGraphRead:
+    asset, version = await _version_scope(session, version_id, context)
+    root = str(version.id)
+    nodes: list[dict[str, Any]] = [
+        {"id": root, "kind": asset.asset_kind, "name": version.name, "status": version.status}
+    ]
+    edges: list[dict[str, Any]] = []
+    for kind, values in (
+        ("CONTEXT_PRODUCT_VERSION", version.context_product_version_ids),
+        ("MODEL_ROUTE", version.model_route_ids),
+        ("POLICY_CONTROL", version.policy_control_ids),
+    ):
+        for value in sorted(values):
+            node_id = f"{kind}:{value}"
+            nodes.append({"id": node_id, "kind": kind, "reference": value})
+            edges.append({"source": root, "target": node_id, "relationship": "DEPENDS_ON"})
+    return AiDependencyGraphRead(nodes=nodes, edges=edges)
+
+
 @router.get("/ai-asset-versions/{version_id}/trust", response_model=AiTrustScoreRead)
 async def get_ai_asset_trust(
     version_id: UUID,
@@ -380,7 +647,30 @@ async def get_ai_asset_trust(
         .order_by(AiAssessment.created_at.desc())
         .limit(1)
     )
-    score = compute_ai_trust_score(version, assessment, computed_at=datetime.now().astimezone())
+    score = compute_ai_trust_score(version, assessment, computed_at=datetime.now(UTC))
+    input_fingerprint = hashlib.sha256(
+        f"{version.fingerprint}:{assessment.id if assessment else 'none'}:"
+        f"{assessment.updated_at.isoformat() if assessment else 'none'}".encode()
+    ).hexdigest()
+    latest_fingerprint = await session.scalar(
+        select(AiTrustSnapshot.input_fingerprint)
+        .where(AiTrustSnapshot.ai_asset_version_id == version.id)
+        .order_by(AiTrustSnapshot.computed_at.desc())
+        .limit(1)
+    )
+    if latest_fingerprint != input_fingerprint:
+        session.add(
+            AiTrustSnapshot(
+                organization_id=version.organization_id,
+                ai_asset_version_id=version.id,
+                score=score.score,
+                grade=score.grade,
+                factors=[factor.model_dump(mode="json") for factor in score.factors],
+                blockers=score.blockers,
+                input_fingerprint=input_fingerprint,
+                computed_at=score.computed_at,
+            )
+        )
     record_audit(
         session,
         replace(context, organization_id=version.organization_id),
@@ -393,3 +683,39 @@ async def get_ai_asset_trust(
     )
     await session.commit()
     return score
+
+
+@router.get("/ai-asset-versions/{version_id}/trust-history", response_model=Page)
+async def get_ai_asset_trust_history(
+    version_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*AI_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    _, version = await _version_scope(session, version_id, context)
+    filters = (AiTrustSnapshot.ai_asset_version_id == version.id,)
+    rows = (
+        await session.scalars(
+            select(AiTrustSnapshot)
+            .where(*filters)
+            .order_by(AiTrustSnapshot.computed_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    total = await session.scalar(select(func.count()).select_from(AiTrustSnapshot).where(*filters))
+    items = [
+        AiTrustSnapshotRead(
+            id=item.id,
+            ai_asset_version_id=item.ai_asset_version_id,
+            score=item.score,
+            grade=item.grade,
+            factors=item.factors,
+            blockers=item.blockers,
+            input_fingerprint=item.input_fingerprint,
+            computed_at=item.computed_at,
+        )
+        for item in rows
+    ]
+    return Page(items=items, limit=limit, offset=offset, total=total or 0)

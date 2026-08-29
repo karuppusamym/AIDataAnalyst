@@ -79,11 +79,17 @@ def context_from_claims(claims: dict[str, Any], settings: Settings) -> SecurityC
         "WORKER",
     }:
         raise OidcVerificationError("OIDC principal type is invalid")
+    business_purpose = _claim(claims, settings.oidc_business_purpose_claim)
+    if business_purpose is not None and (
+        not isinstance(business_purpose, str) or not business_purpose.strip()
+    ):
+        raise OidcVerificationError("OIDC business purpose claim is invalid")
     return SecurityContext(
         principal_id=subject,
         principal_type=principal_type,
         organization_id=organization_id,
         roles=frozenset(mapped_roles),
+        business_purpose=(business_purpose.strip()[:200] if business_purpose else None),
     )
 
 

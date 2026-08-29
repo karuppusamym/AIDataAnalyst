@@ -20,6 +20,7 @@ dependencies = [
   "opentelemetry-sdk==1.37.0",
   "oracledb==4.0.2",
   "PyJWT[crypto]==2.10.1",
+  "PyYAML==6.0.2",
   "prometheus-client==0.22.1",
   "pydantic-settings==2.15.0",
   "python-tds==1.17.1",
@@ -39,6 +40,7 @@ dev = [
   "pytest-asyncio==1.1.0",
   "pytest-cov==6.2.1",
   "ruff==0.12.11",
+  "types-PyYAML==6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from aida.context import get_correlation_id
-from aida.context_product_policy import evaluate_context_product_quality_from_db
+from aida.context_product_policy import (
+    evaluate_context_product_purpose,
+    evaluate_context_product_quality_from_db,
+)
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -470,6 +473,22 @@ async def get_context_product_version(
     if not _can_read_context_product_version(context, version):
         raise HTTPException(status_code=404, detail="context product version not found")
     if not _can_read_lifecycle(context):
+        purpose_decision = evaluate_context_product_purpose(
+            context.business_purpose, version.policy_summary
+        )
+        if not purpose_decision.allowed:
+            record_audit(
+                session,
+                context,
+                action="context_product.read.purpose_denied",
+                resource_type="context_product_version",
+                resource_id=str(version.id),
+                outcome="DENIED",
+                correlation_id=get_correlation_id(),
+                details={"purpose": purpose_decision.snapshot()},
+            )
+            await session.commit()
+            raise HTTPException(status_code=404, detail="context product version not found")
         quality_decision = await evaluate_context_product_quality_from_db(
             session,
             organization_id=version.organization_id,

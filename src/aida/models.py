@@ -1827,6 +1827,36 @@ class ContextProductConsumptionEdge(Base):
     )
 
 
+class McpConsumptionEvidence(Base):
+    """Immutable value-free evidence for every successful MCP operation."""
+
+    __tablename__ = "mcp_consumption_evidence"
+    __table_args__ = (
+        Index("ix_mcp_consumption_org_time", "organization_id", "consumed_at"),
+        Index("ix_mcp_consumption_principal_time", "principal_id", "consumed_at"),
+        CheckConstraint(
+            "operation_kind IN ('CONTROL', 'RESOURCE', 'PROMPT', 'TOOL')",
+            name="ck_mcp_consumption_operation_kind",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    operation_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    method: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_reference: Mapped[str | None] = mapped_column(String(500))
+    business_purpose: Mapped[str | None] = mapped_column(String(200))
+    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    policy_decision: Mapped[str] = mapped_column(String(30), nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class DataProduct(Base, TimestampMixin):
     """Stable identity for a governed, marketplace-visible data product."""
 
@@ -2040,6 +2070,11 @@ class DataProductAccessRequest(Base, TimestampMixin):
             "status IN ('PENDING', 'APPROVED', 'REJECTED', 'REVOKED', 'EXPIRED')",
             name="ck_data_product_access_status",
         ),
+        CheckConstraint(
+            "fulfillment_status IN ('NOT_REQUESTED', 'PENDING', 'PROVISIONED', 'FAILED', "
+            "'REVOKED')",
+            name="ck_data_product_access_fulfillment_status",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2062,6 +2097,13 @@ class DataProductAccessRequest(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     revoked_by: Mapped[str | None] = mapped_column(String(255))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fulfillment_status: Mapped[str] = mapped_column(
+        String(30), default="NOT_REQUESTED", nullable=False
+    )
+    fulfillment_provider: Mapped[str | None] = mapped_column(String(100))
+    fulfillment_reference: Mapped[str | None] = mapped_column(String(500))
+    fulfillment_error: Mapped[str | None] = mapped_column(String(1000))
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AiAsset(Base, TimestampMixin):
@@ -2160,6 +2202,59 @@ class AiAssessment(Base, TimestampMixin):
     control_results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
     assessed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AiTrustSnapshot(Base):
+    """Immutable explainable trust history for an AI asset version."""
+
+    __tablename__ = "ai_trust_snapshot"
+    __table_args__ = (
+        Index("ix_ai_trust_snapshot_version_time", "ai_asset_version_id", "computed_at"),
+        CheckConstraint("score >= 0 AND score <= 100", name="ck_ai_trust_snapshot_score"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    grade: Mapped[str] = mapped_column(String(30), nullable=False)
+    factors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    blockers: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    input_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class AiRemediation(Base, TimestampMixin):
+    __tablename__ = "ai_remediation"
+    __table_args__ = (
+        Index("ix_ai_remediation_version_status", "ai_asset_version_id", "status"),
+        CheckConstraint(
+            "status IN ('OPEN', 'IN_PROGRESS', 'RESOLVED', 'ACCEPTED_RISK')",
+            name="ck_ai_remediation_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    finding_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="OPEN", nullable=False)
+    resolution_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    resolved_by: Mapped[str | None] = mapped_column(String(255))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class OutboxEvent(Base):

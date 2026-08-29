@@ -10,8 +10,10 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.entitlements import apply_entitlement
 from aida.events import record_audit, record_outbox
 from aida.models import (
     ContextProductVersion,
@@ -34,6 +36,7 @@ from aida.platform_schemas import (
     DataProductPortDefinition,
     DataProductVersionCreate,
     DataProductVersionRead,
+    EntitlementOperation,
     MarketplaceAccessRequestCreate,
     MarketplaceAccessRequestRead,
     MarketplaceProductRead,
@@ -932,6 +935,8 @@ async def revoke_marketplace_access(
     access_request.status = "REVOKED"
     access_request.revoked_by = context.principal_id
     access_request.revoked_at = datetime.now(UTC)
+    if access_request.fulfillment_status == "PROVISIONED":
+        access_request.fulfillment_status = "PENDING"
     record_outbox(
         session,
         organization_id=access_request.organization_id,
@@ -939,6 +944,58 @@ async def revoke_marketplace_access(
         aggregate_id=str(access_request.id),
         event_type="data_product.access_revoked.v1",
         payload={"data_product_version_id": str(access_request.data_product_version_id)},
+    )
+    await session.commit()
+    return access_request
+
+
+@router.post(
+    "/marketplace/access-requests/{request_id}/entitlement",
+    response_model=MarketplaceAccessRequestRead,
+)
+async def fulfill_marketplace_entitlement(
+    request_id: UUID,
+    body: EntitlementOperation,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> DataProductAccessRequest:
+    access_request = await session.get(DataProductAccessRequest, request_id)
+    if access_request is None:
+        raise HTTPException(status_code=404, detail="access request not found")
+    enforce_organization(context, access_request.organization_id)
+    if body.action == "PROVISION" and access_request.status != "APPROVED":
+        raise HTTPException(status_code=409, detail="only approved access can be provisioned")
+    if body.action == "REVOKE" and access_request.status not in {"REVOKED", "EXPIRED"}:
+        raise HTTPException(status_code=409, detail="access must be revoked or expired first")
+    result = await apply_entitlement(settings, access_request, body.action)
+    access_request.fulfillment_status = result.status
+    access_request.fulfillment_provider = result.provider
+    access_request.fulfillment_reference = result.reference
+    access_request.fulfillment_error = result.error
+    access_request.fulfilled_at = (
+        datetime.now(UTC) if result.status in {"PROVISIONED", "REVOKED"} else None
+    )
+    correlation_id = get_correlation_id()
+    record_audit(
+        session,
+        context,
+        action=f"marketplace.entitlement.{body.action.lower()}",
+        resource_type="data_product_access_request",
+        resource_id=str(access_request.id),
+        outcome="SUCCESS" if result.status != "FAILED" else "FAILURE",
+        correlation_id=correlation_id,
+        details={"provider": result.provider, "fulfillment_status": result.status},
+    )
+    record_outbox(
+        session,
+        organization_id=access_request.organization_id,
+        aggregate_type="data_product_access_request",
+        aggregate_id=str(access_request.id),
+        event_type=f"data_product.entitlement_{result.status.lower()}.v1",
+        payload={"action": body.action, "provider": result.provider},
     )
     await session.commit()
     return access_request
@@ -961,3 +1018,4 @@ def approve_access_request(
     access_request.decided_at = now
     if approved:
         access_request.expires_at = now + timedelta(days=access_request.duration_days)
+        access_request.fulfillment_status = "PENDING"

@@ -130,14 +130,14 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 
 ## 13. Current state → target
 
-**Implemented foundation.** `src/aida/mcp_server.py` provides a JSON-RPC 2.0 endpoint (`POST /mcp`, mounted in `src/aida/main.py`) with `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, and `resources/read`. Tool calls do **not** bypass the gateway: `tools/call` runs through the same `GovernedAgentOrchestrator` → `QueryExecutionGateway` path as the native analyst (prompt-risk screening, AST guard, cost check, masking, and audit). Role eligibility uses anti-enumeration denials. Published Context Products add immutable, maker-checker-approved resource packages, quality-gated reads, exact eligible-tool scoping, and persisted consumption evidence for REST and MCP consumers. Generic catalog resource reads still lack consumption-lineage edges. The server advertises a `"prompts": {}` capability but does not yet implement `prompts/list` or `prompts/get`, and per-consumer rate limits and budgets remain open.
+**Implemented and production-hardened.** `src/aida/mcp_server.py` provides JSON-RPC 2.0 resources, prompts, governed/native tools, atomic Redis budgets, workload-identity enforcement outside development, purpose ABAC, and immutable value-free consumption evidence. Tool calls do **not** bypass the gateway: governed execution still runs through `GovernedAgentOrchestrator` and `QueryExecutionGateway`. Context Product reads remain lifecycle-, role-, purpose-, and quality-gated with anti-enumeration denials.
 
 | Aspect | Now | Target |
 |---|---|---|
-| MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`, mounted; tool calls route through the full governed gateway | Add MCP `prompts/*` (capability is advertised but unimplemented) |
-| Context products | **Implemented** — immutable versions, maker-checker publication/deprecation, REST/MCP reads, quality policy, UI | Add compiler and marketplace increments |
-| Per-read policy | Partial — tenancy, role, lifecycle, exact product scope, and quality gates are enforced | Add purpose-based ABAC once module 17 has it natively |
-| Consumption lineage | Partial — Context Product REST/MCP reads and product-scoped tool calls persist immutable edges; generic catalog and native-lineage reads retain audit/outbox evidence only | Extend edge capture to every MCP read |
+| MCP server | **Implemented** — JSON-RPC 2.0 over `POST /mcp`; resources, prompts, and tools route through governed policy and evidence controls | Add organization-specific usage analytics |
+| Context products | **Implemented** — immutable versions, maker-checker publication/deprecation, REST/MCP reads, quality policy, UI, compiler, and marketplace | Certify external entitlement and compiler providers |
+| Per-read policy | Implemented — tenancy, role, lifecycle, exact product scope, purpose allowlists, and quality gates are enforced | Extend shared ABAC vocabulary beyond Context Products |
+| Consumption lineage | Implemented for MCP — successful resources, prompts, and tools persist generic immutable evidence; Context Product reads also persist product-specific edges | Project generic evidence into enterprise adoption analytics |
 | Eligible tools exposure | **Implemented** — product-scoped discovery and invocation expose only approved tool-version identifiers and preserve anti-enumeration denials | Add fuzzy resolution without weakening exact authorization |
 | Consumer budgets | **Implemented** -- optional Redis-backed atomic request, tool-call, and context-read budgets; production fails closed when the budget store is unavailable | Add organization-specific plans and administrative usage reporting |
 
@@ -147,8 +147,8 @@ Emits `context.product_published|deprecated`, `context.product_consumed`, `conte
 |---|---|---|
 | CX-1 | MCP server with resource and tool surfaces | P0 -- **native lineage tools delivered 2026-08-29** (`atlas__get_lineage_graph`, `atlas__get_lineage_impact`, `resolve_entity`, `get_transformation_detail`); governed-SQL-tool and context-product surfaces already implemented |
 | CX-2 | Context product definition, versioning, maker-checker | **Implemented** -- `context_product_api.py`, `ContextProduct`/`ContextProductVersion` models, `tests/test_context_products.py` |
-| CX-3 | Per-read policy evaluation | **Partial** -- lifecycle, roles, exact scope, quality score, and critical-incident gates implemented; purpose ABAC remains |
-| CX-4 | Consumption recorded as lineage | **Partial** -- Context Product reads and product-scoped tool calls create immutable `ContextProductConsumptionEdge` evidence; all native lineage tools emit audit/outbox evidence; generic catalog reads do not yet create consumption edges |
+| CX-3 | Per-read policy evaluation | **Implemented** -- lifecycle, roles, exact scope, purpose allowlists, quality score, and critical-incident gates enforced for REST and MCP |
+| CX-4 | Consumption recorded as lineage | **Implemented for MCP** -- successful resources, prompts, and tools create generic immutable evidence; Context Product reads and product-scoped tools retain richer product-specific edges |
 | CX-5 | Eligible-tool exposure and governed invocation | **Implemented** -- Context Product scope and native lineage tools preserve anti-enumeration behavior |
 | CX-6 | Per-consumer rate limits and budgets | **Implemented 2026-08-29** -- atomic Redis request/minute, tool/day, and context/day buckets with hashed principal keys and production fail-closed behavior |
 | CX-7 | Workload identity for MCP consumers | P0 |
@@ -250,7 +250,7 @@ versions before submission. Wildcard estate scope is not permitted.
 | CP-S4 | Data products, ports, contracts, and lifecycle dashboard | Producers manage a portfolio and publish qualifying products | **Implemented foundation** |
 | CP-S5 | Marketplace and access requests | Consumers discover and request governed products without draft or tenant leakage | **Implemented foundation** |
 | CP-S6 | Context specification and compiler | One approved definition compiles deterministically to MCP, REST, YAML, OSI, ODCS, Snowflake, or Databricks targets | **Implemented foundation** |
-| CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | **Implemented foundation** |
+| CP-S7 | AI registry, assessments, and operational trust | Models, agents, use cases, dependencies, controls, and runtime signals share one governed registry | **Implemented and hardened: managed templates, remediation, maker-checker retirement, trust history, provider evidence sync, dependency graph** |
 | CP-S8 | Adoption, privacy, workflow, and ecosystem expansion | Portfolio operations are measurable and integrations are certified | Planned |
 
 ## 17. Implemented hardening controls (2026-08-29)

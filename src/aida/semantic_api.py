@@ -838,6 +838,32 @@ async def decide_governance_review(
             "expires_at": access_request.expires_at,
             "review_id": str(review.id),
         }
+    elif review.object_type == "AI_ASSET":
+        ai_asset = await session.get(AiAsset, UUID(review.object_id))
+        if ai_asset is None or ai_asset.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if ai_asset.lifecycle_status != "ACTIVE":
+            raise HTTPException(status_code=409, detail="AI asset is no longer active")
+        if body.decision == "APPROVE":
+            ai_asset.lifecycle_status = "RETIRED"
+            await session.execute(
+                update(AiAssetVersion)
+                .where(
+                    AiAssetVersion.asset_id == ai_asset.id,
+                    AiAssetVersion.status == "APPROVED",
+                )
+                .values(status="RETIRED", updated_at=now)
+            )
+            event_type = "ai_registry.asset_retired.v1"
+        else:
+            event_type = "ai_registry.asset_retirement_rejected.v1"
+        aggregate_type = "ai_asset"
+        aggregate_id = str(ai_asset.id)
+        payload = {
+            "ai_asset_id": str(ai_asset.id),
+            "asset_kind": ai_asset.asset_kind,
+            "review_id": str(review.id),
+        }
     elif review.object_type == "AI_ASSET_VERSION":
         ai_version = await session.get(AiAssetVersion, UUID(review.object_id))
         if ai_version is None or ai_version.organization_id != review.organization_id:
