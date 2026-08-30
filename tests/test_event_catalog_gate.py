@@ -56,6 +56,7 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     "project.created.v1": "same event as documented `tenant.created` (project level)",
     # --- straight .v1 renames of an already-documented event ---
     "datasource.registered.v1": "same event as documented `datasource.registered`",
+    "catalog.asset.certified.v1": "same event as documented `catalog.asset.certified`",
     "connector.certification.completed.v1": (
         "same event as documented `certification.completed`"
     ),
