@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     outbox_max_backoff_seconds: int = Field(default=300, ge=1, le=3600)
     relationship_candidate_scan_max_columns: int = Field(default=100_000, ge=1_000, le=1_000_000)
     cross_source_candidate_max_datasource_pairs: int = Field(default=50, ge=1, le=2_000)
+    rename_candidate_scan_max_tables: int = Field(default=200, ge=10, le=5_000)
+    rename_candidate_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    object_resolution_scan_max_tables_per_datasource: int = Field(
+        default=300, ge=10, le=5_000
+    )
+    object_resolution_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
     usage_boost_enabled_default: bool = False
     usage_boost_refresh_minutes: int = Field(default=60, ge=5, le=1440)
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)

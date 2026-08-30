@@ -24,6 +24,7 @@ from aida.connectors.base import (
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
+from aida.identity_resolution import IdentityMatch, score_table_rename
 from aida.ingestion import persist_envelope_extensions
 from aida.models import (
     AnalysisRun,
@@ -34,6 +35,7 @@ from aida.models import (
     MetadataConstraint,
     MetadataSchema,
     MetadataTable,
+    RenameCandidate,
     TableProfile,
 )
 from aida.quality_service import evaluate_analysis_run
@@ -65,6 +67,10 @@ class SnapshotScope:
     table_ids: set[UUID] = field(default_factory=set)
     column_ids: set[UUID] = field(default_factory=set)
     constraint_ids: set[UUID] = field(default_factory=set)
+    # Tables actually created (not merely reactivated/updated) across every chunk of this
+    # snapshot -- the CT-4 rename-detection "just created" side. Not part of object_counts()
+    # since it is a detection input, not an inventory total.
+    created_table_ids: set[UUID] = field(default_factory=set)
 
     def object_counts(self) -> dict[str, int]:
         return {
@@ -180,6 +186,8 @@ async def _get_or_create_table(
     schema: MetadataSchema,
     discovered: DiscoveredTable,
     tracker: ChangeTracker,
+    *,
+    created_table_ids: set[UUID] | None = None,
 ) -> MetadataTable:
     table = await session.scalar(
         select(MetadataTable).where(
@@ -201,6 +209,8 @@ async def _get_or_create_table(
         )
         session.add(table)
         await session.flush()
+        if created_table_ids is not None:
+            created_table_ids.add(table.id)
     else:
         table.status = "ACTIVE"
         table.deprecated_at = None
@@ -296,6 +306,15 @@ async def _get_or_create_constraint(
     return constraint
 
 
+@dataclass(slots=True)
+class DeprecationResult:
+    """Total rows tombstoned plus, specifically, which tables -- the CT-4 rename-detection
+    "just tombstoned" input."""
+
+    total: int
+    deprecated_table_ids: set[UUID] = field(default_factory=set)
+
+
 async def _deprecate_missing(
     session: AsyncSession,
     datasource: DataSource,
@@ -305,7 +324,7 @@ async def _deprecate_missing(
     seen_table_ids: set[UUID],
     seen_column_ids: set[UUID],
     seen_constraint_ids: set[UUID],
-) -> int:
+) -> DeprecationResult:
     now = datetime.now(UTC)
     catalog_ids = set(
         await session.scalars(
@@ -348,6 +367,22 @@ async def _deprecate_missing(
             constraint_ids=seen_constraint_ids,
         ),
     )
+    # Captured *before* the UPDATE below flips them: exactly the tables that are about to
+    # transition ACTIVE -> DEPRECATED in this call, as opposed to `missing.table_ids`, which
+    # also includes tables missing from a prior run that are already DEPRECATED. This is the
+    # CT-4 rename-detection "just tombstoned in this run" input (module 04 SS6).
+    deprecated_table_ids: set[UUID] = (
+        set(
+            await session.scalars(
+                select(MetadataTable.id).where(
+                    MetadataTable.id.in_(missing.table_ids),
+                    MetadataTable.status == "ACTIVE",
+                )
+            )
+        )
+        if missing.table_ids
+        else set()
+    )
     statements = [
         update(model)
         .where(model.id.in_(object_ids), model.status == "ACTIVE")
@@ -365,14 +400,14 @@ async def _deprecate_missing(
     for statement in statements:
         result = cast(CursorResult[Any], await session.execute(statement))
         deprecated += result.rowcount
-    return deprecated
+    return DeprecationResult(total=deprecated, deprecated_table_ids=deprecated_table_ids)
 
 
 async def deprecate_missing_snapshot(
     session: AsyncSession,
     datasource: DataSource,
     scope: SnapshotScope,
-) -> int:
+) -> DeprecationResult:
     return await _deprecate_missing(
         session,
         datasource,
