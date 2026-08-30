@@ -1982,3 +1982,45 @@ Studio has moved from Pending to Partial in the status matrix.
   adversarial evaluation remains.
 - Studio parameter-contract designer and Git binding remain open (tracker ST-A4, ST-A6).
 - Interactive browser visual/accessibility certification is not possible in this session.
+
+## 2026-08-30 (continued) — Re-verified `00-status.md` "at a glance" and Retest register figures
+
+### Completed
+
+- A user-supplied summary of `00-status.md` quoted its 12:25 snapshot (1,199 tests, 156 mypy
+  files, "9/9 invariants automated") and asked for the doc to be validated and corrected. By the
+  time this was checked, other concurrent sessions had continued pushing to this shared branch —
+  `git fetch` found 61, then 6 more, divergent commits arrive mid-session — so the 12:25 numbers
+  were already stale rather than wrong-when-written.
+- Built an isolated Python 3.13 venv (`uv venv` + `uv pip install -e ".[dev]"`, the checked-in
+  `.venv` not being runnable from this session) against the current merged head (`c4d8e6f0a1b3`)
+  and re-ran the full suite, `ruff`, `mypy --strict`, and `lint-imports`.
+- Updated `00-status.md`'s "At a glance" table and Retest register (§8) to the 17:20 UTC figures:
+  test count, mypy file count, and the Alembic head hash, with a note on how much drifted and why
+  (other sessions' commits landing in the intervening ~5 hours), rather than silently overwriting
+  the 12:25 numbers as if they had been wrong. Left the invariant-count claim ("9 of 9") and the
+  capability matrix (§4) unchanged — nothing in this pass contradicted either.
+- Confirmed a separate claim in the same user-supplied summary — that this repo's tracker "marks
+  several Studio items done" while the status doc lists Studio as pending — does not hold:
+  `03-tracker.md`'s `ST-A1`–`ST-A7` (module 18) are all still open, matching `00-status.md`'s
+  "Studio | 18 | **Pending**" row. The two documents already agree on Studio.
+
+### Verification evidence
+
+- `pytest`: 1,390 passed, 1 xfailed (1,391 collected) — up from the doc's prior 1,199, with the
+  Tier-0 invariant test files alone now at 188 total (`test_inv5_tenant_isolation.py` particularly,
+  8 → 62) versus the doc's prior 71.
+- `ruff check .`: clean. `mypy src` (strict): clean on 163 files (was 156). `lint-imports`: 4
+  contracts kept, 0 broken (unchanged). `alembic heads`: single head, `c4d8e6f0a1b3` (was
+  `d5f8b21c4a03` — a merge migration landed in between).
+
+### Current limitations
+
+- This branch is under heavy concurrent multi-session development right now (dozens of commits an
+  hour observed while doing this check); any point-in-time count in `00-status.md` should be read
+  as "true when last verified," not as a stable figure — the doc's own §2 "Living document" framing
+  already says this, but the drift rate on this specific branch today is unusually high.
+- Did not re-verify the capability matrix (§4), the invariant-by-invariant limits (§3), or the
+  decisions/gaps sections (§6–§7) against current code — this pass was scoped to the specific
+  numeric claims the user's summary quoted and to the Studio cross-document-consistency question
+  they raised.
