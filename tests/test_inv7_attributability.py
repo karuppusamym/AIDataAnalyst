@@ -110,6 +110,16 @@ _LAZY_DEFAULT_WRITE_ROUTES: dict[str, str] = {
         "ensure_organization_integration_policy"
     ),
     "GET /v1/openlineage-events/{event_id}": "ensure_organization_integration_policy",
+    "GET /v1/projects/{project_id}/bi-connections": "ensure_organization_integration_policy",
+    "GET /v1/bi-connections/{connection_id}/artifact-imports": (
+        "ensure_organization_integration_policy"
+    ),
+    "GET /v1/bi-artifact-imports/{artifact_id}/reports": (
+        "ensure_organization_integration_policy"
+    ),
+    "GET /v1/bi-artifact-imports/{artifact_id}/lineage": (
+        "ensure_organization_integration_policy"
+    ),
 }
 
 # Endpoints that commit governed state with no audit record. Empty, and required to
