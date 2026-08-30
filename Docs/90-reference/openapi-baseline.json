@@ -8379,6 +8379,108 @@
         "title": "DataQualitySummaryRead",
         "type": "object"
       },
+      "DataSourceBulkOnboardItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "status"
+        ],
+        "title": "DataSourceBulkOnboardItemRead",
+        "type": "object"
+      },
+      "DataSourceBulkOnboardRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "datasources": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceCreate"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Datasources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasources"
+        ],
+        "title": "DataSourceBulkOnboardRequest",
+        "type": "object"
+      },
+      "DataSourceBulkOnboardResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceBulkOnboardItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "results"
+        ],
+        "title": "DataSourceBulkOnboardResultRead",
+        "type": "object"
+      },
       "DataSourceCreate": {
         "additionalProperties": false,
         "properties": {
@@ -55980,6 +56082,142 @@
           }
         },
         "summary": "Create Datasource"
+      }
+    },
+    "/v1/projects/{project_id}/datasources/bulk-onboard": {
+      "post": {
+        "description": "IN-1: register up to DATASOURCE_BULK_ONBOARD_MAX_ITEMS datasources in one call.\n\nEvery item goes through exactly the same registration path a single\n`create_datasource` call would -- `_validate_datasource_create` and\n`_build_datasource` are the identical functions that endpoint calls, so\nthere is no bulk-only shortcut on credential-reference validation,\nconnector-type support, or per-project name uniqueness. A bad item (an\nunapproved credential reference, an unsupported connector type, or a name\nthat collides with an existing datasource or an earlier item in this same\nbatch) fails only that item -- CT-1/RL-6's partial-success precedent, not\nan all-or-nothing transaction. Each item's insert runs inside its own\nSAVEPOINT (`session.begin_nested()`) so a `DataSource.project_id+name`\nuniqueness violation caught at flush time rolls back only that item, never\nthe datasources already staged from earlier in the batch.\n\nNo connectivity probe runs here, in or out of a Temporal workflow: the\nsingle-item path doesn't run one either at registration time (that is\n`test_datasource`, POST `/datasources/{id}/test`, a separate step the\ncaller invokes per source after registration), so there is nothing\nper-item-slow to defer for the bulk path either -- 200 items is 200 bounded\nDB writes, not 200 outbound connections.",
+        "operationId": "bulk_onboard_datasources_v1_projects__project_id__datasources_bulk_onboard_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataSourceBulkOnboardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataSourceBulkOnboardResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Onboard Datasources"
       }
     },
     "/v1/projects/{project_id}/dbt-projects": {
