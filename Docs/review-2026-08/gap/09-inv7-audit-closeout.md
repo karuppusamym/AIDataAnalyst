@@ -315,13 +315,15 @@ INV-7's strict xfail became a pass (+1 passed, −1 xfailed), and
 The one remaining xfail is INV-9's, which is blocked on **E12** (a connector
 certification corpus that does not exist) and was deliberately not touched.
 
-**Concurrent-work note.** A later run of `ruff check .` and `mypy src` shows 19 ruff
-errors and 16 mypy errors in `src/aida/ingestion.py`, plus one unused import in
-`tests/test_adversarial_probe.py`, and four failures in `tests/test_ingestion.py` and
-`tests/test_adversarial_probe.py` (`'MetadataSchemaEnvelope' object has no attribute
-'routines'`). Those files belong to the connector/ingestion workstream and are mid-edit;
-none of them was touched by this change and none is fixed here. Everything inside this
-workstream's ownership is clean, as the scoped commands above show.
+**Concurrent-work note (2026-08-30, historical).** A later run of `ruff check .` and
+`mypy src` showed 19 ruff errors and 16 mypy errors in `src/aida/ingestion.py`, plus one
+unused import and four failures in a WIP test file from the concurrent connector/ingestion
+workstream (`'MetadataSchemaEnvelope' object has no attribute 'routines'`). Those files
+belonged to that workstream and were mid-edit; none of them was touched by this change and
+none was fixed here. The WIP file itself no longer exists in the repo under the name this
+note originally gave it — left as a historical record of that moment rather than a claim
+about a file present today. Everything inside this workstream's ownership was clean, as the
+scoped commands above show.
 
 ---
 

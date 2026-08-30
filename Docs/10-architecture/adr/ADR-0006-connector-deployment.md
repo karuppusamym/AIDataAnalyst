@@ -47,4 +47,4 @@ A source class that neither placement mode can serve.
 ## Enforcement
 
 - INV-9 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_capability_matrix_matches_certification`
+- Test (planned, not written — 2026-08-30): `test_capability_matrix_matches_certification`
