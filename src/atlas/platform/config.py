@@ -67,7 +67,32 @@ class Settings(BaseSettings):
     max_bigquery_dry_run_bytes: int = Field(default=10_000_000_000, gt=0)
     profile_sample_rows: int = Field(default=10_000, ge=100, le=100_000)
     profile_column_batch_size: int = Field(default=40, ge=1, le=100)
-    profile_max_tables_per_run: int = Field(default=5_000, ge=1, le=100_000)
+    # PR-5: raised from the original `le=100_000` so a page-based plan can
+    # actually reach the 1,000,000-table exit condition -- pagination alone
+    # cannot compensate for a ceiling that makes a 1M-table run structurally
+    # impossible regardless of continue-as-new.
+    profile_max_tables_per_run: int = Field(default=5_000, ge=1, le=1_000_000)
+    # PR-5: bounded page size for `plan_profile_tasks`'s keyset pagination --
+    # each activity call plans at most this many tables, never the whole run
+    # in one payload (which is what made large runs fatal at scale).
+    profile_plan_page_size: int = Field(default=500, ge=1, le=10_000)
+    # PR-5: once a single `DatasourceDiscoveryWorkflow` execution has
+    # processed this many tables, it hands off to a fresh execution via
+    # `workflow.continue_as_new` instead of letting its own history keep
+    # growing. Deliberately a multiple of `profile_plan_page_size` in the
+    # default so the boundary lands on a page edge, not mid-page.
+    profile_continue_as_new_after_tables: int = Field(default=2_000, ge=1, le=1_000_000)
+    # PR-2: how many (value, count) pairs `profile_column_values` captures per
+    # gated column -- the "top values" half of the policy-approved exception.
+    profile_value_top_n: int = Field(default=10, ge=1, le=100)
+    # PR-2: default retention window pinned onto a `ColumnValueProfileArtifact`
+    # at capture time from the policy that authorized it -- changing this
+    # setting later never retroactively extends or shortens an
+    # already-captured artifact's `expires_at`.
+    profiling_exception_default_retention_days: int = Field(default=30, ge=1, le=3650)
+    # PR-2: how many expired value-bearing artifacts the background purge
+    # sweep deletes per scheduler iteration, mirroring `scheduler_batch_size`.
+    profiling_exception_purge_batch_size: int = Field(default=500, ge=1, le=5_000)
     max_active_runs_per_organization: int = Field(default=100, ge=1, le=10_000)
     scheduler_poll_seconds: int = Field(default=10, ge=1, le=300)
     scheduler_batch_size: int = Field(default=100, ge=1, le=1000)

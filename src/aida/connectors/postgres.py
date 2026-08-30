@@ -5,6 +5,7 @@ import asyncpg
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
+    ColumnValueProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -255,6 +256,10 @@ class PostgresConnector(SqlExecutor):
         routines=True,
         object_comments=True,
         grants=True,
+        # PR-2: the only connector today with a real `profile_column_values`
+        # implementation below -- every other connector stays honestly
+        # unsupported (default False) rather than simulating this capability.
+        value_range_profiling=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -502,6 +507,76 @@ class PostgresConnector(SqlExecutor):
             sampled_row_count=sampled_row_count,
             columns=tuple(snapshots),
         )
+
+    async def profile_column_values(
+        self,
+        schema_name: str,
+        table_name: str,
+        column_names: tuple[str, ...],
+        *,
+        sample_rows: int,
+        top_n: int,
+        timeout_seconds: int,
+    ) -> tuple[ColumnValueProfileSnapshot, ...]:
+        """PR-2: the one connector with a real value-bearing implementation.
+
+        Callers (`profile_table_task`) are responsible for only invoking this
+        for columns whose classification has an APPROVED, unrevoked
+        `ProfilingExceptionPolicy` -- this method has no policy awareness of
+        its own and, per ADR-0014, is never on the path `profile_table` uses.
+        """
+        if not column_names:
+            return ()
+        if sample_rows < 1 or top_n < 1:
+            raise ValueError("profiling limits must be positive")
+        qualified_table = f"{_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
+        connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
+        snapshots: list[ColumnValueProfileSnapshot] = []
+        try:
+            async with connection.transaction(readonly=True):
+                await connection.execute(f"SET LOCAL statement_timeout = {timeout_seconds * 1000}")
+                for name in column_names:
+                    quoted = _quote_identifier(name)
+                    bounded_sample = (
+                        f"SELECT {quoted} AS v FROM {qualified_table} "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                        f"LIMIT {int(sample_rows)}"
+                    )
+                    try:
+                        # A nested transaction here is a SAVEPOINT (asyncpg's
+                        # behaviour for a transaction opened inside another): a
+                        # column whose type has no total order (e.g. json) raises
+                        # below and is rolled back to the savepoint alone, rather
+                        # than aborting the outer read-only transaction and
+                        # poisoning every column queried after it.
+                        async with connection.transaction():
+                            range_row = await connection.fetchrow(
+                                f"SELECT MIN(v::text) AS min_v, MAX(v::text) AS max_v "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                                f"FROM ({bounded_sample}) AS bounded_sample"
+                            )
+                            top_rows = await connection.fetch(
+                                f"SELECT v::text AS value, COUNT(*) AS cnt "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                                f"FROM ({bounded_sample}) AS bounded_sample "
+                                "WHERE v IS NOT NULL GROUP BY v "
+                                f"ORDER BY COUNT(*) DESC, v LIMIT {int(top_n)}"
+                            )
+                    except asyncpg.PostgresError:
+                        snapshots.append(
+                            ColumnValueProfileSnapshot(name=name, min_value=None, max_value=None)
+                        )
+                        continue
+                    snapshots.append(
+                        ColumnValueProfileSnapshot(
+                            name=name,
+                            min_value=None if range_row is None else range_row["min_v"],
+                            max_value=None if range_row is None else range_row["max_v"],
+                            top_values=tuple(
+                                (str(row["value"]), int(row["cnt"])) for row in top_rows
+                            ),
+                        )
+                    )
+        finally:
+            await connection.close()
+        return tuple(snapshots)
 
 
 def _extract_explain_estimate(raw_plan: dict[str, Any]) -> QueryEstimate:

@@ -34,6 +34,7 @@ from aida.catalog_bulk_actions import (
     plan_own,
     plan_tag,
 )
+from aida.classification import SENSITIVE_CLASSES
 from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
 from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
@@ -68,6 +69,7 @@ from aida.models import (
     Organization,
     OrganizationIntegrationPolicy,
     OwnershipAssignment,
+    ProfilingExceptionPolicy,
     Project,
     QueryExecution,
     ScanPolicy,
@@ -126,6 +128,10 @@ from aida.schemas import (
     OrganizationIntegrationPolicyWrite,
     OrganizationRead,
     Page,
+    ProfilingExceptionDecisionRequest,
+    ProfilingExceptionPolicyCreate,
+    ProfilingExceptionPolicyRead,
+    ProfilingExceptionRevokeRequest,
     ProjectCreate,
     ProjectRead,
     QueryExecutionRequest,
@@ -1951,6 +1957,272 @@ async def get_latest_table_profile(
             for column_profile, column in profile_rows
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# PR-2: policy-approved range/top-value profiling by classification.
+#
+# Mirrors `request_cross_boundary_grant`/`decide_governance_review`'s
+# maker-checker shape (a different principal must decide than the one who
+# requested), but keeps its own denormalized status fields rather than filing
+# into the shared `governance_review` queue -- see `ProfilingExceptionPolicy`'s
+# docstring in `models.py` for why. The actual value-capture gate this policy
+# unlocks lives in `workflows.activities.profile_table_task`, which additionally
+# requires the connector to report `capabilities.value_range_profiling`.
+# ---------------------------------------------------------------------------
+
+PROFILING_EXCEPTION_REQUEST_ROLES = ("PlatformAdmin", "DataAdmin", "DataSteward")
+PROFILING_EXCEPTION_READ_ROLES = (
+    "PlatformAdmin",
+    "DataAdmin",
+    "DataSteward",
+    "Reviewer",
+    "Viewer",
+)
+PROFILING_EXCEPTION_DECIDE_ROLES = ("PlatformAdmin", "DataSteward", "Reviewer")
+
+
+@router.post(
+    "/datasources/{datasource_id}/profiling-exception-policies",
+    response_model=ProfilingExceptionPolicyRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_profiling_exception_policy(
+    datasource_id: UUID,
+    body: ProfilingExceptionPolicyCreate,
+    context: SecurityContext = Depends(require_roles(*PROFILING_EXCEPTION_REQUEST_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ProfilingExceptionPolicy:
+    """Request the value-bearing profiling exception for one classification.
+
+    Created `PENDING`; only becomes `APPROVED` -- and only then eligible for
+    `profile_table_task` to act on -- once a *different* principal decides it
+    via `POST /profiling-exception-policies/{id}/decision`.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    classification = body.classification.upper()
+    if classification not in SENSITIVE_CLASSES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "classification must be one of the sensitive classes: "
+                f"{sorted(SENSITIVE_CLASSES)}"
+            ),
+        )
+    existing = await session.scalar(
+        select(ProfilingExceptionPolicy).where(
+            ProfilingExceptionPolicy.organization_id == datasource.organization_id,
+            ProfilingExceptionPolicy.datasource_id == datasource.id,
+            ProfilingExceptionPolicy.classification == classification,
+            ProfilingExceptionPolicy.status.in_(("PENDING", "APPROVED")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="a pending or approved profiling exception policy already covers this scope",
+        )
+    policy = ProfilingExceptionPolicy(
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        classification=classification,
+        status="PENDING",
+        retention_days=body.retention_days,
+        requested_by=context.principal_id,
+        request_reason=body.reason,
+    )
+    session.add(policy)
+    await session.flush()
+    audit_context = replace(context, organization_id=datasource.organization_id)
+    record_audit(
+        session,
+        audit_context,
+        action="profiling_exception_policy.request",
+        resource_type="profiling_exception_policy",
+        resource_id=str(policy.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"datasource_id": str(datasource.id), "classification": classification},
+    )
+    record_outbox(
+        session,
+        organization_id=datasource.organization_id,
+        aggregate_type="profiling_exception_policy",
+        aggregate_id=str(policy.id),
+        event_type="profiling_exception_policy.requested.v1",
+        payload={
+            "policy_id": str(policy.id),
+            "datasource_id": str(datasource.id),
+            "classification": classification,
+        },
+    )
+    await session.commit()
+    return policy
+
+
+@router.get(
+    "/datasources/{datasource_id}/profiling-exception-policies",
+    response_model=Page,
+)
+async def list_profiling_exception_policies(
+    datasource_id: UUID,
+    policy_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*PROFILING_EXCEPTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters = [
+        ProfilingExceptionPolicy.organization_id == datasource.organization_id,
+        ProfilingExceptionPolicy.datasource_id == datasource.id,
+    ]
+    if policy_status:
+        filters.append(ProfilingExceptionPolicy.status == policy_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(ProfilingExceptionPolicy).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(ProfilingExceptionPolicy)
+            .where(*filters)
+            .order_by(ProfilingExceptionPolicy.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[ProfilingExceptionPolicyRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/profiling-exception-policies/{policy_id}/decision",
+    response_model=ProfilingExceptionPolicyRead,
+)
+async def decide_profiling_exception_policy(
+    policy_id: UUID,
+    body: ProfilingExceptionDecisionRequest,
+    context: SecurityContext = Depends(require_roles(*PROFILING_EXCEPTION_DECIDE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ProfilingExceptionPolicy:
+    policy = await session.scalar(
+        select(ProfilingExceptionPolicy)
+        .where(ProfilingExceptionPolicy.id == policy_id)
+        .with_for_update()
+    )
+    if policy is None:
+        raise HTTPException(status_code=404, detail="profiling exception policy not found")
+    enforce_organization(context, policy.organization_id)
+    if policy.status != "PENDING":
+        raise HTTPException(
+            status_code=409, detail="profiling exception policy is already decided"
+        )
+    if policy.requested_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker-checker separation is required")
+    now = datetime.now(UTC)
+    policy.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    policy.decided_by = context.principal_id
+    policy.decision_reason = body.reason
+    policy.decided_at = now
+    audit_context = replace(context, organization_id=policy.organization_id)
+    record_audit(
+        session,
+        audit_context,
+        action="profiling_exception_policy.decide",
+        resource_type="profiling_exception_policy",
+        resource_id=str(policy.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"decision": body.decision, "classification": policy.classification},
+    )
+    record_outbox(
+        session,
+        organization_id=policy.organization_id,
+        aggregate_type="profiling_exception_policy",
+        aggregate_id=str(policy.id),
+        event_type="profiling_exception_policy.decided.v1",
+        payload={
+            "policy_id": str(policy.id),
+            "datasource_id": str(policy.datasource_id),
+            "classification": policy.classification,
+            "status": policy.status,
+        },
+    )
+    await session.commit()
+    return policy
+
+
+@router.post(
+    "/profiling-exception-policies/{policy_id}/revoke",
+    response_model=ProfilingExceptionPolicyRead,
+)
+async def revoke_profiling_exception_policy(
+    policy_id: UUID,
+    body: ProfilingExceptionRevokeRequest,
+    context: SecurityContext = Depends(require_roles(*PROFILING_EXCEPTION_DECIDE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ProfilingExceptionPolicy:
+    """Immediately withdraws an APPROVED policy's authority to capture values.
+
+    `profile_table_task`'s gate (`profiling_exceptions.approved_policy_for`)
+    only ever matches `status == "APPROVED"`, so a revoked policy stops
+    authorizing new captures from the moment this commits -- already-captured
+    `ColumnValueProfileArtifact` rows are unaffected (they still expire on
+    their own pinned schedule; revoking the policy is not itself a retention
+    action).
+    """
+    policy = await session.scalar(
+        select(ProfilingExceptionPolicy)
+        .where(ProfilingExceptionPolicy.id == policy_id)
+        .with_for_update()
+    )
+    if policy is None:
+        raise HTTPException(status_code=404, detail="profiling exception policy not found")
+    enforce_organization(context, policy.organization_id)
+    if policy.status != "APPROVED":
+        raise HTTPException(
+            status_code=409, detail="only an approved profiling exception policy can be revoked"
+        )
+    now = datetime.now(UTC)
+    policy.status = "REVOKED"
+    policy.revoked_by = context.principal_id
+    policy.revoked_at = now
+    policy.revocation_reason = body.reason
+    audit_context = replace(context, organization_id=policy.organization_id)
+    record_audit(
+        session,
+        audit_context,
+        action="profiling_exception_policy.revoke",
+        resource_type="profiling_exception_policy",
+        resource_id=str(policy.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"classification": policy.classification, "reason": body.reason},
+    )
+    record_outbox(
+        session,
+        organization_id=policy.organization_id,
+        aggregate_type="profiling_exception_policy",
+        aggregate_id=str(policy.id),
+        event_type="profiling_exception_policy.revoked.v1",
+        payload={
+            "policy_id": str(policy.id),
+            "datasource_id": str(policy.datasource_id),
+            "classification": policy.classification,
+        },
+    )
+    await session.commit()
+    return policy
 
 
 # ---------------------------------------------------------------------------

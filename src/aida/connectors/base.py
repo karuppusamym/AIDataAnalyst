@@ -20,6 +20,16 @@ class ConnectorCapabilities:
     routines: bool = False
     object_comments: bool = False
     grants: bool = False
+    # PR-2 (ADR-0014 exception path). Value-free statistics (row estimates,
+    # null rates, distinct estimates, lengths) are always computed by
+    # `profile_table` regardless of this flag. Actual ranges/top-values are a
+    # different, much more sensitive query class -- reading real column
+    # contents rather than shapes -- so a connector must opt in explicitly by
+    # overriding `Connector.profile_column_values` AND setting this True.
+    # Default False so every connector that has not implemented it keeps
+    # reporting honestly (fail-closed, matching the `views`/`routines`/etc.
+    # convention above) rather than silently claiming support it lacks.
+    value_range_profiling: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +215,36 @@ class TableProfileSnapshot:
     columns: tuple[ColumnProfileSnapshot, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ColumnValueProfileSnapshot:
+    """PR-2: the value-bearing counterpart to `ColumnProfileSnapshot`.
+
+    Only produced when a policy-approved classification-specific exception
+    (`ProfilingExceptionPolicy`) is APPROVED for the column's classification
+    *and* the connector's `capabilities.value_range_profiling` is True --
+    everywhere else the platform only ever computes `ColumnProfileSnapshot`
+    (ADR-0014). Every field here is real source data and is persisted only
+    into a `ColumnValueProfileArtifact` with a retention/expiry pinned at
+    capture time, never onto the value-free `ColumnProfile` row.
+    """
+
+    name: str
+    min_value: str | None
+    max_value: str | None
+    # (value, count) pairs, most frequent first, bounded to the caller's `top_n`.
+    top_values: tuple[tuple[str, int], ...] = ()
+
+
+class ConnectorValueProfilingUnsupported(NotImplementedError):
+    """Raised by the default `Connector.profile_column_values` implementation.
+
+    A connector that has not implemented the value-bearing query path fails
+    closed with this rather than silently returning an empty/simulated
+    result -- callers must treat "unsupported" and "captured nothing" as
+    distinguishable outcomes.
+    """
+
+
 class Connector(ABC):
     """Source access with structured arguments only.
 
@@ -242,3 +282,29 @@ class Connector(ABC):
         timeout_seconds: int,
     ) -> TableProfileSnapshot:
         raise NotImplementedError
+
+    async def profile_column_values(
+        self,
+        schema_name: str,
+        table_name: str,
+        column_names: tuple[str, ...],
+        *,
+        sample_rows: int,
+        top_n: int,
+        timeout_seconds: int,
+    ) -> tuple[ColumnValueProfileSnapshot, ...]:
+        """PR-2: read actual ranges/top-values for `column_names`.
+
+        Deliberately NOT `@abstractmethod` -- unlike `profile_table`, no
+        connector is required to implement this. The default fails closed
+        rather than every other connector subclass needing a no-op override:
+        a connector that has not implemented the real value-bearing query
+        must never silently claim support it lacks (INV-9-style honesty).
+        Callers must gate a call here behind both an APPROVED, unrevoked
+        `ProfilingExceptionPolicy` for the column's classification AND
+        `self.capabilities.value_range_profiling` -- this method does not
+        itself know about policy state.
+        """
+        raise ConnectorValueProfilingUnsupported(
+            f"{type(self).__name__} does not support value-range profiling"
+        )
