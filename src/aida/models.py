@@ -1657,6 +1657,54 @@ class CrossSourceResolutionCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+
+
+class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
+    """RL-7 (optional, additive): a stronger-than-steward-decision label for one
+    `RelationshipCandidate`, for confidence-calibration purposes only.
+
+    A steward's APPROVE/REJECT on the candidate itself is real, legitimate
+    first-form ground truth (a human looked at the evidence and decided), and
+    calibration reads it directly by default. This table exists only for the
+    case where a *later* signal is stronger than that original decision --
+    e.g. a labelled banking corpus, or a query-execution confirmation that the
+    join is actually used -- without disturbing the original decision record
+    on `RelationshipCandidate` itself (maker-checker history, negative
+    knowledge) or requiring every calibration reader to know about this table.
+    At most one row per candidate: a second label supersedes, it does not
+    accumulate a competing opinion.
+
+    Nothing in this platform populates this table yet (no labelled banking
+    corpus exists in this environment -- see module 06 RL-7). It is schema
+    only, ready for whichever ingestion path is built once such a corpus, or a
+    usage-confirmation signal, exists.
+    """
+
+    __tablename__ = "relationship_candidate_ground_truth_label"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id", name="uq_relationship_candidate_ground_truth_label"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    # Named `candidate_id`, not `relationship_candidate_id` -- combined with this
+    # table's already-long name, the longer column name pushes the default
+    # SQLAlchemy index/constraint names (`ix_<table>_<column>`,
+    # `fk_<table>_<column>_<referred_table>`) past Postgres's 63-byte
+    # NAMEDATALEN limit.
+    candidate_id: Mapped[UUID] = mapped_column(
+        ForeignKey("relationship_candidate.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label: Mapped[str] = mapped_column(String(30), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    rationale: Mapped[str | None] = mapped_column(String(2000))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 

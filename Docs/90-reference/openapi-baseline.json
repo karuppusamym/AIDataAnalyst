@@ -15123,6 +15123,301 @@
         "title": "QueryLineageRead",
         "type": "object"
       },
+      "RelationshipCandidateBulkDecisionItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "status"
+        ],
+        "title": "RelationshipCandidateBulkDecisionItemRead",
+        "type": "object"
+      },
+      "RelationshipCandidateBulkDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Ids"
+          },
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RelationshipCandidateBulkSelectionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "RelationshipCandidateBulkDecisionRequest",
+        "type": "object"
+      },
+      "RelationshipCandidateBulkDecisionResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateBulkDecisionItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "selection_mode": {
+            "enum": [
+              "EXPLICIT",
+              "FILTER"
+            ],
+            "title": "Selection Mode",
+            "type": "string"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision",
+          "selection_mode",
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "truncated",
+          "results"
+        ],
+        "title": "RelationshipCandidateBulkDecisionResultRead",
+        "type": "object"
+      },
+      "RelationshipCandidateBulkSelectionFilter": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "detection_rule": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Rule"
+          },
+          "max_confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Confidence"
+          },
+          "min_confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Confidence"
+          }
+        },
+        "required": [
+          "datasource_id"
+        ],
+        "title": "RelationshipCandidateBulkSelectionFilter",
+        "type": "object"
+      },
+      "RelationshipCandidateCalibrationBucketRead": {
+        "additionalProperties": false,
+        "properties": {
+          "approved_count": {
+            "title": "Approved Count",
+            "type": "integer"
+          },
+          "confidence_high": {
+            "title": "Confidence High",
+            "type": "number"
+          },
+          "confidence_low": {
+            "title": "Confidence Low",
+            "type": "number"
+          },
+          "decided_count": {
+            "title": "Decided Count",
+            "type": "integer"
+          },
+          "observed_approval_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Approval Rate"
+          },
+          "rejected_count": {
+            "title": "Rejected Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "confidence_low",
+          "confidence_high",
+          "decided_count",
+          "approved_count",
+          "rejected_count",
+          "observed_approval_rate"
+        ],
+        "title": "RelationshipCandidateCalibrationBucketRead",
+        "type": "object"
+      },
+      "RelationshipCandidateCalibrationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "bucket_width": {
+            "title": "Bucket Width",
+            "type": "number"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateCalibrationBucketRead"
+            },
+            "title": "Buckets",
+            "type": "array"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "ground_truth_overrides_applied": {
+            "title": "Ground Truth Overrides Applied",
+            "type": "integer"
+          },
+          "methodology_note": {
+            "title": "Methodology Note",
+            "type": "string"
+          },
+          "total_decided": {
+            "title": "Total Decided",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "bucket_width",
+          "total_decided",
+          "ground_truth_overrides_applied",
+          "buckets",
+          "methodology_note"
+        ],
+        "title": "RelationshipCandidateCalibrationRead",
+        "type": "object"
+      },
       "RelationshipCandidateDecision": {
         "additionalProperties": false,
         "properties": {
@@ -54412,6 +54707,283 @@
           }
         },
         "summary": "Validate Query"
+      }
+    },
+    "/v1/relationship-candidates/bulk-decision": {
+      "post": {
+        "description": "RL-6: decide up to RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS PENDING\nrelationship candidates in one call, by explicit id list or by a\nsingle-datasource filter.\n\nExactly the same maker-checker and PENDING-only rules as\n`decide_relationship_candidate` apply per candidate -- this is not a\nlooser bulk path, just a batched one -- but a rule violation on one\ncandidate marks that candidate FAILED and continues rather than aborting\nthe whole request (CT-1's partial-success precedent), since a reviewer\ntriaging hundreds of candidates should not have the entire batch rejected\nfor one candidate that happens to be their own or already decided.",
+        "operationId": "bulk_decide_relationship_candidates_v1_relationship_candidates_bulk_decision_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelationshipCandidateBulkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipCandidateBulkDecisionResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Decide Relationship Candidates",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/relationship-candidates/confidence-calibration": {
+      "get": {
+        "description": "RL-7: bucket DECIDED relationship candidates by confidence and report the\nobserved approval rate per bucket, from this organization's real\nmaker-checker decision history.\n\nThis is explicitly NOT a published calibration curve against a labelled\nbanking corpus -- see `_CALIBRATION_METHODOLOGY_NOTE`, echoed verbatim in\nthe response so a caller cannot mistake this for one. Where a\n`RelationshipCandidateGroundTruthLabel` exists for a decided candidate\n(RL-7's optional additive extra -- a later, stronger signal than the\noriginal steward call, e.g. a labelled corpus or a usage confirmation),\nthat label supersedes the candidate's own `status` for this calculation\nonly; `RelationshipCandidate.status` itself, and the steward decision it\nrecords, is never touched.",
+        "operationId": "get_relationship_candidate_confidence_calibration_v1_relationship_candidates_confidence_calibration_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "datasource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Datasource Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "bucket_width",
+            "required": false,
+            "schema": {
+              "default": 0.1,
+              "exclusiveMinimum": 0.0,
+              "maximum": 1.0,
+              "title": "Bucket Width",
+              "type": "number"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipCandidateCalibrationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Relationship Candidate Confidence Calibration",
+        "tags": [
+          "intelligence-governance"
+        ]
       }
     },
     "/v1/relationship-candidates/{candidate_id}/decision": {

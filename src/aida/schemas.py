@@ -1244,6 +1244,73 @@ class CrossSourceResolutionCandidateDecision(ApiModel):
         return self
 
 
+
+
+# RL-6: a single bulk-decision request may touch at most this many candidates,
+# whether selected by an explicit id list (rejected outright above this size,
+# same as CATALOG_BULK_ACTION_MAX_ITEMS's precedent) or by a filter (silently
+# capped -- see `_resolve_relationship_candidate_bulk_subjects` in
+# intelligence_api.py).
+RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS = 500
+
+
+class RelationshipCandidateBulkSelectionFilter(ApiModel):
+    datasource_id: UUID
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    detection_rule: str | None = Field(default=None, max_length=100)
+
+
+class RelationshipCandidateBulkDecisionRequest(ApiModel):
+    candidate_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
+    )
+    filter: RelationshipCandidateBulkSelectionFilter | None = None
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "RelationshipCandidateBulkDecisionRequest":
+        _require_exactly_one_selection(self.candidate_ids, self.filter)
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting relationship candidates")
+        return self
+
+
+class RelationshipCandidateBulkDecisionItemRead(ApiModel):
+    candidate_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class RelationshipCandidateBulkDecisionResultRead(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    selection_mode: Literal["EXPLICIT", "FILTER"]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    truncated: bool
+    results: list[RelationshipCandidateBulkDecisionItemRead]
+
+
+class RelationshipCandidateCalibrationBucketRead(ApiModel):
+    confidence_low: float
+    confidence_high: float
+    decided_count: int
+    approved_count: int
+    rejected_count: int
+    observed_approval_rate: float | None
+
+
+class RelationshipCandidateCalibrationRead(ApiModel):
+    datasource_id: UUID | None
+    bucket_width: float
+    total_decided: int
+    ground_truth_overrides_applied: int
+    buckets: list[RelationshipCandidateCalibrationBucketRead]
+    methodology_note: str
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]

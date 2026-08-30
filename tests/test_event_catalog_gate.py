@@ -88,10 +88,15 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     ),
     "query.execution.completed.v1": "same event as documented `execution.completed`",
     "query.feedback.updated.v1": "same event as documented `agent.feedback_recorded`",
-    "relationship_candidate.decided.v1": (
-        "consolidates documented `relationship.approved` and `relationship.rejected` "
-        "into one event with a status field"
-    ),
+    # RL-4 (2026-08-30): the single consolidated `relationship_candidate.decided.v1`
+    # above was split back into two literal event types because
+    # `aida.projectors.graph_projector.run_projector` already listened for exactly
+    # these two names to trigger `project_unified_lineage` and they never matched --
+    # decided candidates were silently never projected to Neo4j. Each is the
+    # approve/reject sibling of the documented `relationship.approved` /
+    # `relationship.rejected` rows.
+    "relationship_candidate.approved.v1": "same event as documented `relationship.approved`",
+    "relationship_candidate.rejected.v1": "same event as documented `relationship.rejected`",
     "business_semantics.proposals_created.v1": (
         "same event as documented `semantic.inference_completed` "
         "(run_id/proposal_count payload matches)"
