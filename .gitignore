@@ -19,5 +19,5 @@ artifacts/
 # Local scratch space for ad hoc reports and repo bundles - never commit these
 scratch/
 
-# Claude Code local tooling state (background-agent worktrees, etc.) - never commit
+# Claude Code session-local tooling (agent worktrees, etc.) - never commit these
 .claude/

@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
 from aida.integration_catalog import normalized_transformation_metadata_integrations
 
 
@@ -209,6 +210,7 @@ class MetadataColumnEnvelope(ApiModel):
     physical_type: str = Field(min_length=1, max_length=255)
     nullable: bool
     default_expression: str | None = Field(default=None, max_length=4000)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
 
 
@@ -221,10 +223,120 @@ class MetadataConstraintEnvelope(ApiModel):
     referenced_columns: list[str] = Field(default_factory=list, max_length=1000)
 
 
+# --- envelope 1.1 (gap/02 N1) -----------------------------------------------
+#
+# 1.1 is additive: every field below is optional, so a 1.0 payload validates
+# unchanged and a 1.0 producer keeps working forever. What 1.1 buys is that the
+# platform can tell "the producer sent no view definitions" apart from "the
+# producer sent them and we dropped them" -- `ingestion.validate_envelope_version`
+# rejects the second case rather than answering 201 to it.
+
+
+class MetadataViewDefinitionEnvelope(ApiModel):
+    """The text a view is defined by, and how much of it the source would give.
+
+    `definition_sql is None` is a first-class state meaning *unavailable*, not
+    *empty*, and it must be explained: the model refuses a null definition with
+    no reason, and refuses a reason alongside a definition. That is deliberately
+    stricter than a nullable string, because an unexplained NULL here becomes a
+    permanently unexplainable gap in lineage coverage (gap/02 N2).
+    """
+
+    definition_sql: str | None = Field(default=None, max_length=1_000_000)
+    is_materialized: bool = False
+    is_updatable: bool | None = None
+    check_option: str | None = Field(default=None, max_length=30)
+    truncated: bool = False
+    unavailable_reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_availability(self) -> "MetadataViewDefinitionEnvelope":
+        if self.definition_sql is None and not self.unavailable_reason:
+            raise ValueError(
+                "a view definition without definition_sql must carry an "
+                "unavailable_reason; an unexplained null is indistinguishable "
+                "from an empty definition"
+            )
+        if self.definition_sql is not None and self.unavailable_reason:
+            raise ValueError(
+                "unavailable_reason is only meaningful when definition_sql is null"
+            )
+        if self.definition_sql is None and self.truncated:
+            raise ValueError("a definition that was never returned cannot be truncated")
+        return self
+
+
+class MetadataRoutineParameterEnvelope(ApiModel):
+    name: str | None = Field(default=None, max_length=255)
+    ordinal_position: int = Field(ge=1, le=10_000)
+    mode: Literal["IN", "OUT", "INOUT", "VARIADIC", "TABLE"] = "IN"
+    physical_type: str = Field(min_length=1, max_length=255)
+    default_expression: str | None = Field(default=None, max_length=4000)
+
+
+class MetadataRoutineEnvelope(ApiModel):
+    """A stored procedure or function, with its body when the source exposes it.
+
+    Same availability rule as a view definition, for the same reason: procedure
+    parsing and procedure-to-tool generation (gap/02 N3, N12) must never mistake
+    "not allowed to read it" for "there is nothing to read".
+    """
+
+    name: str = Field(min_length=1, max_length=255)
+    routine_type: Literal["FUNCTION", "PROCEDURE"]
+    language: str | None = Field(default=None, max_length=50)
+    body_sql: str | None = Field(default=None, max_length=1_000_000)
+    parameters: list[MetadataRoutineParameterEnvelope] = Field(
+        default_factory=list, max_length=1000
+    )
+    return_type: str | None = Field(default=None, max_length=255)
+    is_deterministic: bool | None = None
+    security_mode: Literal["DEFINER", "INVOKER"] | None = None
+    source_description: str | None = Field(default=None, max_length=10_000)
+    truncated: bool = False
+    unavailable_reason: str | None = Field(default=None, max_length=500)
+    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_routine(self) -> "MetadataRoutineEnvelope":
+        ordinals = [parameter.ordinal_position for parameter in self.parameters]
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("routine parameter ordinals must be unique within a routine")
+        if self.body_sql is None and not self.unavailable_reason:
+            raise ValueError(
+                "a routine without body_sql must carry an unavailable_reason; an "
+                "unexplained null is indistinguishable from an empty body"
+            )
+        if self.body_sql is not None and self.unavailable_reason:
+            raise ValueError("unavailable_reason is only meaningful when body_sql is null")
+        if self.body_sql is None and self.truncated:
+            raise ValueError("a body that was never returned cannot be truncated")
+        return self
+
+
+class MetadataGrantEnvelope(ApiModel):
+    """One privilege held by one grantee on one source object.
+
+    Evidence about the estate, never authority in this platform: nothing here
+    grants anything and the policy engine does not read it.
+    """
+
+    grantee: str = Field(min_length=1, max_length=255)
+    grantee_type: Literal["USER", "ROLE", "GROUP", "PUBLIC"] = "ROLE"
+    privilege: str = Field(pattern=r"^[A-Z][A-Z0-9_ ]{0,49}$")
+    object_type: Literal[
+        "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"
+    ] = "TABLE"
+    object_name: str = Field(min_length=1, max_length=255)
+    schema_name: str | None = Field(default=None, max_length=255)
+    is_grantable: bool = False
+
+
 class MetadataTableEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
     object_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,29}$")
     source_description: str | None = Field(default=None, max_length=10_000)
+    view_definition: MetadataViewDefinitionEnvelope | None = None
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     columns: list[MetadataColumnEnvelope] = Field(max_length=10_000)
     constraints: list[MetadataConstraintEnvelope] = Field(default_factory=list, max_length=10_000)
@@ -253,18 +365,29 @@ class MetadataTableEnvelope(ApiModel):
 
 class MetadataSchemaEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     tables: list[MetadataTableEnvelope] = Field(max_length=10_000)
+    routines: list[MetadataRoutineEnvelope] = Field(default_factory=list, max_length=10_000)
+    grants: list[MetadataGrantEnvelope] = Field(default_factory=list, max_length=100_000)
 
 
 class MetadataCatalogEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     schemas: list[MetadataSchemaEnvelope] = Field(max_length=5000)
 
 
 class MetadataIngestionCreate(ApiModel):
-    envelope_version: Literal["1.0"] = "1.0"
+    # 1.1 is the current version; 1.0 stays accepted forever (contract §2.1) and
+    # remains the *default*, so a producer that never sent the field keeps the
+    # behaviour it has today. Opting in to 1.1 is explicit, because 1.1 also
+    # opts a FULL snapshot in to reconciling the new axes -- and a producer that
+    # was silently promoted would retire the estate's view definitions on its
+    # next full scan. Declaring 1.0 while sending 1.1 content is rejected by
+    # `ingestion.validate_envelope_version`, not silently stripped.
+    envelope_version: Literal["1.0", "1.1"] = "1.0"
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     producer: str = Field(min_length=2, max_length=200)
     transport: Literal["PUSH", "STREAM"] = "PUSH"
@@ -277,6 +400,7 @@ class MetadataIngestionCreate(ApiModel):
         forbidden_fragments = ("sample", "row_value", "password", "secret", "token", "credential")
         total_tables = 0
         total_columns = 0
+        total_routines = 0
         for catalog in self.catalogs:
             if len({schema.name for schema in catalog.schemas}) != len(catalog.schemas):
                 raise ValueError("schema names must be unique within a catalog")
@@ -286,12 +410,18 @@ class MetadataIngestionCreate(ApiModel):
                     raise ValueError("table names must be unique within a schema")
                 self._validate_attributes(schema.attributes, forbidden_fragments)
                 total_tables += len(schema.tables)
+                # Envelope 1.1: a routine carries its own attribute bag, so it is
+                # screened like every other object. An unscreened bag would be a
+                # hole in INV-6 the moment 1.1 producers appear.
+                total_routines += len(schema.routines)
+                for routine in schema.routines:
+                    self._validate_attributes(routine.attributes, forbidden_fragments)
                 for table in schema.tables:
                     self._validate_attributes(table.attributes, forbidden_fragments)
                     for column in table.columns:
                         self._validate_attributes(column.attributes, forbidden_fragments)
                     total_columns += len(table.columns)
-        if total_tables > 50_000 or total_columns > 250_000:
+        if total_tables > 50_000 or total_columns > 250_000 or total_routines > 50_000:
             raise ValueError("envelope exceeds the synchronous ingestion safety boundary")
         return self
 
@@ -334,7 +464,7 @@ class MetadataIngestionRead(ApiModel):
 
 
 class MetadataIngestionBatchCreate(ApiModel):
-    envelope_version: Literal["1.0"] = "1.0"
+    envelope_version: Literal["1.0", "1.1"] = "1.0"
     batch_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     producer: str = Field(min_length=2, max_length=200)
     snapshot_type: Literal["FULL", "INCREMENTAL"] = "INCREMENTAL"
@@ -769,6 +899,11 @@ class QueryExecutionRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     semantic_version: str | None = Field(default=None, max_length=100)
+    # Which workspace is asking (ADR-0018). Optional while the estate migrates: a
+    # datasource with exactly one live binding resolves without it. It stops being
+    # optional when `unresolved_workspace_posture` flips to DENY, and the request
+    # that omits it is refused rather than silently attributed to some workspace.
+    workspace_id: UUID | None = None
 
 
 class QueryExecutionResponse(ApiModel):
@@ -926,6 +1061,15 @@ class RelationshipCandidateDiscoveryRequest(ApiModel):
 class CrossSourceRelationshipCandidateDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=500, ge=1, le=5000)
     max_datasource_pairs: int = Field(default=50, ge=1, le=2000)
+    target_data_domain_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Pair this domain's datasources against another data_domain's "
+            "instead of scanning within this domain alone. Requires an ACTIVE "
+            "cross_boundary_grant permitting this domain to see into the "
+            "target one (ADR-0017 SS4) -- rejected with 403 otherwise."
+        ),
+    )
 
 
 class RelationshipCandidateRead(ApiModel):
@@ -1020,7 +1164,12 @@ UnifiedLineageNodeKind = Literal[
     "TABLE", "DBT_MODEL", "DBT_SOURCE", "DBT_SEED", "DBT_SNAPSHOT", "UNRESOLVED_DATASET"
 ]
 UnifiedLineageEdgeSource = Literal[
-    "FOREIGN_KEY", "SUGGESTED_RELATIONSHIP", "DBT_DEPENDENCY", "OPENLINEAGE_ETL"
+    "FOREIGN_KEY",
+    "SUGGESTED_RELATIONSHIP",
+    "DBT_DEPENDENCY",
+    "OPENLINEAGE_ETL",
+    "VIEW_DEFINITION",
+    "PROCEDURE_DEFINITION",
 ]
 
 
@@ -1083,6 +1232,14 @@ class DomainLineageGraphRead(ApiModel):
     one. Node and edge ids are prefixed per-datasource to guarantee no
     false merge between two different datasources' same-named synthetic
     (unmatched dbt/OpenLineage) nodes.
+
+    A candidate relationship reaching across a data_domain boundary only
+    ever renders as an edge here when an ACTIVE cross_boundary_grant permits
+    this domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-
+    default, never inherited) -- `withheld_cross_boundary_domain_ids` names
+    any domain that has such a candidate but no covering grant, reported
+    rather than silently dropped, mirroring the withheld:"no_grant"
+    transparency this ADR requires everywhere it applies.
     """
 
     data_domain_id: UUID
@@ -1096,6 +1253,7 @@ class DomainLineageGraphRead(ApiModel):
     edge_limit: int = 0
     truncated: bool = False
     truncation_reasons: list[str] = Field(default_factory=list)
+    withheld_cross_boundary_domain_ids: list[UUID] = Field(default_factory=list)
 
 
 class UnifiedLineageImpactNodeRead(ApiModel):
@@ -1495,6 +1653,37 @@ class CoverageSnapshotRead(ApiModel):
     overall_score: float
     computed_by: str
     created_at: datetime
+
+
+class UnownedAssetEscalationRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    first_detected_unowned_at: datetime
+    status: str
+    candidate_owner: str | None
+    notification_rule_id: UUID | None
+    channel: str | None
+    recipients: list[str]
+    dedup_key: str | None
+    routed_at: datetime | None
+    escalated_at: datetime | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UnownedAssetBacklogRouteRequest(ApiModel):
+    datasource_id: UUID | None = None
+    domain_id: UUID | None = None
+    line_of_business_id: UUID | None = None
+
+
+class UnownedAssetBacklogRouteResult(ApiModel):
+    organization_id: UUID
+    routed: list[UnownedAssetEscalationRead]
+    escalated: list[UnownedAssetEscalationRead]
+    resolved_count: int
 
 
 class BusinessMapNodeRead(ApiModel):
@@ -1970,6 +2159,147 @@ class ContextProductScopeRead(ApiModel):
     unresolved_table_ids: list[UUID]
 
 
+class LineageEdgeRead(ApiModel):
+    """One column-level lineage edge extracted from SQL."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    transformation_type: str
+    confidence: str
+    dialect: str
+
+
+class ViewLineageParseRequest(ApiModel):
+    sql: str = Field(min_length=1, max_length=500_000)
+    dialect: str = Field(default="postgres", pattern=r"^[a-z][a-z0-9_-]{1,49}$")
+
+
+class ViewLineageParseResponse(ApiModel):
+    edges: list[LineageEdgeRead]
+    confidence: str
+    dialect: str
+    sql_hash: str
+    errors: list[str] = Field(default_factory=list)
+    persisted_edge_count: int = 0
+
+
+class ViewLineageEdgeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    source_table_id: UUID | None
+    source_column_id: UUID | None
+    target_table_id: UUID | None
+    target_column_id: UUID | None
+    transformation_type: str
+    confidence: str
+    dialect: str
+    sql_hash: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProcedureLineageEdgeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    source_table_id: UUID | None
+    source_column_id: UUID | None
+    target_table_id: UUID | None
+    target_column_id: UUID | None
+    transformation_type: str
+    confidence: str
+    dialect: str
+    sql_hash: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioChangeSetCreate(ApiModel):
+    name: str = Field(min_length=2, max_length=200)
+
+
+class StudioChangeSetRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    name: str
+    author: str
+    status: str
+    base_version_hash: str
+    conflict_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioChangeItemCreate(ApiModel):
+    object_type: Literal["METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"]
+    object_id: str = Field(min_length=1, max_length=100)
+    operation: Literal["CREATE", "UPDATE", "DELETE"]
+    before_snapshot: dict[str, Any] | None = None
+    after_snapshot: dict[str, Any] | None = None
+
+
+class StudioChangeItemRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    change_set_id: UUID
+    object_type: str
+    object_id: str
+    operation: str
+    before_snapshot: dict[str, Any] | None
+    after_snapshot: dict[str, Any] | None
+    diff: dict[str, Any] | None
+    test_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioConflict(ApiModel):
+    object_type: str
+    object_id: str
+    field_name: str
+    change_set_value: Any
+    current_value: Any
+
+
+class StudioDiffEntry(ApiModel):
+    field: str
+    before: Any
+    after: Any
+
+
+class StudioDiffRead(ApiModel):
+    change_set_id: UUID
+    items: list[dict[str, Any]]
+
+
+class StudioImpactPreview(ApiModel):
+    change_set_id: UUID
+    affected_object_count: int
+    affected_objects: list[dict[str, Any]]
+
+
+class StudioTestResultRead(ApiModel):
+    id: UUID
+    change_set_id: UUID
+    started_at: datetime
+    completed_at: datetime | None
+    passed: bool
+    evidence: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
 class HealthResponse(ApiModel):
     status: str
     service: str
@@ -1982,3 +2312,683 @@ class Page(ApiModel):
     limit: int
     offset: int
     total: int
+
+
+# --- ADR-0018: three-axis tenancy -------------------------------------------
+
+
+class WorkspaceCreate(ApiModel):
+    name: str = Field(min_length=2, max_length=200)
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    purpose: str = Field(default="", max_length=1000)
+    isolation_boundary_id: UUID | None = None
+    monthly_cost_ceiling: int | None = Field(default=None, ge=0)
+
+
+class WorkspaceRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    isolation_boundary_id: UUID | None
+    name: str
+    slug: str
+    purpose: str
+    status: str
+    monthly_cost_ceiling: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceMembershipCreate(ApiModel):
+    principal_id: str = Field(min_length=1, max_length=255)
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
+    role: Literal["viewer", "analyst", "steward", "reviewer", "workspace_owner"]
+    expires_at: datetime | None = None
+
+
+class WorkspaceMembershipRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    workspace_id: UUID
+    principal_id: str
+    principal_kind: str
+    role: str
+    granted_by: str
+    expires_at: datetime | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceBindingCreate(ApiModel):
+    datasource_id: UUID
+    purpose: str = Field(min_length=3, max_length=500)
+    schema_scope: list[str] = Field(default_factory=list, max_length=200)
+    permitted_classifications: list[str] = Field(default_factory=list, max_length=50)
+    masking_profile: str = Field(default="DEFAULT", max_length=50)
+    max_query_cost: int | None = Field(default=None, ge=0)
+
+
+class SourceBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    workspace_id: UUID
+    datasource_id: UUID
+    schema_scope: list[str]
+    permitted_classifications: list[str]
+    masking_profile: str
+    purpose: str
+    max_query_cost: int | None
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceBindingDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    valid_for_days: int = Field(default=365, ge=1, le=1095)
+    rationale: str = Field(default="", max_length=1000)
+
+
+class BusinessNodeCreate(ApiModel):
+    kind: Literal["LOB", "SUB_LOB", "DOMAIN", "SUB_DOMAIN", "CONCEPT"]
+    name: str = Field(min_length=2, max_length=200)
+    code: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,79}$")
+    parent_id: UUID | None = None
+    description: str = Field(default="", max_length=2000)
+    owner_principal: str | None = Field(default=None, max_length=255)
+
+
+class BusinessNodeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    parent_id: UUID | None
+    kind: str
+    name: str
+    code: str
+    description: str
+    owner_principal: str | None
+    origin: str
+    effective_from: datetime
+    effective_to: datetime | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BusinessAssignmentCreate(ApiModel):
+    business_node_id: UUID
+    target_type: Literal[
+        "PROJECT",
+        "WORKSPACE",
+        "DATASOURCE",
+        "TABLE",
+        "COLUMN",
+        "VIEW",
+        "METRIC",
+        "GLOSSARY_TERM",
+        "DATA_PRODUCT",
+        "KNOWLEDGE_PAGE",
+    ]
+    target_id: str = Field(min_length=1, max_length=120)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class BusinessAssignmentRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    business_node_id: UUID
+    target_type: str
+    target_id: str
+    assignment_kind: str
+    confidence: float | None
+    assigned_by: str
+    confirmed_by: str | None
+    effective_from: datetime
+    effective_to: datetime | None
+    status: str
+
+
+class BusinessNodeRollupRead(ApiModel):
+    business_node_id: UUID
+    descendant_node_count: int
+    assigned_by_target_type: dict[str, int]
+    as_of: datetime
+    # When the materialised roll-up was last computed. `None` means it has never been
+    # built and the counts were computed live on this request.
+    computed_at: datetime | None = None
+
+
+class AccessPolicyRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    code: str
+    version: int
+    name: str
+    description: str
+    effect: str
+    priority: int
+    subject_match: dict[str, Any]
+    resource_match: dict[str, Any]
+    action_match: list[str]
+    transform: dict[str, Any]
+    condition: dict[str, Any]
+    origin: str
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AccessPolicyCreate(ApiModel):
+    code: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,79}$")
+    name: str = Field(min_length=2, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    effect: Literal["ALLOW", "DENY", "MASK", "FILTER"]
+    priority: int = Field(default=100, ge=0, le=10000)
+    subject_match: dict[str, Any] = Field(default_factory=dict)
+    resource_match: dict[str, Any] = Field(default_factory=dict)
+    action_match: list[str] = Field(default_factory=list, max_length=20)
+    transform: dict[str, Any] = Field(default_factory=dict)
+    condition: dict[str, Any] = Field(default_factory=dict)
+    # A new policy starts DRAFT so that writing one can never silently change who
+    # can reach what; activation is a separate, auditable step.
+    status: Literal["DRAFT", "ACTIVE"] = "DRAFT"
+
+
+class AuthorizationProbeRequest(ApiModel):
+    """Ask the policy engine what it would decide, without performing the action.
+
+    An access model nobody can interrogate is an access model nobody trusts. This
+    is the "why can this principal see this?" endpoint, and it is deliberately
+    read-only.
+    """
+
+    workspace_id: UUID
+    action: Literal[
+        "READ_METADATA",
+        "READ_DATA",
+        "PROPOSE",
+        "APPROVE",
+        "EXECUTE_TOOL",
+        "CONSUME_CONTEXT",
+        "EXPORT",
+    ]
+    resource_type: str = Field(min_length=1, max_length=40)
+    resource_id: str | None = Field(default=None, max_length=120)
+    datasource_id: UUID | None = None
+    schema_name: str | None = Field(default=None, max_length=200)
+    classifications: list[str] = Field(default_factory=list, max_length=20)
+    certification: str | None = Field(default=None, max_length=40)
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
+
+
+class AuthorizationProbeRead(ApiModel):
+    allowed: bool
+    reason_code: str
+    workspace_id: UUID | None
+    binding_id: UUID | None
+    matched_policy_code: str | None
+    masked_classifications: list[str]
+    row_filters: list[str]
+    evaluated_policy_count: int
+
+
+# --- DQ-1: Notification and Escalation Routing --------------------------------
+
+
+class NotificationRuleCreate(ApiModel):
+    name: str = Field(min_length=3, max_length=200)
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    channel: Literal["EMAIL", "WEBHOOK", "ITSM"]
+    recipients: list[str] = Field(min_length=1, max_length=100)
+    escalation_after_minutes: int | None = Field(default=None, ge=1, le=525_600)
+    enabled: bool = True
+
+
+class NotificationRuleUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=3, max_length=200)
+    conditions: dict[str, Any] | None = None
+    channel: Literal["EMAIL", "WEBHOOK", "ITSM"] | None = None
+    recipients: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    escalation_after_minutes: int | None = Field(default=None, ge=1, le=525_600)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "NotificationRuleUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+class NotificationRuleRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    name: str
+    conditions: dict[str, Any]
+    channel: str
+    recipients: list[str]
+    escalation_after_minutes: int | None
+    enabled: bool
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationEventRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    incident_id: UUID
+    rule_id: UUID
+    channel: str
+    recipients: list[str]
+    status: str
+    dedup_key: str
+    sent_at: datetime | None
+    escalated_at: datetime | None
+    acknowledged_at: datetime | None
+    acknowledged_by: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- DQ-2: Freshness Watermark Contracts --------------------------------------
+
+
+class FreshnessConfigUpsert(ApiModel):
+    watermark_column: str = Field(min_length=1, max_length=255)
+    classification: str = Field(default="INTERNAL", max_length=30)
+    threshold_minutes: int = Field(ge=1, le=525_600)
+    retention_days: int = Field(default=365, ge=1, le=3650)
+
+
+class FreshnessConfigRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    watermark_column: str
+    classification: str
+    threshold_minutes: int
+    retention_days: int
+    status: str
+    approved_by: str | None
+    approved_at: datetime | None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class FreshnessStatusRead(ApiModel):
+    table_id: UUID
+    status: str  # FRESH, STALE, NOT_CONFIGURED, AWAITING_APPROVAL
+    last_watermark: datetime | None
+    age_minutes: float | None
+    threshold_minutes: int | None
+    evidence: dict[str, Any]
+
+
+# --- DQ-3: Trust Scoring (EE.5) -----------------------------------------------
+
+
+class TrustFactorRead(ApiModel):
+    name: str
+    score: int
+    weight: float
+    evidence: dict[str, Any]
+    explanation: str
+
+
+class TrustScoreRead(ApiModel):
+    overall_score: int
+    grade: str
+    factors: list[TrustFactorRead]
+
+
+# --- OB-1 through OB-4: Observability ----------------------------------------
+
+
+class SloDefinitionCreate(ApiModel):
+    slo_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    name: str = Field(min_length=3, max_length=200)
+    target: float = Field(ge=0.0, le=100.0)
+    window_days: int = Field(ge=1, le=365)
+    threshold: float = Field(ge=0.0, le=100.0)
+
+
+class SloDefinitionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    slo_key: str
+    name: str
+    target: float
+    window_days: int
+    threshold: float
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SloBudgetRead(ApiModel):
+    slo_id: UUID
+    slo_key: str
+    name: str
+    target: float
+    current_value: float | None
+    budget_remaining: float | None
+    window_days: int
+    status: str
+
+
+class ArchiveStatusRead(ApiModel):
+    total_archives: int
+    total_events_archived: int
+    latest_archive_id: str | None
+    latest_checksum: str | None
+    legal_hold_count: int
+    status: str
+
+
+# ---------------------------------------------------------------------------
+# TL-1: tool certification corpus and workflow (module 14, tool registry).
+# See aida.models for the ORM shape and aida.tool_certification for the
+# deterministic corpus runner these schemas front.
+# ---------------------------------------------------------------------------
+
+
+class ToolCertificationExpectation(ApiModel):
+    expect: Literal["ACCEPT", "REJECT"]
+    sql_contains: list[str] = Field(default_factory=list, max_length=20)
+    error_contains: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "ToolCertificationExpectation":
+        if self.expect == "REJECT" and self.sql_contains:
+            raise ValueError("sql_contains only applies when expect is ACCEPT")
+        if self.expect == "ACCEPT" and self.error_contains:
+            raise ValueError("error_contains only applies when expect is REJECT")
+        return self
+
+
+class ToolCertificationCaseCreate(ApiModel):
+    case_key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    description: str = Field(min_length=3, max_length=500)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    expectation: ToolCertificationExpectation
+
+
+class ToolCertificationCaseRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    tool_id: UUID
+    case_key: str
+    description: str
+    parameters: dict[str, Any]
+    expectation: dict[str, Any]
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolCertificationRunCreate(ApiModel):
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+
+class ToolCertificationRunRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    tool_id: UUID
+    tool_version_id: UUID
+    suite_version: str
+    corpus_fingerprint: str
+    status: str
+    total_cases: int
+    passed_cases: int
+    score: int
+    results: list[dict[str, Any]]
+    rationale: str
+    executed_by: str
+    certified_by: str | None
+    decision_reason: str | None
+    issued_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolCertificationDecisionRequest(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> "ToolCertificationDecisionRequest":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a certification decision")
+        return self
+
+
+class ToolCertificationStatusRead(ApiModel):
+    tool_id: UUID
+    tool_version_id: UUID | None
+    certified: bool
+    run_id: UUID | None
+    certified_by: str | None
+    issued_at: datetime | None
+    expires_at: datetime | None
+    expired_run_id: UUID | None
+    expired_at: datetime | None
+
+
+# ---------------------------------------------------------------------------
+# BI lineage (LN-4, module 09) — Tableau / Power BI / Looker report -> metric
+# -> column edges. See aida.bi_lineage and aida.bi_api.
+# ---------------------------------------------------------------------------
+
+
+class BiConnectionCreate(ApiModel):
+    datasource_id: UUID
+    bi_tool: Literal["TABLEAU", "POWER_BI", "LOOKER"]
+    connection_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    display_name: str = Field(min_length=2, max_length=200)
+    site_or_workspace: str | None = Field(default=None, max_length=255)
+
+
+class BiConnectionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    datasource_id: UUID
+    bi_tool: str
+    connection_key: str
+    display_name: str
+    site_or_workspace: str | None
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiArtifactImportRequest(ApiModel):
+    bi_tool: Literal["TABLEAU", "POWER_BI", "LOOKER"]
+    artifact: dict[str, Any]
+
+
+class BiArtifactImportRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    connection_id: UUID
+    artifact_fingerprint: str
+    bi_tool: str
+    generated_at: datetime | None
+    status: str
+    report_count: int
+    metric_count: int
+    report_metric_edge_count: int
+    metric_column_edge_count: int
+    matched_column_count: int
+    unmatched_column_count: int
+    imported_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiReportNodeRead(ApiModel):
+    id: UUID
+    artifact_import_id: UUID
+    parent_report_id: UUID | None
+    external_id: str
+    name: str
+    report_type: str
+    project_name: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiMetricNodeRead(ApiModel):
+    id: UUID
+    artifact_import_id: UUID
+    external_id: str
+    name: str
+    field_type: str
+    datasource_name: str | None
+    formula_hash: str | None
+    formula_present: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiReportMetricEdgeRead(ApiModel):
+    id: UUID
+    report_id: UUID
+    metric_id: UUID
+    edge_kind: str
+
+
+class BiMetricColumnEdgeRead(ApiModel):
+    id: UUID
+    metric_id: UUID
+    source_database_name: str | None
+    source_schema_name: str | None
+    source_table_name: str
+    source_column_name: str
+    matched_table_id: UUID | None
+    matched_column_id: UUID | None
+    edge_kind: str
+
+
+class BiLineageRead(ApiModel):
+    artifact_import_id: UUID
+    reports: list[BiReportNodeRead]
+    metrics: list[BiMetricNodeRead]
+    report_metric_edges: list[BiReportMetricEdgeRead]
+    metric_column_edges: list[BiMetricColumnEdgeRead]
+    report_count: int
+    metric_count: int
+    matched_column_count: int
+    unmatched_column_count: int
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+def _require_exactly_one_selection(*selections: object) -> None:
+    provided = [value for value in selections if value]
+    if len(provided) != 1:
+        raise ValueError("provide exactly one selection: an explicit id list or a filter")
+
+
+class CatalogBulkSelectionFilter(ApiModel):
+    datasource_id: UUID
+    match_field: Literal["TABLE_NAME", "SCHEMA_NAME", "QUALIFIED_NAME"] = "TABLE_NAME"
+    match_pattern: str = Field(min_length=1, max_length=255)
+
+
+class CatalogBulkTagRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    tag_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    tag_value: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkTagRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkClassifyRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    column_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    column_name_pattern: str = Field(default="*", min_length=1, max_length=255)
+    classification: Literal[
+        "UNCLASSIFIED", "PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"
+    ]
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkClassifyRequest":
+        _require_exactly_one_selection(self.table_ids, self.column_ids, self.filter)
+        if self.classification not in ALLOWED_CLASSIFICATIONS:
+            raise ValueError("unsupported classification value")
+        return self
+
+
+class CatalogBulkOwnRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    owner_type: Literal["INDIVIDUAL", "GROUP"]
+    owner_principal: str = Field(min_length=2, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkOwnRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkCertifyRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkCertifyRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkActionItemRead(ApiModel):
+    subject_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class CatalogBulkActionRunRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    action: str
+    selection_mode: str
+    parameters: dict[str, Any]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    results: list[CatalogBulkActionItemRead]
+    requested_by: str
+    created_at: datetime

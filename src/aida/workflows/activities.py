@@ -24,6 +24,7 @@ from aida.connectors.base import (
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
+from aida.ingestion import persist_envelope_extensions
 from aida.models import (
     AnalysisRun,
     ColumnProfile,
@@ -577,6 +578,18 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if run is None or datasource is None:
                 raise ValueError("analysis run or datasource disappeared during discovery")
             counts = await persist_discovery_snapshot(session, run, datasource, catalogs)
+            # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
+            # comments and grants in `connector.discover()`; without this call it
+            # would drop them at persistence while both push paths kept them. No
+            # version gate is needed: a pull snapshot comes from a connector whose
+            # capability flags already say which axes it collected, so a connector
+            # that collects an axis is authoritative for it.
+            counts |= await persist_envelope_extensions(
+                session,
+                datasource,
+                catalogs,
+                deprecate_missing=(run.mode == "FULL"),
+            )
             worker_context = SecurityContext(
                 principal_id="metadata-worker",
                 principal_type="WORKER",
@@ -819,6 +832,10 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
             await session.scalars(
                 select(MetadataTable.id)
                 .where(
+                    # INV-5: the tenant boundary is restated explicitly rather than
+                    # inherited from the datasource FK, so this query is scoped even
+                    # if a future caller hands it a datasource from another tenant.
+                    MetadataTable.organization_id == run.organization_id,
                     MetadataTable.datasource_id == datasource.id,
                     MetadataTable.status == "ACTIVE",
                     MetadataTable.object_type == "BASE_TABLE",

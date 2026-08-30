@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -146,6 +147,535 @@ class CrossBoundaryGrant(Base, TimestampMixin):
     approved_by: Mapped[str | None] = mapped_column(String(255))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- ADR-0018: three-axis tenancy -------------------------------------------
+#
+# Axis 1 (access): organization -> workspace. The ONLY axis with permission
+#   semantics. Short and stable, because a reorganisation must not be a data
+#   migration across every governed row.
+# Axis 2 (classification): business_node / business_assignment. Versioned,
+#   many-to-many, effective-dated. Grants nothing; policy keys on it.
+# Axis 3 (technical): datasource -> catalog -> schema -> table -> column.
+#
+# LineOfBusiness and DataDomain above are the pre-ADR-0018 tenancy levels. They
+# remain authoritative until the cutover completes; BusinessNode rows mirroring
+# them are created by migration f1a2b3c4d5e6 so both can be read during the
+# transition. See Docs/10-architecture/adr/ADR-0018-*.md for the migration steps.
+
+
+class IsolationBoundary(Base, TimestampMixin):
+    """A hard wall that no grant can cross (ADR-0018).
+
+    The escape hatch for genuine Chinese walls -- an advisory desk that must not
+    see a trading desk. Deliberately rare and explicit: a bank has a handful, not
+    one per line of business, because everything softer is better expressed as an
+    access policy. `mode="STRICT"` admits no cross-boundary grant by any
+    mechanism, including administrator action; `ADVISORY` records the boundary
+    for reporting but lets an approved grant cross it.
+    """
+
+    __tablename__ = "isolation_boundary"
+    __table_args__ = (UniqueConstraint("organization_id", "code"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), default="STRICT", nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class Workspace(Base, TimestampMixin):
+    """The unit of grant, membership, budget and blast radius (ADR-0018).
+
+    Replaces the LOB/domain segment of the old tenancy path. A workspace owns its
+    membership list, the source bindings that decide which datasources it may
+    reach and how, and the projects that scope analysis inside it. Tenancy scope
+    on governed records becomes `(organization_id, workspace_id)`.
+
+    `isolation_boundary_id` is normally NULL -- most workspaces need no hard wall.
+    """
+
+    __tablename__ = "workspace"
+    __table_args__ = (UniqueConstraint("organization_id", "slug"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    isolation_boundary_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("isolation_boundary.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    monthly_cost_ceiling: Mapped[int | None] = mapped_column(BigInteger)
+    # SHADOW | ENFORCE. New and migrated workspaces start in SHADOW, where the
+    # attribute-based decision is computed and recorded but never denies. Introducing an
+    # authorization system in enforcing mode is how you find out, in production, that it
+    # denies something it should not. Flip per workspace once the shadow record shows a
+    # week of agreement with what actually happened.
+    authorization_mode: Mapped[str] = mapped_column(
+        String(20), default="SHADOW", nullable=False
+    )
+
+
+class WorkspaceMembership(Base, TimestampMixin):
+    """A principal's role inside one workspace (ADR-0018).
+
+    Roles are additive across memberships; a DENY from policy always wins over a
+    grant from a role. Maker != checker (INV-8) holds regardless of role: a
+    `workspace_owner` who proposes a change still cannot approve it.
+    """
+
+    __tablename__ = "workspace_membership"
+    __table_args__ = (UniqueConstraint("workspace_id", "principal_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_kind: Mapped[str] = mapped_column(String(20), default="HUMAN", nullable=False)
+    role: Mapped[str] = mapped_column(String(40), nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class WorkspaceAccessRule(Base, TimestampMixin):
+    """Derives workspace membership from the identity provider's roles.
+
+    Exists because of a problem the ADR-0018 migration created and the rehearsal did not
+    catch: it backfills one workspace per project and **zero memberships**, because there
+    is nothing to backfill them *from*. There is no persisted principal table anywhere in
+    this codebase -- identity and roles arrive as OIDC claims per request and are never
+    stored -- so no record exists of who used which project. Wiring `authorize` into a
+    read path against 24 memberless workspaces would deny every request in the platform.
+
+    Seeding 24 synthetic owners would be worse: it invents an access grant nobody made.
+    Instead a rule maps an IdP role onto a workspace role, which is the same principle the
+    design already states for personas -- derived from group claims, never chosen in a UI.
+    One rule can cover every migrated workspace, and revoking it revokes the access.
+
+    Scope, narrowest wins: a rule bound to `workspace_id` applies to that workspace; one
+    bound to `business_node_id` applies to every workspace whose classification sits at or
+    below that node; one bound to neither applies org-wide and should be rare.
+
+    Rules grant. They never deny -- a DENY policy still outranks anything derived here,
+    and an explicit `workspace_membership` row is evaluated alongside, not instead.
+    """
+
+    __tablename__ = "workspace_access_rule"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code"),
+        Index("ix_workspace_access_rule_workspace", "workspace_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=True
+    )
+    business_node_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=True
+    )
+    # The role as it arrives from the identity provider, after oidc_role_mappings.
+    subject_role: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthorizationShadowRecord(Base):
+    """What the attribute-based decision *would* have been, while it is not enforcing.
+
+    The evidence that makes flipping a workspace to ENFORCE a measurement rather than a
+    leap. One row per divergence -- agreements are counted, not stored, because storing
+    every allowed read would be a second access log at request volume for no information.
+
+    Value-free (INV-6): reason codes, identifiers and counts. No resource values, no
+    question text, and no policy expression.
+    """
+
+    __tablename__ = "authorization_shadow_record"
+    __table_args__ = (
+        Index("ix_auth_shadow_workspace_time", "workspace_id", "observed_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(120))
+    # The decision the new engine reached, and the reason it gave.
+    shadow_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(60), nullable=False)
+    matched_policy_code: Mapped[str | None] = mapped_column(String(80))
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class SourceBinding(Base, TimestampMixin):
+    """A workspace's scoped, expiring permission to reach one datasource (ADR-0018).
+
+    The same warehouse serves many workspaces, and two workspaces on one source
+    can legitimately see different things -- this is where that is expressed and
+    audited. Approval routes to the *source owner*, not a central queue, because
+    central queues are where these requests die.
+
+    Bindings expire. That is the mechanism that stops entitlement creep, and it is
+    the thing almost every platform omits.
+    """
+
+    __tablename__ = "source_binding"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "datasource_id"),
+        Index("ix_source_binding_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    # Empty list = every schema in the datasource; otherwise an allowlist.
+    schema_scope: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Classifications this workspace may see through this binding. Empty = the
+    # organization default policy decides; an explicit list narrows it further.
+    permitted_classifications: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    masking_profile: Mapped[str] = mapped_column(String(50), default="DEFAULT", nullable=False)
+    purpose: Mapped[str] = mapped_column(String(500), nullable=False)
+    max_query_cost: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BusinessNode(Base, TimestampMixin):
+    """A node in the classification tree: LOB, sub-LOB, domain, sub-domain, concept.
+
+    Axis 2 of ADR-0018. Grants nothing on its own -- access policies key on it.
+    Self-referencing to arbitrary depth, effective-dated so that a reorganisation
+    is an update to the tree plus new assignments rather than a migration, and so
+    that last quarter's audit record still resolves against last quarter's tree.
+    """
+
+    __tablename__ = "business_node"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code"),
+        Index("ix_business_node_org_kind", "organization_id", "kind"),
+        Index("ix_business_node_parent", "parent_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    parent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_node.id", ondelete="RESTRICT"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
+    owner_principal: Mapped[str | None] = mapped_column(String(255))
+    # Provenance of the node itself, so a migrated LOB is distinguishable from one
+    # a steward authored. MIGRATED rows were generated from the pre-ADR-0018
+    # line_of_business / data_domain tables.
+    origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    legacy_lob_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("line_of_business.id", ondelete="SET NULL"), nullable=True
+    )
+    legacy_domain_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="SET NULL"), nullable=True
+    )
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class BusinessAssignment(Base, TimestampMixin):
+    """Many-to-many attachment of a business_node to any governed object (ADR-0018).
+
+    `target_type` / `target_id` is a deliberate polymorphic reference rather than a
+    foreign key: assignments reach tables, columns, views, metrics, glossary terms,
+    data products and knowledge pages, which live in different schemas, and
+    ADR-0015 forbids cross-schema foreign keys. Referential integrity is eventual,
+    reconciled by the same mechanism as every other cross-module reference.
+
+    An asset can carry several assignments. That is the point: a `customer` table
+    belongs to both Retail Banking and Financial Crime, which the pre-ADR-0018
+    containment hierarchy could not express.
+    """
+
+    __tablename__ = "business_assignment"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_node_id", "target_type", "target_id", "effective_from",
+            name="uq_business_assignment_node_target_from",
+        ),
+        Index("ix_business_assignment_target", "organization_id", "target_type", "target_id"),
+        Index("ix_business_assignment_node", "business_node_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=False
+    )
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # MANUAL: a steward said so. RULE: produced by an assignment rule.
+    # INFERRED: proposed by analysis, never authoritative until confirmed.
+    # MIGRATED: generated from the pre-ADR-0018 tenancy columns.
+    assignment_kind: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_assignment_rule.id", ondelete="SET NULL"), nullable=True
+    )
+    confidence: Mapped[float | None] = mapped_column(Float)
+    assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    confirmed_by: Mapped[str | None] = mapped_column(String(255))
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class BusinessAssignmentRule(Base, TimestampMixin):
+    """A governed rule that proposes assignments (`schema LIKE 'rtl_%' -> Retail Banking`).
+
+    Re-evaluated on catalog drift. Produces *proposals*, never silent
+    reassignment -- a rule that quietly moved assets between domains would make
+    the classification tree untrustworthy exactly when it matters.
+    """
+
+    __tablename__ = "business_assignment_rule"
+    __table_args__ = (UniqueConstraint("organization_id", "code"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Deterministic match spec, e.g. {"schema_like": "rtl_%", "datasource_id": "..."}.
+    # Never a free-form expression -- see the tool-parameter reasoning in module 14.
+    match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class Embedding(Base, TimestampMixin):
+    """A stored embedding, in ordinary PostgreSQL columns (ADR-0019).
+
+    `vector` is `bytea` holding packed float32s, not a `pgvector` column, because a
+    regulated PostgreSQL estate frequently forbids extensions and the platform must not
+    require one to have semantic search at all. Exact cosine over a policy-narrowed
+    candidate set is the default; an external in-network vector service and a future
+    `pgvector` adapter sit behind the same port.
+
+    `vector_norm` is stored rather than recomputed per comparison -- the single cheapest
+    optimisation available to an exact scorer, halving the inner loop.
+
+    `index_signature` pins (embedding model, model version, dimensions, chunking
+    version). Vectors from different signatures are not comparable, and mixing them
+    fails as quietly poor search rather than as an error, so the signature is matched on
+    every read and a change is a rebuild trigger.
+
+    **What may be embedded:** object names and paths, business names, descriptions,
+    synonyms, glossary terms, compiled knowledge blocks, and sections of the customer's
+    own uploaded documentation. **Never** source business values (INV-6). This matters
+    more than it looks: embedding-inversion research recovers substantial portions of
+    source text from vectors alone, so this table inherits the classification of what
+    was embedded and is in scope for the same retention and deletion obligations as the
+    rest of the control plane. `text_hash` exists so a re-embed can be skipped when
+    nothing changed, without keeping a second copy of the text.
+    """
+
+    __tablename__ = "embedding"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "owner_type", "owner_id", "chunk_index"),
+        Index("ix_embedding_owner", "organization_id", "owner_type", "owner_id"),
+        Index("ix_embedding_signature", "organization_id", "index_signature"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    owner_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    index_signature: Mapped[str] = mapped_column(String(400), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    vector_norm: Mapped[float] = mapped_column(Float, nullable=False)
+    text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class BusinessNodeClosure(Base):
+    """Precomputed ancestor/descendant pairs for the classification tree (ADR-0018).
+
+    Measured, not assumed. Against 13,548 nodes and 5M assignments on PostgreSQL 16,
+    recursive-CTE descendant traversal ran ~3.3 ms and the closure join ~1.5 ms; the
+    bigger win is on aggregation, where a subtree roll-up went from ~3.1 s to ~0.9 s.
+    Neither number is the reason roll-up is fast now -- see `BusinessNodeRollup` --
+    but the closure is what makes that materialisation a single grouped join instead
+    of one recursive query per node.
+
+    **This table reflects the tree as it stands now.** It carries no effective dates,
+    because a closure that encoded history would need a row per (ancestor, descendant,
+    interval) and would grow without bound on a tree that is re-parented. Historical
+    `as_of` queries therefore fall back to the recursive CTE, which is correct and
+    slower -- the right trade, because history queries are rare and traversal is hot.
+
+    52,044 rows for 13,548 nodes at depth 4: roughly 4x the node count, which is what
+    a shallow taxonomy costs. A deep tree would cost more, and the depth cap is the
+    thing to watch if the taxonomy ever grows past a handful of levels.
+    """
+
+    __tablename__ = "business_node_closure"
+    __table_args__ = (
+        Index("ix_business_node_closure_descendant", "descendant_id"),
+        Index("ix_business_node_closure_ancestor", "ancestor_id"),
+    )
+
+    ancestor_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    descendant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    depth: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class BusinessNodeRollup(Base):
+    """Materialised "how much sits under this node", refreshed rather than computed.
+
+    Roll-up is the one query in the classification axis that does not scale as a read.
+    Measured on PostgreSQL 16 with 13,548 nodes and 5,000,000 assignments:
+
+    | Approach                              | p50      |
+    |---------------------------------------|----------|
+    | recursive CTE + count(DISTINCT)       | 3,147 ms |
+    | closure join + count(DISTINCT)        |   915 ms |
+    | **read this table**                   | **0.4 ms** |
+
+    A full recompute of every node takes ~47 s as one grouped statement, which is a
+    batch job, not a request. So roll-up is computed on write-ish cadence and read as
+    a lookup.
+
+    `computed_at` is part of the contract, not bookkeeping: a coverage number that
+    silently drifts is worse than one labelled three hours old. The API returns it so
+    staleness is visible rather than hidden -- the same rule the knowledge layer uses
+    for compiled pages.
+
+    Exact counts, not approximate: `count(DISTINCT)` is preserved because an asset
+    assigned to two sibling domains must not be double-counted, and the obvious
+    approximation (HyperLogLog) needs a PostgreSQL extension that a bank will not
+    always grant.
+    """
+
+    __tablename__ = "business_node_rollup"
+
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    target_type: Mapped[str] = mapped_column(String(40), primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    distinct_targets: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AccessPolicy(Base, TimestampMixin):
+    """Attribute-based access policy (ADR-0018).
+
+    RBAC alone stops scaling at exactly the point a bank estate becomes
+    interesting. A policy keys on what a resource *is* -- its classification, its
+    business node, its certification status -- so it covers the column discovered
+    next Tuesday with no administrative action.
+
+    Two properties are load-bearing and are enforced in `policy_engine.py`:
+
+    * DENY is a hard ceiling. It cannot be overridden by any role, including
+      workspace owner and platform admin.
+    * `principal_kind` is a first-class subject attribute, so "humans may see full
+      account numbers, agents never do" is one policy rather than an
+      inexpressible intention.
+
+    Versioned and immutable per version, so a decision made a year ago can be
+    replayed against the policy that was in force.
+    """
+
+    __tablename__ = "access_policy"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code", "version"),
+        Index("ix_access_policy_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
+    effect: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Higher wins among ALLOWs; DENY always wins regardless of priority.
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    subject_match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    resource_match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    action_match: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    transform: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    condition: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class Project(Base, TimestampMixin):
@@ -910,10 +1440,12 @@ class RelationshipCandidate(Base, TimestampMixin):
     )
     # datasource_id names the SOURCE side's datasource; target_datasource_id names the
     # target's. Equal for a same-source candidate (the only kind before ADR-0017 phase 5),
-    # different for a cross-source candidate discovered within one data_domain -- inference
-    # never crosses a data_domain boundary here (ADR-0017 SS4/SS8: free within a domain,
-    # gated by cross_boundary_grant beyond it, and that gate is enforced by the domain-scoped
-    # discovery endpoint only ever pairing datasources it already loaded from one domain).
+    # different for a cross-source candidate. Same-domain cross-source pairs are free
+    # (ADR-0017 SS4/SS8); a row where the two datasources belong to different data_domains
+    # can only have been created by discover_cross_source_relationship_candidates after
+    # domain_service.check_cross_boundary_grant confirmed an ACTIVE grant, and is only ever
+    # rendered back into a unified lineage graph the same way -- gated per read, not just
+    # per write, so a later-expired or revoked grant stops the edge from rendering too.
     datasource_id: Mapped[UUID] = mapped_column(
         ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -1386,6 +1918,47 @@ class CoverageSnapshot(Base, TimestampMixin):
     dimensions: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     overall_score: Mapped[float] = mapped_column(Float, nullable=False)
     computed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class UnownedAssetEscalation(Base, TimestampMixin):
+    """GL-6: tracks a table's unowned-asset backlog entry through routing/escalation.
+
+    One row per table currently or previously flagged by the stewardship-coverage
+    "owned" dimension as unowned. Routing/escalation reuses DQ-1's generic
+    notification engine (``aida.notification_routing``) against the same
+    ``notification_rule`` table quality incidents route through -- this record
+    persists the outcome of that reuse (candidate owner, matched rule, dedup key,
+    delivery status) since ``notification_event`` is FK-scoped to
+    ``data_quality_incident`` and cannot carry a non-incident subject.
+    """
+
+    __tablename__ = "unowned_asset_escalation"
+    __table_args__ = (
+        UniqueConstraint("table_id"),
+        Index("ix_unowned_asset_escalation_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    first_detected_unowned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    candidate_owner: Mapped[str | None] = mapped_column(String(255))
+    notification_rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("notification_rule.id", ondelete="SET NULL"), index=True
+    )
+    channel: Mapped[str | None] = mapped_column(String(30))
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    dedup_key: Mapped[str | None] = mapped_column(String(64))
+    routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class OpenLineageRunEvent(Base, TimestampMixin):
@@ -2387,6 +2960,496 @@ class OutboxEvent(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SearchIndex(Base, TimestampMixin):
+    """Full-text search index configuration for catalog metadata."""
+
+    __tablename__ = "search_index"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "index_key"),
+        Index("ix_search_index_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    index_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    index_type: Mapped[str] = mapped_column(String(30), default="GIN", nullable=False)
+    source_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    text_columns: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    language: Mapped[str] = mapped_column(String(30), default="english", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    last_rebuilt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VectorEmbedding(Base, TimestampMixin):
+    """Vector embeddings for catalog metadata, stored as JSON float arrays.
+
+    Uses a JSON column for the embedding vector to avoid a hard dependency on
+    pgvector at import time.  The ``ix_vector_embedding_org_type`` index covers
+    the org-scoped type lookups the hybrid retrieval pipeline issues; a future
+    migration can add a pgvector ivfflat/hnsw index on the ``embedding`` column
+    once the extension is provisioned.
+    """
+
+    __tablename__ = "vector_embedding"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "object_type", "object_id"),
+        Index("ix_vector_embedding_org_type", "organization_id", "object_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
+    )
+    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(JSON, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AbacPolicyRecord(Base, TimestampMixin):
+    """Versioned ABAC policy rules for attribute-based access control."""
+
+    __tablename__ = "abac_policy"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "policy_key", "version"),
+        Index("ix_abac_policy_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    policy_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    effect: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    resource_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    environment_conditions: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AbacDecisionRecord(Base):
+    """Immutable audit log of ABAC evaluation decisions."""
+
+    __tablename__ = "abac_decision"
+    __table_args__ = (
+        Index("ix_abac_decision_org_created", "organization_id", "evaluated_at"),
+        Index("ix_abac_decision_principal", "principal_id", "evaluated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(255))
+    subject_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    resource_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    environment_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    contributing_policy_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evaluation_time_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AiDecisionRecord(Base):
+    """First-class AI decision edge for the lineage graph."""
+
+    __tablename__ = "ai_decision_record"
+    __table_args__ = (
+        Index("ix_ai_decision_run", "run_id", "decision_type"),
+        Index("ix_ai_decision_asset", "target_node", "decided_at"),
+        Index("ix_ai_decision_org_created", "organization_id", "decided_at"),
+        Index("ix_ai_decision_refusals", "organization_id", "decision_type",
+              postgresql_where=text("decision_type = 'REFUSAL'")),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    decision_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_node: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_node: Mapped[str] = mapped_column(String(500), nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    control_version: Mapped[str | None] = mapped_column(String(100))
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class ViewLineageEdge(Base, TimestampMixin):
+    """Column-level lineage edge extracted from a SQL view definition."""
+
+    __tablename__ = "view_lineage_edge"
+    __table_args__ = (
+        Index("ix_view_lineage_edge_org_target", "organization_id", "target_table_id"),
+        Index("ix_view_lineage_edge_datasource", "datasource_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    source_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    target_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    target_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    transformation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(30), nullable=False)
+    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
+    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ProcedureLineageEdge(Base, TimestampMixin):
+    """Column-level lineage edge extracted from a stored procedure body."""
+
+    __tablename__ = "procedure_lineage_edge"
+    __table_args__ = (
+        Index("ix_procedure_lineage_edge_org_target", "organization_id", "target_table_id"),
+        Index("ix_procedure_lineage_edge_datasource", "datasource_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_table: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    source_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    target_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    target_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    transformation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(30), nullable=False)
+    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
+    sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class StudioChangeSet(Base, TimestampMixin):
+    """A collection of proposed changes to semantic model objects."""
+
+    __tablename__ = "studio_change_set"
+    __table_args__ = (
+        Index("ix_studio_change_set_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    author: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    base_version_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    conflict_status: Mapped[str] = mapped_column(String(30), default="CLEAN", nullable=False)
+
+
+class StudioChangeItem(Base, TimestampMixin):
+    """One item within a Studio change set."""
+
+    __tablename__ = "studio_change_item"
+    __table_args__ = (
+        Index("ix_studio_change_item_change_set", "change_set_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    operation: Mapped[str] = mapped_column(String(30), nullable=False)
+    before_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    after_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    diff: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    test_status: Mapped[str] = mapped_column(String(30), default="UNTESTED", nullable=False)
+
+
+class StudioTestRun(Base, TimestampMixin):
+    """Test run evidence for a Studio change set."""
+
+    __tablename__ = "studio_test_run"
+    __table_args__ = (
+        Index("ix_studio_test_run_change_set", "change_set_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class ConsumptionRecord(Base):
+    """General-purpose consumption lineage edge: who consumed what, when, and how."""
+
+    __tablename__ = "consumption_record"
+    __table_args__ = (
+        Index(
+            "ix_consumption_record_resource",
+            "organization_id",
+            "resource_type",
+            "resource_id",
+            "consumed_at",
+        ),
+        Index(
+            "ix_consumption_record_consumer",
+            "organization_id",
+            "consumer_id",
+            "consumed_at",
+        ),
+        CheckConstraint(
+            "channel IN ('MCP', 'REST', 'GRAPHQL', 'EVENT', 'INTERNAL')",
+            name="ck_consumption_record_channel",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    consumer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    consumer_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    policy_decision: Mapped[str] = mapped_column(String(30), nullable=False)
+    business_purpose: Mapped[str | None] = mapped_column(String(200))
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class NotificationRuleRecord(Base, TimestampMixin):
+    """Org-scoped notification routing rule for quality incidents."""
+
+    __tablename__ = "notification_rule"
+    __table_args__ = (
+        Index("ix_notification_rule_org_enabled", "organization_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    escalation_after_minutes: Mapped[int | None] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class NotificationEventRecord(Base, TimestampMixin):
+    """Outbound notification event tracking delivery and acknowledgement."""
+
+    __tablename__ = "notification_event"
+    __table_args__ = (
+        Index("ix_notification_event_org_status", "organization_id", "status"),
+        Index("ix_notification_event_incident", "incident_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    incident_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_quality_incident.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    rule_id: Mapped[UUID] = mapped_column(
+        ForeignKey("notification_rule.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    dedup_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class FreshnessWatermarkConfig(Base, TimestampMixin):
+    """Watermark-based freshness configuration for a table. Requires maker-checker approval."""
+
+    __tablename__ = "freshness_watermark_config"
+    __table_args__ = (UniqueConstraint("table_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    watermark_column: Mapped[str] = mapped_column(String(255), nullable=False)
+    classification: Mapped[str] = mapped_column(String(30), default="INTERNAL", nullable=False)
+    threshold_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    retention_days: Mapped[int] = mapped_column(Integer, default=365, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class FreshnessObservation(Base):
+    """Observed watermark value for a table at a point in time."""
+
+    __tablename__ = "freshness_observation"
+    __table_args__ = (
+        Index("ix_freshness_observation_table_time", "table_id", "observed_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    watermark_value: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class SloDefinition(Base, TimestampMixin):
+    """Service-level objective definition, org-scoped."""
+
+    __tablename__ = "slo_definition"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "slo_key"),
+        Index("ix_slo_definition_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    slo_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    target: Mapped[float] = mapped_column(Float, nullable=False)
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class SloMeasurement(Base):
+    """Point-in-time SLO measurement."""
+
+    __tablename__ = "slo_measurement"
+    __table_args__ = (
+        Index("ix_slo_measurement_slo_time", "slo_id", "measured_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    slo_id: Mapped[UUID] = mapped_column(
+        ForeignKey("slo_definition.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    budget_remaining: Mapped[float] = mapped_column(Float, nullable=False)
+    measured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AuditArchiveRecord(Base, TimestampMixin):
+    """Immutable record of an audit archive batch."""
+
+    __tablename__ = "audit_archive_record"
+    __table_args__ = (
+        Index("ix_audit_archive_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    archive_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    event_range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_backend: Mapped[str] = mapped_column(String(30), nullable=False)
+    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_event"
     __table_args__ = (
@@ -2410,3 +3473,527 @@ class AuditEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+# ---------------------------------------------------------------------------
+# Runtime Data Contract Enforcement (Phase E - EE.1)
+# ---------------------------------------------------------------------------
+
+
+class ContractViolationRecord(Base, TimestampMixin):
+    """Immutable record of a runtime data contract violation."""
+
+    __tablename__ = "contract_violation"
+    __table_args__ = (
+        Index("ix_contract_violation_org_contract", "organization_id", "contract_id"),
+        Index("ix_contract_violation_org_type", "organization_id", "violation_type"),
+        Index("ix_contract_violation_detected", "organization_id", "detected_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    contract_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_contract_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    violation_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    severity: Mapped[str] = mapped_column(String(20), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[str | None] = mapped_column(String(255))
+
+
+class ContractSlaRecord(Base, TimestampMixin):
+    """Periodic SLA compliance record for a data contract."""
+
+    __tablename__ = "contract_sla_record"
+    __table_args__ = (
+        UniqueConstraint("contract_id", "period_start", name="uq_contract_sla_period"),
+        Index("ix_contract_sla_org_contract", "organization_id", "contract_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    contract_id: Mapped[UUID] = mapped_column(
+        ForeignKey("data_contract_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    uptime_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    violations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    breach_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# Compliance Pack Generation (Phase E - EE.4 / OB-5)
+# ---------------------------------------------------------------------------
+
+
+class CompliancePackRecord(Base, TimestampMixin):
+    """WORM-archived compliance pack generated from runtime evidence."""
+
+    __tablename__ = "compliance_pack"
+    __table_args__ = (
+        Index("ix_compliance_pack_org_framework", "organization_id", "framework"),
+        Index("ix_compliance_pack_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    framework: Mapped[str] = mapped_column(String(50), nullable=False)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sections: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="GENERATED", nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    generated_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
+# Negative Knowledge Surface (Phase E - EE.3)
+# ---------------------------------------------------------------------------
+
+
+class NegativeAssertionRecord(Base, TimestampMixin):
+    """Queryable negative knowledge: what the system decided is not true."""
+
+    __tablename__ = "negative_assertion"
+    __table_args__ = (
+        Index("ix_negative_assertion_org_subject", "organization_id", "subject_id"),
+        Index("ix_negative_assertion_org_type", "organization_id", "assertion_type"),
+        Index(
+            "ix_negative_assertion_suppression",
+            "organization_id",
+            "suppression_active",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    assertion_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    predicate: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    rejected_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    rejected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    suppression_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    material_change_hash: Mapped[str | None] = mapped_column(String(64))
+    suppression_lifted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suppression_lifted_by: Mapped[str | None] = mapped_column(String(255))
+    lift_reason: Mapped[str | None] = mapped_column(String(2000))
+
+
+# ---------------------------------------------------------------------------
+# Multi-Step Tool Plans (Phase E - EE.6 / AG-4)
+# ---------------------------------------------------------------------------
+
+
+class ToolPlanRecord(Base, TimestampMixin):
+    """Governed multi-step tool execution plan."""
+
+    __tablename__ = "tool_plan"
+    __table_args__ = (
+        Index("ix_tool_plan_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ToolPlanStepRecord(Base, TimestampMixin):
+    """Individual step within a governed tool plan."""
+
+    __tablename__ = "tool_plan_step"
+    __table_args__ = (
+        UniqueConstraint("plan_id", "sequence", name="uq_tool_plan_step_sequence"),
+        Index("ix_tool_plan_step_plan", "plan_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_plan.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    tool_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    tool_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    dependencies: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=300, nullable=False)
+    expected_cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(String(1000))
+
+
+class ToolPlanExecutionRecord(Base, TimestampMixin):
+    """Execution envelope for a tool plan run."""
+
+    __tablename__ = "tool_plan_execution"
+    __table_args__ = (
+        Index("ix_tool_plan_execution_plan", "plan_id"),
+        Index("ix_tool_plan_execution_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    plan_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tool_plan.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    budget_consumed: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="RUNNING", nullable=False)
+    executed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# TL-1: tool certification corpus and workflow (module 14, tool registry).
+#
+# Mirrors ConnectorCertificationRun (module 09 connector "100-point" cert) and
+# AssetCertification (module 08 glossary GL-5 bulk certification with expiry):
+# a corpus of deterministic test cases is executed against a governed tool
+# version's real invocation path (aida.tool_rendering.render_tool_sql -- the
+# AST literal-binding step module 14 owns per its "not responsibilities"
+# boundary with 16 query-gateway) and countersigned maker != checker before it
+# becomes an active certification. Runs are immutable and never deleted or
+# rewritten by recertification: "current" certification is a query-time
+# projection over non-expired CERTIFIED runs, exactly like AssetCertification.
+# ---------------------------------------------------------------------------
+
+
+class ToolCertificationCase(Base, TimestampMixin):
+    """One deterministic case in a governed tool's certification corpus."""
+
+    __tablename__ = "tool_certification_case"
+    __table_args__ = (
+        UniqueConstraint("tool_id", "case_key", name="uq_tool_certification_case_key"),
+        Index("ix_tool_certification_case_tool_status", "tool_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    tool_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    expectation: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ToolCertificationRun(Base, TimestampMixin):
+    """Immutable, attributable certification evidence for one tool version.
+
+    ``status`` moves PENDING_REVIEW -> CERTIFIED/REJECTED once a checker
+    decides, or straight to CERTIFICATION_FAILED when the corpus itself did
+    not fully pass (a failed corpus can never be countersigned into a
+    certification -- this is evidence-driven, not a rubber stamp).
+    Recertification is simply a new row: history is preserved forever.
+    """
+
+    __tablename__ = "tool_certification_run"
+    __table_args__ = (
+        Index("ix_tool_certification_run_tool_created", "tool_id", "created_at"),
+        Index("ix_tool_certification_run_org_status", "organization_id", "status"),
+        Index("ix_tool_certification_run_version_status", "tool_version_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    tool_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tool_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suite_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    corpus_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
+    total_cases: Mapped[int] = mapped_column(Integer, nullable=False)
+    passed_cases: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
+    executed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    certified_by: Mapped[str | None] = mapped_column(String(255))
+    decision_reason: Mapped[str | None] = mapped_column(String(2000))
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# BI lineage (LN-4, module 09) — Tableau / Power BI / Looker report -> metric
+# -> column edges. Mirrors the OpenLineage and dbt ingestion shape above: an
+# immutable, value-free artifact snapshot plus its extracted nodes and edges.
+# Only Tableau has a parser today (see aida.bi_lineage); the other tools are
+# accepted at the connection/import layer as a pluggable extension point.
+# ---------------------------------------------------------------------------
+
+
+class BiConnection(Base, TimestampMixin):
+    """A governed registration of one BI tool site/workspace bound to a warehouse datasource."""
+
+    __tablename__ = "bi_connection"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "connection_key"),
+        Index("ix_bi_connection_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    bi_tool: Mapped[str] = mapped_column(String(30), nullable=False)
+    connection_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    site_or_workspace: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class BiArtifactImport(Base, TimestampMixin):
+    """Immutable BI metadata artifact snapshot; the raw artifact is deliberately not persisted."""
+
+    __tablename__ = "bi_artifact_import"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "artifact_fingerprint"),
+        Index("ix_bi_artifact_import_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_connection.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artifact_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    bi_tool: Mapped[str] = mapped_column(String(30), nullable=False)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="IMPORTED", nullable=False)
+    report_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    report_metric_edge_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_column_edge_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    matched_column_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    unmatched_column_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    imported_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class BiReportNode(Base, TimestampMixin):
+    """A workbook, dashboard, or sheet/report extracted from one BI artifact import."""
+
+    __tablename__ = "bi_report_node"
+    __table_args__ = (
+        UniqueConstraint("artifact_import_id", "external_id"),
+        Index("ix_bi_report_node_import_type", "artifact_import_id", "report_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parent_report_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bi_report_node.id", ondelete="CASCADE"), index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    project_name: Mapped[str | None] = mapped_column(String(255))
+
+
+class BiMetricNode(Base, TimestampMixin):
+    """A field/metric (calculated, column, group, ...) extracted from one BI artifact import."""
+
+    __tablename__ = "bi_metric_node"
+    __table_args__ = (
+        UniqueConstraint("artifact_import_id", "external_id"),
+        Index("ix_bi_metric_node_import_type", "artifact_import_id", "field_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    datasource_name: Mapped[str | None] = mapped_column(String(255))
+    # The raw calculation formula is never persisted — see aida.bi_lineage._formula_hash.
+    formula_hash: Mapped[str | None] = mapped_column(String(64))
+    formula_present: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class BiReportMetricEdge(Base, TimestampMixin):
+    """Report -> metric edge: this workbook/sheet/dashboard uses this field."""
+
+    __tablename__ = "bi_report_metric_edge"
+    __table_args__ = (
+        UniqueConstraint(
+            "artifact_import_id",
+            "report_id",
+            "metric_id",
+            name="uq_bi_report_metric_edge_import_report_metric",
+        ),
+        Index("ix_bi_report_metric_edge_import", "artifact_import_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    report_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_report_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    metric_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_metric_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    edge_kind: Mapped[str] = mapped_column(String(30), default="BI", nullable=False)
+
+
+class BiMetricColumnEdge(Base, TimestampMixin):
+    """Metric -> column edge: this field derives from this underlying source column."""
+
+    __tablename__ = "bi_metric_column_edge"
+    __table_args__ = (
+        UniqueConstraint(
+            "artifact_import_id",
+            "metric_id",
+            "source_database_name",
+            "source_schema_name",
+            "source_table_name",
+            "source_column_name",
+            name="uq_bi_metric_column_edge_import_metric_source",
+        ),
+        Index("ix_bi_metric_column_edge_import", "artifact_import_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    metric_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_metric_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_database_name: Mapped[str | None] = mapped_column(String(255))
+    source_schema_name: Mapped[str | None] = mapped_column(String(255))
+    source_table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_column_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    matched_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    matched_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    edge_kind: Mapped[str] = mapped_column(String(30), default="BI", nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+class AssetTag(Base, TimestampMixin):
+    """A steward-applied label on a table asset (module 04 domain: asset_tag)."""
+
+    __tablename__ = "asset_tag"
+    __table_args__ = (
+        UniqueConstraint("table_id", "tag_key"),
+        Index("ix_asset_tag_org_key", "organization_id", "tag_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tag_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    tag_value: Mapped[str | None] = mapped_column(String(500))
+    applied_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class CatalogBulkActionRun(Base, TimestampMixin):
+    """Durable partial-success record for a CT-1 catalog bulk action.
+
+    One row per bulk request (tag/classify/own/certify), carrying the
+    per-subject outcome so a caller can retrieve which items succeeded and
+    which failed (and why) after the fact, not just in the synchronous
+    response.
+    """
+
+    __tablename__ = "catalog_bulk_action_run"
+    __table_args__ = (
+        Index(
+            "ix_catalog_bulk_action_run_org_action", "organization_id", "action", "created_at"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    selection_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    requested_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)

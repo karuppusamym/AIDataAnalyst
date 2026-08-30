@@ -131,4 +131,4 @@ Emits `execution.requested|denied|completed|cancelled`, `execution.cost_exceeded
 | QG-4 | Cancel propagation certification | P1 |
 | QG-5 | KMS-managed HMAC keys | P0 |
 | QG-6 | Dynamic masking and tokenization integration | P1 |
-| QG-7 | Import-linter contract enforcing gateway exclusivity | P0 |
+| ~~QG-7~~ | ~~Import-linter contract enforcing gateway exclusivity~~ — **DONE 2026-08-30**. See ADR-0004 implementation status and INV-2 | — |

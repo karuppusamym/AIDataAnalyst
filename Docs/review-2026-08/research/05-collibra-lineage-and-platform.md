@@ -3,7 +3,7 @@
 > **Document Status**: Authoritative Feature-Requirement Source
 > **Target Pages**: [Collibra Data Lineage](https://www.collibra.com/products/data-lineage), [Collibra Platform](https://www.collibra.com/products/collibra-platform)
 > **Reviewed**: 2026-08-29
-> **Feeds**: `60-delivery/02-epic-backlog.md` (EA.9, EE.8–EE.11), `60-delivery/05-gap-register.md` ("Newly identified gaps"), `20-modules/09-lineage.md` (LN-7, LN-9), `20-modules/19-context-products-and-mcp.md`
+> **Feeds**: `60-delivery/02-epic-backlog.md` (EA.9, EE.8–EE.11), `60-delivery/00-status.md` ("Newly identified gaps"), `20-modules/09-lineage.md` (LN-7, LN-9), `20-modules/19-context-products-and-mcp.md`
 
 This supplements `02-collibra-analysis.md` with a screenshot-driven review of Collibra's two most consequential product pages, done at the user's request. It is the source of truth for the "Unified Lineage Explorer" and "AI Control Plane parity" work opened in this revision.
 
@@ -93,13 +93,13 @@ authoritative detail in `20-modules/19-context-products-and-mcp.md` §15.2.
 
 ## 4. What this revision intentionally does not attempt
 
-Consistent with `60-delivery/05-gap-register.md`'s operating principle ("deliberate simplifications, not omissions"): this revision ships the *first* milestone of the Unified Lineage Explorer plan only — one canonical graph API and transitive impact. It does not build a new UI view, column-level authoritative mapping, export, BI/view/procedure adapters, or any of the Platform-level items in §2. Those are opened as tracked gaps, not silently deferred.
+Consistent with `60-delivery/00-status.md`'s operating principle ("deliberate simplifications, not omissions"): this revision ships the *first* milestone of the Unified Lineage Explorer plan only — one canonical graph API and transitive impact. It does not build a new UI view, column-level authoritative mapping, export, BI/view/procedure adapters, or any of the Platform-level items in §2. Those are opened as tracked gaps, not silently deferred.
 
 ## Related documents
 
-- `competitors/02-collibra-analysis.md` — the original Collibra deep dive this supplements
+- `review-2026-08/research/01-collibra.md` — the original Collibra deep dive this supplements
 - `20-modules/09-lineage.md` — module ownership and open work (LN-7, LN-9 through LN-12)
 - `20-modules/19-context-products-and-mcp.md` — MCP-1
 - `60-delivery/02-epic-backlog.md` — epic acceptance criteria
-- `60-delivery/05-gap-register.md` — gap register entries
+- `60-delivery/00-status.md` — gap register entries
 - `90-reference/03-sources.md` — source URLs
