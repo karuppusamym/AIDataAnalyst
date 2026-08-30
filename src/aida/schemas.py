@@ -1686,3 +1686,112 @@ class Page(ApiModel):
     limit: int
     offset: int
     total: int
+
+
+# ---------------------------------------------------------------------------
+# BI lineage (LN-4, module 09) — Tableau / Power BI / Looker report -> metric
+# -> column edges. See aida.bi_lineage and aida.bi_api.
+# ---------------------------------------------------------------------------
+
+
+class BiConnectionCreate(ApiModel):
+    datasource_id: UUID
+    bi_tool: Literal["TABLEAU", "POWER_BI", "LOOKER"]
+    connection_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    display_name: str = Field(min_length=2, max_length=200)
+    site_or_workspace: str | None = Field(default=None, max_length=255)
+
+
+class BiConnectionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    datasource_id: UUID
+    bi_tool: str
+    connection_key: str
+    display_name: str
+    site_or_workspace: str | None
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiArtifactImportRequest(ApiModel):
+    bi_tool: Literal["TABLEAU", "POWER_BI", "LOOKER"]
+    artifact: dict[str, Any]
+
+
+class BiArtifactImportRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    connection_id: UUID
+    artifact_fingerprint: str
+    bi_tool: str
+    generated_at: datetime | None
+    status: str
+    report_count: int
+    metric_count: int
+    report_metric_edge_count: int
+    metric_column_edge_count: int
+    matched_column_count: int
+    unmatched_column_count: int
+    imported_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiReportNodeRead(ApiModel):
+    id: UUID
+    artifact_import_id: UUID
+    parent_report_id: UUID | None
+    external_id: str
+    name: str
+    report_type: str
+    project_name: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiMetricNodeRead(ApiModel):
+    id: UUID
+    artifact_import_id: UUID
+    external_id: str
+    name: str
+    field_type: str
+    datasource_name: str | None
+    formula_hash: str | None
+    formula_present: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class BiReportMetricEdgeRead(ApiModel):
+    id: UUID
+    report_id: UUID
+    metric_id: UUID
+    edge_kind: str
+
+
+class BiMetricColumnEdgeRead(ApiModel):
+    id: UUID
+    metric_id: UUID
+    source_database_name: str | None
+    source_schema_name: str | None
+    source_table_name: str
+    source_column_name: str
+    matched_table_id: UUID | None
+    matched_column_id: UUID | None
+    edge_kind: str
+
+
+class BiLineageRead(ApiModel):
+    artifact_import_id: UUID
+    reports: list[BiReportNodeRead]
+    metrics: list[BiMetricNodeRead]
+    report_metric_edges: list[BiReportMetricEdgeRead]
+    metric_column_edges: list[BiMetricColumnEdgeRead]
+    report_count: int
+    metric_count: int
+    matched_column_count: int
+    unmatched_column_count: int

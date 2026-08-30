@@ -13,6 +13,7 @@ from temporalio.client import Client
 from aida import __version__
 from aida.ai_governance_api import router as ai_governance_router
 from aida.api import router
+from aida.bi_api import router as bi_router
 from aida.config import get_settings
 from aida.context import correlation_id_var
 from aida.db import session_factory
@@ -79,6 +80,7 @@ app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(dbt_router)
 app.include_router(openlineage_router)
+app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
 app.include_router(quality_router)
 app.include_router(ingestion_router)
