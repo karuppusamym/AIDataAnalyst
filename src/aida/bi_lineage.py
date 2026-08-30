@@ -6,11 +6,12 @@ manifests): parse a vendor metadata artifact into bounded, redacted dataclasses,
 never persist raw source-data values, and let the API layer own catalog
 matching and storage.
 
-Only Tableau's Metadata API (GraphQL) response shape is fully implemented —
+Tableau's Metadata API (GraphQL) response shape and Power BI's Scanner API
+(`admin/workspaces/getInfo`) response shape are both fully implemented —
 per the roadmap's "minimum credible investment" principle for entry-ticket
-gaps (`Docs/60-delivery/01-roadmap.md` S8/S9). Power BI and Looker are
-pluggable additions: add a `_parse_power_bi(...)` / `_parse_looker(...)`
-function with the same return type and register it in `_PARSERS` below.
+gaps (`Docs/60-delivery/01-roadmap.md` S8/S9). Looker is a pluggable
+addition: add a `_parse_looker(...)` function with the same return type and
+register it in `_PARSERS` below.
 """
 
 import hashlib
@@ -25,11 +26,11 @@ MAX_METRICS = 20_000
 MAX_REPORT_METRIC_EDGES = 50_000
 MAX_METRIC_COLUMN_EDGES = 50_000
 
-# BI tools this ingestion boundary recognizes. Only TABLEAU has a parser today;
-# the others are named here so the API/schema layer can accept and store the
-# intent (a registered connection) ahead of a parser landing for them.
+# BI tools this ingestion boundary recognizes. TABLEAU and POWER_BI have
+# parsers today; LOOKER is named here so the API/schema layer can accept and
+# store the intent (a registered connection) ahead of a parser landing for it.
 SUPPORTED_BI_TOOLS = frozenset({"TABLEAU", "POWER_BI", "LOOKER"})
-IMPLEMENTED_BI_TOOLS = frozenset({"TABLEAU"})
+IMPLEMENTED_BI_TOOLS = frozenset({"TABLEAU", "POWER_BI"})
 
 _TABLEAU_REPORT_FIELD_CONTAINERS = ("sheets", "dashboards")
 _TABLEAU_FIELD_INSTANCE_KEYS = {
@@ -46,6 +47,11 @@ SUPPORTED_TABLEAU_FIELD_TYPES = frozenset(
         "CombinedField",
     }
 )
+
+# Power BI Scanner API (`admin/workspaces/getInfo`) shape constant. A visual's
+# field well references either a measure (DAX, dataset-level) or a plain
+# table column; both surface in `columns[]`/`measures[]` on each dataset table.
+SUPPORTED_POWER_BI_FIELD_KINDS = frozenset({"measure", "column"})
 
 
 class BiLineageError(ValueError):
@@ -316,12 +322,274 @@ def _parse_tableau_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
     )
 
 
-# Registry of implemented parsers, keyed by bi_tool. Adding Power BI or Looker
-# support is additive: implement `_parse_power_bi`/`_parse_looker` with the
-# same `dict[str, Any] -> ParsedBiArtifact` signature and register it here —
-# no change to the dispatcher, models, or API layer is required.
+def _power_bi_table_lookup(dataset: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """table name -> raw table payload, for resolving one dataset's field wells."""
+    raw_tables = dataset.get("tables")
+    tables: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw_tables, list):
+        return tables
+    for raw_table in raw_tables[:2000]:
+        if not isinstance(raw_table, dict):
+            continue
+        table_name = _optional_text(raw_table.get("name"), 255)
+        if table_name:
+            tables[table_name] = raw_table
+    return tables
+
+
+def _power_bi_field_kind_and_name(raw_field: dict[str, Any]) -> tuple[str, str] | None:
+    """A visual field-well entry names exactly one of a measure or a column."""
+    measure_name = _optional_text(raw_field.get("measure"), 500)
+    if measure_name:
+        return "measure", measure_name
+    column_name = _optional_text(raw_field.get("column"), 500)
+    if column_name:
+        return "column", column_name
+    return None
+
+
+def _power_bi_field_from_payload(
+    field_kind: str,
+    field_name: str,
+    table_payload: dict[str, Any],
+    dataset_name: str | None,
+) -> tuple[ParsedBiMetric, list[ParsedBiColumnRef]] | None:
+    """Resolve one visual field-well reference against its dataset table.
+
+    `table_payload` is the raw Power BI dataset table object (`name`, `schema`,
+    `database`, `columns[]`, `measures[]`) -- the same `name`/`schema`/
+    `database` shape Tableau's table objects use, so a resolved column ref is
+    built with `_column_ref_from_payload`, unchanged.
+    """
+    if field_kind not in SUPPORTED_POWER_BI_FIELD_KINDS:
+        return None
+    table_name = _optional_text(table_payload.get("name"), 255)
+    if not table_name:
+        return None
+    external_id = f"{table_name}::{field_kind}::{field_name}"
+    if field_kind == "measure":
+        raw_measures = table_payload.get("measures")
+        measures: list[Any] = raw_measures if isinstance(raw_measures, list) else []
+        raw_measure = next(
+            (
+                m
+                for m in measures
+                if isinstance(m, dict) and _optional_text(m.get("name"), 500) == field_name
+            ),
+            None,
+        )
+        if raw_measure is None:
+            return None
+        formula_hash, formula_present = _formula_hash(raw_measure.get("expression"))
+        metric = ParsedBiMetric(
+            external_id=external_id,
+            name=field_name,
+            field_type="Measure",
+            datasource_name=dataset_name,
+            formula_hash=formula_hash,
+            formula_present=formula_present,
+        )
+        # Unlike Tableau's Metadata API (which resolves a CalculatedField's
+        # upstreamColumns server-side), the Power BI Scanner API gives no
+        # dependency graph for a measure's DAX expression, and deriving one
+        # would mean parsing the (never-persisted, see `_formula_hash`) DAX
+        # text ourselves -- a false sense of lineage fidelity this boundary
+        # does not claim. A measure therefore carries no metric-column edges.
+        return metric, []
+    raw_columns = table_payload.get("columns")
+    columns: list[Any] = raw_columns if isinstance(raw_columns, list) else []
+    raw_column = next(
+        (
+            c
+            for c in columns
+            if isinstance(c, dict) and _optional_text(c.get("name"), 255) == field_name
+        ),
+        None,
+    )
+    if raw_column is None:
+        return None
+    metric = ParsedBiMetric(
+        external_id=external_id,
+        name=field_name,
+        field_type="Column",
+        datasource_name=dataset_name,
+        formula_hash=None,
+        formula_present=False,
+    )
+    column_ref = _column_ref_from_payload({"name": field_name, "table": table_payload})
+    return metric, ([column_ref] if column_ref is not None else [])
+
+
+def _parse_power_bi_metadata(payload: dict[str, Any]) -> ParsedBiArtifact:
+    """Parse a Power BI Scanner API (`admin/workspaces/getInfo`) style export.
+
+    Shape: top-level `workspaces[]`, each with `datasets[]` (each dataset has
+    `tables[]` of `columns[]`/`measures[]`) and `reports[]` (each naming its
+    `datasetId` and a `pages[]` list of `visuals[]`, each visual's `fields[]`
+    referencing a dataset column or measure by table + name). This mirrors
+    Tableau's workbook -> sheet/dashboard -> field -> column edges as
+    report -> page -> measure/column -> column, but is not a re-skin of
+    Tableau's GraphQL shape: Power BI's REST export has no `data` envelope,
+    and a report's field references are lightweight name refs resolved
+    against the dataset schema elsewhere in the same artifact, rather than
+    Tableau's fully self-describing field instances.
+    """
+    raw_workspaces = payload.get("workspaces")
+    if not isinstance(raw_workspaces, list):
+        raise BiLineageError("power bi metadata artifact requires a workspaces array")
+
+    reports: list[ParsedBiReport] = []
+    metrics_by_id: dict[str, ParsedBiMetric] = {}
+    report_metric_edges: set[tuple[str, str]] = set()
+    metric_column_edges: dict[str, dict[tuple[Any, ...], ParsedBiColumnRef]] = {}
+
+    for raw_workspace in raw_workspaces:
+        if not isinstance(raw_workspace, dict):
+            raise BiLineageError("power bi workspace entries must be objects")
+        workspace_name = _optional_text(raw_workspace.get("name"), 255)
+
+        datasets_by_id: dict[str, tuple[str | None, dict[str, dict[str, Any]]]] = {}
+        raw_datasets = raw_workspace.get("datasets")
+        if isinstance(raw_datasets, list):
+            for raw_dataset in raw_datasets[:2000]:
+                if not isinstance(raw_dataset, dict):
+                    continue
+                dataset_id = _optional_text(raw_dataset.get("id"), 255)
+                if not dataset_id:
+                    continue
+                datasets_by_id[dataset_id] = (
+                    _optional_text(raw_dataset.get("name"), 255),
+                    _power_bi_table_lookup(raw_dataset),
+                )
+
+        raw_reports = raw_workspace.get("reports")
+        if not isinstance(raw_reports, list):
+            continue
+        if len(reports) + len(raw_reports) > MAX_REPORTS:
+            raise BiLineageError(
+                f"power bi artifact exceeds the {MAX_REPORTS} report safety boundary"
+            )
+
+        for raw_report in raw_reports:
+            if not isinstance(raw_report, dict):
+                raise BiLineageError("power bi report entries must be objects")
+            report_id = _required_text(raw_report.get("id"), "report.id", 255)
+            report_name = _required_text(raw_report.get("name"), "report.name", 500)
+            reports.append(
+                ParsedBiReport(
+                    external_id=report_id,
+                    name=report_name,
+                    report_type="REPORT",
+                    project_name=workspace_name,
+                    parent_external_id=None,
+                )
+            )
+            dataset_id = _optional_text(raw_report.get("datasetId"), 255)
+            dataset_name, tables_by_name = (
+                datasets_by_id.get(dataset_id, (None, {})) if dataset_id else (None, {})
+            )
+
+            raw_pages = raw_report.get("pages")
+            pages: list[Any] = raw_pages if isinstance(raw_pages, list) else []
+            if len(reports) + len(pages) > MAX_REPORTS:
+                raise BiLineageError(
+                    f"power bi artifact exceeds the {MAX_REPORTS} report safety boundary"
+                )
+
+            for raw_page in pages:
+                if not isinstance(raw_page, dict):
+                    raise BiLineageError("power bi page entries must be objects")
+                page_name = _required_text(raw_page.get("name"), "page.name", 255)
+                page_display = _optional_text(raw_page.get("displayName"), 500) or page_name
+                page_id = f"{report_id}::{page_name}"
+                reports.append(
+                    ParsedBiReport(
+                        external_id=page_id,
+                        name=page_display,
+                        report_type="PAGE",
+                        project_name=workspace_name,
+                        parent_external_id=report_id,
+                    )
+                )
+                raw_visuals = raw_page.get("visuals")
+                visuals: list[Any] = raw_visuals if isinstance(raw_visuals, list) else []
+                for raw_visual in visuals[:2000]:
+                    if not isinstance(raw_visual, dict):
+                        continue
+                    raw_fields = raw_visual.get("fields")
+                    visual_fields: list[Any] = raw_fields if isinstance(raw_fields, list) else []
+                    for raw_field in visual_fields[:2000]:
+                        if not isinstance(raw_field, dict):
+                            continue
+                        table_name = _optional_text(raw_field.get("table"), 255)
+                        if not table_name:
+                            continue
+                        table_payload = tables_by_name.get(table_name)
+                        if table_payload is None:
+                            continue
+                        field_kind_and_name = _power_bi_field_kind_and_name(raw_field)
+                        if field_kind_and_name is None:
+                            continue
+                        field_kind, field_name = field_kind_and_name
+                        resolved = _power_bi_field_from_payload(
+                            field_kind, field_name, table_payload, dataset_name
+                        )
+                        if resolved is None:
+                            continue
+                        metric, columns = resolved
+                        metrics_by_id.setdefault(metric.external_id, metric)
+                        if len(report_metric_edges) >= MAX_REPORT_METRIC_EDGES:
+                            raise BiLineageError(
+                                f"power bi artifact exceeds the {MAX_REPORT_METRIC_EDGES} "
+                                "report-metric edge safety boundary"
+                            )
+                        report_metric_edges.add((page_id, metric.external_id))
+                        bucket = metric_column_edges.setdefault(metric.external_id, {})
+                        for column_ref in columns:
+                            key = (
+                                column_ref.database_name,
+                                column_ref.schema_name,
+                                column_ref.table_name,
+                                column_ref.column_name,
+                            )
+                            bucket[key] = column_ref
+
+    if len(metrics_by_id) > MAX_METRICS:
+        raise BiLineageError(f"power bi artifact exceeds the {MAX_METRICS} metric safety boundary")
+
+    metric_column_edge_list: list[ParsedBiMetricColumnEdge] = []
+    for metric_id, columns_by_key in metric_column_edges.items():
+        for column_ref in columns_by_key.values():
+            metric_column_edge_list.append(
+                ParsedBiMetricColumnEdge(metric_external_id=metric_id, column=column_ref)
+            )
+    if len(metric_column_edge_list) > MAX_METRIC_COLUMN_EDGES:
+        raise BiLineageError(
+            f"power bi artifact exceeds the {MAX_METRIC_COLUMN_EDGES} metric-column edge "
+            "safety boundary"
+        )
+
+    return ParsedBiArtifact(
+        fingerprint="",  # filled in by the dispatcher, which hashes the whole payload
+        bi_tool="POWER_BI",
+        generated_at=_parse_generated_at(payload.get("generatedAt")),
+        reports=reports,
+        metrics=list(metrics_by_id.values()),
+        report_metric_edges=[
+            ParsedBiReportMetricEdge(report_external_id=r, metric_external_id=m)
+            for r, m in sorted(report_metric_edges)
+        ],
+        metric_column_edges=metric_column_edge_list,
+    )
+
+
+# Registry of implemented parsers, keyed by bi_tool. Adding Looker support is
+# additive: implement `_parse_looker` with the same
+# `dict[str, Any] -> ParsedBiArtifact` signature and register it here — no
+# change to the dispatcher, models, or API layer is required.
 _PARSERS: dict[str, Any] = {
     "TABLEAU": _parse_tableau_metadata,
+    "POWER_BI": _parse_power_bi_metadata,
 }
 
 
