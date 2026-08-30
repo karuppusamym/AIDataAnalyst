@@ -37,18 +37,18 @@
   async function searchGlobal(query, limit = 40, offset = 0) {
     if (!state.organizationId) return { items: [], total: 0 };
     try {
-      return await api(`/v1/organizations/${state.organizationId}/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`);
+      return await api(`/v1/search?q=${encodeURIComponent(query)}&organization_id=${encodeURIComponent(state.organizationId)}&limit=${limit}&offset=${offset}`);
     } catch {
       return { items: [], total: 0 };
     }
   }
 
   async function searchSuggest(query, limit = 10) {
-    if (!state.organizationId) return { items: [] };
+    if (!state.organizationId) return [];
     try {
-      return await api(`/v1/organizations/${state.organizationId}/search/suggest?q=${encodeURIComponent(query)}&limit=${limit}`);
+      return await api(`/v1/search/suggest?q=${encodeURIComponent(query)}&organization_id=${encodeURIComponent(state.organizationId)}&limit=${limit}`);
     } catch {
-      return { items: [] };
+      return [];
     }
   }
 
@@ -147,26 +147,30 @@
     debounceTimer = setTimeout(async () => {
       lastQuery = query.trim();
       const response = await searchSuggest(lastQuery);
-      if (response.items && response.items.length) {
-        serverResults = response.items.map(item => ({
-          type: item.resource_type || item.type || "Result",
-          label: item.name || item.display_name || item.label || "Unknown",
-          hint: item.description || item.hint || "",
-          action: item.action_uri ? () => navigateToResult(item) : null,
+      if (response.length) {
+        serverResults = response.map(item => ({
+          type: item.object_type || "Result",
+          label: item.display_name || item.text || "Unknown",
+          hint: item.qualified_name || "Governed catalog result",
+          action: () => navigateToResult(item),
           _raw: item
         }));
       } else {
         serverResults = [];
       }
+      const localEntries = typeof window.AtlasUI.paletteEntries === "function" ? window.AtlasUI.paletteEntries() : [];
+      const combined = [...serverResults, ...localEntries.filter(entry => !serverResults.some(server => server.type === entry.type && server.label === entry.label))];
+      state._allPaletteEntries = combined;
+      renderResults(combined, lastQuery);
     }, DEBOUNCE_MS);
   }
 
   function navigateToResult(item) {
     /* Best-effort navigation based on resource type */
-    const type = (item.resource_type || item.type || "").toLowerCase();
+    const type = (item.object_type || item.resource_type || item.type || "").toLowerCase();
     if (type === "table" || type === "metadata_table") {
       if (typeof window.showView === "function") window.showView("catalog");
-      if (typeof window.showTable === "function" && item.id) window.showTable(item.id);
+      if (typeof window.showTable === "function" && item.object_id) window.showTable(item.object_id);
     } else if (type === "source" || type === "datasource") {
       if (typeof window.showView === "function") window.showView("sources");
     } else if (type === "tool" || type === "governed_tool") {
