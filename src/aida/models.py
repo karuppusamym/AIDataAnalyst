@@ -1593,10 +1593,7 @@ class TableFamilyMember(Base, TimestampMixin):
     """
 
     __tablename__ = "table_family_member"
-    __table_args__ = (
-        UniqueConstraint("table_id", name="uq_table_family_member_table_id"),
-        Index("ix_table_family_member_family", "family_id"),
-    )
+    __table_args__ = (UniqueConstraint("table_id", name="uq_table_family_member_table_id"),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
