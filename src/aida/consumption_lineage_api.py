@@ -20,7 +20,9 @@ from aida.consumption_lineage import (
     get_consumption_for_resource,
     get_consumption_graph,
 )
-from aida.db import AsyncSession, get_session
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aida.db import get_session
 from aida.schemas import ApiModel
 from aida.security import SecurityContext, get_security_context
 
