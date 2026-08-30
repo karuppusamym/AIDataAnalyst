@@ -130,6 +130,19 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     "metadata.analysis.cancellation_race_completed.v1": (
         "additional terminal state of the same renamed analysis_run lifecycle"
     ),
+    # --- added 2026-08-30: concurrent work landed a `.v1` (or re-prefixed) sibling of an
+    # already-documented event without reconciling the older row, same pattern as above ---
+    "context.product_consumed.v1": (
+        "same event as documented `context.product_consumed`, emitted via the MCP/REST "
+        "read paths that were added after that row was written"
+    ),
+    "context.product_consumption_denied.v1": (
+        "same event as documented `context.consumption_denied`"
+    ),
+    "data_quality.incident_opened": "same event as documented `quality.incident_opened`",
+    "data_quality.incident_resolved": (
+        "same event as documented `quality.incident_acknowledged` / `.resolved`"
+    ),
 }
 
 # Sites where `event_type=` could not be fully resolved to a closed set of string literals by

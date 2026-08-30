@@ -56,6 +56,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `tenant.archived` | Level archived | level, id |
 | `secret_reference.rotated` | Reference updated | reference_scheme, path_hash |
 | `organization.integration_policy.updated.v1` | Organization integration policy updated | organization_id, transformation_metadata_integrations |
+| `data_domain.created.v1` | Data domain created under a line of business | data_domain_id, line_of_business_id, parent_domain_id |
 
 ### Connectivity — topic `atlas.operational.v1`
 
@@ -138,6 +139,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
 | `stewardship.bulk_operation_rejected.v1` | Checker rejected a bulk stewardship request | operation_id, review_id |
 | `stewardship.coverage_computed.v1` | Coverage snapshot persisted | snapshot_id, scope, overall_score |
+| `stewardship.unowned_asset_routed.v1` | Unowned-asset backlog entry routed to a candidate owner | table_id, candidate_owner |
+| `stewardship.unowned_asset_escalated.v1` | Backlog entry escalated (no owner found/accepted) | table_id |
+| `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 
@@ -146,6 +150,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `lineage.edge_created` | Edge persisted | edge_id, kind, from, to, confidence |
 | `lineage.artifact_ingested` | dbt manifest / OpenLineage / DDL ingested | artifact_id, kind, counts |
 | `lineage.impact_computed` | Impact computed | node_ref, affected_counts |
+| `bi_artifact.imported.v1` | BI tool metadata (Tableau/Power BI/Looker) imported | artifact_import_id, connection_id, bi_tool, report_count, metric_count |
+| `lineage.consumed.v1` | Unified lineage graph/impact read via a native MCP lineage tool | tool_slug, principal_id, channel |
 
 ### Quality — topic `atlas.quality.v1` (key: `datasource_id`)
 
@@ -159,6 +165,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `quality.incident_acknowledged` / `.resolved` | Operator action | incident_id, actor, rationale_ref |
 | `quality.incident_auto_recovered` | Signal normalized | incident_id |
 | `quality.sla_breached` | SLA missed | sla_id, table_id |
+| `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
+| `contract.violations_detected` | Runtime data contract evaluation found violations | contract_id, violation_count, enforcement_action |
 
 ### Runtime — topic `atlas.execution.v1` (key: `organization_id`)
 
@@ -179,6 +187,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `execution.requested` / `.denied` / `.completed` / `.cancelled` | Execution lifecycle | execution_id, datasource_id, denial_reason_code |
 | `execution.cost_exceeded` | Cost ceiling hit | execution_id, estimate, ceiling |
 | `execution.masking_applied` | Masking applied | execution_id, masked_column_count |
+| `tool.certification_run.executed.v1` | Tool-version certification run scored | certification_run_id, tool_id, tool_version_id, status, score |
+| `tool.certification_completed.v1` / `.certification_rejected.v1` | Reviewer decided a tool certification run | certification_run_id, tool_id, tool_version_id, status, expires_at |
+| `tool_plan.execution_completed` | Multi-step tool plan execution finished | plan_id, status, steps_executed |
 
 ### Governance — topic `atlas.governance.v1`
 
@@ -190,6 +201,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `decision.made` | Checker decided | proposal_id, checker, outcome, rationale_ref |
 | `delegation.granted` / `.revoked` | Delegation | from, to, scope, until |
 | `policy.decision_denied` | Authorization denial | principal, action, resource_type, reason_code |
+| `mcp.tool_invocation_denied.v1` | MCP caller's role is not bound to an otherwise-existing governed tool | tool_slug, principal_id |
 
 ### Context products — topic `atlas.governance.v1`
 
@@ -199,6 +211,51 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.product_consumed` | External read | product_id, version, consumer, purpose |
 | `context.consumption_denied` | Read denied | product_id, consumer, reason_code |
 | `context.budget_exceeded` | Consumer budget hit | consumer, period |
+| `context.product_draft_created.v1` | New context product version drafted | context_product_id, context_product_version_id, version |
+| `context.product_compiled.v1` | Context product compiled for a target consumer surface | context_product_version_id, target, artifact_hash |
+| `context.product_tool_consumed.v1` | Governed tool invoked while scoped to a published context product | product_key, version, tool_version_id, principal_id |
+
+### AI registry — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `ai_registry.asset_draft_created.v1` | New AI asset version drafted | ai_asset_id, asset_kind |
+| `ai_registry.assessment_completed.v1` | Risk/compliance assessment run against an asset version | ai_asset_version_id, score, status |
+| `ai_registry.remediation_opened.v1` | Remediation opened against an assessment finding | ai_asset_version_id, finding_key |
+| `ai_registry.provider_evidence_synced.v1` | Third-party provider evidence synced onto an asset version | provider_type |
+
+### Marketplace — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `data_product.draft_created.v1` | New data product version drafted | data_product_id, version |
+| `data_product.access_requested.v1` | Maker-checker access request created for a published product version | review_id, data_product_version_id |
+| `data_product.access_revoked.v1` | Access entitlement revoked | data_product_version_id |
+
+### Notifications — topic `atlas.operational.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `notification.rule.created.v1` | Notification routing rule created | channel |
+
+### Observability — topic `atlas.operational.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `observability.slo.created.v1` | SLO definition created | slo_key, target |
+
+### Workspace — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `workspace.created.v1` | Workspace created under an organization | workspace_id, slug |
+| `source_binding.requested.v1` | Datasource binding requested for a workspace, pending approval | binding_id, workspace_id, datasource_id |
+
+### Studio — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `studio.change_set.submitted` | Change set submitted for review | change_set_id, name, author, item_count |
 
 ### Graph and retrieval — topic `atlas.operational.v1`
 
