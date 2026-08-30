@@ -17,6 +17,7 @@ from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.bi_api import router as bi_router
+from aida.canonical_table_api import router as canonical_table_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
 from aida.config import get_settings
@@ -128,6 +129,7 @@ app.include_router(compliance_router)
 app.include_router(negative_knowledge_router)
 app.include_router(tool_plans_router)
 app.include_router(table_family_router)
+app.include_router(canonical_table_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

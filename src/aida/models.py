@@ -1559,6 +1559,60 @@ class CompositeKeyCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CanonicalTableGroup(Base, TimestampMixin):
+    """RL-2: evidence-backed, review-gated canonical-table-resolution group.
+
+    A single row records one detected group of ``MetadataTable`` rows
+    believed to represent the same logical entity -- a production table and
+    its read-replica/reporting mirror, the same table cloned into a
+    dev/staging environment, or several near-duplicate ingestions of one
+    source. Mirrors the maker-checker shape already established by
+    ``RelationshipCandidate`` / ``TableFamilyCandidate`` /
+    ``CompositeKeyCandidate`` above (PENDING/APPROVED/REJECTED, created_by /
+    reviewed_by / reviewed_at).
+
+    Unlike ``TableFamilyCandidate`` (bounded to one schema) this group can
+    span schemas, catalogs, or datasources, so it carries no single
+    ``datasource_id``/``schema_id`` column -- only ``organization_id``, plus
+    ``member_table_ids``, the "list of ids on one row" convention
+    ``TableFamilyCandidate.member_table_ids`` already established (chosen
+    over ``RelationshipCandidate``'s pairwise source/target-datasource shape
+    because a canonical-duplicate group has no privileged "first" side and
+    can have more than two members).
+
+    ``canonical_table_id`` is nullable until a steward confirms it: the
+    detector's ``pick_default_canonical`` guess is recorded in ``evidence``
+    (under ``default_canonical_table_id``) at discovery time as a
+    *suggestion*, but is deliberately never auto-populated into this column
+    -- ``canonical_table_id`` only ever gets set on ``APPROVE``, from the
+    steward's own choice (which may or may not match the detector's
+    default), keeping "canonical" a claim only a human has actually
+    confirmed. See ``aida.canonical_table_api.decide_canonical_table_group``.
+    """
+
+    __tablename__ = "canonical_table_group"
+    __table_args__ = (
+        Index("ix_canonical_table_group_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    member_table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    canonical_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 
