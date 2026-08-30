@@ -25,14 +25,11 @@ Key Capabilities
 from __future__ import annotations
 
 import hashlib
-import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Data Contract Specifications (Pydantic Models)
@@ -125,7 +122,10 @@ def evaluate_data_contract(
                     assertion_type="SCHEMA_REQUIRED_COLUMN",
                     target=expected_col.name,
                     status="BREACHED",
-                    message=f"Required column '{expected_col.name}' is missing from the table schema.",
+                    message=(
+                        f"Required column '{expected_col.name}' is missing from the "
+                        "table schema."
+                    ),
                     observed_value=None,
                     expected_value=expected_col.name,
                 )
@@ -141,7 +141,10 @@ def evaluate_data_contract(
                     assertion_type="SCHEMA_NULLABILITY",
                     target=expected_col.name,
                     status="BREACHED",
-                    message=f"Column '{expected_col.name}' is declared NOT NULL in contract but marked nullable in source.",
+                    message=(
+                        f"Column '{expected_col.name}' is declared NOT NULL in contract "
+                        "but marked nullable in source."
+                    ),
                     observed_value=actual_col.get("nullable"),
                     expected_value=False,
                 )
@@ -165,7 +168,10 @@ def evaluate_data_contract(
                         assertion_type="QUALITY_NULL_RATE",
                         target=expected_col.name,
                         status="BREACHED",
-                        message=f"Null rate {observed_null_rate:.2%} exceeds max allowed {expected_col.max_null_ratio:.2%}.",
+                        message=(
+                            f"Null rate {observed_null_rate:.2%} exceeds max allowed "
+                            f"{expected_col.max_null_ratio:.2%}."
+                        ),
                         observed_value=observed_null_rate,
                         expected_value=expected_col.max_null_ratio,
                     )
@@ -174,7 +180,9 @@ def evaluate_data_contract(
     # 2. Strict Schema Check (Unexpected Columns)
     if spec.strict_schema:
         expected_names = {c.name.lower() for c in spec.columns}
-        unexpected_cols = [c["name"] for c in discovered_columns if c["name"].lower() not in expected_names]
+        unexpected_cols = [
+            c["name"] for c in discovered_columns if c["name"].lower() not in expected_names
+        ]
         if unexpected_cols:
             assertions.append(
                 AssertionResult(
@@ -195,7 +203,10 @@ def evaluate_data_contract(
                     assertion_type="SLA_MIN_ROW_COUNT",
                     target="table",
                     status="BREACHED",
-                    message=f"Observed row count {row_count} is below SLA minimum of {spec.sla.min_row_count}.",
+                    message=(
+                        f"Observed row count {row_count} is below SLA minimum of "
+                        f"{spec.sla.min_row_count}."
+                    ),
                     observed_value=row_count,
                     expected_value=spec.sla.min_row_count,
                 )
@@ -220,7 +231,10 @@ def evaluate_data_contract(
                     assertion_type="SLA_FRESHNESS",
                     target="table",
                     status="BREACHED",
-                    message=f"Dataset freshness age {age_minutes}m exceeds SLA threshold of {spec.sla.max_latency_minutes}m.",
+                    message=(
+                        f"Dataset freshness age {age_minutes}m exceeds SLA threshold of "
+                        f"{spec.sla.max_latency_minutes}m."
+                    ),
                     observed_value=age_minutes,
                     expected_value=spec.sla.max_latency_minutes,
                 )

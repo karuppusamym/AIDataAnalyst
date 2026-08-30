@@ -32,6 +32,15 @@ class DbtArtifactError(ValueError):
 
 
 @dataclass(frozen=True)
+class ParsedDbtTestResult:
+    unique_id: str
+    status: str
+    failures: int | None = None
+    message: str | None = None
+    execution_time: float | None = None
+
+
+@dataclass(frozen=True)
 class ParsedDbtResource:
     unique_id: str
     resource_type: str
@@ -51,6 +60,7 @@ class ParsedDbtResource:
     depends_on_unique_ids: list[str]
     column_descriptions: dict[str, str] = field(default_factory=dict)
     column_types: dict[str, str] = field(default_factory=dict)
+    extra_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -157,6 +167,26 @@ def _resource_from_manifest(
             if dtype:
                 column_types[col_name] = dtype
 
+    extra_metadata: dict[str, Any] = {}
+    if resource_type == "exposure":
+        owner = payload.get("owner")
+        if isinstance(owner, dict):
+            if owner.get("name"):
+                extra_metadata["owner_name"] = _optional_text(owner.get("name"), 255)
+            if owner.get("email"):
+                extra_metadata["owner_email"] = _optional_text(owner.get("email"), 255)
+        if payload.get("url"):
+            extra_metadata["url"] = _optional_text(payload.get("url"), 1000)
+        if payload.get("maturity"):
+            extra_metadata["maturity"] = _optional_text(payload.get("maturity"), 50)
+        if payload.get("type"):
+            extra_metadata["exposure_type"] = _optional_text(payload.get("type"), 50)
+    elif resource_type in {"semantic_model", "metric"}:
+        if payload.get("type"):
+            extra_metadata["type"] = _optional_text(payload.get("type"), 100)
+        if payload.get("label"):
+            extra_metadata["label"] = _optional_text(payload.get("label"), 255)
+
     return ParsedDbtResource(
         unique_id=_required_text(unique_id, "unique_id", 500),
         resource_type=resource_type.upper(),
@@ -176,6 +206,7 @@ def _resource_from_manifest(
         depends_on_unique_ids=[str(node)[:500] for node in dependency_nodes][:5000],
         column_descriptions=column_descriptions,
         column_types=column_types,
+        extra_metadata=extra_metadata,
     )
 
 
@@ -255,3 +286,41 @@ def parse_dbt_catalog(catalog: dict[str, Any]) -> dict[str, dict[str, str]]:
             if col_types:
                 result[str(unique_id)] = col_types
     return result
+
+
+def parse_dbt_run_results(run_results: dict[str, Any]) -> dict[str, ParsedDbtTestResult]:
+    """Parse a dbt run_results.json mapping unique_id -> ParsedDbtTestResult."""
+    if not isinstance(run_results, dict):
+        raise DbtArtifactError("dbt run_results must be a valid JSON object")
+    raw_results = run_results.get("results")
+    if not isinstance(raw_results, list):
+        raise DbtArtifactError("dbt run_results must contain a 'results' list")
+
+    parsed: dict[str, ParsedDbtTestResult] = {}
+    for item in raw_results:
+        if not isinstance(item, dict):
+            continue
+        unique_id = _optional_text(item.get("unique_id"), 500)
+        status_val = _optional_text(item.get("status"), 50)
+        if not unique_id or not status_val:
+            continue
+        failures = item.get("failures")
+        failures_int = (
+            int(failures)
+            if isinstance(failures, int | float) and not isinstance(failures, bool)
+            else None
+        )
+        exec_time = item.get("execution_time")
+        exec_time_float = (
+            float(exec_time)
+            if isinstance(exec_time, int | float) and not isinstance(exec_time, bool)
+            else None
+        )
+        parsed[unique_id] = ParsedDbtTestResult(
+            unique_id=unique_id,
+            status=status_val.upper(),
+            failures=failures_int,
+            message=_optional_text(item.get("message"), 4000),
+            execution_time=exec_time_float,
+        )
+    return parsed

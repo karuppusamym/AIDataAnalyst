@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp
 
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -29,7 +30,6 @@ from aida.models import (
     Project,
     SemanticInferenceRun,
 )
-from aida.query_gateway import SENSITIVE_CLASSES
 from aida.schemas import (
     BusinessMapEdgeRead,
     BusinessMapNodeRead,

@@ -145,7 +145,8 @@ def _dataset_from_payload(payload: dict[str, Any]) -> ParsedOpenLineageDataset:
     disallowed = sorted(DISALLOWED_DATASET_FACETS.intersection(lowered_keys))
     if disallowed:
         raise OpenLineageError(
-            f"openlineage dataset facets are not permitted by the value-free contract: {', '.join(disallowed)}"
+            "openlineage dataset facets are not permitted by the value-free contract: "
+            f"{', '.join(disallowed)}"
         )
     _validate_facet_payload(facets, path="dataset.facets")
     return ParsedOpenLineageDataset(

@@ -1,11 +1,34 @@
 # Module Decomposition
 
-> Status: Authoritative. Owner: Architecture.
+> Status: Authoritative **as a target**. Owner: Architecture.
 > This is the anti-monolith document. It defines the bounded contexts, their ownership of data, their allowed dependencies, and the mechanism that stops the boundaries eroding.
+
+> **Implementation status (2026-08-30). This document describes a structure that does not
+> exist yet.** Everything from §3 onward — the 21 modules, the per-module schemas in §6, the
+> module anatomy in §7 — is the target. Built today:
+>
+> * **1 of 21 modules** exists under `src/atlas/modules/`: `identity_tenancy`, 69 lines across
+>   `api.py` / `contracts.py` / `service.py` / `models.py` / `repository.py` / `router.py` /
+>   `schemas.py` / `events.py`, whose `service.py` is labelled *"Status: scaffold only"* and
+>   contains no business rules. `src/atlas/platform/` has four real files (`config.py` 159
+>   lines, `db.py`, `context.py`, `logging.py`).
+> * **Everything that works** is in the flat `src/aida/` package — ~36,500 lines across 87
+>   modules, one declarative base, one PostgreSQL schema, one migration space.
+>
+> Read §3–§7 as "what a module will look like", never as "what you can open". §2's
+> *Enforcement* column is likewise mostly aspirational — see the status note in §5.2 for the
+> three contracts that are actually wired. The extraction sequence is
+> `40-engineering/06-refactor-plan.md`; the tracked work is `ST-05`/`ST-06`/`ST-07`.
 
 ## 1. The problem being solved
 
-The current implementation is a **flat package monolith**: `src/aida/` with ~18,000 lines in which two files — `models.py` (1,274 lines) and `schemas.py` (1,298 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,530 lines) holds a large share of the HTTP surface.
+The current implementation is a **flat package monolith**: `src/aida/` with ~36,500 lines in which two files — `models.py` (2,721 lines) and `schemas.py` (2,222 lines) — hold the ORM models and DTOs for *every* domain, and `api.py` (1,837 lines) holds a large share of the HTTP surface.
+
+> **Implementation status (2026-08-30).** The line counts above were re-measured against the
+> tree on 2026-08-30 and corrected; the previous figures (~18,000 / 1,274 / 1,298 / 1,530)
+> were roughly half of actual and understated the problem by a factor of two. The shape of the
+> problem is unchanged and, on the evidence, getting worse rather than better while the
+> extraction is deferred.
 
 This shape has three specific failure modes, all of which are already visible:
 
@@ -138,9 +161,83 @@ These two are the *only* upward-callable modules, and both are append-or-decide-
 | `platform-purity` | `platform.*` must not import any domain module |
 | `no-cycles` | No import cycles between modules |
 
-These live in `pyproject.toml` and fail CI. See `40-engineering/03-coding-standards.md`.
+> **Implementation status (2026-08-30).** Of the six contracts above, **none is wired in the
+> form described**, because none of the modules they name exists. `pyproject.toml` contains
+> **four** import-linter contracts, and `lint-imports` does run in CI
+> (`.github/workflows/ci.yml`, `quality` job) as of 2026-08-30. This set is growing during the
+> current review push — re-read `pyproject.toml` rather than trusting this list:
+>
+> | Wired contract (`pyproject.toml`) | Relates to | Note |
+> |---|---|---|
+> | `INV-2 connector SQL execution is reachable only from the query gateway` | `gateway-exclusivity` | The real thing, at flat-package addresses: protects `aida.connectors.execution_access`, permits exactly one importer, `aida.query_gateway`. Tracker `QG-7`, landed 2026-08-30 |
+> | `identity_tenancy module privacy` | `module-privacy` | Covers the one scaffold module only |
+> | `security_types never depends on api (leaf-module ratchet)` | — | A narrow true invariant, not in the table above |
+> | `C4 / ST-11 lineage and intelligence modules never import the query gateway` | `no-cycles` (one edge of it) | Pins the one direction §5.3 resolves: the gateway emits, intelligence consumes |
+>
+> `layers`, `no-orm-leakage`, `platform-purity` and `no-cycles` are **not wired**. `pyproject.toml`'s
+> own comment explains why a layering contract over `aida` is deferred: the package is still
+> flat, so such a contract would be either vacuous or a large exemption list, and
+> `05-ci-cd-and-release.md` forbids exemptions. These land with the extraction (`E3`).
+>
+> Note also that `mypy` is configured with `packages = ["aida"]`, so `src/atlas/` is **not**
+> type-checked today.
+
+See `40-engineering/03-coding-standards.md`.
+
+## 5.3 Resolved: `16 query-gateway`'s layer placement and the `09`↔`16` cycle
+
+**Resolved 2026-08-30 (tracker ST-11).** Verified against the code before deciding: there is
+no cycle, and there never was one. `src/aida/query_gateway.py` imports no lineage module, and
+no lineage module (`unified_lineage.py`, `lineage_cache.py`, `lineage_graph_store.py`,
+`openlineage.py`) imports the gateway. `extract_column_lineage` — the function that made the
+relationship look bidirectional — is defined *inside* `query_gateway.py` and is called only
+there. The mutual edge existed in the register table below, not in the import graph.
+
+**The rule, stated once:** the gateway **emits**; intelligence modules **consume**. A module
+that wants lineage from an executed query reads the event the gateway wrote; it does not call
+the gateway. A module that wants a profile enqueues a profiling task; it does not call the
+gateway either. There is one direction, and it is mechanically checkable the moment the
+layers contract lands.
+
+The register's "may call" column for `05 profiling`, `09 lineage` and `11 data-quality` was
+therefore wrong rather than the layering rule being wrong: those modules do not need to call
+L3 at all, so no redrawing of the layer diagram is required and the second option below is
+the one that was correct. Corrected in §3/§4.
+
+<details>
+<summary>Original text of this section, retained for the record (flagged 2026-08-29, resolved 2026-08-30)</summary>
+
+Three L2 modules list `16 query-gateway` (L3) in their "may call" column: `05 profiling`,
+`09 lineage`, and `11 data-quality` (§3, §4). That's an L2-importing-L3 edge, which contradicts
+the layering rule in §5.2 (`L1 must not import L2-L5; L2 must not import L3-L5`, and so on
+upward). Separately, `09 lineage` and `16 query-gateway` list *each other* as callable (§3, §4),
+which is a cycle and contradicts the `no-cycles` contract this same document says CI will
+enforce (§5.2).
+
+Neither is a typo to silently fix — they're a real modelling question the extraction sequence
+(`40-engineering/06-refactor-plan.md` Phase 4) needs answered before `16`, `05`, `09`, and `11`
+can be cut into separate modules with an import-linter layers contract that actually passes:
+
+- Either `16 query-gateway` is more foundational than L3 and belongs alongside L1 (every module
+  that touches cost/execution needs it, which is most of L2) — in which case the layer diagram in
+  §3 needs redrawing, not just the register table — or
+- `05`/`09`/`11`'s dependency on `16` is really a narrower thing (e.g., just cost estimation, not
+  full execution) that should go through an event or a smaller shared interface instead of a
+  direct L2→L3 call.
+
+Either way, `09`↔`16`'s mutual edge needs one direction picked as authoritative before those two
+modules are extracted — see tracker ST-11.
+
+</details>
 
 ## 6. Database schema ownership
+
+> **Implementation status (2026-08-30). Target. No module schemas exist.** Every table in the
+> platform lives in the single default PostgreSQL schema: `src/aida/models.py` sets no
+> `schema=` on any `__table_args__`, and no file under `migrations/versions/` references a
+> schema. The 20 schemas below are the extraction target, and MD-1's "schema-per-module in
+> PostgreSQL" enforcement is therefore not in force today. Boundary erosion is currently
+> prevented by review, not by the database.
 
 One PostgreSQL database, one schema per module. This gives boundary enforcement now and a clean extraction path later.
 
@@ -171,9 +268,17 @@ One PostgreSQL database, one schema per module. This gives boundary enforcement 
 
 - **No cross-schema foreign keys**, except into `identity`. A module referencing another module's entity stores its ID and resolves it through the published interface. This is what makes extraction possible without a data migration.
 - **Referential integrity across modules is eventual**, maintained by projectors and reconciliation jobs, and surfaced as a measurable lag.
-- Tenancy columns (`organization_id`, and where applicable `legal_entity_id`, `lob_id`, `project_id`) are mandatory on every governed table (INV-5).
+- Tenancy columns (`organization_id`, plus the workspace / business-classification scope columns defined by ADR-0018) are mandatory on every governed table (INV-5). **`legal_entity_id` was listed here and does not exist**: searched across `src/` and `migrations/` on 2026-08-30 with no match. It is an ADR-only concept and `gap/02` rows C2/D3 are to not build it. The authoritative current shape is `20-modules/01-identity-and-tenancy.md` and ADR-0018.
 
 ## 7. Module anatomy
+
+> **Implementation status (2026-08-30). Target.** Exactly one directory below exists:
+> `src/atlas/modules/identity_tenancy/`, generated by `scripts/generate_module.py` and
+> asserted by `tests/test_module_scaffold_generator.py`. It has the file *names* below and
+> almost no content — `service.py` is 7 lines and says "scaffold only". Its `migrations/`
+> directory does not exist at all; all 34 Alembic revisions are in the repository-root
+> `migrations/versions/`, and `pytest src/atlas/modules/<name>` is not a supported invocation
+> (`pyproject.toml` sets `testpaths = ["tests"]`).
 
 Every module has the same internal shape. Uniformity is what lets a new engineer work in any module on day one.
 

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bank-data-intelligence-platform"
-version = "0.1.0"
+version = "0.3.0"
 description = "Governed enterprise metadata and agentic analytics platform"
 requires-python = ">=3.13"
 dependencies = [
@@ -20,12 +20,14 @@ dependencies = [
   "opentelemetry-sdk==1.37.0",
   "oracledb==4.0.2",
   "PyJWT[crypto]==2.10.1",
+  "PyYAML==6.0.3",
   "prometheus-client==0.22.1",
   "pydantic-settings==2.15.0",
   "python-tds==1.17.1",
   "redis==6.4.0",
   "sqlalchemy[asyncio]==2.0.52",
   "sqlglot==30.17.0",
+  "snowflake-connector-python==3.15.0",
   "structlog==25.4.0",
   "temporalio==1.32.0",
   "uvicorn[standard]==0.35.0",
@@ -33,20 +35,28 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "aiosqlite==0.21.0",
+  "import-linter==2.14",
   "mypy==1.17.1",
   "pytest==8.4.2",
   "pytest-asyncio==1.1.0",
   "pytest-cov==6.2.1",
   "ruff==0.12.11",
+  "types-PyYAML==6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aida"]
+packages = ["src/aida", "src/atlas"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The Tier-0 invariant harnesses live in `tests/support/` and are imported as
+# `tests.support.*`, so the repository root has to be importable. Without this,
+# `pytest` collects them only when invoked as `python -m pytest` (which puts the
+# CWD on `sys.path` implicitly) and fails under the bare `pytest` CI runs.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -63,9 +73,137 @@ plugins = ["pydantic.mypy"]
 packages = ["aida"]
 
 [[tool.mypy.overrides]]
- module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*"]
+module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*", "snowflake", "snowflake.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["google", "google.*"]
 ignore_missing_imports = true
+
+# The OTLP exporters are an optional install, imported lazily inside
+# `configure_tracing` / `configure_metrics` and guarded by ImportError, exactly like the
+# optional database drivers above. Without this the module cannot type-check on a machine
+# that has not installed the exporter extra.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.exporter.*"]
+ignore_missing_imports = true
+
+# ST-02 (Docs/40-engineering/06-refactor-plan.md, Phase 0): import-linter with a
+# permissive baseline. The ratchet: contracts below are real and currently pass,
+# so from today the dependency shape cannot get worse, even before the rest of
+# `aida` is decomposed and stricter contracts become possible (Phase 2+).
+#
+# import-linter 2.14 has no formal `--create-baseline` / snapshot mechanism (checked
+# `lint-imports --help` and the installed package source) to auto-record today's
+# violations, so `aida` is intentionally NOT given a full layering/independence
+# contract yet — the package is still flat (~50 top-level modules) and a contract
+# covering all of it would either be vacuous or would have to hardcode a large
+# "existing violations" exemption list, which `05-ci-cd-and-release.md` explicitly
+# forbids ("import-linter | Any violation, including a new exemption" blocks the
+# merge gate). Instead `security_types` (a true dependency leaf: no internal `aida`
+# imports of its own, per `grep` of its imports) is pinned so it can never import
+# back from the top-level `api` module — a real, narrow, currently-true invariant.
+# Broader `aida` contracts land as the flat package is decomposed in later phases.
+[tool.importlinter]
+root_packages = ["aida", "atlas"]
+
+[[tool.importlinter.contracts]]
+name = "identity_tenancy module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.identity_tenancy.service",
+  "atlas.modules.identity_tenancy.repository",
+  "atlas.modules.identity_tenancy.models",
+  "atlas.modules.identity_tenancy.schemas",
+  "atlas.modules.identity_tenancy.router",
+  "atlas.modules.identity_tenancy.workers",
+]
+allowed_importers = [
+  "atlas.modules.identity_tenancy.api",
+  "atlas.modules.identity_tenancy.contracts",
+  "atlas.modules.identity_tenancy.service",
+  "atlas.modules.identity_tenancy.repository",
+  "atlas.modules.identity_tenancy.models",
+  "atlas.modules.identity_tenancy.schemas",
+  "atlas.modules.identity_tenancy.router",
+  "atlas.modules.identity_tenancy.workers",
+  "atlas.modules.identity_tenancy.tests",
+]
+
+[[tool.importlinter.contracts]]
+# INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
+# ADR-0004 both name as the enforcement mechanism for the execution choke point.
+# Until now it did not exist, so the platform's most-marketed property was a
+# convention rather than a proof.
+#
+# It does not depend on the flat package being decomposed first, because it protects
+# a single purpose-built module rather than asserting a shape over all of `aida`.
+#
+# `aida.connectors.execution_access` is the only module that returns a `SqlExecutor`,
+# the only type carrying `estimate_read_query` / `execute_read_query`. Everything else
+# in the platform is handed a `Connector`, which has no SQL-accepting member at all, so
+# a second execution path cannot be written without either importing this module
+# (blocked here) or defeating `mypy --strict` (blocked in CI).
+#
+# `tests/test_tier0_invariants.py::test_no_connector_execution_outside_gateway` is the
+# third layer: it statically scans every module for a call to either method, catching a
+# dynamic bypass that neither the import graph nor the type checker can see.
+#
+# Adding an importer below is a change to the platform's central invariant. It needs an
+# ADR, not a pull request.
+name = "INV-2 connector SQL execution is reachable only from the query gateway"
+type = "protected"
+protected_modules = ["aida.connectors.execution_access"]
+allowed_importers = ["aida.query_gateway"]
+
+[[tool.importlinter.contracts]]
+name = "security_types never depends on api (leaf-module ratchet)"
+type = "forbidden"
+source_modules = ["aida.security_types"]
+forbidden_modules = ["aida.api"]
+
+[[tool.importlinter.contracts]]
+# C4 / ST-11 (`Docs/review-2026-08/gap/02-gap-diff-and-plan.md`, row C4). The review
+# records a lineage-gateway cycle: mutual calls, with L2 -> L3 edges. The tracker
+# records that the cycle is already gone in code -- the gateway *emits* lineage
+# evidence (`extract_column_lineage`, `QueryExecution.column_lineage`, the
+# `query.execution.completed.v1` outbox event) and the lineage and intelligence
+# modules *consume* it from platform state. That is a fact about today's import
+# graph, not a property anything defends.
+#
+# This makes it enforced. The relationship is one-directional by contract: nothing
+# in the lineage/intelligence layer may reach back into `aida.query_gateway`, so the
+# cycle cannot be reintroduced by an import somebody adds without noticing. Verified
+# green before it was written, and it constrains no existing edge.
+#
+# `SENSITIVE_CLASSES` used to live in `aida.query_gateway`, which made it a
+# misplaced-constant problem rather than a real cycle for any module that only
+# needed the classification vocabulary (`aida.semantic_intelligence_api`,
+# `aida.semantic_inference`, and -- as of the catalog bulk-actions feature --
+# `aida.catalog_bulk_actions`, whose transitive import through `aida.schemas`
+# briefly broke this contract for every module below that imports schemas).
+# Resolved by moving the constant to the leaf module `aida.classification`
+# (tracked in `Docs/review-2026-08/gap/05-validate-sql-handoff.md`).
+#
+# `aida.semantic_intelligence_api` is still deliberately NOT a source module
+# here: with the constant problem fixed, it now has a *different*, real edge
+# into the gateway (`aida.semantic_intelligence_api` -> `aida.tool_api` ->
+# `aida.query_gateway`). That is a separate, unreviewed architectural question
+# (whether `tool_api`'s own gateway dependency should be reachable from the
+# semantic-intelligence layer at all) and is out of scope for the constant
+# fix; resolve it on its own before adding this module here.
+name = "C4 / ST-11 lineage and intelligence modules never import the query gateway"
+type = "forbidden"
+source_modules = [
+  "aida.unified_lineage",
+  "aida.unified_lineage_api",
+  "aida.lineage_cache",
+  "aida.lineage_graph_store",
+  "aida.openlineage",
+  "aida.openlineage_api",
+  "aida.knowledge_graph",
+  "aida.agent_intelligence",
+  "aida.intelligence_api",
+  "aida.semantic_inference",
+]
+forbidden_modules = ["aida.query_gateway"]

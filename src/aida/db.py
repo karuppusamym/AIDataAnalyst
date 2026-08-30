@@ -1,34 +1,25 @@
-from collections.abc import AsyncIterator
+"""Backward-compatible re-export.
 
-from sqlalchemy import MetaData
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+Canonical location: `atlas.platform.db` (tracker ST-04, Phase 1 of
+`Docs/40-engineering/06-refactor-plan.md`). Every existing
+`from aida.db import ...` caller keeps working unchanged; new code should
+import from `atlas.platform.db` directly.
+"""
 
-from aida.config import get_settings
-
-NAMING_CONVENTION = {
-    "ix": "ix_%(column_0_label)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
-    "ck": "ck_%(table_name)s_%(constraint_name)s",
-    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
-    "pk": "pk_%(table_name)s",
-}
-
-
-class Base(DeclarativeBase):
-    metadata = MetaData(naming_convention=NAMING_CONVENTION)
-
-
-settings = get_settings()
-engine = create_async_engine(
-    settings.database_url,
-    pool_pre_ping=True,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
+from atlas.platform.db import (
+    NAMING_CONVENTION,
+    Base,
+    engine,
+    get_session,
+    session_factory,
+    settings,
 )
-session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with session_factory() as session:
-        yield session
+__all__ = [
+    "NAMING_CONVENTION",
+    "Base",
+    "engine",
+    "get_session",
+    "session_factory",
+    "settings",
+]

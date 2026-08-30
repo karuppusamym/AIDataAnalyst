@@ -48,4 +48,4 @@ An approved enterprise metadata system of record replaces PostgreSQL. The projec
 ## Enforcement
 
 - INV-1 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_projection_rebuild`
+- Test: `test_projection_rebuild` (`tests/test_inv1_single_authoritative_store.py`) — proves the structural property in-process; no Neo4j runs in the suite, so it does not prove Neo4j ingests correctly

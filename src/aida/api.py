@@ -1,10 +1,12 @@
+from collections.abc import Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from neo4j import AsyncGraphDatabase
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client
@@ -18,10 +20,25 @@ from aida.agent_orchestrator import (
     GovernedAgentOrchestrator,
     ModelRouteUnavailable,
 )
+from aida.asset_certification import asset_certification_is_active, current_asset_certification
+from aida.authorization_gate import AuthorizationDenied, gate
+from aida.catalog_bulk_actions import (
+    CATALOG_BULK_ACTION_MAX_ITEMS,
+    CATALOG_BULK_FILTER_SCAN_CAP,
+    BulkPlan,
+    dedupe_preserving_order,
+    match_columns_by_pattern,
+    match_tables_by_filter,
+    plan_certify,
+    plan_classify,
+    plan_own,
+    plan_tag,
+)
 from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
 from aida.integration_service import ensure_organization_integration_policy
@@ -30,23 +47,38 @@ from aida.models import (
     AgentEvaluationRun,
     AgentRun,
     AnalysisRun,
+    AssetCertification,
+    AssetTag,
+    CatalogBulkActionRun,
     ColumnProfile,
+    CrossBoundaryGrant,
+    DataDomain,
     DataSource,
+    GovernanceReview,
     LineOfBusiness,
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
+    MetadataIndex,
+    MetadataPartition,
     MetadataSchema,
     MetadataTable,
     Organization,
     OrganizationIntegrationPolicy,
+    OwnershipAssignment,
     Project,
     QueryExecution,
     ScanPolicy,
     TableProfile,
 )
+from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.prompt_risk import DeterministicPromptRiskClassifier
-from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
+from aida.query_gateway import (
+    AuthorizationRejected,
+    GatewayResult,
+    QueryExecutionGateway,
+    QueryRejected,
+)
 from aida.schemas import (
     AgentAnalysisRequest,
     AgentAnalysisResponse,
@@ -57,7 +89,21 @@ from aida.schemas import (
     AiRuntimeStatusRead,
     AnalysisRunCreate,
     AnalysisRunRead,
+    ApiModel,
+    AssetCertificationRead,
+    CatalogBulkActionRunRead,
+    CatalogBulkCertifyRequest,
+    CatalogBulkClassifyRequest,
+    CatalogBulkOwnRequest,
+    CatalogBulkSelectionFilter,
+    CatalogBulkTagRequest,
+    CertificationDecisionRequest,
     ColumnProfileRead,
+    CrossBoundaryGrantCreate,
+    CrossBoundaryGrantRead,
+    CursorPage,
+    DataDomainCreate,
+    DataDomainRead,
     DataSourceCreate,
     DataSourceRead,
     DataSourceSummaryRead,
@@ -67,6 +113,8 @@ from aida.schemas import (
     LineOfBusinessRead,
     MetadataColumnRead,
     MetadataConstraintRead,
+    MetadataIndexRead,
+    MetadataPartitionRead,
     MetadataTableRead,
     OrganizationCreate,
     OrganizationIntegrationPolicyRead,
@@ -88,6 +136,22 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
+
+CATALOG_BULK_ACTION_WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
+CATALOG_BULK_ACTION_READ_ROLES = (
+    "PlatformAdmin",
+    "MetadataAdmin",
+    "DataAdmin",
+    "DataSteward",
+    "Analyst",
+    "Viewer",
+)
+_CATALOG_BULK_ACTION_EVENT_TYPES = {
+    "TAG": "catalog.asset_tag.applied.v1",
+    "CLASSIFY": "catalog.column.classified.v1",
+    "OWN": "ownership.assigned.v1",
+    "CERTIFY": "certification.granted.v1",
+}
 
 router = APIRouter(prefix="/v1")
 
@@ -169,6 +233,17 @@ async def preview_agent_retrieval(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        # Not READ_METADATA: this returns the assembled retrieval evidence an agent
+        # would be handed, which is the context product, not the catalog.
+        action="CONSUME_CONTEXT",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     prompt_risk = DeterministicPromptRiskClassifier().assess(body.question)
     hits = (
         []
@@ -396,6 +471,37 @@ async def list_lines_of_business(
     )
 
 
+@router.get("/lines-of-business/{lob_id}/data-domains", response_model=Page)
+async def list_data_domains(
+    lob_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    lob = await session.get(LineOfBusiness, lob_id)
+    if lob is None:
+        raise HTTPException(status_code=404, detail="line of business not found")
+    enforce_organization(context, lob.organization_id)
+    await ensure_default_domain(session, lob)
+    await session.commit()
+    filters = (DataDomain.line_of_business_id == lob.id,)
+    total = await session.scalar(select(func.count()).select_from(DataDomain).where(*filters))
+    rows = (
+        await session.scalars(
+            select(DataDomain).where(*filters).order_by(DataDomain.name).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[DataDomainRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
 @router.get("/lines-of-business/{lob_id}/projects", response_model=Page)
 async def list_projects(
     lob_id: UUID,
@@ -585,6 +691,192 @@ async def create_line_of_business(
 
 
 @router.post(
+    "/lines-of-business/{lob_id}/data-domains",
+    response_model=DataDomainRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_data_domain(
+    lob_id: UUID,
+    body: DataDomainCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DataDomain:
+    lob = await session.get(LineOfBusiness, lob_id)
+    if lob is None:
+        raise HTTPException(status_code=404, detail="line of business not found")
+    enforce_organization(context, lob.organization_id)
+    parent = None
+    if body.parent_domain_id is not None:
+        parent = await session.get(DataDomain, body.parent_domain_id)
+        if parent is None or parent.line_of_business_id != lob.id:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "parent_domain_id must reference an existing domain "
+                    "in the same line of business"
+                ),
+            )
+    domain = DataDomain(
+        organization_id=lob.organization_id,
+        line_of_business_id=lob.id,
+        parent_domain_id=body.parent_domain_id,
+        name=body.name,
+        code=body.code,
+    )
+    session.add(domain)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=lob.organization_id),
+        action="data_domain.create",
+        resource_type="data_domain",
+        resource_id=str(domain.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"parent_domain_id": str(body.parent_domain_id) if body.parent_domain_id else None},
+    )
+    record_outbox(
+        session,
+        organization_id=lob.organization_id,
+        aggregate_type="data_domain",
+        aggregate_id=str(domain.id),
+        event_type="data_domain.created.v1",
+        payload={
+            "data_domain_id": str(domain.id),
+            "line_of_business_id": str(lob.id),
+            "parent_domain_id": str(body.parent_domain_id) if body.parent_domain_id else None,
+        },
+    )
+    await _commit_or_conflict(session, "data domain code already exists in this line of business")
+    return domain
+
+
+@router.get("/data-domains/{domain_id}/cross-boundary-grants", response_model=Page)
+async def list_cross_boundary_grants(
+    domain_id: UUID,
+    grant_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    filters = [
+        or_(
+            CrossBoundaryGrant.source_data_domain_id == domain.id,
+            CrossBoundaryGrant.target_data_domain_id == domain.id,
+        )
+    ]
+    if grant_status is not None:
+        filters.append(CrossBoundaryGrant.status == grant_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(CrossBoundaryGrant).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(CrossBoundaryGrant)
+            .where(*filters)
+            .order_by(CrossBoundaryGrant.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[CrossBoundaryGrantRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/data-domains/{domain_id}/cross-boundary-grants",
+    response_model=CrossBoundaryGrantRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_cross_boundary_grant(
+    domain_id: UUID,
+    body: CrossBoundaryGrantCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> CrossBoundaryGrant:
+    """Request permission for `body.target_data_domain_id` to see across the
+    boundary into `domain_id` (the source, owning domain). Creates the grant in
+    PENDING_APPROVAL and files it into the same governance review queue every
+    other governed object here uses (ADR-0017 SS4) — it only becomes ACTIVE once
+    a *different* principal approves it via POST /governance/reviews/{id}/decision.
+    """
+    source_domain = await session.get(DataDomain, domain_id)
+    if source_domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, source_domain.organization_id)
+    if body.target_data_domain_id == source_domain.id:
+        raise HTTPException(
+            status_code=422, detail="target_data_domain_id must differ from the source domain"
+        )
+    target_domain = await session.get(DataDomain, body.target_data_domain_id)
+    if target_domain is None or target_domain.organization_id != source_domain.organization_id:
+        raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+    grant = CrossBoundaryGrant(
+        organization_id=source_domain.organization_id,
+        source_data_domain_id=source_domain.id,
+        target_data_domain_id=target_domain.id,
+        edge_kinds=body.edge_kinds,
+        reason=body.reason,
+        requested_by=context.principal_id,
+        expires_at=body.expires_at,
+    )
+    session.add(grant)
+    await session.flush()
+    review = GovernanceReview(
+        organization_id=source_domain.organization_id,
+        object_type="CROSS_BOUNDARY_GRANT",
+        object_id=str(grant.id),
+        requested_action="GRANT",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=source_domain.organization_id),
+        action="cross_boundary_grant.request",
+        resource_type="governance_review",
+        resource_id=str(review.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "cross_boundary_grant_id": str(grant.id),
+            "source_data_domain_id": str(source_domain.id),
+            "target_data_domain_id": str(target_domain.id),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=source_domain.organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+        },
+    )
+    await session.commit()
+    return grant
+
+
+@router.post(
     "/lines-of-business/{lob_id}/projects",
     response_model=ProjectRead,
     status_code=status.HTTP_201_CREATED,
@@ -599,9 +891,18 @@ async def create_project(
     if lob is None:
         raise HTTPException(status_code=404, detail="line of business not found")
     enforce_organization(context, lob.organization_id)
+    if body.data_domain_id is not None:
+        explicit_domain = await session.get(DataDomain, body.data_domain_id)
+        if explicit_domain is None or explicit_domain.line_of_business_id != lob.id:
+            raise HTTPException(
+                status_code=422,
+                detail="data_domain_id must reference an existing domain in this line of business",
+            )
+    domain = await resolve_domain(session, lob, body.data_domain_id)
     project = Project(
         organization_id=lob.organization_id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         name=body.name,
         slug=body.slug,
     )
@@ -662,6 +963,7 @@ async def create_datasource(
     datasource = DataSource(
         organization_id=project.organization_id,
         line_of_business_id=project.line_of_business_id,
+        data_domain_id=project.data_domain_id,
         project_id=project.id,
         **body.model_dump(),
     )
@@ -765,6 +1067,12 @@ async def upsert_scan_policy(
         select(ScanPolicy).where(ScanPolicy.datasource_id == datasource.id)
     )
     values = body.model_dump(exclude={"start_at"})
+    # base_priority tracks the admin's own explicit choice separately from the
+    # scheduler-visible `priority` column, so a later usage-weighted rebalance
+    # (workflows/scheduler.rebalance_usage_weighted_priorities) always computes
+    # from what the admin actually asked for, never from a previously-boosted
+    # value (ADR-0017 SS8).
+    values["base_priority"] = body.priority
     if policy is None:
         policy = ScanPolicy(
             organization_id=datasource.organization_id,
@@ -841,7 +1149,8 @@ async def test_datasource(
         dsn = SecretResolver(settings).resolve(datasource.credential_reference)
         connector = connector_registry.create(datasource.connector_type, dsn)
         await connector.test_connection()
-        datasource.status = "CONNECTION_VERIFIED"
+        if datasource.status != "ACTIVE":
+            datasource.status = "CONNECTION_VERIFIED"
         datasource.capabilities = asdict(connector.capabilities)
         outcome = "SUCCESS"
     except Exception as exc:
@@ -1084,116 +1393,340 @@ async def resume_analysis_run(
     return resumed
 
 
-@router.get("/datasources/{datasource_id}/tables", response_model=Page)
+async def gate_read(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    datasource_id: UUID,
+) -> None:
+    """Authorize a catalog read, or answer 403 with a reason code.
+
+    A helper rather than a dependency because the resource is not known until the
+    handler has loaded it: `list_columns` is authorized against the *table*, whose
+    datasource it does not learn until after the row is fetched. A dependency would
+    have to re-fetch it, and the version that avoids re-fetching is the version that
+    authorizes against the path parameter instead of the object -- which is how a
+    check ends up describing something other than what the handler returns.
+
+    403 with the bare reason code: enough for a caller to know whether to ask for a
+    grant or stop asking, and nothing about the resource or the policy (INV-6).
+    """
+    try:
+        await gate(
+            session,
+            context,
+            settings=settings,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            datasource_id=datasource_id,
+        )
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc
+
+
+async def _list_page(
+    session: AsyncSession,
+    *,
+    model: type[Any],
+    filters: Sequence[Any],
+    order_columns: tuple[Any, ...],
+    coercers: tuple[type, ...],
+    read_schema: type[ApiModel],
+    limit: int,
+    offset: int,
+    cursor: str | None,
+) -> CursorPage:
+    """Shared list-endpoint body: keyset pagination when `cursor` is given, plain
+    offset pagination otherwise -- both return a `next_cursor` so a caller can
+    fetch page one by `offset` (and see a `total`) and then walk every page after
+    it purely by cursor, never paying for another `COUNT(*)` or a growing `OFFSET`.
+
+    This is CT-2: the high-volume catalog list endpoints (tables, columns, and the
+    CT-3 indexes/partitions/constraints endpoints that share the same shape) need
+    response cost that stays flat regardless of page depth at 1M-tables-by-30M-
+    columns scale, which OFFSET cannot give -- the database must walk and discard
+    every prior row before it can return anything.
+
+    The keyset branch's `WHERE`/`ORDER BY` use exactly `order_columns` (which
+    callers pair with a composite index whose leading columns match `filters`),
+    so its cost is bounded by `limit` alone -- independent of how many pages a
+    caller has already walked, unlike `offset`.
+    """
+    total: int | None = None
+    if cursor is not None:
+        try:
+            raw_values = decode_cursor(cursor, arity=len(order_columns))
+            last_values = tuple(
+                coerce(value) for coerce, value in zip(coercers, raw_values, strict=True)
+            )
+        except (InvalidCursor, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid cursor") from exc
+        statement = apply_keyset(
+            select(model).where(*filters).order_by(*order_columns),
+            order_columns,
+            last_values,
+        ).limit(limit)
+    else:
+        total = await session.scalar(select(func.count()).select_from(model).where(*filters)) or 0
+        statement = (
+            select(model).where(*filters).order_by(*order_columns).limit(limit).offset(offset)
+        )
+
+    rows = (await session.scalars(statement)).all()
+    next_cursor = (
+        encode_cursor(*(getattr(rows[-1], column.key) for column in order_columns))
+        if len(rows) == limit
+        else None
+    )
+    return CursorPage(
+        items=[read_schema.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total,
+        next_cursor=next_cursor,
+    )
+
+
+_CURSOR_DESCRIPTION = (
+    "Opaque keyset cursor from a previous page's next_cursor. When supplied, "
+    "offset is ignored, no total is computed, and the response cost stays "
+    "bounded by limit no matter how many pages precede it."
+)
+
+
+@router.get("/datasources/{datasource_id}/tables", response_model=CursorPage)
 async def list_tables(
     datasource_id: UUID,
+    q: str | None = Query(default=None, min_length=2, max_length=200),
+    object_type: str | None = Query(default=None, max_length=30),
+    table_status: str = Query(default="ACTIVE", alias="status", max_length=30),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page:
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
-    filters = (
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
+    filters: list[Any] = [
         MetadataTable.organization_id == datasource.organization_id,
         MetadataTable.datasource_id == datasource.id,
-        MetadataTable.status == "ACTIVE",
-    )
-    total = await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
-    rows = (
-        await session.scalars(
-            select(MetadataTable)
-            .where(*filters)
-            .order_by(MetadataTable.name)
-            .limit(limit)
-            .offset(offset)
+    ]
+    if table_status != "ALL":
+        filters.append(MetadataTable.status == table_status)
+    if object_type and object_type != "ALL":
+        filters.append(MetadataTable.object_type == object_type)
+    if q:
+        normalized_query = q.strip().lower()
+        filters.append(
+            or_(
+                func.lower(MetadataTable.name).contains(normalized_query),
+                func.lower(func.coalesce(MetadataTable.source_description, "")).contains(
+                    normalized_query
+                ),
+            )
         )
-    ).all()
-    return Page(
-        items=[MetadataTableRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataTable,
+        filters=filters,
+        order_columns=(MetadataTable.name, MetadataTable.id),
+        coercers=(str, UUID),
+        read_schema=MetadataTableRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
     )
 
 
-@router.get("/tables/{table_id}/columns", response_model=Page)
+@router.get("/tables/{table_id}/columns", response_model=CursorPage)
 async def list_columns(
     table_id: UUID,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page:
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     filters = (
         MetadataColumn.organization_id == table.organization_id,
         MetadataColumn.table_id == table.id,
         MetadataColumn.status == "ACTIVE",
     )
-    total = await session.scalar(select(func.count()).select_from(MetadataColumn).where(*filters))
-    rows = (
-        await session.scalars(
-            select(MetadataColumn)
-            .where(*filters)
-            .order_by(MetadataColumn.ordinal_position)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[MetadataColumnRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataColumn,
+        filters=filters,
+        order_columns=(MetadataColumn.ordinal_position, MetadataColumn.id),
+        coercers=(int, UUID),
+        read_schema=MetadataColumnRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
     )
 
 
-@router.get("/tables/{table_id}/constraints", response_model=Page)
+@router.get("/tables/{table_id}/constraints", response_model=CursorPage)
 async def list_constraints(
     table_id: UUID,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page:
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     filters = (
         MetadataConstraint.organization_id == table.organization_id,
         MetadataConstraint.table_id == table.id,
         MetadataConstraint.status == "ACTIVE",
     )
-    total = await session.scalar(
-        select(func.count()).select_from(MetadataConstraint).where(*filters)
-    )
-    rows = (
-        await session.scalars(
-            select(MetadataConstraint)
-            .where(*filters)
-            .order_by(MetadataConstraint.name)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[MetadataConstraintRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataConstraint,
+        filters=filters,
+        order_columns=(MetadataConstraint.name, MetadataConstraint.id),
+        coercers=(str, UUID),
+        read_schema=MetadataConstraintRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
+    )
+
+
+@router.get("/tables/{table_id}/indexes", response_model=CursorPage)
+async def list_indexes(
+    table_id: UUID,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+    filters = (
+        MetadataIndex.organization_id == table.organization_id,
+        MetadataIndex.table_id == table.id,
+        MetadataIndex.status == "ACTIVE",
+    )
+    return await _list_page(
+        session,
+        model=MetadataIndex,
+        filters=filters,
+        order_columns=(MetadataIndex.name, MetadataIndex.id),
+        coercers=(str, UUID),
+        read_schema=MetadataIndexRead,
+        limit=limit,
+        offset=offset,
+        cursor=cursor,
+    )
+
+
+@router.get("/tables/{table_id}/partitions", response_model=CursorPage)
+async def list_partitions(
+    table_id: UUID,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+    filters = (
+        MetadataPartition.organization_id == table.organization_id,
+        MetadataPartition.table_id == table.id,
+        MetadataPartition.status == "ACTIVE",
+    )
+    return await _list_page(
+        session,
+        model=MetadataPartition,
+        filters=filters,
+        order_columns=(MetadataPartition.ordinal_position, MetadataPartition.id),
+        coercers=(int, UUID),
+        read_schema=MetadataPartitionRead,
+        limit=limit,
+        offset=offset,
+        cursor=cursor,
     )
 
 
@@ -1204,11 +1737,21 @@ async def get_latest_table_profile(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> TableProfileRead:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     profile = await session.scalar(
         select(TableProfile)
         .where(
@@ -1252,6 +1795,186 @@ async def get_latest_table_profile(
             for column_profile, column in profile_rows
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# CT-5: asset certification lifecycle with expiry (table or column)
+# ---------------------------------------------------------------------------
+
+
+def _asset_certification_read(
+    certification: AssetCertification, *, is_active: bool
+) -> AssetCertificationRead:
+    return AssetCertificationRead(
+        id=certification.id,
+        organization_id=certification.organization_id,
+        table_id=certification.table_id,
+        column_id=certification.column_id,
+        asset_type=certification.asset_type,
+        status=certification.status,
+        rationale=certification.rationale,
+        certified_by=certification.certified_by,
+        expires_at=certification.expires_at,
+        is_active=is_active,
+        created_at=certification.created_at,
+        updated_at=certification.updated_at,
+    )
+
+
+@router.post(
+    "/tables/{table_id}/certification",
+    response_model=AssetCertificationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def certify_table_asset(
+    table_id: UUID,
+    body: CertificationDecisionRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> AssetCertificationRead:
+    """Module 04's public interface: ``certify_asset(scope, table_id, decision)``.
+
+    Certifies the table itself, or -- module 04's scale note names column as
+    the dominant catalog entity -- one specific column of it. Immediate and
+    role-gated, the same as CT-1's bulk certify action on this same table:
+    a single deliberate certification by an authorized steward, not a batch,
+    so there is no maker-checker review to wait on.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    if table.status != "ACTIVE":
+        raise HTTPException(status_code=409, detail=f"table status is {table.status}, not ACTIVE")
+    now = datetime.now(UTC)
+    if body.expires_at <= now:
+        raise HTTPException(status_code=422, detail="certification expiry must be in the future")
+    column: MetadataColumn | None = None
+    if body.asset_type == "COLUMN":
+        column = await session.get(MetadataColumn, body.column_id)
+        if (
+            column is None
+            or column.organization_id != table.organization_id
+            or column.table_id != table.id
+        ):
+            raise HTTPException(status_code=404, detail="column not found on this table")
+        if column.status != "ACTIVE":
+            raise HTTPException(
+                status_code=409, detail=f"column status is {column.status}, not ACTIVE"
+            )
+    prior_rows = (
+        await session.scalars(
+            select(AssetCertification).where(
+                AssetCertification.table_id == table.id,
+                AssetCertification.asset_type == body.asset_type,
+                AssetCertification.column_id == (column.id if column else None),
+                AssetCertification.status == "ACTIVE",
+            )
+        )
+    ).all()
+    for prior in prior_rows:
+        prior.status = "SUPERSEDED"
+    certification = AssetCertification(
+        organization_id=table.organization_id,
+        table_id=table.id,
+        column_id=column.id if column else None,
+        asset_type=body.asset_type,
+        rationale=body.rationale,
+        certified_by=context.principal_id,
+        expires_at=body.expires_at,
+    )
+    session.add(certification)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=table.organization_id),
+        action="catalog.asset.certify",
+        resource_type="asset_certification",
+        resource_id=str(certification.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "table_id": str(table.id),
+            "column_id": str(column.id) if column else None,
+            "asset_type": body.asset_type,
+            "expires_at": body.expires_at.isoformat(),
+            "superseded_count": len(prior_rows),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=table.organization_id,
+        aggregate_type="asset_certification",
+        aggregate_id=str(certification.id),
+        event_type="catalog.asset.certified.v1",
+        payload={
+            "certification_id": str(certification.id),
+            "table_id": str(table.id),
+            "column_id": str(column.id) if column else None,
+            "asset_type": body.asset_type,
+            "expires_at": body.expires_at.isoformat(),
+        },
+    )
+    await session.commit()
+    return _asset_certification_read(
+        certification, is_active=asset_certification_is_active(certification, at=now)
+    )
+
+
+@router.get("/tables/{table_id}/certification", response_model=AssetCertificationRead)
+async def get_table_certification(
+    table_id: UUID,
+    column_id: UUID | None = Query(default=None),
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AssetCertificationRead:
+    """The currently *active* certification for a table, or one of its columns.
+
+    Expiry is enforced here rather than trusted from ``status``: a certification
+    row keeps reading back ``status == "ACTIVE"`` after ``expires_at`` passes
+    (see ``aida.asset_certification``), so this 404s once the active one has
+    expired, even though the row itself is still sitting there as evidence.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+    asset_type = "TABLE"
+    if column_id is not None:
+        column = await session.get(MetadataColumn, column_id)
+        if (
+            column is None
+            or column.organization_id != table.organization_id
+            or column.table_id != table.id
+        ):
+            raise HTTPException(status_code=404, detail="column not found on this table")
+        asset_type = "COLUMN"
+    rows = (
+        await session.scalars(
+            select(AssetCertification)
+            .where(
+                AssetCertification.table_id == table.id,
+                AssetCertification.asset_type == asset_type,
+                AssetCertification.column_id == column_id,
+            )
+            .order_by(AssetCertification.created_at.desc())
+            .limit(20)
+        )
+    ).all()
+    active = current_asset_certification(list(rows), at=datetime.now(UTC))
+    if active is None:
+        raise HTTPException(status_code=404, detail="no active certification found")
+    return _asset_certification_read(active, is_active=True)
 
 
 @router.get(
@@ -1447,7 +2170,13 @@ async def execute_query(
             sql=body.sql,
             requested_limit=body.max_rows,
             semantic_version=body.semantic_version,
+            workspace_id=body.workspace_id,
         )
+    except AuthorizationRejected as exc:
+        # Before `QueryRejected`, which it subclasses. 403 rather than 422 because the
+        # statement was never the problem -- resubmitting a corrected one changes
+        # nothing, and 422 would send the caller off to fix their SQL.
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc
     except QueryRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -1593,3 +2322,428 @@ async def get_agent_run(
         if agent_run.principal_id != context.principal_id:
             raise HTTPException(status_code=403, detail="agent run belongs to another principal")
     return AgentRunRead.model_validate(agent_run)
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_bulk_table_subjects(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    table_ids: list[UUID] | None,
+    selection_filter: CatalogBulkSelectionFilter | None,
+) -> tuple[list[UUID], str, bool]:
+    if table_ids is not None:
+        return dedupe_preserving_order(table_ids), "EXPLICIT", False
+    assert selection_filter is not None
+    datasource = await session.get(DataSource, selection_filter.datasource_id)
+    if datasource is None or datasource.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="data source not found")
+    rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.datasource_id == selection_filter.datasource_id,
+                MetadataTable.status == "ACTIVE",
+            )
+            .order_by(MetadataTable.id)
+            .limit(CATALOG_BULK_FILTER_SCAN_CAP)
+        )
+    ).all()
+    candidates = [(row[0], row[1]) for row in rows]
+    matched, truncated = match_tables_by_filter(
+        candidates,
+        match_field=selection_filter.match_field,
+        match_pattern=selection_filter.match_pattern,
+        cap=CATALOG_BULK_ACTION_MAX_ITEMS,
+    )
+    if not matched:
+        raise HTTPException(status_code=409, detail="filter matched no active tables")
+    return matched, "FILTER", truncated
+
+
+async def _fetch_bulk_tables(
+    session: AsyncSession, *, organization_id: UUID, table_ids: list[UUID]
+) -> dict[UUID, MetadataTable]:
+    rows = (
+        await session.scalars(
+            select(MetadataTable).where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.id.in_(table_ids),
+            )
+        )
+    ).all()
+    return {row.id: row for row in rows}
+
+
+async def _persist_catalog_bulk_action_run(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    organization_id: UUID,
+    action: str,
+    selection_mode: str,
+    parameters: dict[str, Any],
+    plan: BulkPlan,
+) -> CatalogBulkActionRun:
+    run = CatalogBulkActionRun(
+        organization_id=organization_id,
+        action=action,
+        selection_mode=selection_mode,
+        parameters=parameters,
+        requested_count=len(plan.results),
+        succeeded_count=plan.succeeded_count,
+        failed_count=plan.failed_count,
+        results=[item.as_dict() for item in plan.results],
+        requested_by=context.principal_id,
+    )
+    session.add(run)
+    await session.flush()
+    if plan.succeeded_count and plan.failed_count:
+        outcome = "PARTIAL_SUCCESS"
+    elif plan.succeeded_count:
+        outcome = "SUCCESS"
+    else:
+        outcome = "FAILURE"
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action=f"catalog.bulk_{action.lower()}",
+        resource_type="catalog_bulk_action_run",
+        resource_id=str(run.id),
+        outcome=outcome,
+        correlation_id=get_correlation_id(),
+        details={
+            "requested_count": run.requested_count,
+            "succeeded_count": run.succeeded_count,
+            "failed_count": run.failed_count,
+            "selection_mode": selection_mode,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="catalog_bulk_action_run",
+        aggregate_id=str(run.id),
+        event_type=_CATALOG_BULK_ACTION_EVENT_TYPES[action],
+        payload={
+            "run_id": str(run.id),
+            "action": action,
+            "succeeded_count": run.succeeded_count,
+            "failed_count": run.failed_count,
+        },
+    )
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-tag",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_tag_tables(
+    organization_id: UUID,
+    body: CatalogBulkTagRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    existing_tags = (
+        await session.scalars(
+            select(AssetTag).where(
+                AssetTag.table_id.in_(subject_ids),
+                AssetTag.tag_key == body.tag_key,
+            )
+        )
+    ).all()
+    plan = plan_tag(
+        subject_ids,
+        tables=tables,
+        existing_tags={row.table_id: row for row in existing_tags},
+        organization_id=organization_id,
+        tag_key=body.tag_key,
+        tag_value=body.tag_value,
+        applied_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="TAG",
+        selection_mode=selection_mode,
+        parameters={
+            "tag_key": body.tag_key,
+            "tag_value": body.tag_value,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-classify",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_classify_columns(
+    organization_id: UUID,
+    body: CatalogBulkClassifyRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    truncated = False
+    if body.column_ids is not None:
+        subject_ids = dedupe_preserving_order(body.column_ids)
+        selection_mode = "EXPLICIT"
+    else:
+        table_ids, _, table_truncated = await _resolve_bulk_table_subjects(
+            session,
+            organization_id=organization_id,
+            table_ids=body.table_ids,
+            selection_filter=body.filter,
+        )
+        selection_mode = "EXPLICIT" if body.table_ids is not None else "FILTER"
+        truncated = truncated or table_truncated
+        column_rows = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.organization_id == organization_id,
+                    MetadataColumn.table_id.in_(table_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.id)
+                .limit(CATALOG_BULK_FILTER_SCAN_CAP)
+            )
+        ).all()
+        subject_ids, column_truncated = match_columns_by_pattern(
+            column_rows,
+            name_pattern=body.column_name_pattern,
+            cap=CATALOG_BULK_ACTION_MAX_ITEMS,
+        )
+        truncated = truncated or column_truncated
+        if not subject_ids:
+            raise HTTPException(status_code=409, detail="selection matched no active columns")
+    rows = (
+        await session.execute(
+            select(MetadataColumn, MetadataTable)
+            .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+            .where(
+                MetadataColumn.organization_id == organization_id,
+                MetadataColumn.id.in_(subject_ids),
+            )
+        )
+    ).all()
+    columns = {row[0].id: (row[0], row[1]) for row in rows}
+    plan = plan_classify(
+        subject_ids,
+        columns=columns,
+        classification=body.classification,
+    )
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="CLASSIFY",
+        selection_mode=selection_mode,
+        parameters={
+            "classification": body.classification,
+            "column_name_pattern": body.column_name_pattern,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-own",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_assign_ownership(
+    organization_id: UUID,
+    body: CatalogBulkOwnRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    existing_assignments = (
+        await session.scalars(
+            select(OwnershipAssignment).where(
+                OwnershipAssignment.organization_id == organization_id,
+                OwnershipAssignment.subject_type == "TABLE",
+                OwnershipAssignment.subject_id.in_([str(value) for value in subject_ids]),
+                OwnershipAssignment.owner_type == body.owner_type,
+                OwnershipAssignment.owner_principal == body.owner_principal,
+            )
+        )
+    ).all()
+    plan = plan_own(
+        subject_ids,
+        tables=tables,
+        existing_assignments={UUID(row.subject_id): row for row in existing_assignments},
+        organization_id=organization_id,
+        owner_type=body.owner_type,
+        owner_principal=body.owner_principal,
+        assigned_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="OWN",
+        selection_mode=selection_mode,
+        parameters={
+            "owner_type": body.owner_type,
+            "owner_principal": body.owner_principal,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-certify",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_certify_tables(
+    organization_id: UUID,
+    body: CatalogBulkCertifyRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    if body.expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="certification expiry must be in the future")
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    active_certifications = (
+        await session.scalars(
+            select(AssetCertification).where(
+                AssetCertification.table_id.in_(subject_ids),
+                # CT-5: certification is now also column-scoped (`asset_type ==
+                # "COLUMN"`), with `table_id` still denormalized onto those rows
+                # for lookup. Table-level bulk certify must only ever supersede a
+                # prior *table*-level certification, never a column's.
+                AssetCertification.asset_type == "TABLE",
+                AssetCertification.status == "ACTIVE",
+            )
+        )
+    ).all()
+    grouped_certifications: dict[UUID, list[AssetCertification]] = {}
+    for row in active_certifications:
+        grouped_certifications.setdefault(row.table_id, []).append(row)
+    plan = plan_certify(
+        subject_ids,
+        tables=tables,
+        active_certifications=grouped_certifications,
+        organization_id=organization_id,
+        rationale=body.rationale,
+        expires_at=body.expires_at,
+        certified_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="CERTIFY",
+        selection_mode=selection_mode,
+        parameters={
+            "rationale": body.rationale,
+            "expires_at": body.expires_at.isoformat(),
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.get(
+    "/organizations/{organization_id}/catalog-bulk-actions",
+    response_model=Page,
+)
+async def list_catalog_bulk_action_runs(
+    organization_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    enforce_organization(context, organization_id)
+    filters = (CatalogBulkActionRun.organization_id == organization_id,)
+    total = await session.scalar(
+        select(func.count()).select_from(CatalogBulkActionRun).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(CatalogBulkActionRun)
+            .where(*filters)
+            .order_by(CatalogBulkActionRun.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[CatalogBulkActionRunRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get(
+    "/organizations/{organization_id}/catalog-bulk-actions/{run_id}",
+    response_model=CatalogBulkActionRunRead,
+)
+async def get_catalog_bulk_action_run(
+    organization_id: UUID,
+    run_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    run = await session.get(CatalogBulkActionRun, run_id)
+    if run is None or run.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="catalog bulk action run not found")
+    return run

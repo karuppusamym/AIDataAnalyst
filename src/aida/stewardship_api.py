@@ -41,7 +41,6 @@ from aida.models import (
 from aida.schemas import (
     BulkStewardshipOperationCreate,
     BulkStewardshipOperationRead,
-    CoverageDimensionRead,
     CoverageSnapshotRead,
     GlossaryCategoryCreate,
     GlossaryCategoryRead,
@@ -62,6 +61,7 @@ from aida.schemas import (
     UnownedAssetEscalationRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -492,8 +492,15 @@ async def apply_ownership_rule(
     enforce_organization(context, rule.organization_id)
     rows = (
         await session.execute(
-            select(MetadataTable, MetadataSchema)
+            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .outerjoin(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.table_id == MetadataTable.id,
+            )
+            .outerjoin(
+                BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id
+            )
             .where(
                 MetadataTable.organization_id == rule.organization_id,
                 MetadataTable.status == "ACTIVE",
@@ -502,14 +509,22 @@ async def apply_ownership_rule(
             .limit(10_000)
         )
     ).all()
+    pattern = rule.match_pattern.casefold()
     matched: list[UUID] = []
-    for table, schema in rows:
-        candidates = {
-            "TABLE_NAME": table.name,
-            "SCHEMA_NAME": schema.name,
-            "QUALIFIED_NAME": f"{schema.name}.{table.name}",
-        }
-        if fnmatchcase(candidates[rule.match_field].casefold(), rule.match_pattern.casefold()):
+    for table, schema, annotation, domain in rows:
+        if rule.match_field == "TAG":
+            tags = annotation.tags if annotation is not None else []
+            is_match = any(fnmatchcase(tag.casefold(), pattern) for tag in tags)
+        else:
+            candidates = {
+                "TABLE_NAME": table.name,
+                "SCHEMA_NAME": schema.name,
+                "QUALIFIED_NAME": f"{schema.name}.{table.name}",
+                "DOMAIN_KEY": domain.domain_key if domain is not None else None,
+            }
+            value = candidates[rule.match_field]
+            is_match = value is not None and fnmatchcase(value.casefold(), pattern)
+        if is_match:
             matched.append(table.id)
         if len(matched) == 500:
             break
@@ -1059,19 +1074,6 @@ async def _owned_table_ids(
     approved documentation naming one -- the GL-4 "owned" coverage dimension."""
     if not table_ids:
         return set()
-    documented = set(
-        await session.scalars(
-            select(AssetDocumentation.table_id)
-            .join(
-                AssetDocumentationVersion,
-                AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
-            )
-            .where(
-                AssetDocumentation.table_id.in_(table_ids),
-                AssetDocumentationVersion.status == "APPROVED",
-            )
-        )
-    )
     owned = {
         UUID(value)
         for value in await session.scalars(
@@ -1149,15 +1151,18 @@ async def _coverage(
             .distinct()
         )
     )
-    certified = set(
+    certification_rows = (
         await session.scalars(
-            select(AssetCertification.table_id).where(
+            select(AssetCertification).where(
                 AssetCertification.table_id.in_(table_ids),
-                AssetCertification.status == "ACTIVE",
-                AssetCertification.expires_at > datetime.now(UTC),
+                # CT-5: certification is now also column-scoped; a column's
+                # certification denormalizes its parent table_id but must not
+                # count toward the table's own "certified" coverage dimension.
+                AssetCertification.asset_type != "COLUMN",
             )
         )
-    )
+    ).all()
+    certified = active_certified_table_ids(list(certification_rows), now=datetime.now(UTC))
     policies = (
         await session.scalars(
             select(DataQualityPolicy).where(
@@ -1181,7 +1186,9 @@ async def _coverage(
             )
         ).all()
         quality_monitored.update(
-            table_id for table_id, datasource_id in table_datasources if datasource_id in source_wide
+            table_id
+            for table_id, datasource_id in table_datasources
+            if datasource_id in source_wide
         )
     semantically_mapped = set(
         await session.scalars(
@@ -1198,24 +1205,13 @@ async def _coverage(
         "quality_monitored": quality_monitored,
         "semantically_mapped": semantically_mapped,
     }
-    dimensions: dict[str, CoverageDimensionRead] = {}
-    for name, evidence in evidence_sets.items():
-        count = len(evidence & table_ids)
-        dimensions[name] = CoverageDimensionRead(
-            covered=count,
-            total=len(table_ids),
-            percentage=round(count * 100 / len(table_ids), 2),
-        )
-    overall = round(sum(value.percentage for value in dimensions.values()) / len(dimensions), 2)
-    return StewardshipCoverageRead(
+    return build_stewardship_coverage(
         organization_id=organization_id,
         datasource_id=datasource_id,
         domain_id=domain_id,
         line_of_business_id=line_of_business_id,
-        table_count=len(table_ids),
-        overall_score=overall,
-        dimensions=dimensions,
-        unowned_table_ids=sorted(table_ids - owned, key=str)[:500],
+        table_ids=table_ids,
+        evidence_sets=evidence_sets,
         computed_at=datetime.now(UTC),
     )
 

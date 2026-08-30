@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,11 +13,20 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
+    AiAsset,
+    AiAssetVersion,
     AssetDocumentationVersion,
     BulkStewardshipOperation,
+    ContextProductVersion,
+    CrossBoundaryGrant,
+    DataContractVersion,
+    DataProduct,
+    DataProductAccessRequest,
+    DataProductVersion,
     DataSource,
     GlossaryConflict,
     GlossaryLinkProposal,
+    GlossaryTerm,
     GlossaryTermVersion,
     GovernanceReview,
     GovernedToolVersion,
@@ -29,7 +38,9 @@ from aida.models import (
     SemanticMetric,
     SemanticMetricVersion,
     SemanticModelVersion,
+    TermSemanticBinding,
 )
+from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
     GovernanceDecisionRequest,
     GovernanceReviewRead,
@@ -39,6 +50,8 @@ from aida.schemas import (
     SemanticModelCloneRequest,
     SemanticModelVersionCreate,
     SemanticModelVersionRead,
+    TermSemanticBindingCreate,
+    TermSemanticBindingRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.semantic_inference import apply_enrichment_proposal
@@ -438,6 +451,284 @@ async def list_metric_versions(
     )
 
 
+async def _semantic_metric_and_project(
+    session: AsyncSession, metric_id: UUID, context: SecurityContext
+) -> tuple[SemanticMetric, Project]:
+    metric = await session.get(SemanticMetric, metric_id)
+    if metric is None:
+        raise HTTPException(status_code=404, detail="semantic metric not found")
+    project = await session.get(Project, metric.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    enforce_organization(context, project.organization_id)
+    return metric, project
+
+
+async def _approved_glossary_term(
+    session: AsyncSession, term_id: UUID, organization_id: UUID
+) -> tuple[GlossaryTerm, GlossaryTermVersion]:
+    term = await session.get(GlossaryTerm, term_id)
+    if term is None or term.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="glossary term not found")
+    approved = await session.scalar(
+        select(GlossaryTermVersion)
+        .where(
+            GlossaryTermVersion.term_id == term.id,
+            GlossaryTermVersion.status == "APPROVED",
+        )
+        .order_by(GlossaryTermVersion.version.desc())
+        .limit(1)
+    )
+    if approved is None:
+        raise HTTPException(status_code=409, detail="only approved glossary terms can be bound")
+    return term, approved
+
+
+def _term_semantic_binding_read(
+    binding: TermSemanticBinding,
+    term: GlossaryTerm,
+    term_version: GlossaryTermVersion,
+    semantic_object_name: str,
+) -> TermSemanticBindingRead:
+    return TermSemanticBindingRead(
+        id=binding.id,
+        organization_id=binding.organization_id,
+        term_id=term.id,
+        term_key=term.term_key,
+        term_display_name=term_version.display_name,
+        term_definition=term_version.definition,
+        semantic_object_type=binding.semantic_object_type,
+        semantic_object_id=binding.semantic_object_id,
+        semantic_object_name=semantic_object_name,
+        status=binding.status,
+        requested_by=binding.requested_by,
+        approved_by=binding.approved_by,
+        approved_at=binding.approved_at,
+        governance_review_id=binding.governance_review_id,
+        created_at=binding.created_at,
+        updated_at=binding.updated_at,
+    )
+
+
+@router.post(
+    "/semantic-metrics/{metric_id}/glossary-bindings",
+    response_model=TermSemanticBindingRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_term_semantic_binding(
+    metric_id: UUID,
+    body: TermSemanticBindingCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> TermSemanticBindingRead:
+    """SM-2: bind `body.term_id` to the metric at `metric_id`.
+
+    Mirrors `request_cross_boundary_grant` (api.py): the binding is created
+    `PENDING_APPROVAL` and filed into the same shared governance review queue
+    every other governed object here uses -- it only becomes `ACTIVE`, and
+    only then eligible to participate in retrieval, once a *different*
+    principal approves it via `POST /governance/reviews/{id}/decision`.
+    """
+    metric, project = await _semantic_metric_and_project(session, metric_id, context)
+    if body.semantic_object_type != "METRIC" or body.semantic_object_id != metric.id:
+        raise HTTPException(
+            status_code=422,
+            detail="semantic_object_type/semantic_object_id must identify the metric in the path",
+        )
+    term, _term_version = await _approved_glossary_term(
+        session, body.term_id, project.organization_id
+    )
+    existing = await session.scalar(
+        select(TermSemanticBinding).where(
+            TermSemanticBinding.term_id == term.id,
+            TermSemanticBinding.semantic_object_type == body.semantic_object_type,
+            TermSemanticBinding.semantic_object_id == body.semantic_object_id,
+            TermSemanticBinding.status.in_(("PENDING_APPROVAL", "ACTIVE")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409, detail="a binding for this term and semantic object already exists"
+        )
+    binding = TermSemanticBinding(
+        organization_id=project.organization_id,
+        term_id=term.id,
+        semantic_object_type=body.semantic_object_type,
+        semantic_object_id=body.semantic_object_id,
+        requested_by=context.principal_id,
+    )
+    session.add(binding)
+    await session.flush()
+    review = GovernanceReview(
+        organization_id=project.organization_id,
+        object_type="TERM_SEMANTIC_BINDING",
+        object_id=str(binding.id),
+        requested_action="BIND",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    binding.governance_review_id = review.id
+    audit_context = replace(context, organization_id=project.organization_id)
+    record_audit(
+        session,
+        audit_context,
+        action="semantic.term_binding.request",
+        resource_type="governance_review",
+        resource_id=str(review.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "binding_id": str(binding.id),
+            "term_id": str(term.id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=project.organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+        },
+    )
+    await session.commit()
+    return _term_semantic_binding_read(binding, term, _term_version, metric.slug)
+
+
+@router.get("/semantic-metrics/{metric_id}/glossary-bindings", response_model=Page)
+async def list_metric_glossary_bindings(
+    metric_id: UUID,
+    binding_status: str | None = Query(default="ACTIVE", alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """SM-2, object -> term direction: which glossary terms are bound to this metric."""
+    metric, _project = await _semantic_metric_and_project(session, metric_id, context)
+    filters = [
+        TermSemanticBinding.semantic_object_type == "METRIC",
+        TermSemanticBinding.semantic_object_id == metric.id,
+    ]
+    if binding_status:
+        filters.append(TermSemanticBinding.status == binding_status.upper())
+    base = (
+        select(TermSemanticBinding, GlossaryTerm, GlossaryTermVersion)
+        .join(GlossaryTerm, GlossaryTerm.id == TermSemanticBinding.term_id)
+        .join(
+            GlossaryTermVersion,
+            (GlossaryTermVersion.term_id == GlossaryTerm.id)
+            & (GlossaryTermVersion.status == "APPROVED"),
+        )
+        .where(*filters)
+    )
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    rows = (
+        await session.execute(
+            base.order_by(TermSemanticBinding.created_at).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[
+            _term_semantic_binding_read(binding, term, term_version, metric.slug)
+            for binding, term, term_version in rows
+        ],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get("/glossary-terms/{term_id}/semantic-bindings", response_model=Page)
+async def list_term_semantic_bindings(
+    term_id: UUID,
+    binding_status: str | None = Query(default="ACTIVE", alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """SM-2, term -> object direction: which semantic objects this term is bound to."""
+    term = await session.get(GlossaryTerm, term_id)
+    if term is None:
+        raise HTTPException(status_code=404, detail="glossary term not found")
+    enforce_organization(context, term.organization_id)
+    term_version = await session.scalar(
+        select(GlossaryTermVersion)
+        .where(GlossaryTermVersion.term_id == term.id, GlossaryTermVersion.status == "APPROVED")
+        .order_by(GlossaryTermVersion.version.desc())
+        .limit(1)
+    )
+    if term_version is None:
+        raise HTTPException(status_code=409, detail="glossary term has no approved version")
+    filters = [TermSemanticBinding.term_id == term.id]
+    if binding_status:
+        filters.append(TermSemanticBinding.status == binding_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(select(TermSemanticBinding).where(*filters).subquery())
+    )
+    bindings = (
+        await session.scalars(
+            select(TermSemanticBinding)
+            .where(*filters)
+            .order_by(TermSemanticBinding.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    items: list[TermSemanticBindingRead] = []
+    for binding in bindings:
+        semantic_object_name = ""
+        if binding.semantic_object_type == "METRIC":
+            metric = await session.get(SemanticMetric, binding.semantic_object_id)
+            semantic_object_name = metric.slug if metric is not None else ""
+        items.append(_term_semantic_binding_read(binding, term, term_version, semantic_object_name))
+    return Page(items=items, limit=limit, offset=offset, total=total or 0)
+
+
+@router.delete("/term-semantic-bindings/{binding_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_term_semantic_binding(
+    binding_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    binding = await session.get(TermSemanticBinding, binding_id)
+    if binding is None:
+        raise HTTPException(status_code=404, detail="term-semantic binding not found")
+    enforce_organization(context, binding.organization_id)
+    await session.delete(binding)
+    record_audit(
+        session,
+        replace(context, organization_id=binding.organization_id),
+        action="semantic.term_binding.delete",
+        resource_type="term_semantic_binding",
+        resource_id=str(binding.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "term_id": str(binding.term_id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
+        },
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post(
     "/semantic-model-versions/{model_id}/submit",
     response_model=GovernanceReviewRead,
@@ -552,7 +843,9 @@ async def decide_governance_review(
     context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReview:
-    review = await session.get(GovernanceReview, review_id)
+    review = await session.scalar(
+        select(GovernanceReview).where(GovernanceReview.id == review_id).with_for_update()
+    )
     if review is None:
         raise HTTPException(status_code=404, detail="governance review not found")
     enforce_organization(context, review.organization_id)
@@ -672,6 +965,221 @@ async def decide_governance_review(
             "model_route_id": str(route.id),
             "route_key": route.route_key,
             "version": route.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "CONTEXT_PRODUCT_VERSION":
+        product_version = await session.get(ContextProductVersion, UUID(review.object_id))
+        if product_version is None or product_version.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if review.requested_action == "DEPRECATE":
+            if product_version.status != "PUBLISHED":
+                raise HTTPException(
+                    status_code=409, detail="context product is no longer published"
+                )
+            if body.decision == "APPROVE":
+                product_version.status = "DEPRECATED"
+                event_type = "context.product_deprecated.v1"
+            else:
+                event_type = "context.product_deprecation_rejected.v1"
+        elif product_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="context product is no longer pending")
+        elif body.decision == "APPROVE":
+            await session.execute(
+                update(ContextProductVersion)
+                .where(
+                    ContextProductVersion.product_id == product_version.product_id,
+                    ContextProductVersion.status == "PUBLISHED",
+                    ContextProductVersion.id != product_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            product_version.status = "PUBLISHED"
+            product_version.approved_by = context.principal_id
+            product_version.approved_at = now
+            product_version.published_at = now
+            event_type = "context.product_published.v1"
+        else:
+            product_version.status = "REJECTED"
+            event_type = "context.product_rejected.v1"
+        aggregate_type = "context_product_version"
+        aggregate_id = str(product_version.id)
+        payload = {
+            "context_product_version_id": str(product_version.id),
+            "context_product_id": str(product_version.product_id),
+            "version": product_version.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_PRODUCT_VERSION":
+        data_product_version = await session.get(DataProductVersion, UUID(review.object_id))
+        if (
+            data_product_version is None
+            or data_product_version.organization_id != review.organization_id
+        ):
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        data_product = await session.get(DataProduct, data_product_version.product_id)
+        if data_product is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if review.requested_action == "RETIRE":
+            if data_product_version.status != "PUBLISHED":
+                raise HTTPException(status_code=409, detail="data product is no longer published")
+            if body.decision == "APPROVE":
+                data_product_version.status = "RETIRED"
+                data_product.lifecycle_status = "RETIRED"
+                event_type = "data_product.retired.v1"
+            else:
+                event_type = "data_product.retirement_rejected.v1"
+        elif data_product_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="data product is no longer pending")
+        elif body.decision == "APPROVE":
+            await session.execute(
+                update(DataProductVersion)
+                .where(
+                    DataProductVersion.product_id == data_product_version.product_id,
+                    DataProductVersion.status == "PUBLISHED",
+                    DataProductVersion.id != data_product_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            data_product_version.status = "PUBLISHED"
+            data_product_version.approved_by = context.principal_id
+            data_product_version.approved_at = now
+            data_product_version.published_at = now
+            data_product.lifecycle_status = "ACTIVE"
+            event_type = "data_product.published.v1"
+        else:
+            data_product_version.status = "REJECTED"
+            event_type = "data_product.rejected.v1"
+        aggregate_type = "data_product_version"
+        aggregate_id = str(data_product_version.id)
+        payload = {
+            "data_product_version_id": str(data_product_version.id),
+            "data_product_id": str(data_product.id),
+            "version": data_product_version.version,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_CONTRACT_VERSION":
+        contract_version = await session.get(DataContractVersion, UUID(review.object_id))
+        if contract_version is None or contract_version.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if contract_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="data contract is no longer pending")
+        if body.decision == "APPROVE":
+            await session.execute(
+                update(DataContractVersion)
+                .where(
+                    DataContractVersion.product_id == contract_version.product_id,
+                    DataContractVersion.status == "PUBLISHED",
+                    DataContractVersion.id != contract_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            contract_version.status = "PUBLISHED"
+            contract_version.approved_by = context.principal_id
+            contract_version.approved_at = now
+            contract_version.published_at = now
+            event_type = (
+                "data_contract.breaking_exception_approved.v1"
+                if review.requested_action == "PUBLISH_BREAKING_EXCEPTION"
+                else "data_contract.published.v1"
+            )
+        else:
+            contract_version.status = "REJECTED"
+            event_type = "data_contract.rejected.v1"
+        aggregate_type = "data_contract_version"
+        aggregate_id = str(contract_version.id)
+        payload = {
+            "data_contract_version_id": str(contract_version.id),
+            "data_product_id": str(contract_version.product_id),
+            "version": contract_version.version,
+            "compatibility_status": contract_version.compatibility_status,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DATA_PRODUCT_ACCESS_REQUEST":
+        access_request = await session.get(DataProductAccessRequest, UUID(review.object_id))
+        if access_request is None or access_request.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        try:
+            approve_access_request(
+                access_request,
+                reviewer=context.principal_id,
+                reason=body.reason,
+                approved=body.decision == "APPROVE",
+                now=now,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        event_type = (
+            "data_product.access_granted.v1"
+            if body.decision == "APPROVE"
+            else "data_product.access_rejected.v1"
+        )
+        aggregate_type = "data_product_access_request"
+        aggregate_id = str(access_request.id)
+        payload = {
+            "access_request_id": str(access_request.id),
+            "data_product_version_id": str(access_request.data_product_version_id),
+            "expires_at": access_request.expires_at.isoformat()
+            if access_request.expires_at is not None
+            else None,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "AI_ASSET":
+        ai_asset = await session.get(AiAsset, UUID(review.object_id))
+        if ai_asset is None or ai_asset.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if ai_asset.lifecycle_status != "ACTIVE":
+            raise HTTPException(status_code=409, detail="AI asset is no longer active")
+        if body.decision == "APPROVE":
+            ai_asset.lifecycle_status = "RETIRED"
+            await session.execute(
+                update(AiAssetVersion)
+                .where(
+                    AiAssetVersion.asset_id == ai_asset.id,
+                    AiAssetVersion.status == "APPROVED",
+                )
+                .values(status="RETIRED", updated_at=now)
+            )
+            event_type = "ai_registry.asset_retired.v1"
+        else:
+            event_type = "ai_registry.asset_retirement_rejected.v1"
+        aggregate_type = "ai_asset"
+        aggregate_id = str(ai_asset.id)
+        payload = {
+            "ai_asset_id": str(ai_asset.id),
+            "asset_kind": ai_asset.asset_kind,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "AI_ASSET_VERSION":
+        ai_version = await session.get(AiAssetVersion, UUID(review.object_id))
+        if ai_version is None or ai_version.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        ai_asset = await session.get(AiAsset, ai_version.asset_id)
+        if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
+            raise HTTPException(status_code=409, detail="AI asset is no longer pending")
+        if body.decision == "APPROVE":
+            await session.execute(
+                update(AiAssetVersion)
+                .where(
+                    AiAssetVersion.asset_id == ai_version.asset_id,
+                    AiAssetVersion.status == "APPROVED",
+                    AiAssetVersion.id != ai_version.id,
+                )
+                .values(status="SUPERSEDED", updated_at=now)
+            )
+            ai_version.status = "APPROVED"
+            ai_version.approved_by = context.principal_id
+            ai_version.approved_at = now
+            event_type = "ai_registry.asset_approved.v1"
+        else:
+            ai_version.status = "REJECTED"
+            event_type = "ai_registry.asset_rejected.v1"
+        aggregate_type = "ai_asset_version"
+        aggregate_id = str(ai_version.id)
+        payload = {
+            "ai_asset_version_id": str(ai_version.id),
+            "ai_asset_id": str(ai_asset.id),
+            "asset_kind": ai_asset.asset_kind,
+            "version": ai_version.version,
             "review_id": str(review.id),
         }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":
@@ -842,6 +1350,51 @@ async def decide_governance_review(
             "confidence": link_proposal.confidence,
             "review_id": str(review.id),
         }
+    elif review.object_type == "TERM_SEMANTIC_BINDING":
+        binding = await session.get(TermSemanticBinding, UUID(review.object_id))
+        if binding is None or binding.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if binding.status != "PENDING_APPROVAL":
+            raise HTTPException(status_code=409, detail="binding is no longer pending review")
+        if body.decision == "APPROVE":
+            binding.status = "ACTIVE"
+            binding.approved_by = context.principal_id
+            binding.approved_at = now
+            event_type = "semantic.term_binding_approved.v1"
+        else:
+            binding.status = "REJECTED"
+            event_type = "semantic.term_binding_rejected.v1"
+        aggregate_type = "term_semantic_binding"
+        aggregate_id = str(binding.id)
+        payload = {
+            "binding_id": str(binding.id),
+            "term_id": str(binding.term_id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "CROSS_BOUNDARY_GRANT":
+        grant = await session.get(CrossBoundaryGrant, UUID(review.object_id))
+        if grant is None or grant.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if grant.status != "PENDING_APPROVAL":
+            raise HTTPException(status_code=409, detail="cross-boundary grant is no longer pending")
+        if body.decision == "APPROVE":
+            grant.status = "ACTIVE"
+            grant.approved_by = context.principal_id
+            grant.approved_at = now
+            event_type = "cross_boundary_grant.approved.v1"
+        else:
+            grant.status = "REJECTED"
+            event_type = "cross_boundary_grant.rejected.v1"
+        aggregate_type = "cross_boundary_grant"
+        aggregate_id = str(grant.id)
+        payload = {
+            "cross_boundary_grant_id": str(grant.id),
+            "source_data_domain_id": str(grant.source_data_domain_id),
+            "target_data_domain_id": str(grant.target_data_domain_id),
+            "review_id": str(review.id),
+        }
     else:
         raise HTTPException(status_code=422, detail="unsupported governance object type")
     audit_context = replace(context, organization_id=review.organization_id)
@@ -863,5 +1416,11 @@ async def decide_governance_review(
         event_type=event_type,
         payload=payload,
     )
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="governance decision conflicted with concurrent state"
+        ) from exc
     return review
