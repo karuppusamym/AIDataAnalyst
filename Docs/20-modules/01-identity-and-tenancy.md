@@ -35,12 +35,25 @@ P4 (rotate a credential without an outage), and the tenancy foundation for every
 ## 5. Domain model
 
 ```text
-organization, legal_entity, line_of_business, data_domain, project
+organization, line_of_business, data_domain, project      # in the schema today
+workspace                                                  # target, ADR-0018
 principal (kind: USER | WORKLOAD | SYSTEM)
 principal_role, role_mapping
 secret_reference (scheme, path, provider, never a value)
 identity_provider_config
 ```
+
+> **`legal_entity` is not part of this model** (corrected 2026-08-30). It appeared here and in
+> ADR-0005 but has never existed in the schema — there is no `LegalEntity` model anywhere in
+> `src/`. ADR-0018 withdraws it rather than deferring it: a legal-entity requirement is served
+> either by an `isolation_boundary` or by a classification attribute, both of which that ADR
+> defines. Two documents previously disagreed in writing about this and about `data_domain`
+> (which *does* exist, with a model and a migration); both are now settled.
+>
+> **Direction of travel (ADR-0018).** `line_of_business` and `data_domain` move off the tenancy
+> path and become `business_node` classification records with many-to-many, effective-dated
+> assignments. The tenancy scope this module enforces becomes `(organization_id, workspace_id)`.
+> Until that migration lands, the four levels above are what the repository base class scopes on.
 
 `identity` is the only schema other modules may hold foreign keys into (ADR-0015).
 

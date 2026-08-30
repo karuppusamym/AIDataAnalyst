@@ -24,11 +24,17 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 ### INV-2 — One execution choke point
 
-**Statement.** No code path reaches a data source except through the Query Execution Gateway. This includes generated SQL, approved tool SQL, profiler SQL, lineage extraction SQL, quality check SQL, and administrator SQL.
+**Statement.** No **SQL statement** reaches a data source except through the Query Execution Gateway. This includes generated SQL, approved tool SQL, lineage extraction SQL, quality check SQL, and administrator SQL.
 
-**Enforcement.** Connector `execute_*` methods are private to the gateway module. The module boundary is compile-time-checked (import linter rule).
+Structural discovery and bounded profiling are the two source-touching paths that do *not* carry a SQL statement: they call `Connector.discover()` and `Connector.profile_table()`, which take structured arguments (schema name, table name, column names, caps) and compose their own statements internally. They cannot be used to run caller-supplied SQL, which is why they sit outside the gateway. This is stated explicitly because the earlier wording — "no code path reaches a data source" — described something the system has never done, and an invariant that is not literally true is worth less than a narrower one that is.
 
-**Test.** `test_no_connector_execution_outside_gateway`: static analysis over the import graph asserts no module outside `query_gateway` imports a connector execution symbol.
+**Enforcement — three independent layers, all live as of 2026-08-30.**
+
+1. **Type system.** `ConnectorRegistry.create` returns `Connector`, which has no SQL-accepting member. The `estimate_read_query` / `execute_read_query` pair lives on `aida.connectors.sql_execution.SqlExecutor`. Calling either on a registry-produced connector is an error under `mypy --strict`, which runs in CI.
+2. **Import graph.** `aida.connectors.execution_access` is the only module that returns a `SqlExecutor`, and the import-linter contract *"INV-2 connector SQL execution is reachable only from the query gateway"* (`pyproject.toml`) permits exactly one importer: `aida.query_gateway`. This is the contract ADR-0004 has always named; it did not exist until 2026-08-30.
+3. **Static scan.** The Tier-0 test below catches a dynamic bypass that neither of the above can see.
+
+**Test.** `test_no_connector_execution_outside_gateway`: walks the AST of every module under `src/aida` and asserts that no module except `query_gateway.py` calls either member of the SQL-accepting surface. Paired with `test_the_connector_handed_to_the_platform_has_no_sql_surface`, which fails if someone moves the methods back onto `Connector` — a change that would leave layers 2 and 3 passing while the type-level guarantee silently disappeared.
 
 ### INV-3 — Model output is never authority
 

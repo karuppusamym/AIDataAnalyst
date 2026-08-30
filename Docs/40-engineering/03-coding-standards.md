@@ -7,13 +7,17 @@
 
 | Tool | Purpose | Gate |
 |---|---|---|
-| `ruff` | Lint + format | Fails CI |
-| `mypy --strict` | Type checking | Fails CI |
-| `import-linter` | Module boundary contracts | Fails CI |
-| `alembic` | Migrations | Single-head check fails CI |
-| `pytest` | Tests | Fails CI |
-| `bandit` / SAST | Security lint | Fails CI on high |
-| `pip-audit` | Dependency vulnerabilities | Fails CI on critical |
+| `ruff` | Lint + format | Fails CI — **wired** (`.github/workflows/ci.yml`, `quality` job) |
+| `mypy --strict` | Type checking | Fails CI — **wired** (`quality` job) |
+| `import-linter` | Module boundary contracts | Fails CI — **wired** (`quality` job); 3 contracts, incl. INV-2 gateway exclusivity |
+| `alembic` | Migrations | Single-head check fails CI — **wired** (`migrations` job) |
+| `pytest` | Tests | Fails CI — **wired** (`tests` job); includes the Tier-0 invariant suite |
+| `bandit` / SAST | Security lint | Fails CI on high — **not wired yet**; tool not in `dev` extras |
+| `pip-audit` | Dependency vulnerabilities | Fails CI on critical — **not wired yet**; tool not in `dev` extras |
+
+CI exists as of 2026-08-30 (`.github/workflows/ci.yml`, tracker ST-02). Before that date this
+table described intent, not behaviour: there was no pipeline at all. The two unwired rows are
+marked rather than removed because they are still the intended gate set — see the gap register.
 
 ## 2. Import-linter contracts
 

@@ -2,6 +2,17 @@
 
 > Status: Authoritative. Owner: Architecture.
 > One spec per bounded context defined in `10-architecture/04-module-decomposition.md`.
+>
+> **These specs describe target bounded contexts, not the current package layout** (stated
+> 2026-08-30). One module directory exists under `src/atlas/modules/` — `identity_tenancy`,
+> 69 lines, labelled "scaffold only" — and every other module's behaviour, where it exists at
+> all, lives in the flat `src/aida/` package. Wherever a spec below refers to
+> `<module>/api.py`, `<module>/repository.py` and so on, it is describing the anatomy that
+> module will have when it is extracted, not a file you can open today. Each spec's §11
+> ("Current state → target") is the section that states what is actually built. Tracker
+> items ST-05/06/07 are the extraction work; ST-02 (CI) and QG-7 (gateway exclusivity) landed
+> 2026-08-30 and are the first boundaries that are now mechanically enforced rather than
+> described.
 
 ## Spec template
 

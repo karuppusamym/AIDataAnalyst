@@ -13,6 +13,94 @@
 
 ---
 
+## 2026-08-30
+
+### Phase 0 — "make the invariants true" (independent architecture review, `Docs/review-2026-08/`)
+
+#### Completed
+
+**Continuous integration now exists** (tracker ST-02, closed). `.github/workflows/ci.yml`
+adds five gates across three jobs: `ruff`, `mypy` (strict), `lint-imports`, an
+exactly-one-Alembic-head guard, and `pytest`. `UV_FROZEN=1` makes a stale `uv.lock` itself a
+failure. Before this date there was no pipeline at all, while `40-engineering/03-coding-standards.md`
+and `30-contracts/01-contract-strategy.md` both stated that checks "fail CI."
+
+*Verified*, in a clean checkout outside the working tree, using the exact CI recipe
+(`uv sync --frozen --extra dev`): ruff clean; mypy clean across 106 source files; 3 import
+contracts kept, 0 broken; 1 Alembic head (`e6d5b8c6bcef`); **387 tests passing**.
+
+**INV-2 gateway exclusivity is now enforced rather than asserted** (tracker QG-7, closed;
+ADR-0004's named mechanism, outstanding since that ADR was accepted). The SQL-accepting pair
+`estimate_read_query` / `execute_read_query` was moved off the `Connector` ABC onto a new
+`aida.connectors.sql_execution.SqlExecutor`. `ConnectorRegistry.create` still returns
+`Connector`, which now has no SQL-accepting member. `aida.connectors.execution_access` is the
+sole source of a `SqlExecutor`, and the import-linter contract *"INV-2 connector SQL execution
+is reachable only from the query gateway"* permits exactly one importer.
+
+*Verified by making it fail, not only by making it pass:*
+
+- Adding `from aida.connectors.execution_access import ...` to `aida.api` breaks the contract:
+  `Illegal imports of protected package aida.connectors.execution_access: aida.api -> ... (l.22)`.
+- Calling `connector.execute_read_query(...)` on a registry-produced connector is rejected by
+  mypy: `"Connector" has no attribute "execute_read_query" [attr-defined]`.
+- Both probes were reverted; the tree is clean.
+
+The Tier-0 AST scan (`test_no_connector_execution_outside_gateway`) was widened to cover
+`estimate_read_query` as well — it takes a caller-supplied statement exactly as
+`execute_read_query` does — and a new test,
+`test_the_connector_handed_to_the_platform_has_no_sql_surface`, fails if the methods are ever
+moved back onto `Connector`, a change that would leave the import contract and the AST scan
+passing while the type-level guarantee silently disappeared.
+
+**The `09` ↔ `16` import cycle does not exist** (tracker ST-11, closed). Checked against the
+code before redesigning anything: `query_gateway.py` imports no lineage module, no lineage
+module imports the gateway, and `extract_column_lineage` is defined inside `query_gateway.py`
+and called only there. The mutual edge was an error in the module register in
+`10-architecture/04-module-decomposition.md` §3/§4, not a property of the import graph. Rule
+recorded: **the gateway emits, intelligence modules consume.** No layer diagram redraw needed.
+
+**Pre-existing gate failures fixed so CI is green on its first run** rather than red on
+arrival: 6 ruff errors (4 × E501, 2 × unsorted imports) and 2 mypy errors.
+
+#### Found while doing the above
+
+- **`PyYAML` was an undeclared dependency.** `src/aida/context_compiler.py` imports `yaml`;
+  nothing in `pyproject.toml` declared it, and it resolved only transitively. Now declared
+  (`PyYAML==6.0.3`) with `types-PyYAML` in the dev extra. `uv.lock` regenerated — it had also
+  been missing the dev extras entirely, so `import-linter` was not in the lockfile.
+- **`domain_service.resolve_domain` returned `DataDomain | None` against a `DataDomain`
+  annotation.** An unresolvable `data_domain_id` returned `None` for callers to dereference.
+  Now raises (INV-4, fail closed) rather than returning a value the type says cannot occur.
+
+#### Known limitations — explicitly still open
+
+- `bandit`/SAST and `pip-audit` are named as CI gates in `03-coding-standards.md` and are
+  **not wired**; the tools are not in the `dev` extras. Marked as such in that table.
+- The import-linter contracts cover three narrow, real invariants. There is still **no layering
+  or independence contract over the flat `aida` package** — that lands with decomposition
+  (ST-05/06/07), all of which remain TODO.
+- CI has never actually run: this workflow file has not yet been pushed to a remote. The recipe
+  was verified locally in a clean checkout, which is not the same as a green run on GitHub.
+- Five of the nine Tier-0 invariant tests remain unformalised (INV-1, 5, 6, 7, 9), for the
+  reasons the test module's own docstring gives. Unchanged by this work.
+- Every operational drill remains **never run**. Unchanged by this work.
+
+### Decisions
+
+**ADR-0018 accepted; ADR-0017 superseded before acceptance.** Access, classification and
+technical hierarchies are modelled as three independent axes, and only access grants. Tenancy
+becomes `organization → workspace`; `line_of_business` and `data_domain` become effective-dated
+`business_node` classification records with many-to-many assignments; policy becomes
+attribute-based and keys on classification. `legal_entity` is withdrawn rather than deferred —
+it has never existed in the schema. ADR-0017's `cross_boundary_grant` mechanism is retained.
+
+The triggering argument is ADR-0017's own recorded reversal condition — *"domain taxonomy turns
+out not to nest cleanly (a table genuinely needs two sibling domains)"* — which is structurally
+met in a bank estate rather than being a future risk. **No migration code has been written; the
+schema is unchanged.**
+
+---
+
 ## 2026-08-24
 
 ### Completed

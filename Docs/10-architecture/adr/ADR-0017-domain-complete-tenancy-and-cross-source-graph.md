@@ -1,6 +1,14 @@
 # ADR-0017 — Domain-Complete Tenancy and Boundary-Aware Cross-Source Graph Traversal
 
-**Status:** Proposed | **Date:** 2026-08-29 | **Owner:** Architecture
+**Status:** Superseded by [ADR-0018](ADR-0018-three-axis-tenancy-and-classification.md) | **Date:** 2026-08-29 | **Superseded:** 2026-08-30 | **Owner:** Architecture
+
+> **Superseded before acceptance.** This ADR's own reversal condition — *"domain taxonomy turns
+> out not to nest cleanly (a table genuinely needs two sibling domains)"* — is structurally met
+> in a bank estate: a `customer` table belongs to both Retail Banking and Financial Crime. ADR-0018
+> keeps this ADR's two real goals (cross-source traversal, cross-source relationship inference, and
+> the `cross_boundary_grant` mechanism, which it retains) but reaches them by separating
+> classification from tenancy rather than by deepening the tenancy path. The context and problem
+> statement below remain accurate and worth reading; the proposed solution does not.
 
 ## Context
 

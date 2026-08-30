@@ -68,7 +68,7 @@ Docs/
 | [01 Principles and invariants](10-architecture/01-principles-and-invariants.md) | **Nine invariants, each with an enforcement point and a test** |
 | [02 System context](10-architecture/02-system-context.md) | Boundary crossings and their trust posture |
 | [03 Logical architecture](10-architecture/03-logical-architecture.md) | Five layers, two primary flows, the latency budget |
-| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — 21 modules and their enforced boundaries |
+| [04 Module decomposition](10-architecture/04-module-decomposition.md) | **The anti-monolith document** — the 21-module target and its boundaries. **Target, not current state:** 1 of 21 modules exists under `src/atlas/modules/` and it is a scaffold; the working code is still the flat `src/aida/` package. Read alongside the tracker's section A |
 | [05 Service extraction plan](10-architecture/05-service-extraction-plan.md) | Why not microservices yet, and the triggers that change that |
 | [06 Data architecture](10-architecture/06-data-architecture.md) | Stores, entities, versioning, projection, retention, partitioning |
 | [07 Event and messaging model](10-architecture/07-event-and-messaging-model.md) | Temporal vs. Kafka, the outbox, envelope, topics |
@@ -77,7 +77,7 @@ Docs/
 | [10 Performance and scale model](10-architecture/10-performance-and-scale-model.md) | Every target, its test, and its current measurement status |
 | [11 Capacity and cost model](10-architecture/11-capacity-and-cost-model.md) | Workload isolation, sizing tiers, backpressure, cost governance, metrics |
 | [12 Runtime sequences](10-architecture/12-runtime-sequences.md) | How the modules compose at runtime, end to end |
-| [ADR register](10-architecture/adr/README.md) | Sixteen accepted decisions |
+| [ADR register](10-architecture/adr/README.md) | Seventeen accepted decisions, one superseded (0017 → 0018) |
 
 ### 20-modules — The bounded contexts
 

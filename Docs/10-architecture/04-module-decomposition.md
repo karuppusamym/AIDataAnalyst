@@ -140,7 +140,28 @@ These two are the *only* upward-callable modules, and both are append-or-decide-
 
 These live in `pyproject.toml` and fail CI. See `40-engineering/03-coding-standards.md`.
 
-## 5.3 Known tension: `16 query-gateway`'s layer placement (unresolved, flagged 2026-08-29)
+## 5.3 Resolved: `16 query-gateway`'s layer placement and the `09`↔`16` cycle
+
+**Resolved 2026-08-30 (tracker ST-11).** Verified against the code before deciding: there is
+no cycle, and there never was one. `src/aida/query_gateway.py` imports no lineage module, and
+no lineage module (`unified_lineage.py`, `lineage_cache.py`, `lineage_graph_store.py`,
+`openlineage.py`) imports the gateway. `extract_column_lineage` — the function that made the
+relationship look bidirectional — is defined *inside* `query_gateway.py` and is called only
+there. The mutual edge existed in the register table below, not in the import graph.
+
+**The rule, stated once:** the gateway **emits**; intelligence modules **consume**. A module
+that wants lineage from an executed query reads the event the gateway wrote; it does not call
+the gateway. A module that wants a profile enqueues a profiling task; it does not call the
+gateway either. There is one direction, and it is mechanically checkable the moment the
+layers contract lands.
+
+The register's "may call" column for `05 profiling`, `09 lineage` and `11 data-quality` was
+therefore wrong rather than the layering rule being wrong: those modules do not need to call
+L3 at all, so no redrawing of the layer diagram is required and the second option below is
+the one that was correct. Corrected in §3/§4.
+
+<details>
+<summary>Original text of this section, retained for the record (flagged 2026-08-29, resolved 2026-08-30)</summary>
 
 Three L2 modules list `16 query-gateway` (L3) in their "may call" column: `05 profiling`,
 `09 lineage`, and `11 data-quality` (§3, §4). That's an L2-importing-L3 edge, which contradicts
@@ -162,6 +183,8 @@ can be cut into separate modules with an import-linter layers contract that actu
 
 Either way, `09`↔`16`'s mutual edge needs one direction picked as authoritative before those two
 modules are extracted — see tracker ST-11.
+
+</details>
 
 ## 6. Database schema ownership
 

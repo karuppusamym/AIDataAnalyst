@@ -65,7 +65,7 @@
 
 | Test area | Local result | Required next run |
 |---|---|---|
-| Static quality | Ruff and strict mypy clean | CI on every change |
+| Static quality | Ruff clean, strict mypy clean (106 files), 3 import contracts kept, 1 Alembic head, 387 tests passing — verified 2026-08-30 in a clean checkout using the CI recipe | CI on every change — **now wired** (`.github/workflows/ci.yml`, ST-02). Not yet observed running on a remote |
 | Unit / contract suite | 121 tests passing — SQL Server and canonical/chunk contract validation, stable checksums, sequence/duplicate rejection, scope counting, quality, prompt-risk, graph, business inference, model, dbt, OIDC, secret, lineage, tool-first, evaluation controls | Add database concurrency/race tests, forced mid-batch restart, incident concurrency, JWKS outage, indirect prompt attacks, bank-domain benchmarks |
 | Database migrations | Alembic head `9e4c7a12b5f8`, single head, applied locally | Upgrade/rollback rehearsal on production-like data |
 | End-to-end banking fixture | R20/R21/R22 real API/Temporal/PostgreSQL runs proved manifest/chunk replay, conflicting-content denial, cross-chunk FK resolution, exact scope counts, physical payload cleanup, live SQL Server discovery/profiling/SHOWPLAN/masking | FULL retirement/recovery and concurrent forced-restart fixtures; Kafka intake; maximum-scale load; remaining connectors; approved-provider certification; interactive visual/accessibility certification |
