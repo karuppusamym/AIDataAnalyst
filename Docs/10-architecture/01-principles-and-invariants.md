@@ -57,7 +57,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Model gateway returns typed, validated proposal objects only. Proposal types are structurally distinct from command types; there is no conversion function.
 
-**Test.** `test_model_output_types_are_inert`: assert no proposal type implements or can be coerced to an executable command interface.
+**Test — Built.** `test_model_output_types_are_inert` (`tests/test_tier0_invariants.py`): asserts no proposal type implements or can be coerced to an executable command interface.
 
 ### INV-4 — Fail closed
 
@@ -110,7 +110,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** A single platform-level approval service; feature modules cannot implement their own approval.
 
-**Test.** `test_self_approval_denied`: for every governed object type, attempt self-approval and assert denial.
+**Test — Built.** `test_self_approval_denied` (`tests/test_tier0_invariants.py`): parameterized over every governed object type `decide_governance_review` handles, attempts self-approval and asserts denial.
 
 ### INV-9 — Honest capability reporting
 

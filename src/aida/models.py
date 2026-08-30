@@ -1868,8 +1868,31 @@ class OwnershipRule(Base, TimestampMixin):
 
 
 class AssetCertification(Base, TimestampMixin):
+    """CT-5: certification of a catalog asset, with expiry enforced at query time.
+
+    Originally table-only (GL-5's reviewed bulk table certification). ``asset_type``
+    and ``column_id`` make certification first-class for columns too -- module 04's
+    scale note names column as the dominant catalog entity (30x the table count) --
+    while ``table_id`` stays populated for both, so "every certification under this
+    table" is always a single indexed lookup. A row's ``status`` staying "ACTIVE"
+    past its ``expires_at`` is expected (certification history is retained evidence,
+    never mutated by a clock); ``aida.asset_certification.asset_certification_is_active``
+    is the query-time projection that actually enforces expiry, mirroring
+    ``aida.tool_certification.certification_is_active`` for tool version certification.
+    """
+
     __tablename__ = "asset_certification"
-    __table_args__ = (Index("ix_asset_certification_org_status", "organization_id", "status"),)
+    __table_args__ = (
+        Index("ix_asset_certification_org_status", "organization_id", "status"),
+        CheckConstraint(
+            "asset_type IN ('TABLE', 'COLUMN')", name="ck_asset_certification_asset_type"
+        ),
+        CheckConstraint(
+            "(asset_type = 'TABLE' AND column_id IS NULL) OR "
+            "(asset_type = 'COLUMN' AND column_id IS NOT NULL)",
+            name="ck_asset_certification_column_consistency",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -1878,6 +1901,10 @@ class AssetCertification(Base, TimestampMixin):
     table_id: Mapped[UUID] = mapped_column(
         ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
+    )
+    asset_type: Mapped[str] = mapped_column(String(20), default="TABLE", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
     certified_by: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -2499,6 +2526,10 @@ class ContextProductVersion(Base, TimestampMixin):
             "'REJECTED', 'DEPRECATION_REVIEW', 'DEPRECATED')",
             name="ck_context_product_version_status",
         ),
+        CheckConstraint(
+            "owner_type IN ('INDIVIDUAL', 'GROUP')",
+            name="ck_context_product_version_owner_type",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2513,6 +2544,7 @@ class ContextProductVersion(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
+    owner_type: Mapped[str] = mapped_column(String(20), default="INDIVIDUAL", nullable=False)
     owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
     table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     semantic_model_version_ids: Mapped[list[str]] = mapped_column(
