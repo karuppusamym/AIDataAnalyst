@@ -9,7 +9,11 @@
 >
 > * The platform emits **~55 event types, all suffixed `.v1`** — e.g.
 >   `datasource.registered.v1`, `metadata.discovery.snapshot.v1`, `query.execution.completed.v1`,
->   `context.product_consumed.v1`, `relationship_candidate.decided.v1`,
+>   `context.product_consumed.v1`, `relationship_candidate.approved.v1` /
+>   `relationship_candidate.rejected.v1` (RL-4, 2026-08-30: split from a single
+>   `relationship_candidate.decided.v1` because the graph projector already listened for
+>   these two distinct names and they never matched — decided candidates were silently
+>   never projected to Neo4j),
 >   `governance.review_requested.v1`, `workspace.created.v1`.
 > * **Most rows below match nothing in the code.** Spot-checked and absent:
 >   `principal.created`, `tenant.created`, `ingestion.delivered`, `catalog.object.created`,
