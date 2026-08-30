@@ -1,7 +1,11 @@
-from contextvars import ContextVar
+"""Backward-compatible re-export.
 
-correlation_id_var: ContextVar[str] = ContextVar("correlation_id", default="unknown")
+Canonical location: `atlas.platform.context` (tracker ST-04, Phase 1 of
+`Docs/40-engineering/06-refactor-plan.md`). Every existing
+`from aida.context import ...` caller keeps working unchanged; new code
+should import from `atlas.platform.context` directly.
+"""
 
+from atlas.platform.context import correlation_id_var, get_correlation_id
 
-def get_correlation_id() -> str:
-    return correlation_id_var.get()
+__all__ = ["correlation_id_var", "get_correlation_id"]

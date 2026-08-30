@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.model_gateway import (
     ApprovedModelRoute,
@@ -27,7 +28,6 @@ from aida.models import (
 )
 
 SEMANTIC_INFERENCE_VERSION = "business-semantics-v1"
-SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"})
 TableRole = Literal[
     "FACT",
     "DIMENSION",

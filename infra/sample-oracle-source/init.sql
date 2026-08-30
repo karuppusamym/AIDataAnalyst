@@ -1,5 +1,13 @@
--- Executed by the gvenzl/oracle-free image's /container-entrypoint-initdb.d hook on
--- first container start, connected as SYS against the FREEPDB1 pluggable database.
+-- Executed by the sample-oracle-source-init sidecar service in compose.yaml, via
+-- sqlplus connecting as SYS over the network to sample-oracle-source's FREEPDB1
+-- pluggable database. NOT run through the image's /container-entrypoint-initdb.d
+-- hook: gvenzl/oracle-free ships FREEPDB1 pre-baked into its seed data, so the
+-- container's own first-boot "CREATE PLUGGABLE DATABASE FREEPDB1" step always
+-- raises ORA-65012 (already exists); its recovery restart treats the database as
+-- already initialized and skips /container-entrypoint-initdb.d entirely, so a
+-- mounted init script there silently never runs. This sidecar retries the
+-- connection until the listener is accepting queries, then always applies this
+-- script directly, independent of that quirk.
 -- Creates two schema-owner users (retail, risk) plus a read-only "source" user that
 -- mirrors the credential the SqlServer/Postgres fixtures use, so AIDA_SAMPLE_ORACLE_SOURCE_DSN
 -- authenticates as a least-privilege reader rather than a schema owner.
@@ -15,7 +23,7 @@ ALTER USER risk QUOTA UNLIMITED ON USERS;
 CREATE USER source IDENTIFIED BY "source-local-only";
 GRANT CREATE SESSION TO source;
 
-CONNECT retail/"Retail-Local-Only1"@//localhost:1521/FREEPDB1
+CONNECT retail/"Retail-Local-Only1"@//sample-oracle-source:1521/FREEPDB1
 
 CREATE TABLE retail.customer (
     customer_id NUMBER PRIMARY KEY,
@@ -66,7 +74,7 @@ GRANT REFERENCES ON retail.customer TO risk;
 
 COMMIT;
 
-CONNECT risk/"Risk-Local-Only1"@//localhost:1521/FREEPDB1
+CONNECT risk/"Risk-Local-Only1"@//sample-oracle-source:1521/FREEPDB1
 
 CREATE TABLE risk.customer_risk_snapshot (
     customer_id NUMBER NOT NULL REFERENCES retail.customer(customer_id),

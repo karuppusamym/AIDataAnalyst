@@ -1,17 +1,22 @@
 import hashlib
 import hmac
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp, parse_one
 
+from aida.authorization_gate import AuthorizationDenied, gate
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
-from aida.connectors.registry import connector_registry
+from aida.connectors.execution_access import open_execution_session
+from aida.connectors.sql_execution import SqlExecutor
 from aida.events import record_audit, record_outbox
 from aida.models import (
     DataSource,
@@ -24,14 +29,47 @@ from aida.models import (
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.sql_guard import SqlGuard
-
-SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"})
+from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
+from aida.sql_validation import (
+    EstimateOutcome,
+    SqlFinding,
+    SqlValidationReport,
+    build_report,
+    findings_from_catalog,
+    findings_from_columns,
+    findings_from_estimate,
+    findings_from_guard,
+    locally_defined_names,
+    resolve_column_references,
+    row_limit_finding,
+)
 
 
 class QueryRejected(RuntimeError):
     def __init__(self, message: str) -> None:
         super().__init__(message)
         self.execution_id: Any | None = None
+
+
+class AuthorizationRejected(QueryRejected):
+    """An authorization refusal, shaped as a rejection so no caller has to change.
+
+    A subclass rather than a separate exception on purpose. Every caller of the
+    gateway -- the agent orchestrator, the MCP tool surface, two HTTP handlers --
+    already knows how to record a `QueryRejected`, with the execution id, the failure
+    reason and the run status handling that goes with it. Introducing a sibling type
+    would mean each of those either grows a second branch or silently lets an
+    authorization denial escape as a 500, and the second outcome is the one that
+    happens to whichever caller is overlooked.
+
+    Handlers that want the correct HTTP status catch this *before* `QueryRejected`
+    and answer 403; the ones that do not are still correct, just less specific.
+    """
+
+    def __init__(self, reason_code: str, *, workspace_id: UUID | None = None) -> None:
+        super().__init__(f"AUTHORIZATION_DENIED:{reason_code}")
+        self.reason_code = reason_code
+        self.workspace_id = workspace_id
 
 
 def sensitive_projection_names(
@@ -51,12 +89,25 @@ def sensitive_projection_names(
 
 
 def redact_sql_literals(sql: str, *, dialect: str) -> str:
-    """Create an evidence-safe SQL representation without user/source literal values."""
-    statement = parse_one(sql, read=dialect)
-    redacted = statement.transform(
-        lambda node: exp.Placeholder(this="redacted") if isinstance(node, exp.Literal) else node
-    )
-    return redacted.sql(dialect=dialect, pretty=True)
+    """Create an evidence-safe SQL representation without user/source literal values.
+
+    Re-exported from `aida.sql_redaction`, where the implementation now lives so the
+    ingestion path can use it without importing runtime code (an L1-imports-L3 edge).
+    Kept as a name here because existing callers and tests reference it.
+    """
+    return _redact_sql_literals(sql, dialect=dialect)
+
+
+def audit_sql_hash(key: str, sql: str) -> str:
+    """HMAC-SHA256 the raw SQL text under the configured audit key.
+
+    Keyed (not a bare hash) so the digest is both tamper-evident and
+    unforgeable without the server's ``audit_hmac_key``: an attacker who can
+    read a stored execution record still cannot mint a matching hash for
+    different SQL, and the digest changes if the recorded SQL is altered
+    after the fact.
+    """
+    return hmac.new(key.encode("utf-8"), sql.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def extract_column_lineage(sql: str, *, dialect: str) -> list[dict[str, Any]]:
@@ -146,6 +197,23 @@ class GatewayResult:
     masked_columns: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidationOutcome:
+    """The private result of one validation pass.
+
+    `report` is value-free and safe to return to a caller. `executable_sql` is
+    the guard-normalised statement with its literals *intact* -- it is the thing
+    that would actually run, so it never leaves the gateway; the report carries
+    the redacted form instead. `executor` is the already-opened connector, held
+    so that `execute` costs and runs against the same session it validated
+    against rather than opening a second one.
+    """
+
+    report: SqlValidationReport
+    executable_sql: str | None
+    executor: SqlExecutor | None
+
+
 class QueryExecutionGateway:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -183,6 +251,254 @@ class QueryExecutionGateway:
         allowed.update(name for name, count in unqualified_counts.items() if count == 1)
         return allowed
 
+    async def _catalog_columns(
+        self,
+        session: AsyncSession,
+        datasource: DataSource,
+        referenced_tables: Sequence[str],
+    ) -> dict[str, frozenset[str]]:
+        """Active column names for the referenced tables, keyed the way SQL names them.
+
+        Same catalog binding, tenancy filter and ACTIVE-only rule as
+        `allowed_tables`, and keyed with the same qualified/unqualified variants,
+        so a name that authorises as a table resolves as a table here too. The
+        query is bounded by the statement's own table list rather than loading
+        the datasource's whole column catalog.
+        """
+        leaf_names = {table.rsplit(".", 1)[-1].lower() for table in referenced_tables}
+        if not leaf_names:
+            return {}
+        rows = (
+            await session.execute(
+                select(
+                    MetadataCatalog.name,
+                    MetadataSchema.name,
+                    MetadataTable.name,
+                    MetadataColumn.name,
+                )
+                .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+                .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+                .join(MetadataColumn, MetadataColumn.table_id == MetadataTable.id)
+                .where(
+                    MetadataCatalog.datasource_id == datasource.id,
+                    MetadataTable.organization_id == datasource.organization_id,
+                    MetadataTable.status == "ACTIVE",
+                    MetadataColumn.organization_id == datasource.organization_id,
+                    MetadataColumn.status == "ACTIVE",
+                    func.lower(MetadataTable.name).in_(leaf_names),
+                )
+            )
+        ).all()
+        by_qualified: dict[str, set[str]] = {}
+        qualified_by_leaf: dict[str, set[str]] = {}
+        for catalog_name, schema_name, table_name, column_name in rows:
+            schema_table = f"{schema_name}.{table_name}".lower()
+            catalog_table = f"{catalog_name}.{schema_name}.{table_name}".lower()
+            for key in (schema_table, catalog_table):
+                by_qualified.setdefault(key, set()).add(column_name.lower())
+            qualified_by_leaf.setdefault(table_name.lower(), set()).add(catalog_table)
+        for leaf, qualified in qualified_by_leaf.items():
+            # An unqualified name is only resolvable when it is unambiguous --
+            # the same rule `allowed_tables` applies.
+            if len(qualified) == 1:
+                by_qualified[leaf] = set(by_qualified[next(iter(qualified))])
+        return {name: frozenset(values) for name, values in by_qualified.items()}
+
+    async def _run_validation(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        sql: str,
+        requested_limit: int | None,
+    ) -> _ValidationOutcome:
+        """The one deterministic validation pipeline (review item N14).
+
+        Both `validate` and `execute` come through here, which is the whole
+        point: a rule that would refuse a statement at execution time is a rule
+        an agent can see beforehand, and the two can never disagree because
+        there is only one implementation.
+
+        The phases short-circuit exactly as `execute` always has: the source is
+        contacted for a dry-run estimate only once the statement has passed the
+        guard and every referenced object has resolved and authorised. A bad
+        statement never reaches the warehouse.
+
+        INV-2: the only connector call reachable from here is
+        `estimate_read_query`. Execution stays in `execute`.
+        """
+        dialect = datasource.dialect
+        guard_result = self.guard.validate(sql, dialect=dialect, requested_limit=requested_limit)
+        findings: list[SqlFinding] = findings_from_guard(guard_result)
+        limit_finding = row_limit_finding(
+            guard_result,
+            requested_limit=requested_limit,
+            default_row_limit=self.settings.default_query_row_limit,
+            hard_row_limit=self.settings.hard_query_row_limit,
+        )
+        if limit_finding is not None:
+            findings.append(limit_finding)
+
+        normalized_sql = guard_result.normalized_sql
+        redacted_sql = (
+            redact_sql_literals(normalized_sql, dialect=dialect) if normalized_sql else None
+        )
+        column_lineage = (
+            extract_column_lineage(normalized_sql, dialect=dialect) if normalized_sql else []
+        )
+
+        estimate_outcome: EstimateOutcome | None = None
+        executor: SqlExecutor | None = None
+
+        def blocked() -> bool:
+            return any(finding.blocking for finding in findings)
+
+        if normalized_sql is not None and not blocked():
+            allowed_tables = await self.allowed_tables(session, datasource)
+            findings.extend(
+                findings_from_catalog(
+                    referenced_tables=guard_result.referenced_tables,
+                    allowed_tables=allowed_tables,
+                )
+            )
+            catalog_columns = await self._catalog_columns(
+                session, datasource, guard_result.referenced_tables
+            )
+            findings.extend(
+                findings_from_columns(
+                    resolve_column_references(normalized_sql, dialect=dialect),
+                    catalog_columns=catalog_columns,
+                    local_names=locally_defined_names(normalized_sql, dialect=dialect),
+                )
+            )
+
+        if normalized_sql is not None and not blocked():
+            dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
+            executor = open_execution_session(datasource.connector_type, dsn)
+            if not executor.capabilities.explain:
+                estimate_outcome = EstimateOutcome(supported=False)
+            else:
+                estimate = await executor.estimate_read_query(
+                    normalized_sql,
+                    timeout_seconds=self.settings.query_timeout_seconds,
+                )
+                # Mirrors `gate_query_estimate`'s structural branch selection so
+                # the finding names the budget that actually applied.
+                byte_shaped = estimate.estimated_bytes is not None
+                plan_cost, rejection_reason = gate_query_estimate(estimate, self.settings)
+                estimate_outcome = EstimateOutcome(
+                    supported=True,
+                    plan_cost=plan_cost,
+                    limit=(
+                        self.settings.max_query_estimate_bytes
+                        if byte_shaped
+                        else self.settings.max_query_estimate_cost
+                    ),
+                    over_budget=rejection_reason is not None,
+                    byte_shaped=byte_shaped,
+                    kind=estimate.kind,
+                    estimated_rows=estimate.estimated_rows,
+                    estimated_bytes=estimate.estimated_bytes,
+                )
+            findings.extend(findings_from_estimate(estimate_outcome))
+
+        report = build_report(
+            dialect=dialect,
+            guard_result=guard_result,
+            findings=findings,
+            redacted_sql=redacted_sql,
+            column_lineage=column_lineage,
+            estimate=estimate_outcome,
+        )
+        return _ValidationOutcome(
+            report=report,
+            executable_sql=normalized_sql,
+            executor=executor,
+        )
+
+    async def validate(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        context: SecurityContext,
+        correlation_id: str,
+        sql: str,
+        requested_limit: int | None,
+        workspace_id: UUID | None = None,
+    ) -> SqlValidationReport:
+        """Run the full deterministic pipeline and return findings, without executing.
+
+        The audit trail records the attempt under its own action
+        (`query.validate.gateway`) rather than writing a `QueryExecution` row: a
+        validation is not an execution, and marking one as such would corrupt
+        the execution ledger every operational metric is computed from. See
+        `Docs/review-2026-08/gap/05-validate-sql-handoff.md` for the schema
+        change that would be needed to persist validations as first-class rows,
+        which is deliberately not made here.
+
+        Authorized as `READ_METADATA` rather than `READ_DATA`, and that distinction
+        is real rather than cosmetic: validation returns findings, table names and a
+        cost estimate, never a row. Gating it at the same level as execution would
+        make the iterate-against-the-compiler loop unavailable to a `viewer`, who is
+        exactly the principal who should be allowed to find out that a statement is
+        wrong without being allowed to run it.
+        """
+        try:
+            await gate(
+                session,
+                context,
+                settings=self.settings,
+                action="READ_METADATA",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                workspace_id=workspace_id,
+                datasource_id=datasource.id,
+            )
+        except AuthorizationDenied as exc:
+            record_audit(
+                session,
+                context,
+                action="query.validate.gateway",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                outcome="DENIED",
+                correlation_id=correlation_id,
+                details={"reason": exc.reason_code, "executed": False},
+            )
+            await session.commit()
+            raise AuthorizationRejected(
+                exc.reason_code, workspace_id=exc.workspace_id
+            ) from exc
+        outcome = await self._run_validation(
+            session,
+            datasource=datasource,
+            sql=sql,
+            requested_limit=requested_limit,
+        )
+        report = outcome.report
+        record_audit(
+            session,
+            context,
+            action="query.validate.gateway",
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            outcome="SUCCESS" if report.valid else "DENIED",
+            correlation_id=correlation_id,
+            details={
+                "dialect": datasource.dialect,
+                "sql_hash": audit_sql_hash(self.settings.audit_hmac_key, sql),
+                "referenced_tables": list(report.referenced_tables),
+                "referenced_column_count": len(report.referenced_columns),
+                "finding_codes": list(report.codes()),
+                "applied_row_limit": report.applied_row_limit,
+                "plan_cost": report.plan_cost,
+                "executed": False,
+            },
+        )
+        await session.commit()
+        return report
+
     async def _sensitive_output_names(
         self,
         session: AsyncSession,
@@ -219,17 +535,14 @@ class QueryExecutionGateway:
         sql: str,
         requested_limit: int | None,
         semantic_version: str | None,
+        workspace_id: UUID | None = None,
     ) -> GatewayResult:
         execution = QueryExecution(
             organization_id=datasource.organization_id,
             datasource_id=datasource.id,
             principal_id=context.principal_id,
             dialect=datasource.dialect,
-            sql_hash=hmac.new(
-                self.settings.audit_hmac_key.encode("utf-8"),
-                sql.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest(),
+            sql_hash=audit_sql_hash(self.settings.audit_hmac_key, sql),
             semantic_version=semantic_version,
         )
         session.add(execution)
@@ -247,57 +560,62 @@ class QueryExecutionGateway:
 
         started = perf_counter()
         try:
-            validation = self.guard.validate(
-                sql,
-                dialect=datasource.dialect,
+            # Authorization runs *after* the execution row and its `requested` audit
+            # entry exist, and before anything reaches a connector. Recording first is
+            # what makes a refusal attributable (INV-7): a denied attempt leaves a
+            # REJECTED row naming who asked and why it was refused, which is the
+            # evidence an investigation needs and which gating before the record would
+            # throw away. Nothing has left the platform at this point -- the connector
+            # is opened inside `_run_validation`, below.
+            try:
+                await gate(
+                    session,
+                    context,
+                    settings=self.settings,
+                    action="READ_DATA",
+                    resource_type="datasource",
+                    resource_id=str(datasource.id),
+                    workspace_id=workspace_id,
+                    datasource_id=datasource.id,
+                )
+            except AuthorizationDenied as exc:
+                raise AuthorizationRejected(
+                    exc.reason_code, workspace_id=exc.workspace_id
+                ) from exc
+            # One validation pipeline, two entry points (review item N14): this is
+            # the identical call `validate` makes, so a statement an agent was told
+            # is valid is a statement this path will accept, and a rule that fires
+            # here is a rule the agent could have seen first.
+            outcome = await self._run_validation(
+                session,
+                datasource=datasource,
+                sql=sql,
                 requested_limit=requested_limit,
             )
-            execution.normalized_sql = (
-                redact_sql_literals(validation.normalized_sql, dialect=datasource.dialect)
-                if validation.normalized_sql
-                else None
-            )
-            execution.referenced_tables = list(validation.referenced_tables)
-            execution.referenced_columns = list(validation.referenced_columns)
-            execution.column_lineage = (
-                extract_column_lineage(validation.normalized_sql, dialect=datasource.dialect)
-                if validation.normalized_sql
-                else []
-            )
-            if not validation.valid or not validation.normalized_sql:
-                raise QueryRejected(", ".join(validation.violations))
-
-            allowed_tables = await self.allowed_tables(session, datasource)
-            unauthorized = sorted(
-                table
-                for table in validation.referenced_tables
-                if table.lower() not in allowed_tables
-            )
-            if unauthorized:
-                raise QueryRejected(f"UNKNOWN_OR_UNAUTHORIZED_TABLES: {', '.join(unauthorized)}")
-
-            dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
-            connector = connector_registry.create(datasource.connector_type, dsn)
-            if not connector.capabilities.explain:
+            report = outcome.report
+            execution.normalized_sql = report.normalized_sql
+            execution.referenced_tables = list(report.referenced_tables)
+            execution.referenced_columns = list(report.referenced_columns)
+            execution.column_lineage = [dict(item) for item in report.column_lineage]
+            if report.plan_cost is not None:
+                execution.plan_cost = report.plan_cost
+                execution.status = "COSTED"
+            if not report.valid or outcome.executable_sql is None:
+                raise QueryRejected(report.rejection_reason() or "QUERY_REJECTED")
+            if outcome.executor is None:  # pragma: no cover - defensive
                 raise QueryRejected("QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR")
-            estimate = await connector.estimate_read_query(
-                validation.normalized_sql,
-                timeout_seconds=self.settings.query_timeout_seconds,
-            )
-            plan_cost, rejection_reason = gate_query_estimate(estimate, self.settings)
-            execution.plan_cost = plan_cost
-            execution.status = "COSTED"
-            if rejection_reason is not None:
-                raise QueryRejected(rejection_reason)
 
+            estimate_kind = report.estimate_kind
+            plan_cost = report.plan_cost
+            connector = outcome.executor
             source_result = await connector.execute_read_query(
-                validation.normalized_sql,
+                outcome.executable_sql,
                 timeout_seconds=self.settings.query_timeout_seconds,
             )
             sensitive_names = await self._sensitive_output_names(
                 session,
                 datasource,
-                validation.normalized_sql,
+                outcome.executable_sql,
             )
             masked_columns = sorted(
                 {key for row in source_result.rows for key in row if key.lower() in sensitive_names}
@@ -322,15 +640,16 @@ class QueryExecutionGateway:
                 outcome="SUCCESS",
                 correlation_id=correlation_id,
                 details={
-                    "tables": list(validation.referenced_tables),
-                    "referenced_column_count": len(validation.referenced_columns),
+                    "tables": list(report.referenced_tables),
+                    "referenced_column_count": len(report.referenced_columns),
                     "lineage_output_count": len(execution.column_lineage),
                     "row_count": len(rows),
                     "masked_columns": masked_columns,
                     "plan_cost": plan_cost,
-                    "estimate_kind": estimate.kind,
-                    "estimated_rows": estimate.estimated_rows,
-                    "estimated_bytes": estimate.estimated_bytes,
+                    "estimate_kind": estimate_kind,
+                    "estimated_rows": report.estimated_rows,
+                    "estimated_bytes": report.estimated_bytes,
+                    "finding_codes": list(report.codes()),
                 },
             )
             record_outbox(
@@ -352,6 +671,12 @@ class QueryExecutionGateway:
                 masked_columns=tuple(masked_columns),
             )
         except QueryRejected as exc:
+            # `AuthorizationRejected` is a `QueryRejected`, so a refusal is bookkept
+            # here by the same code as a rejected statement: same REJECTED status, same
+            # DENIED audit action, same reason field, same execution id handed back to
+            # the caller. A refusal taking its own path through the ledger would be a
+            # second denial vocabulary for operators to learn, and the first one they
+            # forgot to query.
             exc.execution_id = execution.id
             execution.status = "REJECTED"
             execution.error_class = type(exc).__name__

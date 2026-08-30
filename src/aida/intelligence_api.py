@@ -3,7 +3,8 @@ import hmac
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal
+from itertools import combinations
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,10 +15,12 @@ from sqlalchemy.sql.elements import ColumnElement
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
 from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
 from aida.models import (
     AgentRun,
+    DataDomain,
     DataSource,
     DbtResource,
     GovernedToolVersion,
@@ -33,6 +36,7 @@ from aida.models import (
     SemanticMetricVersion,
 )
 from aida.schemas import (
+    CrossSourceRelationshipCandidateDiscoveryRequest,
     GraphEdgeRead,
     GraphNodeRead,
     GraphSearchRead,
@@ -1010,6 +1014,7 @@ async def discover_relationship_candidates(
             candidate = RelationshipCandidate(
                 organization_id=datasource.organization_id,
                 datasource_id=datasource.id,
+                target_datasource_id=datasource.id,
                 source_table_id=source.table_id,
                 source_column_id=source.id,
                 target_table_id=target.table_id,
@@ -1045,6 +1050,240 @@ async def discover_relationship_candidates(
             "columns_scanned": len(columns),
             "column_scan_limit": settings.relationship_candidate_scan_max_columns,
             "value_inspection": False,
+        },
+    )
+    await session.commit()
+    return Page(
+        items=[RelationshipCandidateRead.model_validate(item) for item in created],
+        limit=body.max_candidates,
+        offset=0,
+        total=len(created),
+    )
+
+
+@router.post(
+    "/data-domains/{domain_id}/relationship-candidates/discover-cross-source",
+    response_model=Page,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def discover_cross_source_relationship_candidates(
+    domain_id: UUID,
+    body: CrossSourceRelationshipCandidateDiscoveryRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Page:
+    """Infer column relationships ACROSS datasources within one data_domain --
+    or, when `body.target_data_domain_id` is set, across the boundary into a
+    second domain, gated by an ACTIVE cross_boundary_grant.
+
+    Relationship inference is free to cross project/datasource boundaries within
+    a domain (ADR-0017 SS4/SS8) -- pairing two datasources that both already
+    belong to `domain_id` never touches a grant. Pairing against a
+    `target_data_domain_id` is different: that crosses a data_domain boundary,
+    so it is refused with 403 unless domain_service.check_cross_boundary_grant
+    confirms an ACTIVE, unexpired grant lets `domain_id` see into the target
+    domain for SUGGESTED_RELATIONSHIP edges -- deny-by-default, never inherited
+    (INV-5), exactly like every other cross-boundary read in this platform.
+
+    Bounded like every other discovery path in this platform (ADR-0017 SS8: an
+    estate cannot be scanned all at once) -- datasource pairs are capped at
+    max_datasource_pairs and candidates at max_candidates, so a domain with many
+    datasources is triaged over repeated calls rather than in one unbounded pass.
+    """
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    datasources = list(
+        (
+            await session.scalars(
+                select(DataSource)
+                .where(DataSource.data_domain_id == domain.id)
+                .order_by(DataSource.name)
+            )
+        ).all()
+    )
+
+    target_domain: DataDomain | None = None
+    target_datasources: list[DataSource] = []
+    if body.target_data_domain_id is not None:
+        if body.target_data_domain_id == domain.id:
+            raise HTTPException(
+                status_code=422, detail="target_data_domain_id must differ from domain_id"
+            )
+        target_domain = await session.get(DataDomain, body.target_data_domain_id)
+        if target_domain is None or target_domain.organization_id != domain.organization_id:
+            raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+        allowed = await check_cross_boundary_grant(
+            session,
+            domain.organization_id,
+            target_domain.id,
+            domain.id,
+            edge_kind="SUGGESTED_RELATIONSHIP",
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "cross-domain access denied: no ACTIVE cross_boundary_grant permits "
+                    f"{domain.id} to see into {target_domain.id}"
+                ),
+            )
+        target_datasources = list(
+            (
+                await session.scalars(
+                    select(DataSource)
+                    .where(DataSource.data_domain_id == target_domain.id)
+                    .order_by(DataSource.name)
+                )
+            ).all()
+        )
+
+    if target_domain is not None:
+        # Only cross-boundary pairs -- same-domain pairs on either side stay the
+        # job of a same-domain call against that domain's own id.
+        pairs = [
+            (source_datasource, target_datasource)
+            for source_datasource in datasources
+            for target_datasource in target_datasources
+        ]
+    else:
+        pairs = list(combinations(datasources, 2))
+    pairs_available = len(pairs)
+    pairs = pairs[: body.max_datasource_pairs]
+    profile_datasources = datasources + target_datasources
+
+    async def _load_source_profile(datasource: DataSource) -> dict[str, Any]:
+        tables = (
+            await session.scalars(
+                select(MetadataTable).where(
+                    MetadataTable.datasource_id == datasource.id,
+                    MetadataTable.status == "ACTIVE",
+                )
+            )
+        ).all()
+        table_ids = {table.id for table in tables}
+        columns = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.table_id.in_(table_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+                .limit(settings.relationship_candidate_scan_max_columns)
+            )
+        ).all()
+        columns_by_table_name = {
+            (column.table_id, column.name.lower()): column for column in columns
+        }
+        columns_by_name: dict[str, list[MetadataColumn]] = {}
+        for column in columns:
+            columns_by_name.setdefault(column.name.lower(), []).append(column)
+        constraints = (
+            await session.scalars(
+                select(MetadataConstraint).where(
+                    MetadataConstraint.datasource_id == datasource.id,
+                    MetadataConstraint.status == "ACTIVE",
+                    MetadataConstraint.constraint_type == "PRIMARY_KEY",
+                )
+            )
+        ).all()
+        primary_keys: list[MetadataColumn] = []
+        for constraint in constraints:
+            for name in constraint.columns:
+                primary_key_column = columns_by_table_name.get((constraint.table_id, name.lower()))
+                if primary_key_column is not None:
+                    primary_keys.append(primary_key_column)
+        return {
+            "columns_by_name": columns_by_name,
+            "primary_keys": primary_keys,
+            "column_count": len(columns),
+        }
+
+    profiles = {
+        datasource.id: await _load_source_profile(datasource) for datasource in profile_datasources
+    }
+    existing_candidate_pairs = {
+        (source_column_id, target_column_id)
+        for source_column_id, target_column_id in (
+            await session.execute(
+                select(
+                    RelationshipCandidate.source_column_id,
+                    RelationshipCandidate.target_column_id,
+                )
+            )
+        ).all()
+    }
+    created: list[RelationshipCandidate] = []
+    columns_scanned = 0
+    for ds_a, ds_b in pairs:
+        if len(created) >= body.max_candidates:
+            break
+        profile_a = profiles[ds_a.id]
+        profile_b = profiles[ds_b.id]
+        columns_scanned += profile_a["column_count"] + profile_b["column_count"]
+        # Both directions: PKs in ds_a matched from ds_b's columns, and vice versa.
+        for pk_owner, other, other_columns_by_name in (
+            (ds_a, ds_b, profile_b["columns_by_name"]),
+            (ds_b, ds_a, profile_a["columns_by_name"]),
+        ):
+            targets = profiles[pk_owner.id]["primary_keys"]
+            for target in targets:
+                for source in other_columns_by_name.get(target.name.lower(), []):
+                    if source.physical_type.lower() != target.physical_type.lower():
+                        continue
+                    pair = (source.id, target.id)
+                    if pair in existing_candidate_pairs:
+                        continue
+                    candidate = RelationshipCandidate(
+                        organization_id=domain.organization_id,
+                        datasource_id=other.id,
+                        target_datasource_id=pk_owner.id,
+                        source_table_id=source.table_id,
+                        source_column_id=source.id,
+                        target_table_id=target.table_id,
+                        target_column_id=target.id,
+                        detection_rule="EXACT_NAME_TYPE_TO_PRIMARY_KEY_CROSS_SOURCE_V1",
+                        confidence=0.75,
+                        evidence={
+                            "column_name_match": "EXACT",
+                            "physical_type_match": "EXACT",
+                            "target_is_primary_key": True,
+                            "source_values_inspected": False,
+                            "source_datasource": other.name,
+                            "target_datasource": pk_owner.name,
+                        },
+                        created_by=context.principal_id,
+                    )
+                    session.add(candidate)
+                    created.append(candidate)
+                    existing_candidate_pairs.add(pair)
+                    if len(created) >= body.max_candidates:
+                        break
+                if len(created) >= body.max_candidates:
+                    break
+            if len(created) >= body.max_candidates:
+                break
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=domain.organization_id),
+        action="relationship_candidates.discover_cross_source",
+        resource_type="data_domain",
+        resource_id=str(domain.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "created_candidates": len(created),
+            "datasource_pairs_scanned": len(pairs),
+            "datasource_pairs_available": pairs_available,
+            "columns_scanned": columns_scanned,
+            "value_inspection": False,
+            "target_data_domain_id": str(target_domain.id) if target_domain else None,
         },
     )
     await session.commit()

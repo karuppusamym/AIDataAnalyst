@@ -139,9 +139,9 @@ No other module gets this exemption. A proposal to add a third cross-cutting mod
 | Module unit tests | Run standalone; other modules replaced by in-memory fakes built from their `contracts.py` |
 | Contract tests | The fake and the real implementation are tested against the same interface suite |
 | Integration tests | Real modules, real database, per-module schemas |
-| Import contracts | Import-linter in CI |
+| Import contracts | Import-linter in CI — **partially wired (2026-08-30)**: `lint-imports` runs in the `quality` job, but the four contracts in `pyproject.toml` cover the `identity_tenancy` scaffold, INV-2 gateway exclusivity, one leaf-module ratchet, and the lineage→gateway direction (C4/ST-11). The cross-module contracts this document depends on cannot exist until the modules do — see `10-architecture/04-module-decomposition.md` §5.2 |
 
-**The fake-parity rule.** A fake that drifts from the real implementation produces green tests and a broken system. Both are run against the same suite, so drift fails CI.
+**The fake-parity rule.** A fake that drifts from the real implementation produces green tests and a broken system. Both should be run against the same suite, so drift fails CI. **Planned, not built (2026-08-30):** there are no module `contracts.py` fakes to run parity against — `src/atlas/modules/identity_tenancy/contracts.py` is a 9-line stub — and no parity suite exists in `tests/`.
 
 ## 9. Extraction readiness
 

@@ -13,7 +13,10 @@ from aida.dbt_artifacts import (
     ParsedDbtResource,
     parse_dbt_catalog,
     parse_dbt_manifest,
+    parse_dbt_run_results,
 )
+from aida.dbt_column_lineage import DependencyResource, extract_column_lineage
+from aida.dbt_quality_bridge import reconcile_dbt_test_quality
 from aida.events import record_audit, record_outbox
 from aida.integration_catalog import transformation_metadata_integration_enabled
 from aida.integration_service import ensure_organization_integration_policy
@@ -253,6 +256,12 @@ async def import_dbt_manifest(
             catalog_types = parse_dbt_catalog(body.catalog)
         except DbtArtifactError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+    test_results = {}
+    if body.run_results is not None:
+        try:
+            test_results = parse_dbt_run_results(body.run_results)
+        except DbtArtifactError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     existing = await session.scalar(
         select(DbtArtifactImport).where(
             DbtArtifactImport.dbt_project_id == dbt_project.id,
@@ -295,6 +304,7 @@ async def import_dbt_manifest(
         col_types = dict(parsed_resource.column_types)
         if parsed_resource.unique_id in catalog_types:
             col_types.update(catalog_types[parsed_resource.unique_id])
+        test_info = test_results.get(parsed_resource.unique_id)
         dbt_resource = DbtResource(
             organization_id=dbt_project.organization_id,
             artifact_import_id=artifact.id,
@@ -317,6 +327,10 @@ async def import_dbt_manifest(
             tags=parsed_resource.tags,
             depends_on_unique_ids=parsed_resource.depends_on_unique_ids,
             matched_table_id=table_id,
+            test_status=test_info.status if test_info else None,
+            test_failures=test_info.failures if test_info else None,
+            test_execution_time=test_info.execution_time if test_info else None,
+            extra_metadata=parsed_resource.extra_metadata,
         )
         session.add(dbt_resource)
         resource_by_unique_id[dbt_resource.unique_id] = dbt_resource
@@ -328,7 +342,57 @@ async def import_dbt_manifest(
                 artifact_import_id=artifact.id,
                 source_resource_id=resource_by_unique_id[source_unique_id].id,
                 target_resource_id=resource_by_unique_id[target_unique_id].id,
+                edge_type="DEPENDS_ON",
+                # Table-level edges have no column granularity -- "" (never
+                # NULL) so the widened unique constraint stays meaningful.
+                source_column="",
+                target_column="",
             )
+        )
+    column_lineage_edge_count = 0
+    for parsed_resource, _table_id in resources:
+        if parsed_resource.sql_parse_status != "PARSED":
+            continue
+        target_resource = resource_by_unique_id[parsed_resource.unique_id]
+        dependencies = [
+            DependencyResource(
+                unique_id=dependency.unique_id,
+                relation_name=dependency.relation_name,
+                database_name=dependency.database_name,
+                schema_name=dependency.schema_name,
+                name=dependency.name,
+            )
+            for dependency_id in parsed_resource.depends_on_unique_ids
+            if (dependency := resource_by_unique_id.get(dependency_id)) is not None
+        ]
+        if not dependencies:
+            continue
+        column_edges = extract_column_lineage(parsed_resource, dependencies, datasource.dialect)
+        for column_edge in column_edges:
+            source_resource = resource_by_unique_id.get(column_edge.source_unique_id)
+            if source_resource is None:
+                continue
+            session.add(
+                DbtLineageEdge(
+                    organization_id=dbt_project.organization_id,
+                    artifact_import_id=artifact.id,
+                    source_resource_id=source_resource.id,
+                    target_resource_id=target_resource.id,
+                    edge_type="COLUMN_DEPENDS_ON",
+                    source_column=column_edge.source_column,
+                    target_column=column_edge.target_column,
+                    transformation_type=column_edge.transformation_type,
+                    confidence=column_edge.confidence,
+                )
+            )
+            column_lineage_edge_count += 1
+    if test_results:
+        await reconcile_dbt_test_quality(
+            session,
+            organization_id=dbt_project.organization_id,
+            datasource_id=datasource.id,
+            dbt_resources=list(resource_by_unique_id.values()),
+            context=context,
         )
     record_audit(
         session,
@@ -342,6 +406,7 @@ async def import_dbt_manifest(
             "dbt_project_id": str(dbt_project.id),
             "resource_count": artifact.resource_count,
             "lineage_edge_count": artifact.lineage_edge_count,
+            "column_lineage_edge_count": column_lineage_edge_count,
             "matched_resource_count": artifact.matched_resource_count,
             "raw_artifact_persisted": False,
         },
@@ -357,6 +422,7 @@ async def import_dbt_manifest(
             "dbt_project_id": str(dbt_project.id),
             "resource_count": artifact.resource_count,
             "lineage_edge_count": artifact.lineage_edge_count,
+            "column_lineage_edge_count": column_lineage_edge_count,
         },
     )
     await session.commit()
@@ -480,6 +546,7 @@ async def get_dbt_lineage(
                 resource_type=resource.resource_type,
                 materialization=resource.materialization,
                 matched_table_id=resource.matched_table_id,
+                test_status=resource.test_status,
             )
             for resource in resources
         ],

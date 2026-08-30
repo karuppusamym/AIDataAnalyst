@@ -1,202 +1,12 @@
-const state = {
-  organizations: [], organizationId: null, lobs: [], projects: [], sources: [],
-  fleet: null, runs: [], reviews: [], audit: [], runtime: null, evaluations: [],
-  agentRuns: [], tables: [], semanticModels: [], semanticMetrics: [], selectedSemantic: null,
-  tools: [], selectedTool: null, graph: null, relationships: [], modelRoutes: [],
-  memory: [], outbox: [], pendingDecision: null, metricTables: [], metricColumns: [],
-  dbtProjects: [], dbtImports: [], dbtResources: [], dbtLineage: null,
-  selectedDbtProjectId: null, selectedDbtImportId: null,
-  openlineageEvents: [],
-  integrationPolicy: null,
-  semanticInferenceRuns: [], enrichmentProposals: [], businessAnnotations: [],
-  businessMap: null, graphFocusHistory: [], graphSelectedNodeId: null,
-  graphZoom: 1, graphDatasourceId: null, graphSearchResults: [],
-  qualitySummary: null, qualityPolicies: [], qualityObservations: [], qualityIncidents: [],
-  pendingQualityIncidentId: null,
-  connectorMatrix: [], connectorCertifications: [], metadataIngestions: [],
-  metadataBatches: [], metadataBatchChunks: [], selectedBatchId: null,
-  persona: "all", paletteEntries: [], paletteActiveIndex: -1,
-  selectedTableId: null, selectedAssetTab: "overview", glossaryTerms: [],
-  glossaryCategories: [], glossaryLinkProposals: [], glossaryConflicts: [],
-  ownershipRules: [], ownershipAssignments: [], bulkStewardshipOperations: [],
-  stewardshipCoverage: null, selectedAssetDocumentation: null, selectedAssetLinks: [],
-  selectedAssetOwnership: []
-};
+const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource } = window.AtlasUI;
 
-const roles = "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin,SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer";
-const $ = selector => document.querySelector(selector);
-const $$ = selector => [...document.querySelectorAll(selector)];
-const setHtml = (id, html) => { const node = document.getElementById(id); if (node) node.innerHTML = html; };
-const esc = value => String(value ?? "").replace(/[&<>'"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[c]);
-const when = value => value ? new Intl.DateTimeFormat(undefined, {dateStyle:"medium", timeStyle:"short"}).format(new Date(value)) : "Not recorded";
-const human = value => String(value ?? "Unknown").replaceAll("_", " ").toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
-const statusClass = value => ["FAILED","SUBMISSION_FAILED","REJECTED","DEAD_LETTER","DISABLED","SUPPRESSED","UNPARSEABLE","CRITICAL","STALE"].includes(value) ? "bad" : ["PENDING","PLANNED","CONDITIONAL","QUEUED","RUNNING","PROCESSING","PROFILING","REVIEW_REQUIRED","NOT_CONFIGURED","APPROVED_NOT_SELECTED","GENERATION_DISABLED","ADAPTER_REGISTRATION_REQUIRED","UNMATCHED","WARNING","NO_BASELINE","OPEN"].includes(value) ? "warn" : ["ACTIVE","CERTIFIED","PASS","IMPLEMENTED","COMPLETED","PUBLISHED","APPROVED","UP","ELIGIBLE","READY","IMPORTED","PARSED","MATCHED","HEALTHY","CURRENT","RESOLVED","ACKNOWLEDGED"].includes(value) ? "" : "neutral";
-const badge = value => `<span class="status ${statusClass(value)}">${esc(human(value))}</span>`;
-const empty = (title, detail="") => `<div class="empty-state"><strong>${esc(title)}</strong>${detail ? `<span>${esc(detail)}</span>` : ""}</div>`;
-const table = (heads, rows, emptyText="No records found") => rows.length ? `<table class="data-table"><thead><tr>${heads.map(h => `<th>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table>` : empty(emptyText);
-const selectOptions = (items, label, blank="") => `${blank ? `<option value="">${esc(blank)}</option>` : ""}${items.map(item => `<option value="${item.id}">${esc(label(item))}</option>`).join("")}`;
-const asNumberOrNull = value => String(value ?? "").trim() === "" ? null : Number(value);
-
-const integrationFlags = () => state.integrationPolicy?.transformation_metadata_integrations || {};
-const dbtEnabled = () => Boolean(integrationFlags().dbt);
-const transformationMetadataSurfaceEnabled = () => Object.values(integrationFlags()).some(Boolean);
-
-function renderTransformationOverview() {
-  const integrations = integrationFlags();
-  const entries = [
-    ["dbt", "dbt manifest", integrations.dbt, "Implemented workbench"],
-    ["openlineage", "OpenLineage", integrations.openlineage, "Adapter reserved"],
-    ["airflow", "Airflow lineage", integrations.airflow, "Adapter reserved"],
-    ["generic_elt", "Generic ETL or ELT", integrations.generic_elt, "Adapter reserved"]
-  ];
-  setHtml("transformation-integration-summary", [
-    ["Enabled adapters", entries.filter(([, , enabled]) => enabled).length, "Organization-scoped metadata surfaces"],
-    ["Implemented adapters", entries.filter(([key, , enabled]) => enabled && ["dbt", "openlineage"].includes(key)).length, "Live ingestion or workbench coverage"],
-    ["Reserved adapters", entries.filter(([key, , enabled]) => enabled && !["dbt", "openlineage"].includes(key)).length, "Future metadata adapters can bind here"],
-    ["Execution boundary", "External", "Atlas ingests metadata evidence only"]
-  ].map(([a, b, c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
-  setHtml("transformation-adapters", entries.map(([key, label, enabled, detail]) => `<div class="estate-row"><div><strong>${esc(label)}</strong><small>${esc(key)}</small></div><div>${badge(enabled ? (["dbt", "openlineage"].includes(key) ? "IMPLEMENTED" : "PLANNED") : "NOT_CONFIGURED")}</div><div><small>${esc(enabled ? detail : "Disabled for this organization")}</small></div></div>`).join(""));
-  setHtml("transformation-workbenches", [
-    `<div class="estate-row"><div><strong>dbt workbench</strong><small>Manifest import, catalog matching, DAG lineage</small></div><div>${badge(integrations.dbt ? "READY" : "DISABLED")}</div><div><small>${esc(integrations.dbt ? "Available in this workspace" : "Enable dbt in Administration to expose it")}</small></div></div>`,
-    `<div class="estate-row"><div><strong>OpenLineage intake</strong><small>Run events, jobs, inputs, outputs, column lineage</small></div><div>${badge(integrations.openlineage ? "READY" : "NOT_CONFIGURED")}</div><div><small>${esc(integrations.openlineage ? "API and UI ingestion are live" : "Disabled for this organization")}</small></div></div>`,
-    `<div class="estate-row"><div><strong>Airflow lineage</strong><small>Scheduler or DAG metadata mapped into lineage</small></div><div>${badge(integrations.airflow ? "PLANNED" : "NOT_CONFIGURED")}</div><div><small>${esc(integrations.airflow ? "Reserved policy slot; adapter not implemented yet" : "Disabled for this organization")}</small></div></div>`,
-    `<div class="estate-row"><div><strong>Generic ELT adapter</strong><small>External transformation metadata normalized into Atlas evidence</small></div><div>${badge(integrations.generic_elt ? "PLANNED" : "NOT_CONFIGURED")}</div><div><small>${esc(integrations.generic_elt ? "Reserved policy slot; normalization contract comes next" : "Disabled for this organization")}</small></div></div>`
-  ].join(""));
-}
-
-function renderDbtDisabledState() {
-  setHtml("dbt-metrics", [["dbt workbench", "Disabled", "Enable dbt in Administration to ingest manifest metadata"]].map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
-  setHtml("dbt-projects-table", empty("dbt integration is disabled", "This workspace hides dbt project registration until an administrator enables it."));
-  setHtml("dbt-imports-table", empty("No dbt imports available", "Enable dbt first if you want to ingest manifest metadata."));
-  setHtml("dbt-resources-table", empty("dbt workbench is disabled"));
-  setHtml("dbt-lineage", empty("No dbt lineage available", "This section activates only when dbt integration is enabled for the current organization."));
-  setHtml("dbt-lineage-status", badge("DISABLED"));
-}
-
-function renderIntegrationPolicy() {
-  const form = $("#integration-policy-form");
-  if (!form) return;
-  const integrations = state.integrationPolicy?.transformation_metadata_integrations || {};
-  form.elements.dbt.checked = Boolean(integrations.dbt);
-  form.elements.openlineage.checked = Boolean(integrations.openlineage);
-  form.elements.airflow.checked = Boolean(integrations.airflow);
-  form.elements.generic_elt.checked = Boolean(integrations.generic_elt);
-  const enabled = Object.values(integrations).filter(Boolean).length;
-  setHtml("integration-policy-status", badge(enabled ? "ACTIVE" : "NOT_CONFIGURED"));
-  renderTransformationOverview();
-}
-
-function applyIntegrationPolicyVisibility() {
-  const enabled = transformationMetadataSurfaceEnabled();
-  $(".nav-item[data-view='transformations']")?.classList.toggle("integration-hidden", !enabled);
-  if (!enabled && location.hash.slice(1) === "transformations") history.replaceState(null, "", "#administration");
-  if (!enabled && $("#transformations-view")?.classList.contains("active")) showView("administration");
-}
-
-async function loadIntegrationPolicy() {
-  if (!state.organizationId) {
-    state.integrationPolicy = null;
-    renderIntegrationPolicy();
-    applyIntegrationPolicyVisibility();
-    return;
-  }
-  state.integrationPolicy = await api(`/v1/organizations/${state.organizationId}/integration-policy`);
-  renderIntegrationPolicy();
-  applyIntegrationPolicyVisibility();
-}
-
-const VIRTUAL_ROW_HEIGHT = 56;
-const VIRTUAL_THRESHOLD = 150;
-const VIRTUAL_VISIBLE_ROWS = 10;
-const VIRTUAL_OVERSCAN = 4;
-
-function renderTable(target, heads, rows, emptyText="No records found") {
-  const container = typeof target === "string" ? document.getElementById(target) : target;
-  if (!container) return;
-  if (!rows.length || rows.length <= VIRTUAL_THRESHOLD) {
-    container.classList.remove("virtual-table-host");
-    container._vtBound = false;
-    container.innerHTML = rows.length ? table(heads, rows, emptyText) : empty(emptyText);
-    return;
-  }
-  mountVirtualTable(container, heads, rows);
-}
-
-function mountVirtualTable(container, heads, rows) {
-  container.classList.add("virtual-table-host");
-  container._vtHeads = heads;
-  container._vtRows = rows;
-  const viewportHeight = Math.min(rows.length, VIRTUAL_VISIBLE_ROWS) * VIRTUAL_ROW_HEIGHT;
-  if (!container._vtBound) {
-    container.innerHTML = `<div class="virtual-count" role="status" aria-live="polite"></div><div class="virtual-scroll"><div class="virtual-spacer"><table class="data-table virtual-table"><thead></thead><tbody></tbody></table></div></div>`;
-    container.querySelector(".virtual-scroll").addEventListener("scroll", () => paintVirtualTable(container));
-    container._vtBound = true;
-  }
-  const scroller = container.querySelector(".virtual-scroll");
-  scroller.style.height = `${viewportHeight}px`;
-  scroller.scrollTop = 0;
-  paintVirtualTable(container);
-}
-
-function paintVirtualTable(container) {
-  const heads = container._vtHeads, rows = container._vtRows;
-  const scroller = container.querySelector(".virtual-scroll");
-  const spacer = container.querySelector(".virtual-spacer");
-  const tableNode = container.querySelector(".virtual-table");
-  spacer.style.height = `${rows.length * VIRTUAL_ROW_HEIGHT}px`;
-  const firstIndex = Math.max(0, Math.floor(scroller.scrollTop / VIRTUAL_ROW_HEIGHT) - VIRTUAL_OVERSCAN);
-  const visibleCount = Math.ceil((scroller.clientHeight || VIRTUAL_VISIBLE_ROWS * VIRTUAL_ROW_HEIGHT) / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
-  const lastIndex = Math.min(rows.length, firstIndex + visibleCount);
-  tableNode.querySelector("thead").innerHTML = `<tr>${heads.map(h => `<th>${h}</th>`).join("")}</tr>`;
-  tableNode.querySelector("tbody").innerHTML = rows.slice(firstIndex, lastIndex).join("");
-  tableNode.style.transform = `translateY(${firstIndex * VIRTUAL_ROW_HEIGHT}px)`;
-  const countNode = container.querySelector(".virtual-count");
-  if (countNode) countNode.textContent = `Showing ${rows.length ? firstIndex + 1 : 0}–${lastIndex} of ${rows.length} rows — virtualized for smooth large-estate browsing`;
-}
-
-function baseHeaders(principal="local-ui-admin") {
-  return {"X-Principal-Id": principal, "X-Roles": roles, ...(state.organizationId ? {"X-Organization-Id": state.organizationId} : {})};
-}
-
-async function api(path, options={}) {
-  const response = await fetch(`/api${path}`, {
-    ...options,
-    headers: {...baseHeaders(options.principal), ...(options.body ? {"Content-Type":"application/json"} : {}), ...(options.headers || {})}
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const detail = Array.isArray(data.detail) ? data.detail.map(item => item.msg || JSON.stringify(item)).join("; ") : data.detail;
-    const error = new Error(detail || `Request failed (${response.status})`);
-    error.status = response.status;
-    throw error;
-  }
-  return data;
-}
-
-async function fetchAll(path, maximum=10000, pageLimit=100) {
-  const items = [];
-  for (let offset=0; offset<maximum; offset+=pageLimit) {
-    const join = path.includes("?") ? "&" : "?";
-    const page = await api(`${path}${join}limit=${pageLimit}&offset=${offset}`);
-    items.push(...page.items);
-    if (items.length >= page.total || !page.items.length) break;
-  }
-  return items;
-}
+let knowledgeGraphEngine = null;
 
 function notify(message, success=false) {
   const region = document.getElementById("alert-region");
   if (region) { region.setAttribute("role", success ? "status" : "alert"); region.setAttribute("aria-live", success ? "polite" : "assertive"); }
   setHtml("alert-region", `<div class="alert ${success ? "success" : ""}">${esc(message)}</div>`);
   window.setTimeout(() => setHtml("alert-region", ""), 5500);
-}
-
-function preserveSelect(id, html) {
-  const node = document.getElementById(id);
-  if (!node) return;
-  const previous = node.value;
-  node.innerHTML = html;
-  if ([...node.options].some(option => option.value === previous)) node.value = previous;
 }
 
 async function loadOrganizations(preferredId=null) {
@@ -212,14 +22,16 @@ async function loadOrganizations(preferredId=null) {
 }
 
 async function loadHierarchy() {
-  const [lobs, projects, sources] = await Promise.all([
+  const [lobs, domains, projects, sources] = await Promise.all([
     fetchAll(`/v1/organizations/${state.organizationId}/lines-of-business`),
+    fetchAll(`/v1/organizations/${state.organizationId}/data-domains`),
     fetchAll(`/v1/organizations/${state.organizationId}/projects`),
     fetchAll(`/v1/organizations/${state.organizationId}/datasources`)
   ]);
   const lobMap = new Map(lobs.map(item => [item.id, item]));
   const projectMap = new Map(projects.map(item => [item.id, item]));
   state.lobs = lobs;
+  state.domains = domains.map(item => ({...item, lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   state.projects = projects.map(item => ({...item, lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   state.sources = sources.map(item => ({...item, projectName: projectMap.get(item.project_id)?.name || "Unknown project", lobName: lobMap.get(item.line_of_business_id)?.name || "Unknown LOB"}));
   populateSelectors();
@@ -227,21 +39,16 @@ async function loadHierarchy() {
 }
 
 function populateSelectors() {
-  const sourceHtml = selectOptions(state.sources, item => `${item.name} / ${item.projectName}`, "No sources");
+  const sourceHtml = selectOptions(state.sources, item => `${item.name} / ${item.projectName}`, state.sources.length ? "" : "No sources");
   ["analyst-source","catalog-source","meaning-source","relationship-source","schedule-source","memory-source","quality-source","certification-source","ingestion-source","batch-source"].forEach(id => preserveSelect(id, sourceHtml));
   preserveSelect("run-source-filter", `<option value="ALL">All sources</option>${selectOptions(state.sources, item => item.name)}`);
-  const projectHtml = selectOptions(state.projects, item => `${item.name} / ${item.lobName}`, "No projects");
+  const projectHtml = selectOptions(state.projects, item => `${item.name} / ${item.lobName}`, state.projects.length ? "" : "No projects");
   ["semantic-project","tools-project","transform-project","datasource-project"].forEach(id => preserveSelect(id, projectHtml));
-  preserveSelect("project-lob", selectOptions(state.lobs, item => `${item.name} (${item.code})`, "No lines of business"));
+  preserveSelect("project-lob", selectOptions(state.lobs, item => `${item.name} (${item.code})`, state.lobs.length ? "" : "No lines of business"));
   populateProjectSources("tool-author-source", $("#tools-project")?.value);
   populateProjectSources("metric-source", $("#semantic-project")?.value);
   populateProjectSources("dbt-source", $("#transform-project")?.value);
   populateProjectSources("openlineage-source", $("#transform-project")?.value);
-}
-
-function populateProjectSources(id, projectId) {
-  const items = state.sources.filter(item => item.project_id === projectId);
-  preserveSelect(id, selectOptions(items, item => item.name, "No sources in project"));
 }
 
 async function loadOrganizationData() {
@@ -367,7 +174,7 @@ function renderEnterpriseIngestion() {
   renderTable("ingestion-history", ["Producer / key","Status","Delivery","Tables / columns","Created / changed / retired","Completed"], ingestionRows, "No canonical metadata deliveries for this source");
 
   const openBatches = state.metadataBatches.filter(item => ["DRAFT","FAILED","SUBMISSION_FAILED"].includes(item.status));
-  preserveSelect("batch-select", selectOptions(openBatches, item => `${item.batch_key} · ${item.received_chunks}/${item.expected_chunks} chunks`, "No open batches"));
+  preserveSelect("batch-select", selectOptions(openBatches, item => `${item.batch_key} · ${item.received_chunks}/${item.expected_chunks} chunks`, openBatches.length ? "" : "No open batches"));
   if (state.selectedBatchId && openBatches.some(item => item.id === state.selectedBatchId)) $("#batch-select").value = state.selectedBatchId;
   const selected = state.metadataBatches.find(item => item.id === state.selectedBatchId);
   if (!selected) setHtml("batch-progress", empty("No batch selected", "Create a manifest or select a batch from the history."));
@@ -519,7 +326,7 @@ function renderRuntime() {
   $("#analyst-route-badge").innerHTML = badge(runtime.model_route_status);
   setHtml("runtime-controls", runtime.deterministic_controls.slice(0, 8).map((control,index) => `<div><span class="control-icon">${String(index + 1).padStart(2,"0")}</span><p><strong>${esc(human(control))}</strong><small>Enforced outside model output</small></p><b>ENFORCED</b></div>`).join(""));
   const values = [["Orchestration",runtime.orchestration_mode,runtime.runtime],["Model route",runtime.model_route_status,`${runtime.available_model_providers.join(" / ")} adapters; generation enabled: ${runtime.model_generation_enabled}`],["Identity",runtime.identity_provider,human(runtime.identity_verification)],["Secrets",runtime.credential_provider,runtime.credential_provider_available ? "Adapter available" : "Adapter registration required"]];
-  setHtml("ai-runtime", `<div class="metric-grid">${values.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong class="metric-text ${["NOT_CONFIGURED","development","env"].includes(b) ? "warn-text" : ""}">${esc(human(b))}</strong><small>${esc(c)}</small></div>`).join("")}</div>`);
+  setHtml("ai-runtime", values.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong class="metric-text ${["NOT_CONFIGURED","development","env"].includes(b) ? "warn-text" : ""}">${esc(human(b))}</strong><small>${esc(c)}</small></div>`).join(""));
 }
 
 function renderEvaluations() {
@@ -750,7 +557,7 @@ async function prepareMetricComposer() {
 async function loadMetricTables() {
   const sourceId = $("#metric-source").value;
   state.metricTables = sourceId ? await fetchAll(`/v1/datasources/${sourceId}/tables`) : [];
-  preserveSelect("metric-table", selectOptions(state.metricTables, item => item.name, "No active tables"));
+  preserveSelect("metric-table", selectOptions(state.metricTables, item => item.name, state.metricTables.length ? "" : "No active tables"));
   await loadMetricColumns();
 }
 
@@ -861,10 +668,9 @@ async function loadRelationships(options={}) {
   const path = focusId
     ? `/v1/datasources/${sourceId}/knowledge-graph/neighborhood?focus_table_id=${encodeURIComponent(focusId)}&depth=${encodeURIComponent($("#graph-depth").value)}&direction=${encodeURIComponent($("#graph-direction").value)}&node_limit=100&edge_limit=500`
     : `/v1/datasources/${sourceId}/knowledge-graph?limit=500`;
-  setHtml("graph-nodes", '<div class="loading">Loading bounded graph neighborhood</div>');
   state.graph = await api(path);
   state.relationships = state.graph.edges.filter(edge => edge.edge_type === "SUGGESTED_RELATIONSHIP");
-  state.graphSelectedNodeId = focusId || null; state.graphZoom = 1;
+  state.graphSelectedNodeId = focusId || null;
   renderGraph();
   if (state.graphSelectedNodeId) await selectGraphNode(state.graphSelectedNodeId, false);
   else setHtml("graph-node-detail", empty("Select a table node", "Columns, classifications, edge evidence and downstream impact will appear here."));
@@ -878,7 +684,7 @@ function visibleGraphEdges() {
 
 function renderGraph() {
   const graph = state.graph;
-  if (!graph) { setHtml("graph-metrics", ""); setHtml("graph-nodes", ""); setHtml("relationships-table", empty("No source selected")); return; }
+  if (!graph) { setHtml("graph-metrics", ""); knowledgeGraphEngine?.setData([], [], {emptyHtml: empty("No source selected")}); setHtml("relationships-table", empty("No source selected")); return; }
   const visibleCount = graph.returned_node_count || graph.nodes.length; const visibleEdges = graph.returned_edge_count || graph.edges.length;
   const metrics = [[graph.focus_node_id ? "Visible nodes" : "Tables",graph.focus_node_id ? visibleCount : graph.total_tables,graph.focus_node_id ? `${graph.requested_depth} hop governed neighborhood` : "Current source"],["Visible edges",visibleEdges,`${graph.total_declared_edges} declared estate-wide`],["Suggestions",graph.total_suggested_edges,"Metadata-only"],["Pending",graph.pending_suggestions,"Checker queue"]];
   setHtml("graph-metrics", metrics.map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
@@ -890,59 +696,61 @@ function renderGraph() {
   setHtml("graph-boundary-note", `<strong>Safe exploration boundary</strong><span>This graph contains metadata, classifications, aggregate profile evidence and approved relationships. It never renders raw customer, account or transaction values.</span>${graph.truncation_reasons?.length ? `<div class="graph-truncation">Bounded by ${esc(graph.truncation_reasons.map(human).join(", "))}. Refine the search or focus a nearby node.</div>` : ""}`);
   const rows = state.relationships.map(edge => `<tr><td><span class="primary-cell">${esc(edge.source_label)}</span><span class="secondary-cell">${esc(edge.source_columns.join(", "))}</span></td><td><span class="primary-cell">${esc(edge.target_label)}</span><span class="secondary-cell">${esc(edge.target_columns.join(", "))}</span></td><td>${Math.round(edge.confidence * 100)}%</td><td>${badge(edge.status)}</td><td>${esc(edge.evidence.source_values_inspected === false ? "Metadata only / no values" : "Bounded evidence")}</td><td>${edge.status === "PENDING" ? `<button class="row-action" data-relationship="${edge.candidate_id}" data-decision="APPROVE">Approve</button><button class="row-action danger" data-relationship="${edge.candidate_id}" data-decision="REJECT">Reject</button>` : "Decision retained"}</td></tr>`);
   renderTable("relationships-table", ["Source","Target","Confidence","Status","Evidence boundary","Checker"], rows, "No relationship suggestions");
-  window.requestAnimationFrame(drawGraph);
+  renderGraphStage(graph);
 }
 
-function graphPositions(nodes, width, height, focusId) {
-  const positions = new Map();
-  if (focusId && nodes.some(node => node.id === focusId)) {
-    const center = {x:width / 2, y:height / 2}; positions.set(focusId, center);
-    const groups = new Map();
-    nodes.filter(node => node.id !== focusId).forEach(node => { const depth = Math.max(1, node.depth || 1); if (!groups.has(depth)) groups.set(depth, []); groups.get(depth).push(node); });
-    const maxDepth = Math.max(1, ...groups.keys()); const maxRadius = Math.max(100, Math.min(width, height) / 2 - 82);
-    [...groups.entries()].sort(([a],[b]) => a-b).forEach(([depth,group]) => { const radius = Math.max(95, maxRadius * depth / maxDepth); group.forEach((node,index) => { const angle = -Math.PI / 2 + index * Math.PI * 2 / group.length + (depth % 2 ? .12 : 0); positions.set(node.id, {x:center.x + Math.cos(angle) * radius, y:center.y + Math.sin(angle) * radius}); }); });
-    return positions;
+function knowledgeGraphNodeHtml(data, meta) {
+  const classes = ["atlas-node-card"];
+  if (data.sensitive_column_count) classes.push("is-sensitive");
+  if (data.isFocus) classes.push("is-focus");
+  if (meta.selected) classes.push("is-selected");
+  if (data.agMatch) classes.push("is-match");
+  if (data.agDim) classes.push("is-dim");
+  return `<button type="button" class="${classes.join(" ")}" data-graph-node="${data.id}" title="${esc(data.qualified_name || "")}" aria-pressed="${meta.selected}">`
+    + `<span class="ag-title">${esc(data.label || data.id)}</span>`
+    + `<span class="ag-sub">${data.column_count || 0} columns \u00b7 ${data.sensitive_column_count || 0} sensitive</span>`
+    + `<span class="ag-meta"><span class="ag-pill">${data.inbound_edge_count || 0} in</span><span class="ag-pill">${data.outbound_edge_count || 0} out</span>${data.depth ? `<span class="ag-pill">hop ${data.depth}</span>` : ""}</span>`
+    + `</button>`;
+}
+
+function renderGraphStage(graph) {
+  if (!knowledgeGraphEngine) {
+    knowledgeGraphEngine = new window.AtlasUI.AtlasGraph("graph-stage", {
+      direction: "LR",
+      nodeHtml: knowledgeGraphNodeHtml,
+      matchNode: (data, q) => `${data.label || ""} ${data.qualified_name || ""}`.toLowerCase().includes(q),
+      onNodeExpand: data => loadRelationships({focusId:data.id, pushHistory:true}).catch(error => notify(error.message))
+    });
   }
-  const columns = Math.max(2, Math.ceil(Math.sqrt(nodes.length * width / height))); const rows = Math.max(1, Math.ceil(nodes.length / columns));
-  nodes.forEach((node,index) => positions.set(node.id, {x:(index % columns + .5) * width / columns, y:(Math.floor(index / columns) + .5) * height / rows}));
-  return positions;
-}
-
-function applyGraphZoom() {
-  [$("#graph-canvas"), $("#graph-nodes")].forEach(node => { if (node) node.style.transform = `scale(${state.graphZoom})`; });
-  $("#graph-zoom-fit").textContent = `${Math.round(state.graphZoom * 100)}%`;
-}
-
-function drawGraph() {
-  const graph = state.graph; const stage = $("#graph-stage"); const canvas = $("#graph-canvas");
-  if (!graph || !stage || stage.offsetWidth === 0) return;
   const edges = visibleGraphEdges();
   const connectedIds = new Set(edges.flatMap(edge => [edge.source_node_id, edge.target_node_id]));
   let nodes = graph.nodes.filter(node => connectedIds.has(node.id));
   if (!nodes.length) nodes = graph.nodes;
-  nodes = nodes.slice(0, 60);
-  const width = stage.clientWidth, height = stage.clientHeight, ratio = window.devicePixelRatio || 1;
-  canvas.width = width * ratio; canvas.height = height * ratio; canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
-  const context = canvas.getContext("2d"); context.scale(ratio, ratio); context.clearRect(0, 0, width, height);
-  const positions = graphPositions(nodes, width, height, graph.focus_node_id);
+  nodes = nodes.slice(0, 90);
   const allowed = new Set(nodes.map(node => node.id));
-  edges.filter(edge => allowed.has(edge.source_node_id) && allowed.has(edge.target_node_id)).forEach(edge => {
-    const start = positions.get(edge.source_node_id), end = positions.get(edge.target_node_id);
-    context.beginPath(); context.moveTo(start.x, start.y); context.lineTo(end.x, end.y);
-    const selected = state.graphSelectedNodeId && [edge.source_node_id,edge.target_node_id].includes(state.graphSelectedNodeId);
-    context.strokeStyle = edge.edge_type === "DECLARED_FOREIGN_KEY" ? "#47769d" : "#b86e00";
-    context.lineWidth = selected ? 3 : edge.edge_type === "DECLARED_FOREIGN_KEY" ? 2 : 1.5;
-    context.setLineDash(edge.edge_type === "DECLARED_FOREIGN_KEY" ? [] : [6,4]); context.stroke();
-    const angle = Math.atan2(end.y-start.y, end.x-start.x); const arrowX = start.x + (end.x-start.x) * .66, arrowY = start.y + (end.y-start.y) * .66;
-    context.beginPath(); context.moveTo(arrowX, arrowY); context.lineTo(arrowX-7*Math.cos(angle-.45), arrowY-7*Math.sin(angle-.45)); context.lineTo(arrowX-7*Math.cos(angle+.45), arrowY-7*Math.sin(angle+.45)); context.closePath(); context.fillStyle = context.strokeStyle; context.fill();
+  const cyNodes = nodes.map(node => ({
+    id: node.id, w: 190, h: 96,
+    data: {
+      label: node.label, qualified_name: node.qualified_name, column_count: node.column_count,
+      sensitive_column_count: node.sensitive_column_count, inbound_edge_count: node.inbound_edge_count,
+      outbound_edge_count: node.outbound_edge_count, depth: node.depth || 0,
+      isFocus: node.id === graph.focus_node_id
+    }
+  }));
+  const cyEdges = edges.filter(edge => allowed.has(edge.source_node_id) && allowed.has(edge.target_node_id)).map(edge => ({
+    id: edge.candidate_id || `${edge.source_node_id}->${edge.target_node_id}`,
+    source: edge.source_node_id, target: edge.target_node_id,
+    classes: edge.edge_type === "DECLARED_FOREIGN_KEY" ? "declared" : (edge.status || "suggested").toLowerCase()
+  }));
+  knowledgeGraphEngine.setData(cyNodes, cyEdges, {
+    selectId: state.graphSelectedNodeId,
+    emptyHtml: empty("No relationships in view", "Broaden the edge filter or focus a different table.")
   });
-  setHtml("graph-nodes", nodes.map(node => { const pos = positions.get(node.id); const classes = ["topology-node",node.sensitive_column_count ? "sensitive" : "",node.id === state.graphSelectedNodeId ? "selected" : "",node.id === graph.focus_node_id ? "focus" : ""].filter(Boolean).join(" "); return `<button class="${classes}" data-graph-node="${node.id}" style="left:${pos.x}px;top:${pos.y}px" title="${esc(node.qualified_name)}" aria-pressed="${node.id === state.graphSelectedNodeId}"><strong>${esc(node.label)}</strong><small>${node.column_count} columns · ${node.sensitive_column_count} sensitive</small><em>${node.inbound_edge_count || 0} in · ${node.outbound_edge_count || 0} out${node.depth ? ` · hop ${node.depth}` : ""}</em></button>`; }).join(""));
-  applyGraphZoom();
 }
 
 async function selectGraphNode(nodeId, redraw=true) {
   const node = state.graph?.nodes.find(item => item.id === nodeId); if (!node) return;
-  state.graphSelectedNodeId = nodeId; if (redraw) window.requestAnimationFrame(drawGraph);
+  state.graphSelectedNodeId = nodeId; if (redraw && knowledgeGraphEngine) knowledgeGraphEngine.select(nodeId);
   setHtml("graph-node-detail", '<div class="loading">Loading governed node evidence</div>');
   try {
     const [columns,impact,annotation,profile] = await Promise.all([
@@ -964,117 +772,6 @@ async function searchGraph() {
   setHtml("graph-search-results", '<div class="loading">Searching governed metadata</div>'); $("#graph-search-results").classList.add("active");
   const result = await api(`/v1/datasources/${sourceId}/knowledge-graph/search?q=${encodeURIComponent(query)}&limit=25`); state.graphSearchResults = result.items;
   setHtml("graph-search-results", result.items.length ? result.items.map(node => `<button class="graph-search-result" data-graph-search-node="${node.id}"><strong>${esc(node.label)}</strong><small>${esc(node.qualified_name)} · ${node.column_count} columns</small></button>`).join("") + (result.truncated ? `<p class="form-note">Showing 25 of ${result.total} matches. Refine the search for a narrower result.</p>` : "") : empty("No graph nodes matched", "Try a table, schema, or catalog name."));
-}
-
-function renderDbtProjects() {
-  const rows = state.dbtProjects.map(item => `<tr><td><button class="link-button" data-dbt-project="${item.id}">${esc(item.display_name)}</button><span class="secondary-cell">${esc(item.project_key)}</span></td><td>${badge(item.status)}</td><td>${esc(item.target_name)}</td><td>${esc(state.sources.find(source => source.id === item.datasource_id)?.name || item.datasource_id)}</td></tr>`);
-  renderTable("dbt-projects-table", ["Project","Status","Target","Warehouse source"], rows, "No dbt projects registered for this delivery project");
-  const options = selectOptions(state.dbtProjects, item => `${item.display_name} / ${item.target_name}`, "No dbt projects");
-  preserveSelect("dbt-import-project", options);
-  if (state.selectedDbtProjectId && state.dbtProjects.some(item => item.id === state.selectedDbtProjectId)) $("#dbt-import-project").value = state.selectedDbtProjectId;
-}
-
-function renderOpenLineageHistory() {
-  if (!integrationFlags().openlineage) {
-    setHtml("openlineage-history", empty("OpenLineage is disabled", "Enable it in Administration to ingest runtime lineage events."));
-    return;
-  }
-  const rows = state.openlineageEvents.map(item => `<tr><td><button class="link-button" data-openlineage-event="${item.id}">${esc(item.job_name)}</button><span class="secondary-cell">${esc(item.job_namespace)} / ${esc(item.run_id)}</span></td><td>${badge(item.event_type)}</td><td>${item.input_dataset_count} in / ${item.output_dataset_count} out</td><td>${item.table_edge_count} table / ${item.column_edge_count} column</td><td>${item.unresolved_dataset_count}</td><td>${when(item.event_time)}</td></tr>`);
-  renderTable("openlineage-history", ["Job run","Event","Datasets","Edges","Unresolved","Observed"], rows, "No OpenLineage events have been ingested for this source");
-}
-
-function renderDbtImports() {
-  const rows = state.dbtImports.map(item => `<tr><td><button class="link-button" data-dbt-import="${item.id}">${when(item.generated_at || item.created_at)}</button><span class="secondary-cell">dbt ${esc(item.dbt_version || "unknown")}</span></td><td>${badge(item.status)}</td><td>${item.model_count} / ${item.source_count} / ${item.test_count}</td><td>${item.lineage_edge_count}</td><td>${item.matched_resource_count} matched / ${item.unmatched_resource_count} open</td></tr>`);
-  renderTable("dbt-imports-table", ["Artifact","Status","Models / sources / tests","Edges","Catalog coverage"], rows, "No manifest imports yet");
-}
-
-function renderDbtArtifact() {
-  if (!dbtEnabled()) {
-    renderDbtDisabledState();
-    return;
-  }
-  const artifact = state.dbtImports.find(item => item.id === state.selectedDbtImportId);
-  if (!artifact) {
-    setHtml("dbt-metrics", [["Registered projects",state.dbtProjects.length,"Selected delivery scope"],["Artifact imports",0,"Import manifest.json to begin"],["Catalog matches",0,"No artifact selected"],["Lineage edges",0,"No artifact selected"]].map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
-    setHtml("dbt-resources-table", empty("No dbt artifact selected", "Import a manifest or select an immutable artifact."));
-    setHtml("dbt-lineage", empty("No lineage available"));
-    setHtml("dbt-lineage-status", badge("NOT_CONFIGURED"));
-    return;
-  }
-  setHtml("dbt-metrics", [["Models",artifact.model_count,"Compiled transformation nodes"],["Sources",artifact.source_count,"Declared upstream relations"],["Catalog matches",artifact.matched_resource_count,`${artifact.unmatched_resource_count} relation mappings need attention`],["Lineage edges",artifact.lineage_edge_count,`${artifact.test_count} test nodes included`]].map(([a,b,c]) => `<div class="metric"><p>${a}</p><strong>${b}</strong><small>${c}</small></div>`).join(""));
-  const type = $("#dbt-resource-type")?.value || "ALL"; const match = $("#dbt-match-filter")?.value || "ALL";
-  const visible = state.dbtResources.filter(item => (type === "ALL" || item.resource_type === type) && (match === "ALL" || (match === "MATCHED") === Boolean(item.matched_table_id)));
-  const rows = visible.map(item => `<tr><td><button class="link-button" data-dbt-resource="${item.id}">${esc(item.name)}</button><span class="secondary-cell">${esc(item.package_name)} / ${esc(item.unique_id)}</span></td><td>${badge(item.resource_type)}</td><td>${esc(item.materialization || "Not applicable")}</td><td>${badge(item.matched_table_id ? "MATCHED" : "UNMATCHED")}</td><td>${badge(item.sql_parse_status)}</td><td>${item.column_names.length}</td></tr>`);
-  renderTable("dbt-resources-table", ["Resource","Type","Materialization","Catalog","SQL evidence","Columns"], rows, "No resources match these filters");
-  const nodes = new Map((state.dbtLineage?.nodes || []).map(node => [node.id, node]));
-  const edges = (state.dbtLineage?.edges || []).slice(0, 60).map(edge => {
-    const source = nodes.get(edge.source_resource_id), target = nodes.get(edge.target_resource_id); if (!source || !target) return "";
-    return `<div class="lineage-edge"><div class="lineage-node"><strong>${esc(source.label)}</strong><small>${esc(human(source.resource_type))}${source.matched_table_id ? " / catalog linked" : ""}</small></div><b>&rarr;</b><div class="lineage-node target"><strong>${esc(target.label)}</strong><small>${esc(human(target.resource_type))}${target.materialization ? ` / ${esc(target.materialization)}` : ""}</small></div></div>`;
-  }).join("");
-  setHtml("dbt-lineage", edges ? `<div class="lineage-list">${edges}</div>${artifact.lineage_edge_count > 60 ? `<p class="form-note">Showing the first 60 of ${artifact.lineage_edge_count} edges in this bounded UI slice.</p>` : ""}` : empty("No dependencies declared", "This artifact has resources but no resolvable depends_on edges."));
-  setHtml("dbt-lineage-status", badge("IMPORTED"));
-}
-
-async function loadDbtArtifact(artifactId) {
-  state.selectedDbtImportId = artifactId;
-  if (!artifactId) { state.dbtResources = []; state.dbtLineage = null; renderDbtArtifact(); return; }
-  [state.dbtResources, state.dbtLineage] = await Promise.all([
-    fetchAll(`/v1/dbt-artifact-imports/${artifactId}/resources`, 2000),
-    api(`/v1/dbt-artifact-imports/${artifactId}/lineage?limit=2000`)
-  ]);
-  renderDbtArtifact();
-}
-
-async function selectDbtProject(dbtProjectId) {
-  state.selectedDbtProjectId = dbtProjectId;
-  state.dbtImports = dbtProjectId ? await fetchAll(`/v1/dbt-projects/${dbtProjectId}/artifact-imports`) : [];
-  renderDbtProjects(); renderDbtImports();
-  const preferred = state.dbtImports.some(item => item.id === state.selectedDbtImportId) ? state.selectedDbtImportId : state.dbtImports[0]?.id || null;
-  await loadDbtArtifact(preferred);
-}
-
-async function loadDbtProjects() {
-  renderTransformationOverview();
-  if (!dbtEnabled()) {
-    Object.assign(state, {
-      dbtProjects: [], dbtImports: [], dbtResources: [], dbtLineage: null,
-      selectedDbtProjectId: null, selectedDbtImportId: null
-    });
-    renderDbtProjects();
-    renderDbtImports();
-    renderDbtDisabledState();
-    return;
-  }
-  const projectId = $("#transform-project")?.value;
-  populateProjectSources("dbt-source", projectId);
-  state.dbtProjects = projectId ? await fetchAll(`/v1/projects/${projectId}/dbt-projects`) : [];
-  const preferred = state.dbtProjects.some(item => item.id === state.selectedDbtProjectId) ? state.selectedDbtProjectId : state.dbtProjects[0]?.id || null;
-  await selectDbtProject(preferred);
-}
-
-async function loadOpenLineage() {
-  renderTransformationOverview();
-  if (!integrationFlags().openlineage) {
-    state.openlineageEvents = [];
-    renderOpenLineageHistory();
-    return;
-  }
-  const sourceId = $("#openlineage-source")?.value;
-  populateProjectSources("openlineage-source", $("#transform-project")?.value);
-  if (!sourceId) {
-    state.openlineageEvents = [];
-    setHtml("openlineage-history", empty("No source selected", "Choose a warehouse source to inspect OpenLineage evidence."));
-    return;
-  }
-  state.openlineageEvents = await fetchAll(`/v1/datasources/${sourceId}/openlineage-events`);
-  renderOpenLineageHistory();
-}
-
-function showDbtResource(resourceId) {
-  const resource = state.dbtResources.find(item => item.id === resourceId); if (!resource) return;
-  $("#record-title").textContent = `${human(resource.resource_type)} / ${resource.name}`;
-  const details = `<dl class="record-json"><dt>Unique ID</dt><dd>${esc(resource.unique_id)}</dd><dt>Relation</dt><dd>${esc(resource.relation_name || "Not a warehouse relation")}</dd><dt>Materialization</dt><dd>${esc(resource.materialization || "Not applicable")}</dd><dt>Catalog mapping</dt><dd>${esc(resource.matched_table_id || "Unmatched")}</dd><dt>Source file</dt><dd>${esc(resource.original_file_path || "Not recorded")}</dd><dt>Columns</dt><dd>${esc(resource.column_names.join(", ") || "Not declared")}</dd><dt>Tags</dt><dd>${esc(resource.tags.join(", ") || "None")}</dd><dt>SQL fingerprint</dt><dd>${esc(resource.compiled_sql_hash || "No compiled SQL")}</dd></dl>${resource.compiled_sql_redacted ? `<h3>Literal-redacted compiled SQL</h3><pre class="sql-preview">${esc(resource.compiled_sql_redacted)}</pre>` : `<p class="form-note">Compiled SQL was not present or could not be safely normalized; only its fingerprint is retained.</p>`}`;
-  setHtml("record-content", details); $("#record-dialog").showModal();
 }
 
 async function loadModelRoutes() {
@@ -1346,7 +1043,7 @@ function showView(name) {
   });
   const titles = {home:"Home",analyst:"Ask Atlas",catalog:"All assets",transformations:"Transformation metadata",meaning:"Business meaning",semantics:"Semantic layer",tools:"Tool registry",relationships:"Knowledge graph",governance:"Review center",agents:"AI governance",sources:"Sources",quality:"Data quality",operations:"Operations",administration:"Administration",audit:"Audit evidence"};
   $("#page-title").textContent = titles[name] || human(name); history.replaceState(null, "", `#${name}`);
-  if (name === "relationships") window.requestAnimationFrame(drawGraph);
+  if (name === "relationships") window.requestAnimationFrame(() => knowledgeGraphEngine?.resizeAndFit());
   if (name === "operations" && $("#ops-memory").classList.contains("active")) loadMemory().catch(error => notify(error.message));
   if (name === "operations" && $("#ops-outbox").classList.contains("active")) loadOutbox().catch(error => notify(error.message));
   document.body.classList.remove("nav-open");
@@ -1354,6 +1051,8 @@ function showView(name) {
   window.scrollTo({top:0, behavior: reducedMotion ? "auto" : "smooth"});
   window.requestAnimationFrame(() => $("#page-title")?.focus({preventScroll:true}));
 }
+
+window.AtlasUI.navigateTo = showView;
 
 function openAssetDocumentationDialog() {
   if (!state.selectedTableId) return notify("Select an asset first.");
@@ -1485,6 +1184,20 @@ function bindDirectEvents() {
     if (!dbtEnabled()) return notify("Enable dbt in Administration before importing manifests.");
     return state.dbtProjects.length ? $("#dbt-import-dialog").showModal() : notify("Register a dbt project before importing a manifest.");
   });
+  $$("[data-dbt-dag-mode]").forEach(btn => {
+    btn.addEventListener("click", event => {
+      state.dbtDagMode = event.currentTarget.dataset.dbtDagMode;
+      renderDbtArtifact();
+    });
+  });
+  $("#dbt-dag-zoom-in")?.addEventListener("click", () => state.dbtGraphEngine?.zoomBy(1.25));
+  $("#dbt-dag-zoom-out")?.addEventListener("click", () => state.dbtGraphEngine?.zoomBy(1 / 1.25));
+  $("#dbt-dag-zoom-fit")?.addEventListener("click", () => state.dbtGraphEngine?.fit());
+  $("#dbt-dag-search")?.addEventListener("input", event => {
+    state.dbtDagSearch = event.target.value;
+    if (state.dbtDagMode === "dag" && state.dbtGraphEngine) state.dbtGraphEngine.applySearch(state.dbtDagSearch);
+    else renderDbtArtifact();
+  });
   $("#dbt-resource-type").addEventListener("change", renderDbtArtifact); $("#dbt-match-filter").addEventListener("change", renderDbtArtifact);
   $("#refresh-dbt").addEventListener("click", () => loadDbtProjects().then(() => notify("Transformation evidence refreshed.", true)).catch(error => notify(error.message)));
   $("#tools-project").addEventListener("change", async event => { populateProjectSources("tool-author-source", event.target.value); await loadTools(); });
@@ -1497,10 +1210,7 @@ function bindDirectEvents() {
   ["graph-depth","graph-direction"].forEach(id => $("#"+id).addEventListener("change", () => { const focusId = state.graph?.focus_node_id; if (focusId) loadRelationships({focusId}).catch(error => notify(error.message)); }));
   $("#graph-overview").addEventListener("click", () => { state.graphFocusHistory = []; loadRelationships().catch(error => notify(error.message)); });
   $("#graph-back").addEventListener("click", () => { const focusId = state.graphFocusHistory.pop(); if (focusId && focusId !== "OVERVIEW") loadRelationships({focusId}).catch(error => notify(error.message)); else loadRelationships().catch(error => notify(error.message)); });
-  $("#graph-zoom-in").addEventListener("click", () => { state.graphZoom = Math.min(1.6, state.graphZoom + .15); applyGraphZoom(); });
-  $("#graph-zoom-out").addEventListener("click", () => { state.graphZoom = Math.max(.55, state.graphZoom - .15); applyGraphZoom(); });
-  $("#graph-zoom-fit").addEventListener("click", () => { state.graphZoom = 1; applyGraphZoom(); });
-  $("#graph-stage").addEventListener("keydown", event => { if (!["+","-","0"].includes(event.key)) return; event.preventDefault(); state.graphZoom = event.key === "0" ? 1 : Math.max(.55, Math.min(1.6, state.graphZoom + (event.key === "+" ? .15 : -.15))); applyGraphZoom(); });
+  $("#graph-stage")?.addEventListener("keydown", event => { if (!["+","-","0"].includes(event.key)) return; event.preventDefault(); if (event.key === "0") knowledgeGraphEngine?.fit(); else knowledgeGraphEngine?.zoomBy(event.key === "+" ? 1.25 : 1 / 1.25); });
   $("#schedule-source").addEventListener("change", loadSchedule); $("#run-status-filter").addEventListener("change", () => renderRuns("runs-table", 500)); $("#run-source-filter").addEventListener("change", () => renderRuns("runs-table", 500));
   $("#certification-source").addEventListener("change", () => loadEnterpriseIngestion().catch(error => notify(error.message)));
   $("#ingestion-source").addEventListener("change", () => loadEnterpriseIngestion().catch(error => notify(error.message)));
@@ -1531,7 +1241,7 @@ function bindDirectEvents() {
     try { await api(`/v1/quality-incidents/${incidentId}/transition`, {method:"POST", body:JSON.stringify({status:data.get("status"), reason:data.get("reason")})}); $("#quality-transition-dialog").close(); form.reset(); notify("Quality incident lifecycle updated with audit evidence.", true); await loadQuality(); } catch (error) { notify(error.message); }
   });
   $("#tool-form").addEventListener("submit", event => { event.preventDefault(); executeSelectedTool(event.target); });
-  window.addEventListener("resize", () => window.requestAnimationFrame(drawGraph));
+  window.addEventListener("resize", () => window.requestAnimationFrame(() => { knowledgeGraphEngine?.resizeAndFit(); state.dbtGraphEngine?.resizeAndFit(); }));
 
   $("#semantic-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.target; const data = new FormData(form); const projectId = $("#semantic-project").value;
@@ -1557,10 +1267,44 @@ function bindDirectEvents() {
     try { const created = await api(`/v1/projects/${projectId}/dbt-projects`, {method:"POST", body:JSON.stringify(body)}); state.selectedDbtProjectId = created.id; $("#dbt-project-dialog").close(); form.reset(); notify("dbt project registered to its governed warehouse source.", true); await loadDbtProjects(); } catch (error) { notify(error.message); }
   });
   $("#dbt-import-form").addEventListener("submit", async event => {
-    event.preventDefault(); const form = event.target; const data = new FormData(form); const file = $("#dbt-manifest-file").files[0];
-    if (!file) return notify("Choose a dbt manifest.json file."); if (file.size > 32 * 1024 * 1024) return notify("The manifest exceeds the 32 MiB ingestion limit.");
+    event.preventDefault(); const form = event.target; const data = new FormData(form);
+    const manifestFile = $("#dbt-manifest-file")?.files[0];
+    const catalogFile = $("#dbt-catalog-file")?.files[0];
+    const runResultsFile = $("#dbt-run-results-file")?.files[0];
+    if (!manifestFile) return notify("Choose a dbt manifest.json file.");
+    if (manifestFile.size > 32 * 1024 * 1024) return notify("The manifest exceeds the 32 MiB ingestion limit.");
     const button = form.querySelector("button[type=submit]"); button.disabled = true; button.textContent = "Validating artifact";
-    try { const manifest = JSON.parse(await file.text()); const imported = await api(`/v1/dbt-projects/${data.get("dbt_project_id")}/artifact-imports`, {method:"POST", body:JSON.stringify({manifest})}); state.selectedDbtProjectId = String(data.get("dbt_project_id")); state.selectedDbtImportId = imported.id; $("#dbt-import-dialog").close(); form.reset(); notify(`Imported ${imported.resource_count} dbt resources and ${imported.lineage_edge_count} lineage edges.`, true); await loadDbtProjects(); } catch (error) { notify(error instanceof SyntaxError ? "The selected file is not valid JSON." : error.message); } finally { button.disabled = false; button.textContent = "Validate and import"; }
+    try {
+      const manifest = JSON.parse(await manifestFile.text());
+      let catalog = null;
+      if (catalogFile) {
+        try { catalog = JSON.parse(await catalogFile.text()); }
+        catch { return notify("The catalog.json file is not valid JSON."); }
+      }
+      let runResults = null;
+      if (runResultsFile) {
+        try { runResults = JSON.parse(await runResultsFile.text()); }
+        catch { return notify("The run_results.json file is not valid JSON."); }
+      }
+      const imported = await api(`/v1/dbt-projects/${data.get("dbt_project_id")}/artifact-imports`, {
+        method: "POST",
+        body: JSON.stringify({
+          manifest,
+          catalog,
+          run_results: runResults
+        })
+      });
+      state.selectedDbtProjectId = String(data.get("dbt_project_id"));
+      state.selectedDbtImportId = imported.id;
+      $("#dbt-import-dialog").close();
+      form.reset();
+      notify(`Imported ${imported.resource_count} dbt resources, ${imported.lineage_edge_count} lineage edges, and associated catalog/test metadata.`, true);
+      await loadDbtProjects();
+    } catch (error) {
+      notify(error instanceof SyntaxError ? "The selected file is not valid JSON." : error.message);
+    } finally {
+      button.disabled = false; button.textContent = "Validate and import";
+    }
   });
   $("#schedule-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.target; const data = new FormData(form); const sourceId = $("#schedule-source").value;
@@ -1677,6 +1421,21 @@ function bindDelegatedEvents() {
     const tool = event.target.closest("[data-tool]"); if (tool) return selectTool(tool.dataset.tool);
     const dbtProject = event.target.closest("[data-dbt-project]"); if (dbtProject) return selectDbtProject(dbtProject.dataset.dbtProject).catch(error => notify(error.message));
     const dbtImport = event.target.closest("[data-dbt-import]"); if (dbtImport) return loadDbtArtifact(dbtImport.dataset.dbtImport).catch(error => notify(error.message));
+    const toggleCols = event.target.closest("[data-toggle-dbt-columns]");
+    if (toggleCols) {
+      const nodeId = toggleCols.dataset.toggleDbtColumns;
+      if (state.dbtDagExpandedNodes.has(nodeId)) state.dbtDagExpandedNodes.delete(nodeId);
+      else state.dbtDagExpandedNodes.add(nodeId);
+      if (state.dbtDagMode === "dag" && state.dbtGraphEngine) { state.dbtGraphEngine.updateNodeData(nodeId, {expanded: state.dbtDagExpandedNodes.has(nodeId)}); return; }
+      return renderDbtArtifact();
+    }
+    const dagNode = event.target.closest("[data-dbt-dag-node]");
+    if (dagNode) {
+      const nodeId = dagNode.dataset.dbtDagNode;
+      state.dbtDagSelectedNodeId = state.dbtDagSelectedNodeId === nodeId ? null : nodeId;
+      showDbtResource(nodeId);
+      return renderDbtArtifact();
+    }
     const dbtResource = event.target.closest("[data-dbt-resource]"); if (dbtResource) return showDbtResource(dbtResource.dataset.dbtResource);
     const proposalDetail = event.target.closest("[data-proposal-detail]"); if (proposalDetail) return showRecord("Business metadata proposal", state.enrichmentProposals.find(item => item.id === proposalDetail.dataset.proposalDetail));
     const annotationDetail = event.target.closest("[data-annotation-detail]"); if (annotationDetail) return showRecord("Approved business annotation", state.businessAnnotations.find(item => item.id === annotationDetail.dataset.annotationDetail));

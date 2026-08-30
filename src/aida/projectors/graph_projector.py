@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import signal
 from dataclasses import dataclass
@@ -14,12 +15,15 @@ from aida.config import get_settings
 from aida.db import session_factory
 from aida.logging import configure_logging
 from aida.models import (
+    DataSource,
+    DbtProject,
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
     MetadataSchema,
     MetadataTable,
 )
+from aida.unified_lineage_api import build_unified_lineage_graph_payload
 
 
 @dataclass(slots=True)
@@ -39,6 +43,20 @@ async def ensure_graph_constraints(driver: AsyncDriver) -> None:
         "FOR (n:Column) REQUIRE n.platform_id IS UNIQUE",
         "CREATE CONSTRAINT constraint_platform_id IF NOT EXISTS "
         "FOR (n:Constraint) REQUIRE n.platform_id IS UNIQUE",
+        "CREATE CONSTRAINT unified_lineage_projection_key IF NOT EXISTS "
+        "FOR (n:UnifiedLineageNode) REQUIRE n.projection_key IS UNIQUE",
+        # ADR-0017 SS2 -- tenancy-path indexes. A domain-scoped traversal filters
+        # by data_domain_id before it walks edges, rather than walking first and
+        # checking after; these are ordinary (non-unique) indexes since every
+        # tagged label shares the same organization/domain/project property names.
+        "CREATE INDEX table_data_domain_id IF NOT EXISTS "
+        "FOR (n:Table) ON (n.data_domain_id)",
+        "CREATE INDEX table_project_id IF NOT EXISTS "
+        "FOR (n:Table) ON (n.project_id)",
+        "CREATE INDEX unified_lineage_node_data_domain_id IF NOT EXISTS "
+        "FOR (n:UnifiedLineageNode) ON (n.data_domain_id)",
+        "CREATE INDEX unified_lineage_node_project_id IF NOT EXISTS "
+        "FOR (n:UnifiedLineageNode) ON (n.project_id)",
     )
     async with driver.session() as graph_session:
         for statement in statements:
@@ -49,6 +67,18 @@ async def load_projection(
     datasource_id: UUID, organization_id: UUID
 ) -> dict[str, list[dict[str, Any]]]:
     async with session_factory() as session:
+        # ADR-0017 SS2 -- every projected node carries its full tenancy path, not
+        # just organization_id, so a bounded traversal can be scoped to a domain.
+        datasource = await session.get(DataSource, datasource_id)
+        tenancy_path = (
+            {
+                "line_of_business_id": str(datasource.line_of_business_id),
+                "data_domain_id": str(datasource.data_domain_id),
+                "project_id": str(datasource.project_id),
+            }
+            if datasource is not None
+            else {}
+        )
         catalogs = (
             await session.scalars(
                 select(MetadataCatalog).where(
@@ -101,6 +131,7 @@ async def load_projection(
                 "datasource_id": str(datasource_id),
                 "name": item.name,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in catalogs
         ],
@@ -111,6 +142,7 @@ async def load_projection(
                 "catalog_id": str(item.catalog_id),
                 "name": item.name,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in schemas
         ],
@@ -122,6 +154,7 @@ async def load_projection(
                 "name": item.name,
                 "object_type": item.object_type,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in tables
         ],
@@ -135,6 +168,7 @@ async def load_projection(
                 "physical_type": item.physical_type,
                 "classification": item.classification,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in columns
         ],
@@ -151,6 +185,7 @@ async def load_projection(
                 ),
                 "referenced_columns": item.referenced_columns,
                 "status": item.status,
+                **tenancy_path,
             }
             for item in constraints
         ],
@@ -223,6 +258,154 @@ async def project_discovery(driver: AsyncDriver, event: dict[str, Any]) -> None:
         )
 
 
+async def _event_datasource_id(event: dict[str, Any]) -> UUID | None:
+    payload = event.get("payload") or {}
+    raw_datasource_id = payload.get("datasource_id")
+    if raw_datasource_id:
+        try:
+            return UUID(str(raw_datasource_id))
+        except ValueError:
+            return None
+    raw_dbt_project_id = payload.get("dbt_project_id")
+    if not raw_dbt_project_id:
+        return None
+    try:
+        dbt_project_id = UUID(str(raw_dbt_project_id))
+    except ValueError:
+        return None
+    async with session_factory() as session:
+        dbt_project = await session.get(DbtProject, dbt_project_id)
+        return dbt_project.datasource_id if dbt_project is not None else None
+
+
+async def load_unified_lineage_projection(
+    datasource_id: UUID,
+    organization_id: UUID,
+) -> dict[str, list[dict[str, Any]]]:
+    settings = get_settings()
+    async with session_factory() as session:
+        datasource = await session.get(DataSource, datasource_id)
+        if datasource is None or datasource.organization_id != organization_id:
+            return {"nodes": [], "edges": []}
+        graph = await build_unified_lineage_graph_payload(
+            session,
+            datasource,
+            node_limit=settings.lineage_projection_max_nodes,
+            edge_limit=settings.lineage_projection_max_edges,
+            suggestion_status="ALL",
+            settings=None,
+        )
+    # ADR-0017 SS2 -- same tenancy-path tagging as load_projection, so a domain-
+    # scoped unified-lineage traversal can filter before it walks edges.
+    tenancy_path = {
+        "line_of_business_id": str(datasource.line_of_business_id),
+        "data_domain_id": str(datasource.data_domain_id),
+        "project_id": str(datasource.project_id),
+    }
+    prefix = f"{organization_id}:{datasource_id}:"
+    nodes = [
+        {
+            "projection_key": f"{prefix}{node.id}",
+            "platform_id": node.id,
+            "organization_id": str(organization_id),
+            "datasource_id": str(datasource_id),
+            "node_kind": node.node_kind,
+            "label": node.label,
+            "qualified_name": node.qualified_name,
+            "matched_table_id": str(node.matched_table_id) if node.matched_table_id else None,
+            "resolved": node.resolved,
+            **tenancy_path,
+        }
+        for node in graph.nodes
+    ]
+    edges = [
+        {
+            "projection_key": f"{prefix}{edge.id}",
+            "source_projection_key": f"{prefix}{edge.source_node_id}",
+            "target_projection_key": f"{prefix}{edge.target_node_id}",
+            "organization_id": str(organization_id),
+            "datasource_id": str(datasource_id),
+            "edge_source": edge.edge_source,
+            "status": edge.status,
+            "confidence": edge.confidence,
+            "source_columns": edge.source_columns,
+            "target_columns": edge.target_columns,
+            "evidence": json.dumps(edge.evidence, sort_keys=True, separators=(",", ":")),
+            **tenancy_path,
+        }
+        for edge in graph.edges
+    ]
+    return {"nodes": nodes, "edges": edges}
+
+
+async def project_unified_lineage(driver: AsyncDriver, event: dict[str, Any]) -> bool:
+    datasource_id = await _event_datasource_id(event)
+    raw_organization_id = event.get("organization_id")
+    if datasource_id is None or not raw_organization_id:
+        return False
+    try:
+        organization_id = UUID(str(raw_organization_id))
+    except ValueError:
+        return False
+    projection = await load_unified_lineage_projection(datasource_id, organization_id)
+    generation_source = json.dumps(
+        {
+            "event_id": event.get("event_id"),
+            "nodes": [row["projection_key"] for row in projection["nodes"]],
+            "edges": [row["projection_key"] for row in projection["edges"]],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    generation = hashlib.sha256(generation_source.encode("utf-8")).hexdigest()
+    async with driver.session() as graph_session:
+        await graph_session.run(
+            """
+            UNWIND $rows AS row
+            MERGE (n:UnifiedLineageNode {projection_key: row.projection_key})
+            SET n += row, n.generation = $generation
+            """,
+            rows=projection["nodes"],
+            generation=generation,
+        )
+        await graph_session.run(
+            """
+            UNWIND $rows AS row
+            MATCH (source:UnifiedLineageNode {projection_key: row.source_projection_key})
+            MATCH (target:UnifiedLineageNode {projection_key: row.target_projection_key})
+            MERGE (source)-[edge:UNIFIED_LINEAGE {projection_key: row.projection_key}]->(target)
+            SET edge += row, edge.generation = $generation
+            """,
+            rows=projection["edges"],
+            generation=generation,
+        )
+        await graph_session.run(
+            """
+            MATCH ()-[edge:UNIFIED_LINEAGE]->()
+            WHERE edge.organization_id = $organization_id
+              AND edge.datasource_id = $datasource_id
+              AND edge.generation <> $generation
+            DELETE edge
+            """,
+            organization_id=str(organization_id),
+            datasource_id=str(datasource_id),
+            generation=generation,
+        )
+        await graph_session.run(
+            """
+            MATCH (node:UnifiedLineageNode)
+            WHERE node.organization_id = $organization_id
+              AND node.datasource_id = $datasource_id
+              AND node.generation <> $generation
+            DETACH DELETE node
+            """,
+            organization_id=str(organization_id),
+            datasource_id=str(datasource_id),
+            generation=generation,
+        )
+    return True
+
+
 async def run_projector() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
@@ -251,7 +434,8 @@ async def run_projector() -> None:
     try:
         async for message in consumer:
             event = json.loads(message.value)
-            if event.get("event_type") in {
+            event_type = event.get("event_type")
+            if event_type in {
                 "metadata.discovery.completed.v1",
                 "metadata.discovery.snapshot.v1",
             }:
@@ -260,6 +444,19 @@ async def run_projector() -> None:
                     "metadata_graph_projected",
                     event_id=event["event_id"],
                     datasource_id=event["payload"]["datasource_id"],
+                )
+            if event_type in {
+                "metadata.discovery.completed.v1",
+                "metadata.discovery.snapshot.v1",
+                "dbt_artifact.imported.v1",
+                "openlineage.run_event.ingested.v1",
+                "relationship_candidate.approved.v1",
+                "relationship_candidate.rejected.v1",
+            } and await project_unified_lineage(driver, event):
+                logger.info(
+                    "unified_lineage_graph_projected",
+                    event_id=event.get("event_id"),
+                    event_type=event_type,
                 )
             await consumer.commit()
             if state.stopping:

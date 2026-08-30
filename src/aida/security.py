@@ -31,6 +31,7 @@ async def get_security_context(
     organization_header: UUID | None = Header(default=None, alias="X-Organization-Id"),
     roles: str = Header(default="Viewer", alias="X-Roles"),
     authorization: str | None = Header(default=None, alias="Authorization"),
+    business_purpose: str | None = Header(default=None, alias="X-Business-Purpose"),
 ) -> SecurityContext:
     if settings.identity_provider == "oidc":
         if not authorization or not authorization.startswith("Bearer "):
@@ -61,6 +62,7 @@ async def get_security_context(
             principal_type=principal_type,
             organization_id=organization_header,
             roles=role_set,
+            business_purpose=(business_purpose.strip()[:200] if business_purpose else None),
         )
     raise HTTPException(status_code=503, detail="identity provider is unavailable")
 

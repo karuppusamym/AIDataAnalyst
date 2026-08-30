@@ -18,14 +18,13 @@ from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
     DiscoveredConstraint,
-    DiscoveredIndex,
-    DiscoveredPartition,
     DiscoveredSchema,
     DiscoveredTable,
 )
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
+from aida.ingestion import persist_envelope_extensions
 from aida.models import (
     AnalysisRun,
     ColumnProfile,
@@ -33,8 +32,6 @@ from aida.models import (
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
-    MetadataIndex,
-    MetadataPartition,
     MetadataSchema,
     MetadataTable,
     TableProfile,
@@ -68,8 +65,6 @@ class SnapshotScope:
     table_ids: set[UUID] = field(default_factory=set)
     column_ids: set[UUID] = field(default_factory=set)
     constraint_ids: set[UUID] = field(default_factory=set)
-    index_ids: set[UUID] = field(default_factory=set)
-    partition_ids: set[UUID] = field(default_factory=set)
 
     def object_counts(self) -> dict[str, int]:
         return {
@@ -78,9 +73,18 @@ class SnapshotScope:
             "tables": len(self.table_ids),
             "columns": len(self.column_ids),
             "constraints": len(self.constraint_ids),
-            "indexes": len(self.index_ids),
-            "partitions": len(self.partition_ids),
         }
+
+
+def missing_snapshot_scope(existing: SnapshotScope, observed: SnapshotScope) -> SnapshotScope:
+    """Return only inventory identities absent from an authoritative full snapshot."""
+    return SnapshotScope(
+        catalog_ids=existing.catalog_ids - observed.catalog_ids,
+        schema_ids=existing.schema_ids - observed.schema_ids,
+        table_ids=existing.table_ids - observed.table_ids,
+        column_ids=existing.column_ids - observed.column_ids,
+        constraint_ids=existing.constraint_ids - observed.constraint_ids,
+    )
 
 
 def fingerprint(value: object) -> str:
@@ -292,84 +296,6 @@ async def _get_or_create_constraint(
     return constraint
 
 
-async def _get_or_create_index(
-    session: AsyncSession,
-    datasource: DataSource,
-    table: MetadataTable,
-    discovered: DiscoveredIndex,
-    tracker: ChangeTracker,
-) -> MetadataIndex:
-    index = await session.scalar(
-        select(MetadataIndex).where(
-            MetadataIndex.table_id == table.id,
-            MetadataIndex.name == discovered.name,
-        )
-    )
-    index_fingerprint = fingerprint(asdict(discovered))
-    tracker.observe(index, index.fingerprint if index else None, index_fingerprint)
-    if index is None:
-        index = MetadataIndex(
-            organization_id=datasource.organization_id,
-            datasource_id=datasource.id,
-            table_id=table.id,
-            name=discovered.name,
-            index_type=discovered.index_type,
-            columns=list(discovered.columns),
-            is_unique=discovered.is_unique,
-            is_primary=discovered.is_primary,
-            fingerprint=index_fingerprint,
-        )
-        session.add(index)
-    else:
-        index.status = "ACTIVE"
-        index.deprecated_at = None
-        index.index_type = discovered.index_type
-        index.columns = list(discovered.columns)
-        index.is_unique = discovered.is_unique
-        index.is_primary = discovered.is_primary
-        index.fingerprint = index_fingerprint
-    return index
-
-
-async def _get_or_create_partition(
-    session: AsyncSession,
-    datasource: DataSource,
-    table: MetadataTable,
-    discovered: DiscoveredPartition,
-    tracker: ChangeTracker,
-) -> MetadataPartition:
-    partition = await session.scalar(
-        select(MetadataPartition).where(
-            MetadataPartition.table_id == table.id,
-            MetadataPartition.name == discovered.name,
-        )
-    )
-    partition_fingerprint = fingerprint(asdict(discovered))
-    tracker.observe(partition, partition.fingerprint if partition else None, partition_fingerprint)
-    if partition is None:
-        partition = MetadataPartition(
-            organization_id=datasource.organization_id,
-            datasource_id=datasource.id,
-            table_id=table.id,
-            name=discovered.name,
-            partition_type=discovered.partition_type,
-            ordinal_position=discovered.ordinal_position,
-            key_columns=list(discovered.key_columns),
-            high_value=discovered.high_value,
-            fingerprint=partition_fingerprint,
-        )
-        session.add(partition)
-    else:
-        partition.status = "ACTIVE"
-        partition.deprecated_at = None
-        partition.partition_type = discovered.partition_type
-        partition.ordinal_position = discovered.ordinal_position
-        partition.key_columns = list(discovered.key_columns)
-        partition.high_value = discovered.high_value
-        partition.fingerprint = partition_fingerprint
-    return partition
-
-
 async def _deprecate_missing(
     session: AsyncSession,
     datasource: DataSource,
@@ -379,8 +305,6 @@ async def _deprecate_missing(
     seen_table_ids: set[UUID],
     seen_column_ids: set[UUID],
     seen_constraint_ids: set[UUID],
-    seen_index_ids: set[UUID],
-    seen_partition_ids: set[UUID],
 ) -> int:
     now = datetime.now(UTC)
     catalog_ids = set(
@@ -393,85 +317,49 @@ async def _deprecate_missing(
             select(MetadataTable.id).where(MetadataTable.datasource_id == datasource.id)
         )
     )
-
+    existing = SnapshotScope(
+        catalog_ids=catalog_ids,
+        schema_ids=set(
+            await session.scalars(
+                select(MetadataSchema.id).where(MetadataSchema.catalog_id.in_(catalog_ids))
+            )
+        ),
+        table_ids=table_ids,
+        column_ids=set(
+            await session.scalars(
+                select(MetadataColumn.id).where(MetadataColumn.table_id.in_(table_ids))
+            )
+        ),
+        constraint_ids=set(
+            await session.scalars(
+                select(MetadataConstraint.id).where(
+                    MetadataConstraint.datasource_id == datasource.id
+                )
+            )
+        ),
+    )
+    missing = missing_snapshot_scope(
+        existing,
+        SnapshotScope(
+            catalog_ids=seen_catalog_ids,
+            schema_ids=seen_schema_ids,
+            table_ids=seen_table_ids,
+            column_ids=seen_column_ids,
+            constraint_ids=seen_constraint_ids,
+        ),
+    )
     statements = [
-        update(MetadataCatalog)
-        .where(
-            MetadataCatalog.datasource_id == datasource.id,
-            MetadataCatalog.status == "ACTIVE",
-            (
-                ~MetadataCatalog.id.in_(seen_catalog_ids)
-                if seen_catalog_ids
-                else MetadataCatalog.id.is_not(None)
-            ),
+        update(model)
+        .where(model.id.in_(object_ids), model.status == "ACTIVE")
+        .values(status="DEPRECATED", deprecated_at=now, updated_at=now)
+        for model, object_ids in (
+            (MetadataCatalog, missing.catalog_ids),
+            (MetadataSchema, missing.schema_ids),
+            (MetadataTable, missing.table_ids),
+            (MetadataColumn, missing.column_ids),
+            (MetadataConstraint, missing.constraint_ids),
         )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataSchema)
-        .where(
-            MetadataSchema.catalog_id.in_(catalog_ids),
-            MetadataSchema.status == "ACTIVE",
-            (
-                ~MetadataSchema.id.in_(seen_schema_ids)
-                if seen_schema_ids
-                else MetadataSchema.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataTable)
-        .where(
-            MetadataTable.datasource_id == datasource.id,
-            MetadataTable.status == "ACTIVE",
-            (
-                ~MetadataTable.id.in_(seen_table_ids)
-                if seen_table_ids
-                else MetadataTable.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataColumn)
-        .where(
-            MetadataColumn.table_id.in_(table_ids),
-            MetadataColumn.status == "ACTIVE",
-            (
-                ~MetadataColumn.id.in_(seen_column_ids)
-                if seen_column_ids
-                else MetadataColumn.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataConstraint)
-        .where(
-            MetadataConstraint.datasource_id == datasource.id,
-            MetadataConstraint.status == "ACTIVE",
-            (
-                ~MetadataConstraint.id.in_(seen_constraint_ids)
-                if seen_constraint_ids
-                else MetadataConstraint.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataIndex)
-        .where(
-            MetadataIndex.datasource_id == datasource.id,
-            MetadataIndex.status == "ACTIVE",
-            (
-                ~MetadataIndex.id.in_(seen_index_ids)
-                if seen_index_ids
-                else MetadataIndex.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
-        update(MetadataPartition)
-        .where(
-            MetadataPartition.datasource_id == datasource.id,
-            MetadataPartition.status == "ACTIVE",
-            (
-                ~MetadataPartition.id.in_(seen_partition_ids)
-                if seen_partition_ids
-                else MetadataPartition.id.is_not(None)
-            ),
-        )
-        .values(status="DEPRECATED", deprecated_at=now, updated_at=now),
+        if object_ids
     ]
     deprecated = 0
     for statement in statements:
@@ -493,8 +381,6 @@ async def deprecate_missing_snapshot(
         seen_table_ids=scope.table_ids,
         seen_column_ids=scope.column_ids,
         seen_constraint_ids=scope.constraint_ids,
-        seen_index_ids=scope.index_ids,
-        seen_partition_ids=scope.partition_ids,
     )
 
 
@@ -508,15 +394,7 @@ async def persist_discovery_snapshot(
     connector_capabilities: dict[str, Any] | None = None,
     scope: SnapshotScope | None = None,
 ) -> dict[str, int]:
-    counts = {
-        "catalogs": 0,
-        "schemas": 0,
-        "tables": 0,
-        "columns": 0,
-        "constraints": 0,
-        "indexes": 0,
-        "partitions": 0,
-    }
+    counts = {"catalogs": 0, "schemas": 0, "tables": 0, "columns": 0, "constraints": 0}
     tracker = ChangeTracker()
     table_map: dict[tuple[str, str, str], MetadataTable] = {}
     snapshot_scope = scope or SnapshotScope()
@@ -555,25 +433,6 @@ async def persist_discovery_snapshot(
                 # after the table batch is persisted so FULL reconciliation is exact.
                 await session.flush()
                 snapshot_scope.column_ids.update(column.id for column in persisted_columns)
-
-                # Indexes and partitions have no cross-table references (unlike
-                # constraints' foreign keys), so they can be persisted in this same
-                # per-table pass rather than needing the second, table_map-resolving
-                # pass below.
-                for discovered_index in discovered_table.indexes:
-                    index = await _get_or_create_index(
-                        session, datasource, table, discovered_index, tracker
-                    )
-                    await session.flush()
-                    snapshot_scope.index_ids.add(index.id)
-                    counts["indexes"] += 1
-                for discovered_partition in discovered_table.partitions:
-                    partition = await _get_or_create_partition(
-                        session, datasource, table, discovered_partition, tracker
-                    )
-                    await session.flush()
-                    snapshot_scope.partition_ids.add(partition.id)
-                    counts["partitions"] += 1
 
     for discovered_catalog in catalogs:
         for discovered_schema in discovered_catalog.schemas:
@@ -632,8 +491,6 @@ async def persist_discovery_snapshot(
     run.discovered_tables = counts["tables"]
     run.discovered_columns = counts["columns"]
     run.discovered_constraints = counts["constraints"]
-    run.discovered_indexes = counts["indexes"]
-    run.discovered_partitions = counts["partitions"]
     run.created_objects = tracker.created
     run.changed_objects = tracker.changed
     run.deprecated_objects = tracker.deprecated
@@ -721,6 +578,18 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if run is None or datasource is None:
                 raise ValueError("analysis run or datasource disappeared during discovery")
             counts = await persist_discovery_snapshot(session, run, datasource, catalogs)
+            # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
+            # comments and grants in `connector.discover()`; without this call it
+            # would drop them at persistence while both push paths kept them. No
+            # version gate is needed: a pull snapshot comes from a connector whose
+            # capability flags already say which axes it collected, so a connector
+            # that collects an axis is authoritative for it.
+            counts |= await persist_envelope_extensions(
+                session,
+                datasource,
+                catalogs,
+                deprecate_missing=(run.mode == "FULL"),
+            )
             worker_context = SecurityContext(
                 principal_id="metadata-worker",
                 principal_type="WORKER",
@@ -963,6 +832,10 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
             await session.scalars(
                 select(MetadataTable.id)
                 .where(
+                    # INV-5: the tenant boundary is restated explicitly rather than
+                    # inherited from the datasource FK, so this query is scoped even
+                    # if a future caller hands it a datasource from another tenant.
+                    MetadataTable.organization_id == run.organization_id,
                     MetadataTable.datasource_id == datasource.id,
                     MetadataTable.status == "ACTIVE",
                     MetadataTable.object_type == "BASE_TABLE",

@@ -5,6 +5,19 @@
 
 ## 1. Deployment units
 
+> **Implementation status (2026-08-30).** The one-image / multiple-entrypoint shape is real,
+> but the unit names below are target names and the count is five, not four. `compose.yaml`
+> builds one image and runs it as `api`, `metadata-worker` (`python -m aida.workflows.worker`),
+> `fleet-scheduler` (`aida.workflows.scheduler`), `outbox-publisher`
+> (`aida.projectors.outbox_publisher`) and `graph-projector` (`aida.projectors.graph_projector`) —
+> so the single "projector" unit below is in fact two processes today. The `atlas-*` names and
+> the `src/atlas/entrypoints/` package do not exist. **`atlas-connector-agent` does not exist
+> in any form**: no agent code, no registration endpoint, no mTLS path — it is a requirement,
+> not a deployed unit, and the `connector_agent.*` events in
+> `30-contracts/04-event-catalog.md` are likewise unimplemented. The HA models in the last
+> column are untested: leader election is coded in the scheduler, but no failover drill has
+> ever been run.
+
 Four units, one image, different entrypoints (see `05-service-extraction-plan.md` §1).
 
 | Unit | Entrypoint | Scales on | Stateless? | HA model |
@@ -173,7 +186,7 @@ Planning defaults:
 | SBOM | Generated per build |
 | Signing | Images signed; admission policy verifies |
 | Vulnerability policy | Fail build on critical; documented patch SLA |
-| Scanning | SAST, DAST, dependency, and container scans in CI |
+| Scanning | SAST, DAST, dependency, and container scans in CI — **planned, not wired (2026-08-30)**. `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic single-head check and `pytest`, and nothing else; no SAST, DAST, dependency-audit, secret-scan or container-scan step exists, and no such tool is in the `dev` extras |
 
 ## 10. Environment matrix
 

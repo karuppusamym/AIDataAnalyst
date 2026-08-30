@@ -9,7 +9,7 @@
 
 **Boundary.** This research compares Atlas to **vendor-stated public positioning** — product pages, engineering blogs, and analyst-review summaries. It does not compare against private roadmaps, customer-specific deployments, or non-public capability. Where a vendor describes a capability as preview or private preview, that qualifier is carried into the analysis.
 
-**Bias to be aware of.** Vendor product pages overstate. The matrix is therefore deliberately generous to competitors and honest about Atlas — a competitor claim is scored as stated, while Atlas is scored against `60-delivery/04-status-matrix.md`. A capability Atlas scores `◐` on may be scored `●` for a competitor on weaker evidence. This asymmetry is intentional: it prevents the analysis flattering the home team.
+**Bias to be aware of.** Vendor product pages overstate. The matrix is therefore deliberately generous to competitors and honest about Atlas — a competitor claim is scored as stated, while Atlas is scored against `60-delivery/00-status.md`. A capability Atlas scores `◐` on may be scored `●` for a competitor on weaker evidence. This asymmetry is intentional: it prevents the analysis flattering the home team.
 
 ## Primary vendor sources
 
@@ -18,6 +18,8 @@
 - [Atlan — The Context Layer for AI](https://atlan.com/)
 - [Alation — Agentic Data Intelligence Platform](https://www.alation.com/product/agentic-data-intelligence-platform/)
 - [Collibra Platform](https://www.collibra.com/products/collibra-platform)
+- [Collibra Data Lineage](https://www.collibra.com/products/data-lineage) — reviewed 2026-08-29; see `review-2026-08/research/05-collibra-lineage-and-platform.md`
+- [Collibra Data Marketplace](https://www.collibra.com/products/data-marketplace), [Data Catalog](https://www.collibra.com/products/data-catalog), [Integrations & APIs](https://www.collibra.com/products/integrations-apis), [MCP Server](https://www.collibra.com/products/mcp-server), [Data Governance](https://www.collibra.com/products/data-governance) — reviewed 2026-08-29; see `review-2026-08/research/06-collibra-marketplace-and-mcp.md`
 - [Microsoft Purview Data Governance](https://www.microsoft.com/en-us/security/business/risk-management/microsoft-purview-data-governance)
 
 ### Warehouse-native context planes
@@ -56,7 +58,7 @@ The competitive picture in this segment moves on roughly a quarterly cadence, dr
 |---|---|
 | 1 | Re-fetch each primary vendor product page; diff against the capability set recorded in `00-product/03-market-landscape.md` |
 | 2 | Check the most recent Databricks Data + AI Summit and Snowflake Summit announcements — these move the warehouse-native segment fastest |
-| 3 | Re-score `00-product/04-competitive-feature-matrix.md`, updating the Atlas column from `60-delivery/04-status-matrix.md` |
+| 3 | Re-score `00-product/04-competitive-feature-matrix.md`, updating the Atlas column from `60-delivery/00-status.md` |
 | 4 | Re-evaluate the strategic clock in `00-product/05-differentiation-and-whitespace.md` §6 — has anyone shipped governed agent execution for heterogeneous estates? |
 | 5 | Update the baseline date in every affected document |
 

@@ -116,7 +116,7 @@ Databricks' **Unity AI Gateway** — model/MCP/agent/skill registration, context
 
 | Aspect | Now | Target |
 |---|---|---|
-| Route versions | Implemented — immutable, residency/retention/capability/budget contracts, credential redaction, maker-checker, honest activation states | Bank-approved route selection |
+| Route versions | Implemented — immutable, residency/retention/capability/budget contracts, credential redaction, maker-checker, honest activation states, **plus config-selected `route_key` gating (bank-approved route selection) in `model_gateway.py`/`ai_governance_api.py`** | Private endpoint adapters/routing |
 | Adapters | Implemented — OpenAI Responses, Gemini GenerateContent, structured output, bounded retries/timeouts | Private endpoint adapters |
 | Evidence | Implemented — non-content | Unchanged |
 | Evaluations | Implemented — durable control evaluations | Bank model-risk corpus |
@@ -130,7 +130,7 @@ Databricks' **Unity AI Gateway** — model/MCP/agent/skill registration, context
 |---|---|---|
 | MG-1 | Rotate development credentials; move to workload identity | P0 |
 | MG-2 | Kill-switch drill with retained evidence | P0 |
-| MG-3 | Bank-approved route selection and private routing | P0 |
+| MG-3 | Private routing (bank-approved route selection itself is implemented — see §14) | P0 |
 | MG-4 | Residency and retention contract certification | P0 |
 | MG-5 | Model-risk evaluation corpus | P0 |
 | MG-6 | Spend, latency, and drift monitoring with alerts | P1 |

@@ -5,12 +5,18 @@
 
 ## 1. Current layout (the problem)
 
+> **Implementation status (2026-08-30).** Line counts re-measured against the tree and
+> corrected; the previous figures were roughly half of actual. `src/aida/` is ~36,500 lines
+> across 87 modules. Note also what this section omits: `src/atlas/` already exists alongside
+> `src/aida/` — `platform/` (four real files) and one scaffold module — so the repository is
+> currently in the *middle* of §2's migration, with 1 of 21 modules cut.
+
 ```text
 src/aida/
-├── api.py                    1,530 lines — most of the HTTP surface
-├── models.py                 1,274 lines — EVERY module's ORM models
-├── schemas.py                1,298 lines — EVERY module's DTOs
-├── intelligence_api.py       1,140 lines — three domains tangled
+├── api.py                    1,837 lines — most of the HTTP surface
+├── models.py                 2,721 lines — EVERY module's ORM models
+├── schemas.py                2,222 lines — EVERY module's DTOs
+├── intelligence_api.py       1,379 lines — three domains tangled
 ├── semantic_intelligence_api.py, semantic_api.py, semantic_inference.py
 ├── ingestion_api.py, ingestion.py, batch_ingestion.py
 ├── agent_orchestrator.py, agent_runtime.py, agent_intelligence.py, agent_evals.py
@@ -23,6 +29,15 @@ src/aida/
 Three specific defects: no enforceable boundaries (any module can import any model), high change amplification (one shared migration space), and no extraction seam.
 
 ## 2. Target layout
+
+> **Implementation status (2026-08-30). Target.** Built today, of the tree below:
+> `src/atlas/platform/` (`config.py`, `db.py`, `context.py`, `logging.py` — the `telemetry/`,
+> `errors/`, `pagination/`, `idempotency/`, `outbox/`, `workflow/` and `http/` packages do not
+> exist), and `src/atlas/modules/identity_tenancy/` as a 69-line scaffold. `src/atlas/entrypoints/`
+> does not exist — entrypoints are `aida.main`, `aida.workflows.worker`,
+> `aida.workflows.scheduler`, `aida.projectors.outbox_publisher` and
+> `aida.projectors.graph_projector`. `tests/` is flat: 44 files, 339 test functions, no
+> `invariants/`, `integration/`, `contract/`, `performance/` or `fixtures/` subdirectories.
 
 ```text
 atlas/
@@ -83,6 +98,11 @@ atlas/
 
 ## 3. Module internal layout
 
+> **Implementation status (2026-08-30). Target, realised once.** Only
+> `src/atlas/modules/identity_tenancy/` has this shape, and it is a scaffold: `service.py` is
+> 7 lines. It has no `migrations/` directory — all 34 Alembic revisions live in the
+> repository-root `migrations/versions/`. `scripts/generate_module.py` generates this shape.
+
 Identical for every module — uniformity is what lets an engineer work in any module on day one.
 
 ```text
@@ -113,6 +133,12 @@ One image, four entrypoints (ADR-0011).
 | `scheduler.py` | Fleet scheduler | Leader-elected loop |
 
 ## 5. Test placement
+
+> **Implementation status (2026-08-30). Target.** `pyproject.toml` sets
+> `testpaths = ["tests"]` and `tests/` is flat — none of the four directories below exists,
+> and `pytest src/atlas/modules/<name>` is not a supported invocation. The one module-local
+> test file, `src/atlas/modules/identity_tenancy/tests/test_module_scaffold.py`, is outside
+> the collected path.
 
 | Test kind | Location | Runs |
 |---|---|---|

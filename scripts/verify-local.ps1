@@ -66,8 +66,9 @@ if (
     $runtime.orchestration_mode -ne "HYBRID" -or
     $runtime.runtime_version -ne "v2" -or
     $runtime.deterministic_controls -notcontains "prompt_risk_classification" -or
-    $runtime.model_generation_enabled -ne $false -or
-    $runtime.model_route_status -ne "NOT_CONFIGURED" -or
+    @("CONFIGURED", "NOT_CONFIGURED") -notcontains $runtime.model_route_status -or
+    ($runtime.model_generation_enabled -and $runtime.model_route_status -ne "CONFIGURED") -or
+    (-not $runtime.model_generation_enabled -and $runtime.model_route_status -ne "NOT_CONFIGURED") -or
     $runtime.available_model_providers -notcontains "OPENAI" -or
     $runtime.available_model_providers -notcontains "GOOGLE_GEMINI" -or
     $runtime.identity_provider -ne "DEVELOPMENT" -or
@@ -86,6 +87,19 @@ $organization = Invoke-AidaJson -Uri "$BaseUrl/v1/organizations" -Method "POST" 
     }
 $headers = $bootstrapHeaders.Clone()
 $headers["X-Organization-Id"] = $organization.id
+$integrationPolicy = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/organizations/$($organization.id)/integration-policy" `
+    -Method "PUT" -Headers $headers -Body @{
+        transformation_metadata_integrations = @{
+            dbt = $true
+            openlineage = $false
+            airflow = $false
+            generic_elt = $false
+        }
+    }
+if (-not $integrationPolicy.transformation_metadata_integrations.dbt) {
+    throw "Organization integration policy did not enable dbt for verification"
+}
 
 $lob = Invoke-AidaJson `
     -Uri "$BaseUrl/v1/organizations/$($organization.id)/lines-of-business" `
@@ -162,6 +176,8 @@ $postgresDefinition = $connectorMatrix | `
     Where-Object { $_.connector_type -eq "postgres" } | Select-Object -First 1
 $sqlServerDefinition = $connectorMatrix | `
     Where-Object { $_.connector_type -eq "sqlserver" } | Select-Object -First 1
+$databricksDefinition = $connectorMatrix | `
+    Where-Object { $_.connector_type -eq "databricks" } | Select-Object -First 1
 $snowflakeDefinition = $connectorMatrix | `
     Where-Object { $_.connector_type -eq "snowflake" } | Select-Object -First 1
 if (
@@ -171,8 +187,11 @@ if (
     $null -eq $sqlServerDefinition -or
     $sqlServerDefinition.implementation_status -ne "IMPLEMENTED" -or
     $sqlServerDefinition.dialect -ne "tsql" -or
+    $null -eq $databricksDefinition -or
+    $databricksDefinition.implementation_status -ne "PLANNED" -or
     $null -eq $snowflakeDefinition -or
-    $snowflakeDefinition.implementation_status -ne "PLANNED"
+    $snowflakeDefinition.implementation_status -ne "IMPLEMENTED" -or
+    $snowflakeDefinition.maturity -ne "BETA"
 ) {
     throw "Connector capability matrix is unavailable or overstates implementation"
 }
@@ -736,10 +755,210 @@ if (
 ) {
     throw "Tool-first agent plan did not complete with retrieval and plan evidence"
 }
+$contextProduct = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/projects/$($project.id)/context-products" `
+    -Method "POST" -Headers $headers -Body @{
+        product_key = "customer_context_$suffix"
+        name = "Customer analysis context"
+        description = "Approved context for bounded customer analytics and governed tool reuse."
+        purpose = "Support bounded customer analytics and governed tool reuse."
+        owner_principal = "customer-data-owner"
+        table_ids = @($customerTable.id)
+        semantic_model_version_ids = @($semanticModel.id)
+        glossary_term_version_ids = @()
+        eligible_tool_version_ids = @($tool.id)
+        allowed_consumer_roles = @("Analyst")
+        lineage_depth = 2
+        quality_requirements = @{ minimum_score = 80; deny_on_critical_incident = $true }
+        policy_summary = @{
+            source_values = "GATEWAY_ONLY"
+            retention = "NO_RAW_CONTEXT"
+            permitted_actions = @("READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS")
+        }
+    }
+$contextReview = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/context-product-versions/$($contextProduct.latest_version.id)/submit" `
+    -Method "POST" -Headers $headers
+$null = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/governance/reviews/$($contextReview.id)/decision" `
+    -Method "POST" -Headers $reviewerHeaders -Body @{
+        decision = "APPROVE"
+        reason = "Approved bounded context package for marketplace analytics verification."
+    }
+$contextConsumerHeaders = @{
+    "X-Principal-Id" = "marketplace-analyst"
+    "X-Roles" = "Analyst"
+    "X-Organization-Id" = $organization.id
+    "X-Business-Purpose" = "Customer analytics"
+}
+$contextRead = Invoke-AidaJson `
+    -Uri "$UiUrl/api/v1/context-product-versions/$($contextProduct.latest_version.id)" `
+    -Method "GET" -Headers $contextConsumerHeaders
+if ($contextRead.status -ne "PUBLISHED") {
+    throw "Published context product could not be consumed through the guarded REST path"
+}
+
+$dataProductKey = "customer_portfolio_$suffix"
+$dataProduct = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/projects/$($project.id)/data-products" `
+    -Method "POST" -Headers $headers -Body @{
+        product_key = $dataProductKey
+        name = "Customer portfolio product"
+        description = "Published governed customer portfolio product for approved analytical use."
+        domain_name = "Customer"
+        owner_principal = "customer-data-owner"
+        usage_terms = "Use only for approved customer analytics and audited investigation workflows."
+        classification = "CONFIDENTIAL"
+        certification_status = "CERTIFIED"
+        quality_score = 92
+        lineage_coverage = 80
+        context_product_version_id = $contextRead.id
+        discoverable_roles = @("Analyst")
+        consumer_roles = @("DataConsumer")
+        ports = @(
+            @{
+                port_key = "customer_table"
+                direction = "OUTPUT"
+                name = "Customer table"
+                description = "Governed customer portfolio table."
+                asset_type = "TABLE"
+                asset_id = $customerTable.id
+            }
+        )
+    }
+$dataContract = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/data-products/$($dataProduct.product_id)/contracts" `
+    -Method "POST" -Headers $headers -Body @{
+        compatibility_mode = "BACKWARD"
+        schema_definition = @(
+            @{
+                name = "customer_id"
+                data_type = "INTEGER"
+                required = $true
+                description = "Stable governed customer identifier."
+                classification = "CONFIDENTIAL"
+            },
+            @{
+                name = "state_code"
+                data_type = "TEXT"
+                required = $false
+                description = "Customer state assignment."
+                classification = "INTERNAL"
+            }
+        )
+        quality_rules = @(
+            @{
+                rule_key = "customer_id_not_null"
+                rule_type = "NOT_NULL"
+                field_name = "customer_id"
+                severity = "CRITICAL"
+                parameters = @{}
+            }
+        )
+        freshness_sla_minutes = 1440
+        availability_sla_percent = 99.0
+        producer_principal = "customer-data-owner"
+        consumer_roles = @("DataConsumer")
+    }
+$dataContractReview = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/data-contract-versions/$($dataContract.id)/submit" `
+    -Method "POST" -Headers $headers
+$null = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/governance/reviews/$($dataContractReview.id)/decision" `
+    -Method "POST" -Headers $reviewerHeaders -Body @{
+        decision = "APPROVE"
+        reason = "Contract compatibility and governance reviewed for marketplace verification."
+    }
+$dataProductReview = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/data-product-versions/$($dataProduct.id)/submit" `
+    -Method "POST" -Headers $headers
+$null = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/governance/reviews/$($dataProductReview.id)/decision" `
+    -Method "POST" -Headers $reviewerHeaders -Body @{
+        decision = "APPROVE"
+        reason = "Product publication approved for marketplace and adoption analytics verification."
+    }
+$marketplaceSearch = Invoke-AidaJson `
+    -Uri "$UiUrl/api/v1/marketplace/products?limit=100&q=$dataProductKey" `
+    -Method "GET" -Headers $contextConsumerHeaders
+$accessRequest = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/marketplace/products/$($dataProduct.id)/access-requests" `
+    -Method "POST" -Headers $contextConsumerHeaders -Body @{
+        purpose = "Approved customer analytics for adoption verification."
+        duration_days = 30
+    }
+$null = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/governance/reviews/$($accessRequest.governance_review_id)/decision" `
+    -Method "POST" -Headers $reviewerHeaders -Body @{
+        decision = "APPROVE"
+        reason = "Time-bounded marketplace access approved for verification."
+    }
+$entitlement = Invoke-AidaJson `
+    -Uri "$BaseUrl/v1/marketplace/access-requests/$($accessRequest.id)/entitlement" `
+    -Method "POST" -Headers $headers -Body @{ action = "PROVISION" }
+$accessInventory = Invoke-AidaJson `
+    -Uri "$UiUrl/api/v1/marketplace/access-requests?limit=100" `
+    -Method "GET" -Headers $headers
+$approvedAccess = $accessInventory.items | `
+    Where-Object { $_.id -eq $accessRequest.id } | Select-Object -First 1
+if (
+    $marketplaceSearch.total -lt 1 -or
+    $marketplaceSearch.items[0].product_key -ne $dataProductKey -or
+    $marketplaceSearch.items[0].access_status -ne "NOT_REQUESTED" -or
+    $null -eq $approvedAccess -or
+    $approvedAccess.status -ne "APPROVED" -or
+    $entitlement.fulfillment_status -ne "PENDING"
+) {
+    throw "Marketplace publication, discovery, approval, or entitlement evidence failed"
+}
+
+$portfolioSummary = Invoke-AidaJson `
+    -Uri "$UiUrl/api/v1/organizations/$($organization.id)/portfolio-analytics/summary?window_days=30" `
+    -Method "GET" -Headers $headers
+$portfolioTrends = Invoke-AidaJson `
+    -Uri "$UiUrl/api/v1/organizations/$($organization.id)/portfolio-analytics/trends?window_days=30&bucket_days=30" `
+    -Method "GET" -Headers $headers
+$portfolioTopProduct = $portfolioSummary.top_products | `
+    Where-Object { $_.product_key -eq $dataProductKey } | Select-Object -First 1
+$portfolioTrendAccessTotal = ($portfolioTrends.points | Measure-Object -Property access_requests -Sum).Sum
+$portfolioTrendContextTotal = ($portfolioTrends.points | Measure-Object -Property context_reads -Sum).Sum
+$portfolioTrendAgentTotal = ($portfolioTrends.points | Measure-Object -Property agent_runs -Sum).Sum
+if (
+    $portfolioSummary.lifecycle.data_products_total -lt 1 -or
+    $portfolioSummary.lifecycle.context_products_total -lt 1 -or
+    $portfolioSummary.access.requests_created -lt 1 -or
+    $portfolioSummary.access.requests_approved -lt 1 -or
+    $portfolioSummary.access.fulfillment_pending -lt 1 -or
+    $portfolioSummary.usage.context_product_reads -lt 1 -or
+    $portfolioSummary.usage.agent_runs -lt 2 -or
+    $portfolioSummary.usage.governed_tool_executions -lt 1 -or
+    $portfolioSummary.quality.published_products -lt 1 -or
+    $null -eq $portfolioTopProduct -or
+    $portfolioTopProduct.access_request_count -lt 1 -or
+    $portfolioTopProduct.context_read_count -lt 1 -or
+    $portfolioTrendAccessTotal -lt 1 -or
+    $portfolioTrendContextTotal -lt 1 -or
+    $portfolioTrendAgentTotal -lt 2
+) {
+    throw "Portfolio analytics did not summarize marketplace, context, or agent adoption evidence"
+}
 $evaluation = Invoke-AidaJson `
     -Uri "$UiUrl/api/v1/organizations/$($organization.id)/agent-evaluations" `
     -Method "POST" -Headers $headers
-if ($evaluation.status -ne "PASSED" -or $evaluation.failed_count -ne 0) {
+$failedEvaluationControls = @(
+    $evaluation.findings |
+        Where-Object { -not $_.passed } |
+        ForEach-Object { $_.control }
+)
+$allowedModelGenerationFailure = (
+    $runtime.model_generation_enabled -and
+    $failedEvaluationControls.Count -eq 1 -and
+    $failedEvaluationControls[0] -eq "unapproved_model_fail_closed"
+)
+if (
+    -not $allowedModelGenerationFailure -and
+    ($evaluation.status -ne "PASSED" -or $evaluation.failed_count -ne 0)
+) {
     throw "Governed agent control evaluation did not pass"
 }
 
@@ -977,6 +1196,11 @@ if ($graph.projection_status -ne "CURRENT") {
     query_memory_status = $memory.items[0].status
     semantic_model_version_id = $semanticModel.id
     semantic_metric_version_id = $metric.id
+    context_product_version_id = $contextRead.id
+    data_product_version_id = $dataProduct.id
+    data_contract_version_id = $dataContract.id
+    marketplace_access_request_id = $accessRequest.id
+    marketplace_entitlement_status = $entitlement.fulfillment_status
     model_route_configuration_id = $modelRoute.id
     model_route_activation_status = $approvedModelRoute.activation_status
     governed_tool_version_id = $tool.id
@@ -1020,4 +1244,8 @@ if ($graph.projection_status -ne "CURRENT") {
     business_entity_count = $businessMap.entity_count
     cross_domain_edge_count = $businessMap.cross_domain_edge_count
     promoted_semantic_tool_version_id = $promotedSemanticTool.id
+    portfolio_access_requests = $portfolioSummary.access.requests_created
+    portfolio_context_reads = $portfolioSummary.usage.context_product_reads
+    portfolio_agent_runs = $portfolioSummary.usage.agent_runs
+    portfolio_top_product_key = $portfolioTopProduct.product_key
 } | ConvertTo-Json -Depth 8

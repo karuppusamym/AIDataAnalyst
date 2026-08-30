@@ -60,7 +60,7 @@ class StructuredModelProvider(Protocol):
     ) -> dict[str, Any]: ...
 
 
-async def _post_with_retry(
+async def post_with_retry(
     *,
     client: httpx.AsyncClient,
     url: str,
@@ -171,7 +171,7 @@ class OpenAIResponsesProvider:
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
-            response = await _post_with_retry(
+            response = await post_with_retry(
                 client=client,
                 url=f"{self.settings.openai_base_url.rstrip('/')}/responses",
                 headers={
@@ -235,7 +235,7 @@ class GeminiGenerateContentProvider:
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
-            response = await _post_with_retry(
+            response = await post_with_retry(
                 client=client,
                 url=(
                     f"{self.settings.gemini_base_url.rstrip('/')}/models/{model_id}:generateContent"
