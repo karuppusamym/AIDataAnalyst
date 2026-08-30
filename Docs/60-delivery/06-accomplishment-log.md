@@ -2024,3 +2024,22 @@ Studio has moved from Pending to Partial in the status matrix.
   decisions/gaps sections (§6–§7) against current code — this pass was scoped to the specific
   numeric claims the user's summary quoted and to the Studio cross-document-consistency question
   they raised.
+
+### Addendum (17:35 UTC) — the correction above was already stale by the time it merged
+
+- Pushing the above correction required merging two further rounds of concurrent commits (a QG-1
+  adversarial-SQL-corpus merge and a CT-5 certification merge, each bringing their own tracker/
+  Alembic-head updates). Re-ran the same checks against the newly merged head (`12aa5b4dd87d`):
+  `pytest` now reports **2,381 passed, 5 skipped, 1 xfailed** (2,387 collected) — up again from the
+  1,391 just logged above, largely from a new `tests/test_doc_claims.py` (866 cases: a doc-claim
+  regression gate landed by the same concurrent work, tracker TS-12) plus
+  `test_catalog_certification.py` and `test_adversarial_sql_corpus.py`.
+- `ruff check .` regressed from clean to **14 errors** (all auto-fixable) between this addendum and
+  the check 15 minutes prior — not this session's doing; left unfixed as out of scope for a
+  docs-only pass, and noted in `00-status.md` rather than silently fixed, since the owning session
+  should decide whether `--fix` is safe against their in-flight work.
+- Updated `00-status.md` a second time in the same sitting to the 17:35 figures rather than leave
+  the 17:20 numbers live and known-wrong. This is the third distinct "true count" recorded for this
+  page today (12:25: 1,199; 17:20: 1,391; 17:35: 2,387) — each correction was accurate when made and
+  stale within the hour, which is itself the fact worth recording: on a branch this actively
+  developed, treat every count in `00-status.md` as a timestamped snapshot, not a stable number.

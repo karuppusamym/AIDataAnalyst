@@ -5,9 +5,11 @@
 > `Docs/_superseded/`. If a status claim appears in two places, this one wins; every other
 > document should carry a pointer here rather than its own summary.
 
-**Verified:** 2026-08-30 17:20 UTC, against the working tree. (Superseded the 12:25 snapshot below in
-place — this branch had ~200 more tests and a new Alembic merge migration land in the intervening
-~5 hours from other concurrent sessions still pushing to it; see the note directly below.)
+**Verified:** 2026-08-30 17:35 UTC, against the working tree. (Superseded the 12:25 snapshot in
+place; the 17:20 revision of this correction was itself already stale 15 minutes later — this
+branch is being pushed to by several concurrent sessions in parallel today, and each verification
+below is only "true as of" its own timestamp, not a stable fact. See `06-accomplishment-log.md`'s
+2026-08-30 entries for what changed between checks.)
 
 > **The tree moved sharply on 2026-08-30.** A parallel session committed three times and added
 > ~35 modules (ABAC API, studio, tool plans, view lineage, full-text index, fusion ranking, graph
@@ -19,9 +21,9 @@ place — this branch had ~200 more tests and a new Alembic merge migration land
 
 | | |
 |---|---|
-| Test suite | **1,390 passing, 1 expected failure** (1,391 collected; the xfail is INV-9's known gap, §3), no unexpected failures, no skips, no external service required |
-| Static quality | `ruff` clean · `mypy --strict` clean on **163** files · **4** import-linter contracts kept. Was 168 ruff and 16 mypy errors at 12:25; **fixed 2026-08-30**, and four of them were runtime faults rather than style (§1a) |
-| Migrations | **1** Alembic head, `c4d8e6f0a1b3` |
+| Test suite | **2,381 passing, 5 skipped, 1 expected failure** (2,387 collected; the xfail is INV-9's known gap, §3), no unexpected failures, no external service required |
+| Static quality | `mypy --strict` clean on **164** files · **4** import-linter contracts kept. `ruff` is **not** clean right now: **14 errors, all auto-fixable** (`ruff check --fix`), introduced by work merged in after the 17:20 revision of this line — not yet run |
+| Migrations | **1** Alembic head, `12aa5b4dd87d` |
 | Architecture decisions | **20** recorded, 1 superseded (ADR-0017 → ADR-0018) |
 | Invariants | **9 of 9** have an automated test; 3 carry a named limit (see §3) |
 | Authorization | Wired into the execution path and 5 read surfaces; **enforcing nothing** (shadow mode, §3 INV-4) |
@@ -216,8 +218,8 @@ carried here as closed rows — a status document listing what is already done s
 
 | Test area | Local result | Required next run |
 |---|---|---|
-| Static quality | Ruff clean, strict mypy clean (163 files), 4 import contracts kept, 1 Alembic head, 1,390 tests passing + 1 xfailed — reverified 2026-08-30 17:20 UTC (superseding the 12:25/1,199 snapshot; ~200 tests landed from other concurrent sessions on this branch in between) | CI on every change — **wired** (`.github/workflows/ci.yml`, ST-02). Not yet observed running on a remote |
-| Unit / contract suite | 1,390 passing + 1 xfailed (1,391 collected), of which the Tier-0 invariant files contribute 188 (INV-1 8, INV-4 26, INV-5 62, INV-6 27, INV-7 11, INV-9 28, `test_tier0_invariants.py` 26) — SQL Server and canonical/chunk contract validation, stable checksums, sequence/duplicate rejection, scope counting, quality, prompt-risk, graph, business inference, model, dbt, OIDC, secret, lineage, tool-first, evaluation controls | Add database concurrency/race tests, forced mid-batch restart, incident concurrency, JWKS outage, indirect prompt attacks, bank-domain benchmarks |
+| Static quality | Strict mypy clean (164 files), 4 import contracts kept, 1 Alembic head (`12aa5b4dd87d`) — reverified 2026-08-30 17:35 UTC. Ruff regressed to 14 errors (all auto-fixable) between the 17:20 and 17:35 checks, from concurrent work merging in; not yet run. Test count: **2,381 passing, 5 skipped, 1 xfailed** (2,387 collected), up from 1,199 at 12:25 and 1,391 at 17:20 — three different true counts inside one day, from other sessions pushing to this branch throughout | CI on every change — **wired** (`.github/workflows/ci.yml`, ST-02). Not yet observed running on a remote |
+| Unit / contract suite | 2,381 passing + 5 skipped + 1 xfailed (2,387 collected) as of 17:35 UTC — SQL Server and canonical/chunk contract validation, stable checksums, sequence/duplicate rejection, scope counting, quality, prompt-risk, graph, business inference, model, dbt, OIDC, secret, lineage, tool-first, evaluation controls, adversarial SQL corpus, catalog certification, doc-claim regression gate (`test_doc_claims.py`, new) | Run `ruff check --fix` to clear the 14 new errors; add database concurrency/race tests, forced mid-batch restart, incident concurrency, JWKS outage, indirect prompt attacks, bank-domain benchmarks |
 | Database migrations | Single head, applied locally. The ADR-0018 chain (`f1a2b3c4d5e6` → `a7c3e91d4f28` → `b4e2f70a9c15` → `c9d1a83e6b47`) and the value-freedom fix (`d5f8b21c4a03`) were **rehearsed on PostgreSQL 16 with populated data** — 14/14 backfill assertions, and a real sentinel seeded pre-migration confirmed absent from the database afterwards, with a clean downgrade/re-upgrade round trip | Rehearsal at the bank's catalogue scale; PITR restore |
 | End-to-end banking fixture | R20/R21/R22 real API/Temporal/PostgreSQL runs proved manifest/chunk replay, conflicting-content denial, cross-chunk FK resolution, exact scope counts, physical payload cleanup, live SQL Server discovery/profiling/SHOWPLAN/masking | FULL retirement/recovery and concurrent forced-restart fixtures; Kafka intake; maximum-scale load; remaining connectors; approved-provider certification; interactive visual/accessibility certification |
 | Security | Fail-closed controls and cross-tenant denial pass locally | Threat-led penetration testing; ABAC/row-policy certification |
