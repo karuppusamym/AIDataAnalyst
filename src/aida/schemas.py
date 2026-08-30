@@ -607,6 +607,26 @@ class ScanPolicyRead(ApiModel):
     updated_at: datetime
 
 
+class AnalysisTaskRead(ApiModel):
+    id: UUID
+    analysis_run_id: UUID
+    table_id: UUID | None
+    task_type: str
+    task_key: str
+    status: str
+    attempt_count: int
+    max_attempts: int
+    started_at: datetime | None
+    last_heartbeat_at: datetime | None
+    completed_at: datetime | None
+    heartbeat_detail: dict[str, Any]
+    error_class: str | None
+    error_message: str | None
+    retry_history: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+
 class AuditEventRead(ApiModel):
     id: int
     organization_id: UUID | None
@@ -654,7 +674,43 @@ class MetadataColumnRead(ApiModel):
     physical_type: str
     nullable: bool
     classification: str
+    classification_source: str
     status: str
+
+
+class ClassificationEvidenceRead(ApiModel):
+    id: UUID
+    column_id: UUID
+    classification: str
+    source_type: str
+    rule_id: str
+    confidence: float | None
+    matched_signal: dict[str, Any]
+    is_current: bool
+    created_by: str
+    created_at: datetime
+
+
+class ClassificationFeedRecord(ApiModel):
+    schema_name: str = Field(min_length=1, max_length=255)
+    table_name: str = Field(min_length=1, max_length=255)
+    column_name: str = Field(min_length=1, max_length=255)
+    classification: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,29}$")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ClassificationFeedIngestRequest(ApiModel):
+    source: str = Field(min_length=1, max_length=255)
+    records: list[ClassificationFeedRecord] = Field(min_length=1, max_length=500)
+
+
+class ClassificationFeedIngestResponse(ApiModel):
+    source: str
+    total: int
+    matched: int
+    changed: int
+    unmatched: list[str]
 
 
 class MetadataConstraintRead(ApiModel):
@@ -1052,6 +1108,45 @@ class QueryMemoryEvidenceRead(ApiModel):
     negative_feedback_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class KeyInferenceDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2000)
+    table_id: UUID | None = None
+    min_ratio: float = Field(default=0.95, ge=0.5, le=1.0)
+
+
+class KeyInferenceCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    table_profile_id: UUID | None
+    column_ids: list[str]
+    column_names: list[str]
+    column_count: int
+    detection_rule: str
+    confidence: float
+    estimated_distinctness_ratio: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class KeyInferenceCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "KeyInferenceCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a key candidate")
+        return self
 
 
 class RelationshipCandidateDiscoveryRequest(ApiModel):

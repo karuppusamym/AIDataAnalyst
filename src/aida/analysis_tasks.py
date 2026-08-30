@@ -14,6 +14,17 @@ TASK_TYPE_LABELS = {
     TASK_TYPE_PROFILE_DATASOURCE: "Profile datasource",
 }
 
+# Single source of truth for each task type's Temporal RetryPolicy.maximum_attempts
+# (see aida.workflows.discovery) and for the per-task evidence persisted by
+# aida.task_tracking / exposed via GET /v1/analysis-runs/{id}/tasks.
+TASK_TYPE_MAX_ATTEMPTS = {
+    TASK_TYPE_DISCOVER_DATASOURCE: 5,
+    TASK_TYPE_PLAN_PROFILE_TASKS: 5,
+    TASK_TYPE_PROFILE_TABLE: 4,
+    TASK_TYPE_FINALIZE_PROFILE_TASKS: 5,
+    TASK_TYPE_PROFILE_DATASOURCE: 5,
+}
+
 
 def task_display_name(task_type: str, details: dict[str, Any] | None = None) -> str:
     details = details or {}
