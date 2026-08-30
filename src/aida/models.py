@@ -2919,6 +2919,145 @@ class OutboxEvent(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class SearchIndex(Base, TimestampMixin):
+    """Full-text search index configuration for catalog metadata."""
+
+    __tablename__ = "search_index"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "index_key"),
+        Index("ix_search_index_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    index_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    index_type: Mapped[str] = mapped_column(String(30), default="GIN", nullable=False)
+    source_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    text_columns: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    language: Mapped[str] = mapped_column(String(30), default="english", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    last_rebuilt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class VectorEmbedding(Base, TimestampMixin):
+    """Vector embeddings for catalog metadata, stored as JSON float arrays.
+
+    Uses a JSON column for the embedding vector to avoid a hard dependency on
+    pgvector at import time.  The ``ix_vector_embedding_org_type`` index covers
+    the org-scoped type lookups the hybrid retrieval pipeline issues; a future
+    migration can add a pgvector ivfflat/hnsw index on the ``embedding`` column
+    once the extension is provisioned.
+    """
+
+    __tablename__ = "vector_embedding"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "object_type", "object_id"),
+        Index("ix_vector_embedding_org_type", "organization_id", "object_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
+    )
+    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    display_name: Mapped[str] = mapped_column(String(500), nullable=False)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(JSON, nullable=False)
+    embedding_model: Mapped[str] = mapped_column(String(100), nullable=False)
+    dimension: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AbacPolicyRecord(Base, TimestampMixin):
+    """Versioned ABAC policy rules for attribute-based access control."""
+
+    __tablename__ = "abac_policy"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "policy_key", "version"),
+        Index("ix_abac_policy_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    policy_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    effect: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    resource_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    environment_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AbacDecisionRecord(Base):
+    """Immutable audit log of ABAC evaluation decisions."""
+
+    __tablename__ = "abac_decision"
+    __table_args__ = (
+        Index("ix_abac_decision_org_created", "organization_id", "evaluated_at"),
+        Index("ix_abac_decision_principal", "principal_id", "evaluated_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    decision: Mapped[str] = mapped_column(String(10), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(255))
+    subject_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    resource_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    environment_attributes: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    contributing_policy_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    evaluation_time_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class AiDecisionRecord(Base):
+    """First-class AI decision edge for the lineage graph."""
+
+    __tablename__ = "ai_decision_record"
+    __table_args__ = (
+        Index("ix_ai_decision_run", "run_id", "decision_type"),
+        Index("ix_ai_decision_asset", "target_node", "decided_at"),
+        Index("ix_ai_decision_org_created", "organization_id", "decided_at"),
+        Index("ix_ai_decision_refusals", "organization_id", "decision_type",
+              postgresql_where=text("decision_type = 'REFUSAL'")),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    run_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    decision_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_node: Mapped[str] = mapped_column(String(500), nullable=False)
+    target_node: Mapped[str] = mapped_column(String(500), nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    control_version: Mapped[str | None] = mapped_column(String(100))
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class AuditEvent(Base):
     __tablename__ = "audit_event"
     __table_args__ = (
