@@ -3,44 +3,71 @@
 properties that must hold in every state of the system, formalized as one
 suite (tracker item ST-03).
 
-**Coverage in this file: INV-2, INV-3, INV-4, INV-8.** These four are provable
-today with static analysis and direct function calls against fakes -- the same
-no-live-infrastructure convention the rest of this suite already follows.
+**Coverage in this file: INV-2, INV-3, INV-4, INV-8**, plus the workspace-level
+half of INV-5 (`test_cross_tenant_denial` and
+`test_authorization_defaults_to_deny_without_membership`), which drives the
+policy engine against a real in-memory SQLite database.
 
-**Deliberately not attempted here, and why** (rather than faking a shallow
-pass): INV-1 (`test_projection_rebuild`) and INV-6 (`test_no_source_values_in_control_plane`)
-require deleting and replaying against a live Neo4j/search stack and a full
-ingestion pipeline -- Tier 3/4 integration infrastructure that does not exist
-in this environment. INV-5 (`test_cross_tenant_denial`) and INV-7
-(`test_every_mutation_audits`) as specced require exercising *every* API
-endpoint and background worker, which needs a running app plus a real or
-much heavier per-route fake-session harness than a single test file -- a
-distinct, larger undertaking from formalizing what's already provable. INV-9
-(`test_capability_matrix_matches_certification`) needs a certification-result
-store to assert against; nothing in the current codebase derives capability
-flags from a certification run, so there is nothing yet to test. Closing
-these five is real remaining work, not a gap this file quietly papers over.
+**The other five live in their own modules**, because each needed a harness
+rather than a handful of assertions and one 1,500-line file would be read by
+nobody:
+
+- `tests/test_inv1_single_authoritative_store.py` -- INV-1, single authoritative
+  store. Every Cypher statement in `src/aida` is extracted and classified, so a
+  projection write outside the projector package fails immediately; the rebuild
+  property is proven as replay determinism against a fixed PostgreSQL fixture.
+- `tests/test_inv5_tenant_isolation.py` -- INV-5, tenant isolation, at the API
+  surface. Every route on the live FastAPI app is enumerated; all 44
+  organization-scoped ones are driven with a foreign tenant and a session that
+  raises on first use, and the remaining 155 are required to reach a boundary
+  check. Complements, rather than replaces, the workspace-authorization tests in
+  this file: those prove one entry point deeply against a real database, that
+  module proves the whole surface.
+- `tests/test_inv6_value_freedom.py` -- INV-6, value-freedom. The query gateway
+  is driven end-to-end against a fake source returning sentinel-laden rows, and
+  everything it persists is searched for them.
+- `tests/test_inv7_attributability.py` -- INV-7, attributability. The mutating
+  route set is derived from HTTP verb *and* call graph, and each must reach
+  `record_audit`.
+- `tests/test_inv9_capability_honesty.py` -- INV-9, honest capability reporting.
+  Driven over the connector registry rather than a list of connectors.
+
+**What is still not proven, stated once so it is not implied away.** Two strict
+xfails remain, and both name a gap in the *codebase*, not in this suite:
+eleven-plus endpoints commit governed state with no audit record (INV-7), and
+capability flags are hand-declared rather than derived from a certification
+result (INV-9). Both are recorded in
+`Docs/review-2026-08/gap/06-tier0-invariant-suite.md`. Separately, INV-1's live
+projection-rebuild drill (gap item E5) and INV-6's full ingestion-pipeline
+sentinel sweep still need infrastructure that does not exist here; the tests
+above prove the in-process half of each and say so in their own docstrings.
 """
 
 import ast
 import inspect
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import aida.models  # noqa: F401  -- registers every table on the metadata
 from aida.config import Settings
 from aida.connectors.base import Connector
+from aida.db import Base
 from aida.model_gateway import SqlGenerationOutput
-from aida.models import GovernanceReview
+from aida.models import GovernanceReview, Organization
 from aida.query_gateway import QueryExecutionGateway
 from aida.schemas import GovernanceDecisionRequest
 from aida.security import SecurityContext
 from aida.semantic_api import decide_governance_review
 from aida.semantic_inference import SemanticEnrichmentBatchOutput
+from aida.workspace_service import authorize, create_workspace
 
 # --- INV-2: one execution choke point ----------------------------------
 
@@ -240,6 +267,93 @@ def test_the_secure_production_baseline_itself_is_accepted() -> None:
     already broken).
     """
     Settings(**_SECURE_PRODUCTION_BASELINE)
+
+
+# --- INV-5: tenant isolation is total -------------------------------------
+
+
+@pytest_asyncio.fixture
+async def isolated_session() -> AsyncIterator[AsyncSession]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as active:
+        yield active
+    await engine.dispose()
+
+
+async def test_cross_tenant_denial(isolated_session: AsyncSession) -> None:
+    """INV-5: authorization defaults to deny and never crosses an organization.
+
+    Exercised against the single workspace authorization entry point with a real
+    database. A principal carrying a valid identity in organization B is refused a
+    workspace in organization A even though that workspace exists, and the refusal
+    is shaped so that "exists elsewhere" and "does not exist" are indistinguishable
+    from outside (`30-contracts/02-api-conventions.md`).
+    """
+    org_a = Organization(name="A", slug=f"a-{uuid4().hex[:8]}")
+    org_b = Organization(name="B", slug=f"b-{uuid4().hex[:8]}")
+    isolated_session.add_all([org_a, org_b])
+    await isolated_session.flush()
+
+    workspace = await create_workspace(
+        isolated_session,
+        organization_id=org_a.id,
+        name="Risk",
+        slug="risk",
+        purpose="p",
+        owner_principal="alice",
+    )
+    # alice is a real owner -- in organization A.
+    intruder = SecurityContext(
+        principal_id="alice",
+        principal_type="USER",
+        organization_id=org_b.id,
+        roles=frozenset({"PlatformAdmin"}),
+    )
+    result = await authorize(
+        isolated_session,
+        intruder,
+        workspace_id=workspace.id,
+        action="READ_METADATA",
+        resource_type="TABLE",
+    )
+    assert result.allowed is False
+    assert result.reason_code == "CROSS_ORGANIZATION_DENIED"
+
+
+async def test_authorization_defaults_to_deny_without_membership(
+    isolated_session: AsyncSession,
+) -> None:
+    """INV-5: access is granted, never inherited. Being in the right organization
+    is not by itself permission to enter a workspace inside it."""
+    org = Organization(name="A", slug=f"a-{uuid4().hex[:8]}")
+    isolated_session.add(org)
+    await isolated_session.flush()
+    workspace = await create_workspace(
+        isolated_session,
+        organization_id=org.id,
+        name="Risk",
+        slug="risk",
+        purpose="p",
+        owner_principal="alice",
+    )
+    outsider = SecurityContext(
+        principal_id="mallory",
+        principal_type="USER",
+        organization_id=org.id,
+        roles=frozenset({"PlatformAdmin"}),
+    )
+    result = await authorize(
+        isolated_session,
+        outsider,
+        workspace_id=workspace.id,
+        action="READ_METADATA",
+        resource_type="TABLE",
+    )
+    assert result.allowed is False
+    assert result.reason_code == "NO_WORKSPACE_MEMBERSHIP"
 
 
 # --- INV-8: maker != checker ----------------------------------------------
