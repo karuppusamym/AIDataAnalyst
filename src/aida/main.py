@@ -27,6 +27,7 @@ from aida.context_product_api import router as context_product_router
 from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
 from aida.glossary_api import router as glossary_router
+from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.logging import configure_logging
@@ -103,6 +104,7 @@ app.include_router(ai_governance_router)
 app.include_router(ai_registry_router)
 app.include_router(dbt_router)
 app.include_router(composite_key_router)
+app.include_router(graph_perspectives_router)
 app.include_router(openlineage_router)
 app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
