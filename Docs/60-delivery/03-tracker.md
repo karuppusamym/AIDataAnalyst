@@ -99,7 +99,7 @@ happens the row names both, rather than being listed twice.
 | CT-2 | Million-object virtualization | 04/21 | A | P1 | TODO | — | 1M rows, no lockup |
 | CT-3 | Index/partition normalized models | 04 | A | P1 | TODO | — | Populated by ≥2 adapters |
 | CT-4 | Rename detection | 04 | C | P2 | TODO | — | Heuristic + steward confirmation |
-| CT-5 | Asset certification lifecycle with expiry | 04/08 | A | P1 | TODO | — | All asset types; expiry enforced |
+| CT-5 | Asset certification lifecycle with expiry | 04/08 | A | P1 | DONE | — | `AssetCertification` now covers tables and columns (`asset_type` + nullable `column_id`, `21a56d48976e`); expiry enforced via a shared, tested predicate (`asset_certification.py::asset_certification_is_active`) rather than a trusted `status` column; exposed at module 04's own declared `POST`/`GET /v1/tables/{id}/certification`. Verified against a live local Postgres 16 (full Alembic chain up/down/up, then a real ASGI HTTP run: certify table, certify column independently, re-certify supersedes, and — the exit condition itself — a row reading `status=="ACTIVE"` with a past `expires_at` 404s) |
 | CT-6 | Cross-source object resolution | 04 | A | P1 | TODO | — | Same logical asset across sources |
 | PR-1 | Composite key inference | 05 | B | P1 | TODO | — | Evidence-backed; review-gated |
 | PR-2 | Policy-approved range/top-value profiling | 05 | C | P2 | TODO | — | Per-classification approval + retention contract |
@@ -119,7 +119,7 @@ happens the row names both, rather than being listed twice.
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
 | SM-1 | Governed dimension authoring | 07 | B | P1 | TODO | — | Versioned; maker-checker |
-| SM-2 | Glossary term binding to semantic objects | 07/08 | A | P0 | TODO | — | Terms resolve in retrieval |
+| SM-2 | Glossary term binding to semantic objects | 07/08 | A | P0 | DONE | — | Delivered 2026-08-30. `TermSemanticBinding` between `GlossaryTerm` and `SemanticMetric` (`models.py`/`schemas.py`), mirroring `CrossBoundaryGrant`'s maker-checker shape (PENDING_APPROVAL → ACTIVE/REJECTED via the shared governance review queue, self-approval blocked) rather than GL-8's evidence-inference shape, since a binding here is a direct steward assertion. Create/list (both directions)/delete endpoints in `semantic_api.py`. Wired into `retrieval.py::hybrid_retrieve`: an ACTIVE binding folds the bound term's definition/synonyms into the semantic metric's retrievable/rankable text, and a glossary-term hit surfaces its bound semantic objects; a binding that never activated does not participate — proven against a real hybrid_retrieve call over a real in-memory database, not just a DB row check |
 | SM-3 | Confidence calibration + bank-domain corpus | 07 | D | P1 | TODO | — | Published accuracy results |
 | SM-4 | Metric suggestions from approved annotations | 07 | C | P1 | TODO | — | Proposals enter the review queue |
 | SM-5 | Multi-table tool blueprints | 07/14 | B | P1 | TODO | — | Deterministically rendered |

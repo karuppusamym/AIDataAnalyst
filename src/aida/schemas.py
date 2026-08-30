@@ -3035,6 +3035,36 @@ class CatalogBulkActionRunRead(ApiModel):
 
 
 # ---------------------------------------------------------------------------
+# SM-2: Glossary term binding to semantic objects
+# ---------------------------------------------------------------------------
+
+
+class TermSemanticBindingCreate(ApiModel):
+    term_id: UUID
+    semantic_object_type: Literal["METRIC"] = "METRIC"
+    semantic_object_id: UUID
+
+
+class TermSemanticBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    term_id: UUID
+    term_key: str
+    term_display_name: str
+    term_definition: str
+    semantic_object_type: str
+    semantic_object_id: UUID
+    semantic_object_name: str
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    governance_review_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # CT-5: asset certification lifecycle with expiry (single table or column)
 # ---------------------------------------------------------------------------
 
