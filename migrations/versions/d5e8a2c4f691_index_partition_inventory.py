@@ -1,8 +1,8 @@
 """index and partition inventory
 
 Revision ID: d5e8a2c4f691
-Revises: c3a9f1d5b6e2
-Create Date: 2026-08-30 15:05:00
+Revises: f371492245ae
+Create Date: 2026-08-30 16:00:00
 """
 
 from collections.abc import Sequence
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "d5e8a2c4f691"
-down_revision: str | Sequence[str] | None = "c3a9f1d5b6e2"
+down_revision: str | Sequence[str] | None = "f371492245ae"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

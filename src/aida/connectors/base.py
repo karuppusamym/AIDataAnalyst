@@ -44,6 +44,32 @@ class DiscoveredConstraint:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveredIndex:
+    """CT-3/CN-8. Cost-estimation-only inventory, deliberately not part of the
+    envelope 1.1 axes: nothing in lineage or semantic meaning reads an index, so
+    it carries none of that axis's unavailable-reason machinery and is grouped
+    like a constraint instead.
+    """
+
+    name: str
+    index_type: str
+    columns: tuple[str, ...]
+    is_unique: bool = False
+    is_primary: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredPartition:
+    """CT-3/CN-8. See `DiscoveredIndex` for why this is not an envelope 1.1 axis."""
+
+    name: str
+    partition_type: str
+    ordinal_position: int
+    key_columns: tuple[str, ...] = ()
+    high_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveredViewDefinition:
     """The text a view is defined by, and how much of it the source would give.
 
@@ -122,6 +148,8 @@ class DiscoveredTable:
     object_type: str
     columns: tuple[DiscoveredColumn, ...]
     constraints: tuple[DiscoveredConstraint, ...] = ()
+    indexes: tuple[DiscoveredIndex, ...] = ()
+    partitions: tuple[DiscoveredPartition, ...] = ()
     source_description: str | None = None
     view_definition: DiscoveredViewDefinition | None = None
     attributes: dict[str, Any] = field(default_factory=dict)

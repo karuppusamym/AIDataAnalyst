@@ -13,6 +13,8 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
+    append_grouped_index_rows,
+    append_partition_rows,
     apply_column_descriptions,
     apply_table_descriptions,
     apply_view_definitions,
@@ -146,6 +148,72 @@ _CATALOG_COMMENT_SQL = """
     WHERE d.datname = current_database()
 """
 
+# CT-3/CN-8. Not an envelope 1.1 axis (cost-estimation-only, see DiscoveredIndex),
+# grouped like the constraint query above via pg_index/pg_am. Expression indexes
+# (indkey entries of 0) have no matching pg_attribute row and are silently
+# dropped by the join rather than reported with a placeholder column name.
+_INDEX_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        ic.relname AS index_name,
+        am.amname AS index_type,
+        ix.indisunique AS is_unique,
+        ix.indisprimary AS is_primary,
+        att.attname AS column_name
+    FROM pg_index ix
+    JOIN pg_class rel ON rel.oid = ix.indrelid
+    JOIN pg_class ic ON ic.oid = ix.indexrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN pg_am am ON am.oid = ic.relam
+    JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = cols.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, ic.relname, cols.ordinality
+"""
+
+# Declarative partitioning: pg_partitioned_table carries the parent's
+# partitioning strategy and key; pg_inherits lists each partition's parent.
+_PARTITION_KEY_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        key.ordinality AS ordinal_position
+    FROM pg_partitioned_table part
+    JOIN pg_class rel ON rel.oid = part.partrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN LATERAL unnest(part.partattrs) WITH ORDINALITY AS key(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = key.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, key.ordinality
+"""
+
+_PARTITION_SQL = """
+    SELECT
+        parent_ns.nspname AS table_schema,
+        parent.relname AS table_name,
+        child.relname AS partition_name,
+        CASE part.partstrat
+            WHEN 'r' THEN 'RANGE'
+            WHEN 'l' THEN 'LIST'
+            WHEN 'h' THEN 'HASH'
+        END AS partition_type,
+        pg_get_expr(child.relpartbound, child.oid) AS high_value,
+        inh.inhseqno AS ordinal_position
+    FROM pg_inherits inh
+    JOIN pg_class parent ON parent.oid = inh.inhparent
+    JOIN pg_class child ON child.oid = inh.inhrelid
+    JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+    JOIN pg_partitioned_table part ON part.partrelid = parent.oid
+    WHERE parent_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY parent_ns.nspname, parent.relname, inh.inhseqno
+"""
+
 # `role_table_grants` is the privileges visible to the connecting role, which is
 # the honest scope: a metadata reader is not a superuser, and reporting only what
 # it can see is preferable to failing the whole discovery on a permission error.
@@ -170,8 +238,10 @@ class PostgresConnector(SqlExecutor):
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
         constraints=True,
-        indexes=False,
-        partitions=False,
+        # CT-3/CN-8: indexes -> pg_index/pg_am; partitions -> pg_partitioned_table
+        # + pg_inherits. See `_INDEX_SQL`/`_PARTITION_SQL` below.
+        indexes=True,
+        partitions=True,
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
@@ -278,6 +348,9 @@ class PostgresConnector(SqlExecutor):
             schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
             catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
             grant_rows = await connection.fetch(_GRANT_SQL)
+            index_rows = await connection.fetch(_INDEX_SQL)
+            partition_key_rows = await connection.fetch(_PARTITION_KEY_SQL)
+            partition_rows = await connection.fetch(_PARTITION_SQL)
         finally:
             await connection.close()
 
@@ -286,6 +359,31 @@ class PostgresConnector(SqlExecutor):
         apply_table_descriptions(tables, table_description_rows)
         apply_column_descriptions(tables, column_description_rows)
         apply_view_definitions(tables, view_rows)
+        append_grouped_index_rows(tables, index_rows)
+
+        # A partition key is a property of the parent table's partitioning
+        # scheme, not of the individual partition, so it is merged onto every
+        # partition row for that table before `append_partition_rows` groups them.
+        partition_key_map: dict[tuple[str, str], list[str]] = {}
+        for row in partition_key_rows:
+            key = (str(row["table_schema"]), str(row["table_name"]))
+            partition_key_map.setdefault(key, []).append(str(row["column_name"]))
+        merged_partition_rows = [
+            {
+                "table_schema": str(row["table_schema"]),
+                "table_name": str(row["table_name"]),
+                "partition_name": str(row["partition_name"]),
+                "partition_type": row["partition_type"],
+                "high_value": row["high_value"],
+                "ordinal_position": row["ordinal_position"],
+                "key_columns": partition_key_map.get(
+                    (str(row["table_schema"]), str(row["table_name"])), []
+                ),
+            }
+            for row in partition_rows
+        ]
+        append_partition_rows(tables, merged_partition_rows)
+
         return assemble_catalog(
             str(catalog_name),
             tables,
