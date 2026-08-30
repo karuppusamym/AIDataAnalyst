@@ -219,7 +219,8 @@ class TestVectorSearch:
                 "embedding": provider.embed("customer revenue"),
             },
         ]
-        hits = vector_search(q_emb, candidates, top_k=10)
+        # Use min_similarity=-1.0 so even low/negative similarities are included
+        hits = vector_search(q_emb, candidates, top_k=10, min_similarity=-1.0)
         assert len(hits) == 2
         # Exact match should be first
         assert hits[0].object_id == "2"

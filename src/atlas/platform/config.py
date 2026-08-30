@@ -93,6 +93,10 @@ class Settings(BaseSettings):
     mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
     mcp_tool_calls_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
     mcp_context_reads_per_day: int = Field(default=5_000, ge=1, le=1_000_000)
+    # Per-consumer rate limits (CX-6): narrower throttle for individual consumers
+    mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
+    mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
+    mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids

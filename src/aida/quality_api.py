@@ -9,12 +9,15 @@ from aida.context import get_correlation_id
 from aida.data_quality import DEFAULT_POLICY
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.freshness import WatermarkConfig, evaluate_freshness
 from aida.models import (
     AnalysisRun,
     DataQualityIncident,
     DataQualityObservation,
     DataQualityPolicy,
     DataSource,
+    FreshnessObservation,
+    FreshnessWatermarkConfig,
     MetadataTable,
 )
 from aida.quality_service import evaluate_analysis_run
@@ -25,6 +28,9 @@ from aida.schemas import (
     DataQualityPolicyRead,
     DataQualityPolicyUpsert,
     DataQualitySummaryRead,
+    FreshnessConfigRead,
+    FreshnessConfigUpsert,
+    FreshnessStatusRead,
     Page,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles

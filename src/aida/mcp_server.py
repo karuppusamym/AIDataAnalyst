@@ -1742,6 +1742,27 @@ async def _read_context_product_resource(
             quality_snapshot=quality_decision.snapshot(),
         )
     )
+    # CX-4: Record consumption lineage for context product reads
+    if context.organization_id is not None:
+        await record_consumption(
+            session,
+            organization_id=context.organization_id,
+            edge=ConsumptionEdge(
+                consumer_id=context.principal_id,
+                consumer_type=context.principal_type,
+                resource_type="context_product_version",
+                resource_id=str(product_version.id),
+                channel="MCP",
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+                business_purpose=context.business_purpose,
+                details={
+                    "product_key": product.product_key,
+                    "version": product_version.version,
+                    "fingerprint": product_version.fingerprint,
+                },
+            ),
+        )
     await session.commit()
     return {
         "contents": [
