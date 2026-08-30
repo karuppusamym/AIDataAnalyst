@@ -4210,6 +4210,43 @@ class AuditEvent(Base):
 
 
 # ---------------------------------------------------------------------------
+# Token revocation (ID-4, module 01 identity-and-tenancy)
+# ---------------------------------------------------------------------------
+
+
+class RevokedToken(Base, TimestampMixin):
+    """Durable revocation record for a bearer token.
+
+    Keyed by `token_identifier` (see `aida.oidc.token_identifier`) -- the token's own
+    `jti` claim when the issuer sets one, else a deterministic fingerprint of
+    (subject, issued-at, expiry) so tokens from issuers that omit `jti` can still be
+    revoked individually. `token_expires_at` mirrors the *token's* own expiry, not
+    this record's: it bounds how long the revocation list must be kept, since a
+    token can never be replayed past its own `exp` regardless of this table's
+    contents (see `aida.token_revocation.prune_expired_revocations`).
+    """
+
+    __tablename__ = "revoked_token"
+    __table_args__ = (
+        UniqueConstraint("token_identifier"),
+        Index("ix_revoked_token_expires_at", "token_expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), index=True
+    )
+    token_identifier: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject: Mapped[str] = mapped_column(String(255), nullable=False)
+    token_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    revoked_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+
+
+# ---------------------------------------------------------------------------
 # Runtime Data Contract Enforcement (Phase E - EE.1)
 # ---------------------------------------------------------------------------
 
