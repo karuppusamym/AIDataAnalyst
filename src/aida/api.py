@@ -34,6 +34,7 @@ from aida.catalog_bulk_actions import (
     plan_own,
     plan_tag,
 )
+from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
 from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
@@ -47,6 +48,7 @@ from aida.models import (
     AgentEvaluationRun,
     AgentRun,
     AnalysisRun,
+    AnalysisTask,
     AssetCertification,
     AssetTag,
     CatalogBulkActionRun,
@@ -89,6 +91,7 @@ from aida.schemas import (
     AiRuntimeStatusRead,
     AnalysisRunCreate,
     AnalysisRunRead,
+    AnalysisTaskRead,
     ApiModel,
     AssetCertificationRead,
     CatalogBulkActionRunRead,
@@ -98,6 +101,8 @@ from aida.schemas import (
     CatalogBulkSelectionFilter,
     CatalogBulkTagRequest,
     CertificationDecisionRequest,
+    ClassificationFeedIngestRequest,
+    ClassificationFeedIngestResponse,
     ColumnProfileRead,
     CrossBoundaryGrantCreate,
     CrossBoundaryGrantRead,
@@ -1182,6 +1187,94 @@ async def test_datasource(
 
 
 @router.post(
+    "/datasources/{datasource_id}/classification-feed/ingest",
+    response_model=ClassificationFeedIngestResponse,
+)
+async def ingest_datasource_classification_feed(
+    datasource_id: UUID,
+    body: ClassificationFeedIngestRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ClassificationFeedIngestResponse:
+    """Ingest one batch from an authoritative external classification feed.
+
+    Module 05 sec 9, PR-3: a bank's own classification feed is the
+    highest-accuracy source and *overrides* deterministic rule-based
+    classification -- ``aida.classification_feed.ingest_classification_feed``
+    is the single decision point for that override, and every applied record
+    appends a ``classification_evidence`` row with
+    ``source_type="EXTERNAL_AUTHORITATIVE"`` so provenance (inferred vs.
+    externally authoritative) is always inspectable, never silently merged.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    records = [
+        ExternalClassificationRecord(
+            schema_name=record.schema_name,
+            table_name=record.table_name,
+            column_name=record.column_name,
+            classification=record.classification,
+            source=body.source,
+            confidence=record.confidence,
+            note=record.note,
+        )
+        for record in body.records
+    ]
+    result = await ingest_classification_feed(
+        session,
+        datasource=datasource,
+        records=records,
+        created_by=context.principal_id,
+    )
+    record_audit(
+        session,
+        replace(context, organization_id=datasource.organization_id),
+        action="classification_feed.ingest",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "source": body.source,
+            "total": result.total,
+            "matched": result.matched,
+            "changed": result.changed,
+            "unmatched_count": len(result.unmatched),
+        },
+    )
+    if result.changed_column_ids:
+        # Matches the catalog's already-documented `classification.assigned` row
+        # (Docs/30-contracts/04-event-catalog.md) -- an authoritative-feed
+        # override is still "a column classified", just with a different
+        # source_type in the payload than a rule-based one.
+        record_outbox(
+            session,
+            organization_id=datasource.organization_id,
+            aggregate_type="datasource",
+            aggregate_id=str(datasource.id),
+            event_type="classification.assigned",
+            payload={
+                "datasource_id": str(datasource.id),
+                "source": body.source,
+                "source_type": "EXTERNAL_AUTHORITATIVE",
+                "column_ids": list(result.changed_column_ids),
+            },
+        )
+    await session.commit()
+    return ClassificationFeedIngestResponse(
+        source=body.source,
+        total=result.total,
+        matched=result.matched,
+        changed=result.changed,
+        unmatched=list(result.unmatched),
+    )
+
+
+@router.post(
     "/datasources/{datasource_id}/analysis-runs",
     response_model=AnalysisRunRead,
     status_code=status.HTTP_202_ACCEPTED,
@@ -1282,6 +1375,69 @@ async def get_analysis_run(
         raise HTTPException(status_code=404, detail="analysis run not found")
     enforce_organization(context, run.organization_id)
     return run
+
+
+@router.get("/analysis-runs/{run_id}/tasks", response_model=Page)
+async def list_analysis_run_tasks(
+    run_id: UUID,
+    task_status: str | None = Query(default=None, max_length=30),
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """Per-task attempt/heartbeat/failure drill-down for one analysis run.
+
+    Module 05 sec 6/10, PR-4: Temporal already tracks retries and heartbeats
+    for every activity, but only inside the cluster. ``analysis_task`` is the
+    operator-facing mirror ``aida.task_tracking`` writes at the start, on
+    heartbeat, and at the end of every task, so a stuck or failing run can be
+    drilled into here without reaching into Temporal directly.
+    """
+    run = await session.get(AnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="analysis run not found")
+    enforce_organization(context, run.organization_id)
+    filters = [AnalysisTask.analysis_run_id == run.id]
+    if task_status:
+        filters.append(AnalysisTask.status == task_status.upper())
+    total = await session.scalar(select(func.count()).select_from(AnalysisTask).where(*filters))
+    rows = (
+        await session.scalars(
+            select(AnalysisTask)
+            .where(*filters)
+            .order_by(AnalysisTask.started_at.asc().nulls_last(), AnalysisTask.created_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[AnalysisTaskRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get("/analysis-runs/{run_id}/tasks/{task_id}", response_model=AnalysisTaskRead)
+async def get_analysis_run_task(
+    run_id: UUID,
+    task_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> AnalysisTask:
+    run = await session.get(AnalysisRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="analysis run not found")
+    enforce_organization(context, run.organization_id)
+    task = await session.get(AnalysisTask, task_id)
+    if task is None or task.analysis_run_id != run.id:
+        raise HTTPException(status_code=404, detail="analysis task not found")
+    return task
 
 
 @router.post("/analysis-runs/{run_id}/cancel", response_model=AnalysisRunRead)

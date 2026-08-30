@@ -604,6 +604,26 @@ class ScanPolicyRead(ApiModel):
     updated_at: datetime
 
 
+class AnalysisTaskRead(ApiModel):
+    id: UUID
+    analysis_run_id: UUID
+    table_id: UUID | None
+    task_type: str
+    task_key: str
+    status: str
+    attempt_count: int
+    max_attempts: int
+    started_at: datetime | None
+    last_heartbeat_at: datetime | None
+    completed_at: datetime | None
+    heartbeat_detail: dict[str, Any]
+    error_class: str | None
+    error_message: str | None
+    retry_history: list[dict[str, Any]]
+    created_at: datetime
+    updated_at: datetime
+
+
 class AuditEventRead(ApiModel):
     id: int
     organization_id: UUID | None
@@ -651,7 +671,43 @@ class MetadataColumnRead(ApiModel):
     physical_type: str
     nullable: bool
     classification: str
+    classification_source: str
     status: str
+
+
+class ClassificationEvidenceRead(ApiModel):
+    id: UUID
+    column_id: UUID
+    classification: str
+    source_type: str
+    rule_id: str
+    confidence: float | None
+    matched_signal: dict[str, Any]
+    is_current: bool
+    created_by: str
+    created_at: datetime
+
+
+class ClassificationFeedRecord(ApiModel):
+    schema_name: str = Field(min_length=1, max_length=255)
+    table_name: str = Field(min_length=1, max_length=255)
+    column_name: str = Field(min_length=1, max_length=255)
+    classification: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,29}$")
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class ClassificationFeedIngestRequest(ApiModel):
+    source: str = Field(min_length=1, max_length=255)
+    records: list[ClassificationFeedRecord] = Field(min_length=1, max_length=500)
+
+
+class ClassificationFeedIngestResponse(ApiModel):
+    source: str
+    total: int
+    matched: int
+    changed: int
+    unmatched: list[str]
 
 
 class MetadataConstraintRead(ApiModel):

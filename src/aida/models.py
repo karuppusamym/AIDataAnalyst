@@ -826,9 +826,47 @@ class MetadataColumn(Base, TimestampMixin):
     nullable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     default_expression: Mapped[str | None] = mapped_column(Text)
     classification: Mapped[str] = mapped_column(String(30), default="UNCLASSIFIED", nullable=False)
+    # "RULE" (deterministic name/type inference) or "EXTERNAL_AUTHORITATIVE" (a bank's own
+    # classification feed — see aida.classification_feed). Once EXTERNAL_AUTHORITATIVE, rediscovery
+    # must never let rule-based inference silently overwrite it again (module 05 §9 exit condition).
+    classification_source: Mapped[str] = mapped_column(String(30), default="RULE", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class ClassificationEvidence(Base):
+    """Append-only provenance ledger for column classification decisions.
+
+    Every rule-based classification and every authoritative-feed override is
+    recorded here (never mutated), with ``is_current`` marking the row that
+    matches ``MetadataColumn.classification`` right now — so "why is this
+    column classified this way, and was it inferred or externally asserted"
+    is always answerable without guessing from the column row alone.
+    """
+
+    __tablename__ = "classification_evidence"
+    __table_args__ = (
+        Index("ix_classification_evidence_column_current", "column_id", "is_current"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    rule_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float | None] = mapped_column(Float)
+    matched_signal: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class MetadataConstraint(Base, TimestampMixin):
@@ -955,6 +993,48 @@ class AnalysisRun(Base, TimestampMixin):
     profiled_columns: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_class: Mapped[str | None] = mapped_column(String(100))
     error_message: Mapped[str | None] = mapped_column(Text)
+
+
+class AnalysisTask(Base, TimestampMixin):
+    """Persisted per-task evidence for one node of the analysis-run DAG.
+
+    Temporal tracks attempt count, heartbeats, and retry backoff for each
+    activity invocation, but that state lives only inside the Temporal
+    cluster. This table is the operator-facing mirror of it — written by
+    ``aida.task_tracking`` at the start, on heartbeat, and at the end of every
+    task — so ``GET /v1/analysis-runs/{id}/tasks[/…]`` can show attempt
+    count, last heartbeat, and failure reason for a stuck or failing run
+    without reaching into Temporal directly (module 05 §6/§10, PR-4).
+    """
+
+    __tablename__ = "analysis_task"
+    __table_args__ = (
+        UniqueConstraint("analysis_run_id", "task_key", name="uq_analysis_task_run_key"),
+        Index("ix_analysis_task_run_status", "analysis_run_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_run.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    task_key: Mapped[str] = mapped_column(String(320), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    error_class: Mapped[str | None] = mapped_column(String(100))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    retry_history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
 
 
 class ScanPolicy(Base, TimestampMixin):
@@ -1758,9 +1838,16 @@ class CompositeKeyCandidate(Base, TimestampMixin):
     table_id: Mapped[UUID] = mapped_column(
         ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    table_profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("table_profile.id", ondelete="SET NULL"), index=True
+    )
     column_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    column_names: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    column_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    key_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    estimated_distinctness_ratio: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
