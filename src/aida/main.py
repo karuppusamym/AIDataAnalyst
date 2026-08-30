@@ -16,6 +16,7 @@ from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
+from aida.bi_api import router as bi_router
 from aida.compliance_api import router as compliance_router
 from aida.config import get_settings
 from aida.consumption_lineage_api import router as consumption_lineage_router
@@ -100,6 +101,7 @@ app.include_router(ai_governance_router)
 app.include_router(ai_registry_router)
 app.include_router(dbt_router)
 app.include_router(openlineage_router)
+app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
 app.include_router(sql_validation_router)
 app.include_router(quality_router)

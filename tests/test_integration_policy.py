@@ -17,6 +17,7 @@ def test_transformation_metadata_integrations_default_closed() -> None:
         "openlineage": False,
         "airflow": False,
         "generic_elt": False,
+        "bi": False,
     }
     assert transformation_metadata_integration_enabled(defaults, "dbt") is False
 
@@ -36,6 +37,7 @@ def test_integration_policy_schema_normalizes_missing_keys() -> None:
         "openlineage": False,
         "airflow": False,
         "generic_elt": True,
+        "bi": False,
     }
 
 

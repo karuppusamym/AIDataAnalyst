@@ -3715,3 +3715,188 @@ class ToolCertificationRun(Base, TimestampMixin):
     decision_reason: Mapped[str | None] = mapped_column(String(2000))
     issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# BI lineage (LN-4, module 09) — Tableau / Power BI / Looker report -> metric
+# -> column edges. Mirrors the OpenLineage and dbt ingestion shape above: an
+# immutable, value-free artifact snapshot plus its extracted nodes and edges.
+# Only Tableau has a parser today (see aida.bi_lineage); the other tools are
+# accepted at the connection/import layer as a pluggable extension point.
+# ---------------------------------------------------------------------------
+
+
+class BiConnection(Base, TimestampMixin):
+    """A governed registration of one BI tool site/workspace bound to a warehouse datasource."""
+
+    __tablename__ = "bi_connection"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "connection_key"),
+        Index("ix_bi_connection_project_status", "project_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    bi_tool: Mapped[str] = mapped_column(String(30), nullable=False)
+    connection_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    site_or_workspace: Mapped[str | None] = mapped_column(String(255))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class BiArtifactImport(Base, TimestampMixin):
+    """Immutable BI metadata artifact snapshot; the raw artifact is deliberately not persisted."""
+
+    __tablename__ = "bi_artifact_import"
+    __table_args__ = (
+        UniqueConstraint("connection_id", "artifact_fingerprint"),
+        Index("ix_bi_artifact_import_org_created", "organization_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_connection.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artifact_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    bi_tool: Mapped[str] = mapped_column(String(30), nullable=False)
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="IMPORTED", nullable=False)
+    report_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    report_metric_edge_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_column_edge_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    matched_column_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    unmatched_column_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    imported_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class BiReportNode(Base, TimestampMixin):
+    """A workbook, dashboard, or sheet/report extracted from one BI artifact import."""
+
+    __tablename__ = "bi_report_node"
+    __table_args__ = (
+        UniqueConstraint("artifact_import_id", "external_id"),
+        Index("ix_bi_report_node_import_type", "artifact_import_id", "report_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    parent_report_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("bi_report_node.id", ondelete="CASCADE"), index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    report_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    project_name: Mapped[str | None] = mapped_column(String(255))
+
+
+class BiMetricNode(Base, TimestampMixin):
+    """A field/metric (calculated, column, group, ...) extracted from one BI artifact import."""
+
+    __tablename__ = "bi_metric_node"
+    __table_args__ = (
+        UniqueConstraint("artifact_import_id", "external_id"),
+        Index("ix_bi_metric_node_import_type", "artifact_import_id", "field_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    external_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    field_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    datasource_name: Mapped[str | None] = mapped_column(String(255))
+    # The raw calculation formula is never persisted — see aida.bi_lineage._formula_hash.
+    formula_hash: Mapped[str | None] = mapped_column(String(64))
+    formula_present: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class BiReportMetricEdge(Base, TimestampMixin):
+    """Report -> metric edge: this workbook/sheet/dashboard uses this field."""
+
+    __tablename__ = "bi_report_metric_edge"
+    __table_args__ = (
+        UniqueConstraint(
+            "artifact_import_id",
+            "report_id",
+            "metric_id",
+            name="uq_bi_report_metric_edge_import_report_metric",
+        ),
+        Index("ix_bi_report_metric_edge_import", "artifact_import_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    report_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_report_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    metric_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_metric_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    edge_kind: Mapped[str] = mapped_column(String(30), default="BI", nullable=False)
+
+
+class BiMetricColumnEdge(Base, TimestampMixin):
+    """Metric -> column edge: this field derives from this underlying source column."""
+
+    __tablename__ = "bi_metric_column_edge"
+    __table_args__ = (
+        UniqueConstraint(
+            "artifact_import_id",
+            "metric_id",
+            "source_database_name",
+            "source_schema_name",
+            "source_table_name",
+            "source_column_name",
+            name="uq_bi_metric_column_edge_import_metric_source",
+        ),
+        Index("ix_bi_metric_column_edge_import", "artifact_import_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    artifact_import_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_artifact_import.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    metric_id: Mapped[UUID] = mapped_column(
+        ForeignKey("bi_metric_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_database_name: Mapped[str | None] = mapped_column(String(255))
+    source_schema_name: Mapped[str | None] = mapped_column(String(255))
+    source_table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_column_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    matched_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    matched_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    edge_kind: Mapped[str] = mapped_column(String(30), default="BI", nullable=False)
