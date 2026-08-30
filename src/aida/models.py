@@ -3634,3 +3634,84 @@ class ToolPlanExecutionRecord(Base, TimestampMixin):
     budget_consumed: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="RUNNING", nullable=False)
     executed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# TL-1: tool certification corpus and workflow (module 14, tool registry).
+#
+# Mirrors ConnectorCertificationRun (module 09 connector "100-point" cert) and
+# AssetCertification (module 08 glossary GL-5 bulk certification with expiry):
+# a corpus of deterministic test cases is executed against a governed tool
+# version's real invocation path (aida.tool_rendering.render_tool_sql -- the
+# AST literal-binding step module 14 owns per its "not responsibilities"
+# boundary with 16 query-gateway) and countersigned maker != checker before it
+# becomes an active certification. Runs are immutable and never deleted or
+# rewritten by recertification: "current" certification is a query-time
+# projection over non-expired CERTIFIED runs, exactly like AssetCertification.
+# ---------------------------------------------------------------------------
+
+
+class ToolCertificationCase(Base, TimestampMixin):
+    """One deterministic case in a governed tool's certification corpus."""
+
+    __tablename__ = "tool_certification_case"
+    __table_args__ = (
+        UniqueConstraint("tool_id", "case_key", name="uq_tool_certification_case_key"),
+        Index("ix_tool_certification_case_tool_status", "tool_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    tool_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    expectation: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class ToolCertificationRun(Base, TimestampMixin):
+    """Immutable, attributable certification evidence for one tool version.
+
+    ``status`` moves PENDING_REVIEW -> CERTIFIED/REJECTED once a checker
+    decides, or straight to CERTIFICATION_FAILED when the corpus itself did
+    not fully pass (a failed corpus can never be countersigned into a
+    certification -- this is evidence-driven, not a rubber stamp).
+    Recertification is simply a new row: history is preserved forever.
+    """
+
+    __tablename__ = "tool_certification_run"
+    __table_args__ = (
+        Index("ix_tool_certification_run_tool_created", "tool_id", "created_at"),
+        Index("ix_tool_certification_run_org_status", "organization_id", "status"),
+        Index("ix_tool_certification_run_version_status", "tool_version_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    tool_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tool_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governed_tool_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suite_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    corpus_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
+    total_cases: Mapped[int] = mapped_column(Integer, nullable=False)
+    passed_cases: Mapped[int] = mapped_column(Integer, nullable=False)
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
+    executed_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    certified_by: Mapped[str | None] = mapped_column(String(255))
+    decision_reason: Mapped[str | None] = mapped_column(String(2000))
+    issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
