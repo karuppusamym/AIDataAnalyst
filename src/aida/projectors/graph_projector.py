@@ -25,6 +25,28 @@ from aida.models import (
 )
 from aida.unified_lineage_api import build_unified_lineage_graph_payload
 
+# Event types that trigger `project_unified_lineage` in `run_projector` below.
+# Named (rather than an inline set literal) so it can be asserted against
+# directly -- e.g. by `intelligence_api._relationship_candidate_decision_event_type`
+# regression tests -- rather than only by reading `run_projector`'s source.
+# RL-4: `relationship_candidate.approved.v1` / `.rejected.v1` were already
+# listed here before the corresponding `record_outbox()` call in
+# `intelligence_api.decide_relationship_candidate` emitted a different,
+# single consolidated event type (`relationship_candidate.decided.v1`) --
+# the two never matched, so an approved/rejected candidate never actually
+# reached this projector. Keep these two names in lockstep with
+# `intelligence_api._relationship_candidate_decision_event_type`.
+UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES = frozenset(
+    {
+        "metadata.discovery.completed.v1",
+        "metadata.discovery.snapshot.v1",
+        "dbt_artifact.imported.v1",
+        "openlineage.run_event.ingested.v1",
+        "relationship_candidate.approved.v1",
+        "relationship_candidate.rejected.v1",
+    }
+)
+
 
 @dataclass(slots=True)
 class ProjectorState:
@@ -445,14 +467,10 @@ async def run_projector() -> None:
                     event_id=event["event_id"],
                     datasource_id=event["payload"]["datasource_id"],
                 )
-            if event_type in {
-                "metadata.discovery.completed.v1",
-                "metadata.discovery.snapshot.v1",
-                "dbt_artifact.imported.v1",
-                "openlineage.run_event.ingested.v1",
-                "relationship_candidate.approved.v1",
-                "relationship_candidate.rejected.v1",
-            } and await project_unified_lineage(driver, event):
+            if (
+                event_type in UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES
+                and await project_unified_lineage(driver, event)
+            ):
                 logger.info(
                     "unified_lineage_graph_projected",
                     event_id=event.get("event_id"),

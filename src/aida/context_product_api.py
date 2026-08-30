@@ -107,6 +107,7 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
             "name": version.name,
             "description": version.description,
             "purpose": version.purpose,
+            "owner_type": version.owner_type,
             "owner_principal": version.owner_principal,
             "table_ids": version.table_ids,
             "semantic_model_version_ids": version.semantic_model_version_ids,
@@ -127,6 +128,7 @@ def _apply_definition(
     version.name = body.name
     version.description = body.description
     version.purpose = body.purpose
+    version.owner_type = body.owner_type
     version.owner_principal = body.owner_principal
     version.table_ids = payload["table_ids"]
     version.semantic_model_version_ids = payload["semantic_model_version_ids"]

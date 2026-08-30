@@ -782,6 +782,11 @@ class MetadataTable(Base, TimestampMixin):
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     source_description: Mapped[str | None] = mapped_column(Text)
+    # CT-4: set when a RenameCandidate naming this (tombstoned) row is approved and merged --
+    # lets anyone still holding this stable ID resolve forward to the object it became.
+    superseded_by_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
 
 
 class MetadataColumn(Base, TimestampMixin):
@@ -1554,18 +1559,114 @@ class RelationshipCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class KeyInferenceCandidate(Base, TimestampMixin):
-    """A proposed single-column or composite (2-4 column) key, evidence-backed
-    and review-gated exactly like ``RelationshipCandidate`` (module 05 §13,
-    PR-1) — see ``aida.key_inference`` for how candidates are derived purely
-    from value-free profile statistics, never from source values."""
+class TableFamilyCandidate(Base, TimestampMixin):
+    """RL-1: evidence-backed table-family / temporal-intelligence candidate.
 
-    __tablename__ = "key_inference_candidate"
+    A single row records one detected grouping -- a snapshot series, a
+    history/audit pair, a delta/CDC pair, or a single SCD Type 2 table -- and
+    follows the exact maker-checker review shape established by
+    ``RelationshipCandidate`` above (PENDING/APPROVED/REJECTED, created_by /
+    reviewed_by / reviewed_at). ``member_table_ids`` holds every
+    ``MetadataTable`` id that belongs to the family (exactly one for SCD,
+    normally two or more otherwise); ``base_table_id`` is the inferred
+    "current/live" table when one can be resolved (never set for SNAPSHOT).
+    """
+
+    __tablename__ = "table_family_candidate"
     __table_args__ = (
-        UniqueConstraint(
-            "table_id", "key_fingerprint", name="uq_key_inference_candidate_table_fingerprint"
-        ),
-        Index("ix_key_inference_candidate_org_status", "organization_id", "status"),
+        Index("ix_table_family_candidate_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    family_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    member_table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    base_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RenameCandidate(Base, TimestampMixin):
+    """CT-4: a tombstoned object proposed as a rename of a just-created one.
+
+    Detected automatically inside the same scan run that tombstones the old object and
+    creates the new one -- see `aida.workflows.activities.detect_rename_candidates`.
+    Approval is a steward decision (maker-checker) and is the only path that reassigns
+    the old object's downstream links (see `aida.identity_merge`); rejecting a candidate
+    leaves the delete-then-create outcome exactly as it was (module 04 SS6).
+    """
+
+    __tablename__ = "rename_candidate"
+    __table_args__ = (
+        UniqueConstraint("old_table_id", "new_table_id", name="uq_rename_candidate_pair"),
+        Index("ix_rename_candidate_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_run.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    old_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    new_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CompositeKeyCandidate(Base, TimestampMixin):
+    """PR-1: an evidence-backed, review-gated candidate composite (or single) key.
+
+    Mirrors ``RelationshipCandidate``'s maker-checker shape. ``column_ids`` is
+    the ordered list of ``MetadataColumn`` ids that make up the candidate key,
+    stored as stringified UUIDs in a JSON list -- the same "list of ids on one
+    row" convention already used by e.g. ``ContextProductVersion.table_ids``.
+    ``evidence`` carries the full per-column profiling stats (null/non-null/
+    approximate-distinct counts) and the ``TableProfile`` context they were
+    computed against, so a reviewer can see why this was proposed without
+    re-querying anything -- see ``aida.composite_key_inference`` for how it is
+    produced and why ``confidence`` is capped well below what a corroborated
+    ``RelationshipCandidate`` might reach.
+    """
+
+    __tablename__ = "composite_key_candidate"
+    __table_args__ = (
+        Index("ix_composite_key_candidate_org_status", "organization_id", "status"),
+        Index("ix_composite_key_candidate_table", "table_id"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -1594,6 +1695,101 @@ class KeyInferenceCandidate(Base, TimestampMixin):
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     review_reason: Mapped[str | None] = mapped_column(String(2000))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CrossSourceResolutionCandidate(Base, TimestampMixin):
+    """CT-6: proposes that two tables in different datasources are the same logical asset.
+
+    The catalog-identity analogue of `RelationshipCandidate`'s cross-source pairing
+    (module 06 RL-5): deterministic, metadata-only matching on name/qualified-name
+    similarity and column shape -- never row values, per ADR-0014. Discovery is scoped
+    and grant-gated exactly like `discover_cross_source_relationship_candidates` --
+    free within one `data_domain`, requiring an ACTIVE `CrossBoundaryGrant` to pair
+    across a domain boundary (ADR-0017 SS4). Approval only confirms the link; unlike a
+    rename candidate it never reassigns either table's downstream references, because
+    both tables remain distinct catalog objects in distinct estates.
+    """
+
+    __tablename__ = "cross_source_resolution_candidate"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_table_id", "target_table_id", name="uq_cross_source_resolution_pair"
+        ),
+        Index("ix_cross_source_resolution_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+
+
+class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
+    """RL-7 (optional, additive): a stronger-than-steward-decision label for one
+    `RelationshipCandidate`, for confidence-calibration purposes only.
+
+    A steward's APPROVE/REJECT on the candidate itself is real, legitimate
+    first-form ground truth (a human looked at the evidence and decided), and
+    calibration reads it directly by default. This table exists only for the
+    case where a *later* signal is stronger than that original decision --
+    e.g. a labelled banking corpus, or a query-execution confirmation that the
+    join is actually used -- without disturbing the original decision record
+    on `RelationshipCandidate` itself (maker-checker history, negative
+    knowledge) or requiring every calibration reader to know about this table.
+    At most one row per candidate: a second label supersedes, it does not
+    accumulate a competing opinion.
+
+    Nothing in this platform populates this table yet (no labelled banking
+    corpus exists in this environment -- see module 06 RL-7). It is schema
+    only, ready for whichever ingestion path is built once such a corpus, or a
+    usage-confirmation signal, exists.
+    """
+
+    __tablename__ = "relationship_candidate_ground_truth_label"
+    __table_args__ = (
+        UniqueConstraint(
+            "candidate_id", name="uq_relationship_candidate_ground_truth_label"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    # Named `candidate_id`, not `relationship_candidate_id` -- combined with this
+    # table's already-long name, the longer column name pushes the default
+    # SQLAlchemy index/constraint names (`ix_<table>_<column>`,
+    # `fk_<table>_<column>_<referred_table>`) past Postgres's 63-byte
+    # NAMEDATALEN limit.
+    candidate_id: Mapped[UUID] = mapped_column(
+        ForeignKey("relationship_candidate.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label: Mapped[str] = mapped_column(String(30), nullable=False)
+    source: Mapped[str] = mapped_column(String(100), nullable=False)
+    rationale: Mapped[str | None] = mapped_column(String(2000))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class SemanticInferenceRun(Base, TimestampMixin):
@@ -1909,8 +2105,31 @@ class OwnershipRule(Base, TimestampMixin):
 
 
 class AssetCertification(Base, TimestampMixin):
+    """CT-5: certification of a catalog asset, with expiry enforced at query time.
+
+    Originally table-only (GL-5's reviewed bulk table certification). ``asset_type``
+    and ``column_id`` make certification first-class for columns too -- module 04's
+    scale note names column as the dominant catalog entity (30x the table count) --
+    while ``table_id`` stays populated for both, so "every certification under this
+    table" is always a single indexed lookup. A row's ``status`` staying "ACTIVE"
+    past its ``expires_at`` is expected (certification history is retained evidence,
+    never mutated by a clock); ``aida.asset_certification.asset_certification_is_active``
+    is the query-time projection that actually enforces expiry, mirroring
+    ``aida.tool_certification.certification_is_active`` for tool version certification.
+    """
+
     __tablename__ = "asset_certification"
-    __table_args__ = (Index("ix_asset_certification_org_status", "organization_id", "status"),)
+    __table_args__ = (
+        Index("ix_asset_certification_org_status", "organization_id", "status"),
+        CheckConstraint(
+            "asset_type IN ('TABLE', 'COLUMN')", name="ck_asset_certification_asset_type"
+        ),
+        CheckConstraint(
+            "(asset_type = 'TABLE' AND column_id IS NULL) OR "
+            "(asset_type = 'COLUMN' AND column_id IS NOT NULL)",
+            name="ck_asset_certification_column_consistency",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -1919,6 +2138,10 @@ class AssetCertification(Base, TimestampMixin):
     table_id: Mapped[UUID] = mapped_column(
         ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
+    )
+    asset_type: Mapped[str] = mapped_column(String(20), default="TABLE", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
     certified_by: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -2540,6 +2763,10 @@ class ContextProductVersion(Base, TimestampMixin):
             "'REJECTED', 'DEPRECATION_REVIEW', 'DEPRECATED')",
             name="ck_context_product_version_status",
         ),
+        CheckConstraint(
+            "owner_type IN ('INDIVIDUAL', 'GROUP')",
+            name="ck_context_product_version_owner_type",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2554,6 +2781,7 @@ class ContextProductVersion(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
+    owner_type: Mapped[str] = mapped_column(String(20), default="INDIVIDUAL", nullable=False)
     owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
     table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     semantic_model_version_ids: Mapped[list[str]] = mapped_column(
@@ -4137,4 +4365,66 @@ class CatalogBulkActionRun(Base, TimestampMixin):
     succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# SM-2: Glossary term binding to semantic objects
+# ---------------------------------------------------------------------------
+
+
+class TermSemanticBinding(Base, TimestampMixin):
+    """Reviewable link between a glossary term (module 08) and a semantic
+    object (module 07 -- today only a published `SemanticMetric`; a future
+    governed-dimension type from SM-1 binds the same way without a schema
+    change).
+
+    Mirrors `CrossBoundaryGrant`'s maker-checker shape rather than GL-8's
+    evidence-inference shape (`GlossaryLinkProposal`): a binding is a direct
+    steward assertion, not something inferred from approved annotations, so
+    it is created `PENDING_APPROVAL` and only becomes `ACTIVE` once an
+    independent reviewer decides it through the shared governance review
+    queue (`semantic_api.decide_governance_review`,
+    object_type="TERM_SEMANTIC_BINDING"). Only an `ACTIVE` binding
+    participates in retrieval (`retrieval.hybrid_retrieve`).
+
+    `semantic_object_type` is deliberately open so it does not need a schema
+    change when a second semantic-object kind exists; `semantic_object_id`
+    therefore carries no FK constraint of its own -- the same polymorphic
+    subject-reference pattern `OwnershipAssignment.subject_id` already uses
+    elsewhere in this module, just typed as `UUID` here because every
+    semantic object today has a UUID primary key and callers join on it
+    directly (see `retrieval.hybrid_retrieve`).
+    """
+
+    __tablename__ = "term_semantic_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "term_id",
+            "semantic_object_type",
+            "semantic_object_id",
+            name="uq_term_semantic_binding_term_object",
+        ),
+        Index("ix_term_semantic_binding_org_status", "organization_id", "status"),
+        Index(
+            "ix_term_semantic_binding_object",
+            "semantic_object_type",
+            "semantic_object_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    term_id: Mapped[UUID] = mapped_column(
+        ForeignKey("glossary_term.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    semantic_object_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    semantic_object_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )

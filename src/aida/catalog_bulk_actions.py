@@ -286,6 +286,7 @@ def plan_certify(
             AssetCertification(
                 organization_id=organization_id,
                 table_id=subject_id,
+                asset_type="TABLE",
                 rationale=rationale,
                 certified_by=certified_by,
                 expires_at=expires_at,

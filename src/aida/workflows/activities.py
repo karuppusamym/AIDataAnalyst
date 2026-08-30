@@ -38,19 +38,19 @@ from aida.connectors.base import (
 from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
+from aida.identity_resolution import IdentityMatch, score_table_rename
 from aida.ingestion import persist_envelope_extensions
-from aida.key_inference import ColumnStat, infer_key_candidates, key_fingerprint
 from aida.models import (
     AnalysisRun,
     ClassificationEvidence,
     ColumnProfile,
     DataSource,
-    KeyInferenceCandidate,
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
     MetadataSchema,
     MetadataTable,
+    RenameCandidate,
     TableProfile,
 )
 from aida.quality_service import evaluate_analysis_run
@@ -64,10 +64,6 @@ logger = structlog.get_logger(__name__)
 # evidence rows written from inside a Temporal activity (no human principal
 # is available on this path).
 _METADATA_WORKER_PRINCIPAL = "metadata-worker"
-
-# Bounds the per-table key-candidate search invoked from finalize_profile_tasks
-# (module 05 sec 7 -- every DAG stage is bounded, key inference included).
-MAX_KEY_CANDIDATES_PER_TABLE = 25
 
 
 @dataclass(slots=True)
@@ -92,6 +88,10 @@ class SnapshotScope:
     table_ids: set[UUID] = field(default_factory=set)
     column_ids: set[UUID] = field(default_factory=set)
     constraint_ids: set[UUID] = field(default_factory=set)
+    # Tables actually created (not merely reactivated/updated) across every chunk of this
+    # snapshot -- the CT-4 rename-detection "just created" side. Not part of object_counts()
+    # since it is a detection input, not an inventory total.
+    created_table_ids: set[UUID] = field(default_factory=set)
 
     def object_counts(self) -> dict[str, int]:
         return {
@@ -238,6 +238,8 @@ async def _get_or_create_table(
     schema: MetadataSchema,
     discovered: DiscoveredTable,
     tracker: ChangeTracker,
+    *,
+    created_table_ids: set[UUID] | None = None,
 ) -> MetadataTable:
     table = await session.scalar(
         select(MetadataTable).where(
@@ -259,6 +261,8 @@ async def _get_or_create_table(
         )
         session.add(table)
         await session.flush()
+        if created_table_ids is not None:
+            created_table_ids.add(table.id)
     else:
         table.status = "ACTIVE"
         table.deprecated_at = None
@@ -364,6 +368,15 @@ async def _get_or_create_constraint(
     return constraint
 
 
+@dataclass(slots=True)
+class DeprecationResult:
+    """Total rows tombstoned plus, specifically, which tables -- the CT-4 rename-detection
+    "just tombstoned" input."""
+
+    total: int
+    deprecated_table_ids: set[UUID] = field(default_factory=set)
+
+
 async def _deprecate_missing(
     session: AsyncSession,
     datasource: DataSource,
@@ -373,7 +386,7 @@ async def _deprecate_missing(
     seen_table_ids: set[UUID],
     seen_column_ids: set[UUID],
     seen_constraint_ids: set[UUID],
-) -> int:
+) -> DeprecationResult:
     now = datetime.now(UTC)
     catalog_ids = set(
         await session.scalars(
@@ -416,6 +429,22 @@ async def _deprecate_missing(
             constraint_ids=seen_constraint_ids,
         ),
     )
+    # Captured *before* the UPDATE below flips them: exactly the tables that are about to
+    # transition ACTIVE -> DEPRECATED in this call, as opposed to `missing.table_ids`, which
+    # also includes tables missing from a prior run that are already DEPRECATED. This is the
+    # CT-4 rename-detection "just tombstoned in this run" input (module 04 SS6).
+    deprecated_table_ids: set[UUID] = (
+        set(
+            await session.scalars(
+                select(MetadataTable.id).where(
+                    MetadataTable.id.in_(missing.table_ids),
+                    MetadataTable.status == "ACTIVE",
+                )
+            )
+        )
+        if missing.table_ids
+        else set()
+    )
     statements = [
         update(model)
         .where(model.id.in_(object_ids), model.status == "ACTIVE")
@@ -433,14 +462,14 @@ async def _deprecate_missing(
     for statement in statements:
         result = cast(CursorResult[Any], await session.execute(statement))
         deprecated += result.rowcount
-    return deprecated
+    return DeprecationResult(total=deprecated, deprecated_table_ids=deprecated_table_ids)
 
 
 async def deprecate_missing_snapshot(
     session: AsyncSession,
     datasource: DataSource,
     scope: SnapshotScope,
-) -> int:
+) -> DeprecationResult:
     return await _deprecate_missing(
         session,
         datasource,
@@ -450,6 +479,121 @@ async def deprecate_missing_snapshot(
         seen_column_ids=scope.column_ids,
         seen_constraint_ids=scope.constraint_ids,
     )
+
+
+async def detect_rename_candidates(
+    session: AsyncSession,
+    *,
+    run: AnalysisRun,
+    datasource: DataSource,
+    created_table_ids: set[UUID],
+    deprecated_table_ids: set[UUID],
+) -> list[RenameCandidate]:
+    """CT-4: propose that a table tombstoned in this run is really a table just
+    created in this run, renamed.
+
+    Deliberately narrow, per module 04 SS6 and ADR-0017 SS8 ("discovery cannot
+    scan everything, all the time"):
+
+    * Same run only -- this is a same-scan tombstone-plus-create pairing, never
+      a retroactive sweep across history. `created_table_ids` /
+      `deprecated_table_ids` are exactly what THIS call to
+      `persist_discovery_snapshot` just created and tombstoned.
+    * Same schema only -- `RenameCandidate.schema_id` is a single column, not
+      old/new, so a rename that also moves the object to a different schema is
+      out of scope for this heuristic (a steward can still relink by hand via
+      `aida.identity_merge.merge_table_identity`, called directly).
+    * Bounded -- at most `settings.rename_candidate_scan_max_tables` tables on
+      each side are considered, chosen deterministically (sorted by id) so a
+      retry considers the same subset rather than a random one.
+
+    `aida.identity_resolution.score_table_rename` is the sole arbiter of "strong
+    structural match"; this function only bounds candidates, dedupes against
+    already-proposed pairs, and persists what the heuristic proposes. Nothing
+    here merges identity -- that only happens when a steward approves the
+    candidate through the review endpoint, via `aida.identity_merge`.
+    """
+    if not created_table_ids or not deprecated_table_ids:
+        return []
+    settings = get_settings()
+    scan_cap = settings.rename_candidate_scan_max_tables
+    created_ids = sorted(created_table_ids, key=str)[:scan_cap]
+    deprecated_ids = sorted(deprecated_table_ids, key=str)[:scan_cap]
+
+    tables = {
+        table.id: table
+        for table in (
+            await session.scalars(
+                select(MetadataTable).where(
+                    MetadataTable.id.in_(set(created_ids) | set(deprecated_ids))
+                )
+            )
+        ).all()
+    }
+    deprecated_by_schema: dict[UUID, list[MetadataTable]] = {}
+    for table_id in deprecated_ids:
+        table = tables.get(table_id)
+        if table is not None:
+            deprecated_by_schema.setdefault(table.schema_id, []).append(table)
+    if not deprecated_by_schema:
+        return []
+
+    existing_pairs = {
+        (old_id, new_id)
+        for old_id, new_id in (
+            await session.execute(
+                select(RenameCandidate.old_table_id, RenameCandidate.new_table_id)
+            )
+        ).all()
+    }
+
+    all_table_ids = set(tables)
+    columns_by_table: dict[UUID, list[MetadataColumn]] = {}
+    if all_table_ids:
+        for column in (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(MetadataColumn.table_id.in_(all_table_ids))
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+            )
+        ).all():
+            columns_by_table.setdefault(column.table_id, []).append(column)
+
+    created: list[RenameCandidate] = []
+    for new_table_id in created_ids:
+        new_table = tables.get(new_table_id)
+        if new_table is None:
+            continue
+        for old_table in deprecated_by_schema.get(new_table.schema_id, []):
+            if (old_table.id, new_table.id) in existing_pairs:
+                continue
+            match: IdentityMatch | None = score_table_rename(
+                old_table_name=old_table.name,
+                old_columns=columns_by_table.get(old_table.id, []),
+                new_table_name=new_table.name,
+                new_columns=columns_by_table.get(new_table.id, []),
+                min_confidence=settings.rename_candidate_min_confidence,
+            )
+            if match is None:
+                continue
+            candidate = RenameCandidate(
+                organization_id=datasource.organization_id,
+                datasource_id=datasource.id,
+                analysis_run_id=run.id,
+                schema_id=new_table.schema_id,
+                old_table_id=old_table.id,
+                new_table_id=new_table.id,
+                detection_rule=match.detection_rule,
+                confidence=match.confidence,
+                evidence=match.evidence,
+                created_by="metadata-worker",
+            )
+            session.add(candidate)
+            created.append(candidate)
+            existing_pairs.add((old_table.id, new_table.id))
+    if created:
+        await session.flush()
+    return created
 
 
 async def persist_discovery_snapshot(
@@ -478,7 +622,12 @@ async def persist_discovery_snapshot(
             counts["schemas"] += 1
             for discovered_table in discovered_schema.tables:
                 table = await _get_or_create_table(
-                    session, datasource, schema, discovered_table, tracker
+                    session,
+                    datasource,
+                    schema,
+                    discovered_table,
+                    tracker,
+                    created_table_ids=snapshot_scope.created_table_ids,
                 )
                 snapshot_scope.table_ids.add(table.id)
                 table_key = (
@@ -552,7 +701,20 @@ async def persist_discovery_snapshot(
                     counts["constraints"] += 1
 
     if deprecate_missing:
-        tracker.deprecated = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        deprecation_result = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        tracker.deprecated = deprecation_result.total
+        # CT-4: same-run tombstone-plus-create pairing. Both sides are only known
+        # for certain once deprecation for *this* run has actually happened --
+        # `snapshot_scope.created_table_ids` accumulates as tables are persisted
+        # above, `deprecation_result.deprecated_table_ids` is exactly what this
+        # call just tombstoned.
+        await detect_rename_candidates(
+            session,
+            run=run,
+            datasource=datasource,
+            created_table_ids=snapshot_scope.created_table_ids,
+            deprecated_table_ids=deprecation_result.deprecated_table_ids,
+        )
 
     run.discovered_catalogs = counts["catalogs"]
     run.discovered_schemas = counts["schemas"]
@@ -1221,123 +1383,6 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
         raise
 
 
-async def _infer_and_persist_key_candidates(
-    session: AsyncSession,
-    run: AnalysisRun,
-) -> int:
-    """The DAG's "infer keys" stage (module 05 sec 6, PR-1) -- run once per
-    analysis run, after every table in it has a completed profile.
-
-    Every candidate is derived purely from ``ColumnProfile``/``TableProfile``
-    value-free statistics (ADR-0014) via ``aida.key_inference``; nothing here
-    reads a source value. Candidates are proposals only -- they land as
-    ``PENDING`` and require a maker-checker decision through
-    ``POST /v1/key-candidates/{id}/decision`` before anything downstream may
-    treat a column (set) as a key. A table_id/key_fingerprint pair already on
-    record (pending, approved, or rejected) is never re-proposed, so a human
-    decision is never silently reopened by the next run.
-    """
-    table_profiles = (
-        await session.scalars(
-            select(TableProfile).where(TableProfile.analysis_run_id == run.id)
-        )
-    ).all()
-    created = 0
-    for table_profile in table_profiles:
-        column_rows = (
-            await session.execute(
-                select(ColumnProfile, MetadataColumn)
-                .join(MetadataColumn, MetadataColumn.id == ColumnProfile.column_id)
-                .where(ColumnProfile.table_profile_id == table_profile.id)
-            )
-        ).all()
-        if not column_rows:
-            continue
-        stats = [
-            ColumnStat(
-                column_id=column.id,
-                column_name=column.name,
-                null_count=column_profile.null_count,
-                non_null_count=column_profile.non_null_count,
-                approximate_distinct_count=column_profile.approximate_distinct_count,
-            )
-            for column_profile, column in column_rows
-        ]
-        columns_by_lower_name = {column.name.lower(): column for _, column in column_rows}
-        constraints = (
-            await session.scalars(
-                select(MetadataConstraint).where(
-                    MetadataConstraint.table_id == table_profile.table_id,
-                    MetadataConstraint.constraint_type == "PRIMARY_KEY",
-                    MetadataConstraint.status == "ACTIVE",
-                )
-            )
-        ).all()
-        declared_primary_keys: set[frozenset[UUID]] = set()
-        for constraint in constraints:
-            declared_columns = frozenset(
-                columns_by_lower_name[name.lower()].id
-                for name in constraint.columns
-                if name.lower() in columns_by_lower_name
-            )
-            if declared_columns:
-                declared_primary_keys.add(declared_columns)
-        candidates = infer_key_candidates(
-            stats,
-            table_profile.row_count_estimate or 0,
-            declared_primary_key_column_ids=frozenset(declared_primary_keys),
-            max_candidates=MAX_KEY_CANDIDATES_PER_TABLE,
-        )
-        if not candidates:
-            continue
-        existing_fingerprints = set(
-            await session.scalars(
-                select(KeyInferenceCandidate.key_fingerprint).where(
-                    KeyInferenceCandidate.table_id == table_profile.table_id
-                )
-            )
-        )
-        for candidate in candidates:
-            fp = key_fingerprint(candidate.column_ids)
-            if fp in existing_fingerprints:
-                continue
-            session.add(
-                KeyInferenceCandidate(
-                    organization_id=run.organization_id,
-                    datasource_id=run.datasource_id,
-                    table_id=table_profile.table_id,
-                    table_profile_id=table_profile.id,
-                    column_ids=[str(column_id) for column_id in candidate.column_ids],
-                    column_names=list(candidate.column_names),
-                    column_count=candidate.column_count,
-                    key_fingerprint=fp,
-                    detection_rule=candidate.detection_rule,
-                    confidence=candidate.confidence,
-                    estimated_distinctness_ratio=candidate.estimated_distinctness_ratio,
-                    evidence=candidate.evidence,
-                    created_by=_METADATA_WORKER_PRINCIPAL,
-                )
-            )
-            existing_fingerprints.add(fp)
-            created += 1
-            # Matches the catalog-documented `key.inferred` row exactly
-            # (Docs/30-contracts/04-event-catalog.md) -- payload
-            # table_id/columns/confidence, one event per proposed candidate.
-            record_outbox(
-                session,
-                organization_id=run.organization_id,
-                aggregate_type="metadata_table",
-                aggregate_id=str(table_profile.table_id),
-                event_type="key.inferred",
-                payload={
-                    "table_id": str(table_profile.table_id),
-                    "columns": list(candidate.column_names),
-                    "confidence": candidate.confidence,
-                },
-            )
-    return created
-
-
 @activity.defn(name="finalize_profile_tasks")
 async def finalize_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
     run_uuid = UUID(str(payload["run_id"]))
@@ -1366,13 +1411,11 @@ async def finalize_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
                 organization_id=run.organization_id,
                 roles=frozenset({"MetadataWorker"}),
             )
-            key_candidates_created = await _infer_and_persist_key_candidates(session, run)
             details = {
                 "profiled_tables": profiled_tables,
                 "profiled_columns": profiled_columns,
                 "profile_version": "safe-v1",
                 "execution_model": "TABLE_TASK_DAG_V1",
-                "key_candidates_created": key_candidates_created,
             }
             quality = await evaluate_analysis_run(
                 session,

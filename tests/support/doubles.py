@@ -60,17 +60,40 @@ class RecordingSession:
 
     def __init__(self) -> None:
         self.added: list[Any] = []
+        self.deleted: list[Any] = []
         self.commits = 0
         self.flushes = 0
 
     def add(self, instance: Any) -> None:
         self.added.append(instance)
 
+    async def delete(self, instance: Any) -> None:
+        self.deleted.append(instance)
+        if instance in self.added:
+            self.added.remove(instance)
+
     async def flush(self) -> None:
         self.flushes += 1
         for instance in self.added:
             if getattr(instance, "id", None) is None:
                 instance.id = uuid4()
+            # Approximate what a real `session.flush()` populates via column
+            # defaults (status="DRAFT", created_at=..., ...): this double never
+            # touches a real engine, so SQLAlchemy's own default machinery never
+            # runs, and a handler that reads a just-created row back to build its
+            # response (as most of these do) would otherwise see None where a
+            # live flush would have filled in the default.
+            table = getattr(type(instance), "__table__", None)
+            if table is None:
+                continue
+            for column in table.columns:
+                if getattr(instance, column.name, None) is not None:
+                    continue
+                default = column.default
+                if default is None:
+                    continue
+                value = default.arg(None) if default.is_callable else default.arg
+                setattr(instance, column.name, value)
 
     async def commit(self) -> None:
         self.commits += 1

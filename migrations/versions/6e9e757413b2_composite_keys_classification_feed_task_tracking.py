@@ -1,6 +1,8 @@
-"""composite key inference, classification feed evidence, task-level tracking
+"""classification feed evidence, task-level tracking
 
-Module 05 (profiling-and-classification) open work PR-1/PR-3/PR-4:
+Module 05 (profiling-and-classification) open work PR-3/PR-4 (PR-1 composite
+key inference is a separate, already-merged migration -- see
+``6500275e1d36_composite_key_candidate``):
 
 - ``classification_evidence`` -- append-only provenance ledger for every
   column classification decision (rule-based or externally authoritative),
@@ -12,9 +14,6 @@ Module 05 (profiling-and-classification) open work PR-1/PR-3/PR-4:
 - ``analysis_task`` -- the operator-facing mirror of Temporal's per-activity
   attempt/heartbeat/retry state (module 05 sec 6/10, PR-4), read by
   ``GET /v1/analysis-runs/{id}/tasks``.
-- ``key_inference_candidate`` -- proposed single-column or composite (2-4
-  column) keys, evidence-backed and review-gated exactly like
-  ``relationship_candidate`` (module 05 sec 13, PR-1).
 
 Revision ID: 6e9e757413b2
 Revises: f371492245ae
@@ -154,112 +153,7 @@ def upgrade() -> None:
         unique=False,
     )
 
-    op.create_table(
-        "key_inference_candidate",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("datasource_id", sa.Uuid(), nullable=False),
-        sa.Column("table_id", sa.Uuid(), nullable=False),
-        sa.Column("table_profile_id", sa.Uuid(), nullable=True),
-        sa.Column("column_ids", sa.JSON(), nullable=False, server_default="[]"),
-        sa.Column("column_names", sa.JSON(), nullable=False, server_default="[]"),
-        sa.Column("column_count", sa.Integer(), nullable=False),
-        sa.Column("key_fingerprint", sa.String(length=64), nullable=False),
-        sa.Column("detection_rule", sa.String(length=100), nullable=False),
-        sa.Column("confidence", sa.Float(), nullable=False),
-        sa.Column("estimated_distinctness_ratio", sa.Float(), nullable=False),
-        sa.Column("evidence", sa.JSON(), nullable=False, server_default="{}"),
-        sa.Column("status", sa.String(length=30), nullable=False, server_default="PENDING"),
-        sa.Column("created_by", sa.String(length=255), nullable=False),
-        sa.Column("reviewed_by", sa.String(length=255), nullable=True),
-        sa.Column("review_reason", sa.String(length=2000), nullable=True),
-        sa.Column("reviewed_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(
-            ["organization_id"],
-            ["organization.id"],
-            name=op.f("fk_key_inference_candidate_organization_id_organization"),
-            ondelete="RESTRICT",
-        ),
-        sa.ForeignKeyConstraint(
-            ["datasource_id"],
-            ["datasource.id"],
-            name=op.f("fk_key_inference_candidate_datasource_id_datasource"),
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["table_id"],
-            ["metadata_table.id"],
-            name=op.f("fk_key_inference_candidate_table_id_metadata_table"),
-            ondelete="CASCADE",
-        ),
-        sa.ForeignKeyConstraint(
-            ["table_profile_id"],
-            ["table_profile.id"],
-            name=op.f("fk_key_inference_candidate_table_profile_id_table_profile"),
-            ondelete="SET NULL",
-        ),
-        sa.PrimaryKeyConstraint("id", name=op.f("pk_key_inference_candidate")),
-        sa.UniqueConstraint(
-            "table_id",
-            "key_fingerprint",
-            name="uq_key_inference_candidate_table_fingerprint",
-        ),
-    )
-    op.create_index(
-        op.f("ix_key_inference_candidate_organization_id"),
-        "key_inference_candidate",
-        ["organization_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_key_inference_candidate_datasource_id"),
-        "key_inference_candidate",
-        ["datasource_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_key_inference_candidate_table_id"),
-        "key_inference_candidate",
-        ["table_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_key_inference_candidate_table_profile_id"),
-        "key_inference_candidate",
-        ["table_profile_id"],
-        unique=False,
-    )
-    op.create_index(
-        "ix_key_inference_candidate_org_status",
-        "key_inference_candidate",
-        ["organization_id", "status"],
-        unique=False,
-    )
-
-
 def downgrade() -> None:
-    op.drop_index(
-        "ix_key_inference_candidate_org_status", table_name="key_inference_candidate"
-    )
-    op.drop_index(
-        op.f("ix_key_inference_candidate_table_profile_id"),
-        table_name="key_inference_candidate",
-    )
-    op.drop_index(
-        op.f("ix_key_inference_candidate_table_id"), table_name="key_inference_candidate"
-    )
-    op.drop_index(
-        op.f("ix_key_inference_candidate_datasource_id"),
-        table_name="key_inference_candidate",
-    )
-    op.drop_index(
-        op.f("ix_key_inference_candidate_organization_id"),
-        table_name="key_inference_candidate",
-    )
-    op.drop_table("key_inference_candidate")
-
     op.drop_index("ix_analysis_task_run_status", table_name="analysis_task")
     op.drop_index(op.f("ix_analysis_task_table_id"), table_name="analysis_task")
     op.drop_index(op.f("ix_analysis_task_analysis_run_id"), table_name="analysis_task")

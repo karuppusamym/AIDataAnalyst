@@ -117,6 +117,10 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
         {observed_ids[index], missing_ids[index]}
         for index in range(5)
     ]
+    # A 6th `scalars` call queries which of the about-to-be-tombstoned tables are
+    # currently ACTIVE (the CT-4 rename-detection "just tombstoned" input) --
+    # this synthetic scan's missing table, `missing_ids[1]`, is exactly that set.
+    inventories.append({missing_ids[1]})
     session = DeprecationSession(inventories)
     datasource = DataSource(
         id=uuid4(),
@@ -147,7 +151,8 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
         observed,
     )
 
-    assert deprecated == 5
+    assert deprecated.total == 5
+    assert deprecated.deprecated_table_ids == {missing_ids[1]}
     assert len(session.statements) == 5
     targeted: dict[str, set[UUID]] = {}
     for statement in session.statements:

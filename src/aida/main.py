@@ -18,6 +18,7 @@ from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.bi_api import router as bi_router
 from aida.compliance_api import router as compliance_router
+from aida.composite_key_api import router as composite_key_router
 from aida.config import get_settings
 from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
@@ -45,6 +46,7 @@ from aida.semantic_intelligence_api import router as semantic_intelligence_route
 from aida.sql_validation_api import router as sql_validation_router
 from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
+from aida.table_family_api import router as table_family_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
@@ -100,6 +102,7 @@ app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(ai_registry_router)
 app.include_router(dbt_router)
+app.include_router(composite_key_router)
 app.include_router(openlineage_router)
 app.include_router(bi_router)
 app.include_router(semantic_intelligence_router)
@@ -124,6 +127,7 @@ app.include_router(runtime_contracts_router)
 app.include_router(compliance_router)
 app.include_router(negative_knowledge_router)
 app.include_router(tool_plans_router)
+app.include_router(table_family_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

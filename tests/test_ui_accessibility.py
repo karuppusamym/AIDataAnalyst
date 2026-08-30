@@ -75,10 +75,51 @@ def test_ui_entrypoint_loads_split_runtime_assets() -> None:
         "features/transformation-workbench.js",
         "features/context-lineage-control-plane.js",
         "features/product-ai-control-plane.js",
+        "features/control-center.js",
     )
     for name in assets:
         assert f'/scripts/{name}' in html
         assert (UI_ROOT / "scripts" / name).is_file()
+
+
+def test_completed_control_plane_features_have_a_tabbed_ui() -> None:
+    html = (UI_ROOT / "index.html").read_text(encoding="utf-8")
+    script = (UI_ROOT / "scripts/features/control-center.js").read_text(encoding="utf-8")
+
+    assert 'id="controls-view"' in html
+    assert 'role="tablist"' in html
+    for tab in (
+        "catalog",
+        "access",
+        "policy",
+        "reliability",
+        "compliance",
+        "studio",
+        "plans",
+        "bi",
+    ):
+        assert f'data-control-tab="{tab}"' in html
+    assert "/v1/abac/policies" in script
+    assert "/v1/observability/slo" in script
+    assert "/v1/compliance/packs" in script
+    assert "/v1/studio/change-sets" in script
+    assert "/v1/tool-plans" in script
+
+
+def test_catalog_uses_bounded_server_paging_and_lazy_view_loading() -> None:
+    script = (UI_ROOT / "app.js").read_text(encoding="utf-8")
+    core = (UI_ROOT / "scripts/core.js").read_text(encoding="utf-8")
+
+    assert "catalogPageSize: 50" in core
+    assert 'params.set("q", query)' in script
+    assert 'params.set("object_type", type)' in script
+    assert 'data-catalog-page="next"' in script
+    assert "loadViewData(activeView)" in script
+    organization_loader = script.split("async function loadOrganizationData()", 1)[1].split(
+        "async function loadViewData", 1
+    )[0]
+    assert "loadControlCenter()" not in organization_loader
+    assert "fetchAll(`/v1/datasources/${sourceId}/tables`)" not in script
 
 
 def test_context_product_and_unified_lineage_surfaces_are_wired() -> None:

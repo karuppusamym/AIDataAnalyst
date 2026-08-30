@@ -1110,45 +1110,6 @@ class QueryMemoryEvidenceRead(ApiModel):
     updated_at: datetime
 
 
-class KeyInferenceDiscoveryRequest(ApiModel):
-    max_candidates: int = Field(default=200, ge=1, le=2000)
-    table_id: UUID | None = None
-    min_ratio: float = Field(default=0.95, ge=0.5, le=1.0)
-
-
-class KeyInferenceCandidateRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    table_id: UUID
-    table_profile_id: UUID | None
-    column_ids: list[str]
-    column_names: list[str]
-    column_count: int
-    detection_rule: str
-    confidence: float
-    estimated_distinctness_ratio: float
-    evidence: dict[str, Any]
-    status: str
-    created_by: str
-    reviewed_by: str | None
-    review_reason: str | None
-    reviewed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class KeyInferenceCandidateDecision(ApiModel):
-    decision: Literal["APPROVE", "REJECT"]
-    reason: str | None = Field(default=None, max_length=2000)
-
-    @model_validator(mode="after")
-    def require_reason(self) -> "KeyInferenceCandidateDecision":
-        if self.decision == "REJECT" and not self.reason:
-            raise ValueError("a reason is required when rejecting a key candidate")
-        return self
-
-
 class RelationshipCandidateDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=500, ge=1, le=5000)
 
@@ -1199,6 +1160,213 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class TableFamilyDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2000)
+
+
+class TableFamilyCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    schema_id: UUID
+    family_type: Literal["SNAPSHOT", "HISTORY", "DELTA", "SCD"]
+    member_table_ids: list[UUID]
+    base_table_id: UUID | None
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TableFamilyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "TableFamilyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a table family candidate")
+        return self
+
+
+class RenameCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    analysis_run_id: UUID
+    schema_id: UUID
+    old_table_id: UUID
+    new_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    merged_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RenameCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "RenameCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a rename candidate")
+        return self
+
+
+class CompositeKeyCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    column_ids: list[UUID]
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompositeKeyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "CompositeKeyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a composite key candidate")
+        return self
+
+
+class CrossSourceObjectResolutionDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=500, ge=1, le=5000)
+    max_datasource_pairs: int = Field(default=50, ge=1, le=2000)
+    target_data_domain_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Pair this domain's datasources against another data_domain's "
+            "instead of scanning within this domain alone. Requires an ACTIVE "
+            "cross_boundary_grant permitting this domain to see into the "
+            "target one (ADR-0017 SS4) -- rejected with 403 otherwise."
+        ),
+    )
+
+
+class CrossSourceResolutionCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    source_datasource_id: UUID
+    source_table_id: UUID
+    target_datasource_id: UUID
+    target_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrossSourceResolutionCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "CrossSourceResolutionCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a cross-source resolution")
+        return self
+
+
+
+
+# RL-6: a single bulk-decision request may touch at most this many candidates,
+# whether selected by an explicit id list (rejected outright above this size,
+# same as CATALOG_BULK_ACTION_MAX_ITEMS's precedent) or by a filter (silently
+# capped -- see `_resolve_relationship_candidate_bulk_subjects` in
+# intelligence_api.py).
+RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS = 500
+
+
+class RelationshipCandidateBulkSelectionFilter(ApiModel):
+    datasource_id: UUID
+    min_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    detection_rule: str | None = Field(default=None, max_length=100)
+
+
+class RelationshipCandidateBulkDecisionRequest(ApiModel):
+    candidate_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
+    )
+    filter: RelationshipCandidateBulkSelectionFilter | None = None
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "RelationshipCandidateBulkDecisionRequest":
+        _require_exactly_one_selection(self.candidate_ids, self.filter)
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting relationship candidates")
+        return self
+
+
+class RelationshipCandidateBulkDecisionItemRead(ApiModel):
+    candidate_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class RelationshipCandidateBulkDecisionResultRead(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    selection_mode: Literal["EXPLICIT", "FILTER"]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    truncated: bool
+    results: list[RelationshipCandidateBulkDecisionItemRead]
+
+
+class RelationshipCandidateCalibrationBucketRead(ApiModel):
+    confidence_low: float
+    confidence_high: float
+    decided_count: int
+    approved_count: int
+    rejected_count: int
+    observed_approval_rate: float | None
+
+
+class RelationshipCandidateCalibrationRead(ApiModel):
+    datasource_id: UUID | None
+    bucket_width: float
+    total_decided: int
+    ground_truth_overrides_applied: int
+    buckets: list[RelationshipCandidateCalibrationBucketRead]
+    methodology_note: str
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]
@@ -2162,6 +2330,7 @@ class ContextProductDefinition(ApiModel):
     name: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=3, max_length=10_000)
     purpose: str = Field(min_length=10, max_length=1000)
+    owner_type: Literal["INDIVIDUAL", "GROUP"]
     owner_principal: str = Field(min_length=2, max_length=255)
     table_ids: list[UUID] = Field(default_factory=list, max_length=1000)
     semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
@@ -3091,3 +3260,70 @@ class CatalogBulkActionRunRead(ApiModel):
     results: list[CatalogBulkActionItemRead]
     requested_by: str
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# SM-2: Glossary term binding to semantic objects
+# ---------------------------------------------------------------------------
+
+
+class TermSemanticBindingCreate(ApiModel):
+    term_id: UUID
+    semantic_object_type: Literal["METRIC"] = "METRIC"
+    semantic_object_id: UUID
+
+
+class TermSemanticBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    term_id: UUID
+    term_key: str
+    term_display_name: str
+    term_definition: str
+    semantic_object_type: str
+    semantic_object_id: UUID
+    semantic_object_name: str
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    governance_review_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# CT-5: asset certification lifecycle with expiry (single table or column)
+# ---------------------------------------------------------------------------
+
+
+class CertificationDecisionRequest(ApiModel):
+    """Module 04's ``CertificationDecision``: certify the table itself, or one column."""
+
+    asset_type: Literal["TABLE", "COLUMN"] = "TABLE"
+    column_id: UUID | None = None
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "CertificationDecisionRequest":
+        if self.asset_type == "COLUMN" and self.column_id is None:
+            raise ValueError("certifying a column requires column_id")
+        if self.asset_type == "TABLE" and self.column_id is not None:
+            raise ValueError("column_id is only meaningful when asset_type is COLUMN")
+        return self
+
+
+class AssetCertificationRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    column_id: UUID | None
+    asset_type: str
+    status: str
+    rationale: str
+    certified_by: str
+    expires_at: datetime
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime

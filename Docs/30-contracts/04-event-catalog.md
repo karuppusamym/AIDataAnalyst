@@ -9,7 +9,11 @@
 >
 > * The platform emits **~55 event types, all suffixed `.v1`** — e.g.
 >   `datasource.registered.v1`, `metadata.discovery.snapshot.v1`, `query.execution.completed.v1`,
->   `context.product_consumed.v1`, `relationship_candidate.decided.v1`,
+>   `context.product_consumed.v1`, `relationship_candidate.approved.v1` /
+>   `relationship_candidate.rejected.v1` (RL-4, 2026-08-30: split from a single
+>   `relationship_candidate.decided.v1` because the graph projector already listened for
+>   these two distinct names and they never matched — decided candidates were silently
+>   never projected to Neo4j),
 >   `governance.review_requested.v1`, `workspace.created.v1`.
 > * **Most rows below match nothing in the code.** Spot-checked and absent:
 >   `principal.created`, `tenant.created`, `ingestion.delivered`, `catalog.object.created`,
@@ -94,6 +98,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `catalog.object.reactivated` | Reappeared | object_id |
 | `catalog.drift.detected` | Run completed with drift | run_id, created, changed, deprecated |
 | `catalog.asset.certified` | Certification granted | object_id, certifier, expires_at |
+| `rename_candidate.decided.v1` | CT-4: steward approved/rejected a proposed rename | candidate_id, status |
+| `cross_source_resolution_candidate.decided.v1` | CT-6: steward approved/rejected a proposed cross-source match | candidate_id, status |
 
 ### Profiling — topic `atlas.catalog.v1`
 
@@ -103,6 +109,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `profile.failed` | Profiling failed | table_id, run_id, reason_code |
 | `classification.assigned` | Column classified | column_id, classification, confidence, rule_version |
 | `key.inferred` | Key inferred | table_id, columns, confidence |
+| `composite_key_candidate.decided.v1` | Checker approved or rejected a composite-key candidate | candidate_id, status |
 | `analysis_run.started` / `.completed` / `.cancelled` | Run lifecycle | run_id, scope, counts |
 
 ### Relationships — topic `atlas.catalog.v1`
@@ -113,6 +120,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `relationship.approved` | Checker approved | candidate_id, checker, rationale_ref |
 | `relationship.rejected` | Checker rejected | candidate_id, checker, rationale_ref |
 | `table_family.detected` | Family identified | family_id, family_type, members |
+| `table_family_candidate.decided.v1` | Checker approved or rejected a table-family candidate | candidate_id, status |
 | `canonical_table.resolved` | Canonical chosen | entity_ref, table_id, evidence_ref |
 
 ### Semantics and glossary — topic `atlas.semantics.v1` (key: `organization_id`)
