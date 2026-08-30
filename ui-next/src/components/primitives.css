@@ -1,0 +1,31 @@
+.pill{display:inline-flex;align-items:center;font-family:var(--mono);font-size:10.5px;letter-spacing:.04em;padding:2px 7px;border-radius:3px;white-space:nowrap;line-height:1.5}
+.pill--ok{color:var(--ok);background:var(--ok-soft)}
+.pill--warn{color:var(--warn);background:var(--warn-soft)}
+.pill--bad{color:var(--bad);background:var(--bad-soft)}
+.pill--info{color:var(--info);background:var(--info-soft)}
+.pill--accent{color:var(--accent);background:var(--accent-soft)}
+.pill--mute{color:var(--ink-3);background:var(--sunk);border:1px solid var(--line)}
+
+.sdot{display:inline-block;width:3px;height:14px;border-radius:2px;flex:none}
+.sdot--ok{background:var(--ok)} .sdot--warn{background:var(--warn)}
+.sdot--bad{background:var(--bad)} .sdot--info{background:var(--info)}
+.sdot--mute{background:var(--line)} .sdot--accent{background:var(--accent)}
+
+.btn{font:inherit;font-size:13px;border-radius:var(--radius-sm);padding:6px 12px;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink-2);transition:background .12s,border-color .12s}
+.btn:hover:not(:disabled){background:var(--sunk);color:var(--ink)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn--primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:500}
+.btn--primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover);color:var(--accent-ink)}
+
+.field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.field__label{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.field input,.field select{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--ink);min-width:0}
+.field input::placeholder{color:var(--ink-3)}
+
+.empty{border:1px dashed var(--line);border-radius:var(--radius);padding:34px 18px;text-align:center;background:var(--sunk)}
+.empty__t{font-size:14px;color:var(--ink-2);font-weight:500}
+.empty__h{font-size:12.5px;color:var(--ink-3);margin-top:5px}
+
+.errbox{border:1px solid var(--bad);border-left-width:3px;border-radius:var(--radius);padding:16px 18px;background:var(--bad-soft);display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.errbox__t{font-weight:600;color:var(--ink)}
+.errbox__d{font-family:var(--mono);font-size:12px;color:var(--ink-2)}

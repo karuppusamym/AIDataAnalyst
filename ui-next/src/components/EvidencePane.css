@@ -1,0 +1,30 @@
+.evp{width:352px;flex:none;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.evp--idle{align-items:center;justify-content:center;padding:20px}
+.evp--idle .empty{border:0;background:none}
+
+.evp__head{flex:none;display:flex;align-items:flex-start;gap:10px;padding:13px 14px;border-bottom:1px solid var(--line);background:var(--sunk)}
+.evp__title{min-width:0;flex:1}
+.evp__name{font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evp__path{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.evp__x{flex:none;background:none;border:0;font-size:20px;line-height:1;color:var(--ink-3);cursor:pointer;padding:0 2px;border-radius:var(--radius-sm)}
+.evp__x:hover{color:var(--ink)}
+
+.evp__body{flex:1;min-height:0;overflow-y:auto;padding:12px 14px}
+.evp__load{font-size:12.5px;color:var(--ink-3);padding:8px 0}
+
+.evl{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.evi{border-left:2px solid var(--line);padding:1px 0 1px 11px}
+.evi--ok{border-left-color:var(--ok)}
+.evi--warn{border-left-color:var(--warn)}
+.evi--bad{border-left-color:var(--bad)}
+.evi--info{border-left-color:var(--info)}
+.evi__label{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.evi__value{font-size:13px;color:var(--ink);margin-top:2px;line-height:1.45}
+.evi__source{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:3px;line-height:1.45}
+
+.evp__terms{margin-top:16px;padding-top:13px;border-top:1px solid var(--line-soft)}
+.evp__sub{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin-bottom:7px}
+.evp__pills{display:flex;flex-wrap:wrap;gap:5px}
+
+.evp__foot{flex:none;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 14px;border-top:1px solid var(--line);background:var(--sunk)}
+.evp__hint{font-family:var(--mono);font-size:10px;color:var(--ink-3)}

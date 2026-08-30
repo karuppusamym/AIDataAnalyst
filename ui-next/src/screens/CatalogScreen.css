@@ -1,0 +1,27 @@
+.cat{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px}
+.cat__head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex:none;flex-wrap:wrap}
+.cat__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.cat__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:62ch}
+.cat__stats{display:flex;gap:18px;font-size:12.5px;color:var(--ink-3);flex-wrap:wrap}
+.cat__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+.tnum{font-variant-numeric:tabular-nums}
+
+.cat__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.cat__filters .field:nth-child(1){width:280px}
+.cat__filters .field:nth-child(2){width:170px}
+.cat__filters .field:nth-child(3){width:180px}
+.cat__spacer{flex:1}
+.cat__bulk{display:flex;align-items:center;gap:8px}
+
+.cat__main{display:flex;gap:14px;flex:1;min-height:0}
+.cat__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+
+/* Below this the evidence pane stacks under the table. The table keeps an
+   explicit height because a virtualized list inside a collapsed flex chain
+   renders zero rows -- it has no viewport to measure against. */
+@media (max-width:1100px){
+  .cat{height:auto;min-height:100%}
+  .cat__main{flex-direction:column;min-height:0}
+  .cat__main .ctable{height:62vh;flex:none}
+  .evp{width:auto;max-height:none}
+}
