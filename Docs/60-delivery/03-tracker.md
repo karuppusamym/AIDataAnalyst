@@ -101,7 +101,7 @@ happens the row names both, rather than being listed twice.
 | CT-4 | Rename detection | 04 | C | P2 | TODO | — | Heuristic + steward confirmation |
 | CT-5 | Asset certification lifecycle with expiry | 04/08 | A | P1 | DONE | — | `AssetCertification` now covers tables and columns (`asset_type` + nullable `column_id`, `21a56d48976e`); expiry enforced via a shared, tested predicate (`asset_certification.py::asset_certification_is_active`) rather than a trusted `status` column; exposed at module 04's own declared `POST`/`GET /v1/tables/{id}/certification`. Verified against a live local Postgres 16 (full Alembic chain up/down/up, then a real ASGI HTTP run: certify table, certify column independently, re-certify supersedes, and — the exit condition itself — a row reading `status=="ACTIVE"` with a past `expires_at` 404s) |
 | CT-6 | Cross-source object resolution | 04 | A | P1 | TODO | — | Same logical asset across sources |
-| PR-1 | Composite key inference | 05 | B | P1 | TODO | — | Evidence-backed; review-gated |
+| PR-1 | Composite key inference | 05 | B | P1 | DONE | — | Delivered 2026-08-30. Bounded, evidence-backed candidate composite (and single) key detection from `TableProfile`/`ColumnProfile` statistics, conservatively scored and persisted as review-gated `CompositeKeyCandidate` rows with maker-checker decision (`composite_key_inference.py`, `composite_key_api.py`) |
 | PR-2 | Policy-approved range/top-value profiling | 05 | C | P2 | TODO | — | Per-classification approval + retention contract |
 | PR-3 | Authoritative classification feed integration | 05 | B | P1 | TODO | — | External feed overrides inference |
 | PR-4 | Task-level retry/heartbeat drill-down API | 05 | A | P1 | TODO | — | Operator console shows per-task evidence |
