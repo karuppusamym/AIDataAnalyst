@@ -1,0 +1,52 @@
+/* The table is a container, so columns respond to the space the table actually
+   has — which changes when the evidence pane opens, not when the window
+   resizes. A media query cannot see that; a container query can. */
+.ctable{container-type:inline-size;container-name:ctable;display:flex;flex-direction:column;min-height:340px;flex:1;min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);overflow:hidden}
+
+.ctable__head{display:flex;align-items:center;border-bottom:1px solid var(--line);background:var(--sunk);font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);height:34px;flex:none}
+/* Reserve the scrollbar gutter always, so header columns and body columns stay
+   aligned whether or not the list is currently scrollable. */
+.ctable__scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;contain:strict}
+.ctable__head{padding-right:15px}
+
+.ctable__foot{flex:none;height:32px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-top:1px solid var(--line);background:var(--sunk);font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.ctable__more{color:var(--accent)}
+
+.crow{position:absolute;top:0;left:0;width:100%;height:38px;display:flex;align-items:center;border-bottom:1px solid var(--line-soft);cursor:pointer}
+.crow:hover{background:var(--sunk)}
+.crow--sel{background:var(--accent-soft)}
+.crow--sel:hover{background:var(--accent-soft)}
+
+.cc{padding:0 9px;min-width:0;overflow:hidden;display:flex;align-items:center;gap:7px;font-size:13px}
+.cc--check{width:34px;flex:none;justify-content:center;padding:0;overflow:visible}
+.cc--name{width:206px;flex:none}
+.cc--desc{flex:1;min-width:0}
+.cc--owner{width:128px;flex:none;white-space:nowrap;text-overflow:ellipsis;display:block;line-height:38px}
+.cc--state{width:104px;flex:none}
+.cc--rows{width:92px;flex:none;justify-content:flex-end;font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+
+.cname{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cpath{font-family:var(--mono);font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
+.cdesc{display:flex;align-items:center;gap:6px;min-width:0;color:var(--ink-2)}
+.cdesc > span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.cnone{color:var(--ink-3);font-style:italic;white-space:nowrap}
+
+/* Progressive disclosure by priority: the columns that decide whether an agent
+   may use an asset (certification, quality) are the last to go. */
+@container ctable (max-width: 900px) {
+  .cc--owner{display:none}
+  .cpath{display:none}
+}
+@container ctable (max-width: 700px) {
+  .cc--rows{display:none}
+}
+@container ctable (max-width: 560px) {
+  .cc--desc{display:none}
+}
+
+.ctable__head .cc{font-size:9.5px}
+.ctable__head .cc--owner{line-height:34px}
+
+/* A state pill must never be truncated — a half-rendered "propo…" is worse
+   than no pill, because it still reads as a claim. The description yields. */
+.cdesc .pill{flex:none}

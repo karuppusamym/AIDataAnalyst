@@ -1,0 +1,152 @@
+/* ---------------------------------------------------------------------------
+   Atlas design tokens.
+
+   Module 21 requires WCAG AA contrast, visible focus, and reduced-motion
+   support. Those are properties of the token layer, not of individual screens,
+   so every colour a component uses comes from here and nowhere else.
+
+   Semantic state (certified / warning / failing / refused) is deliberately a
+   SEPARATE ramp from the brand accent. A screen that encodes "this asset has an
+   open quality incident" in the same hue it uses for "this row is selected"
+   cannot be read at a glance, which is the entire point of the catalog.
+--------------------------------------------------------------------------- */
+
+:root {
+  color-scheme: light;
+
+  /* Neutrals carry a slight blue bias so they sit with the accent rather than
+     reading as unconsidered greys. */
+  --paper: #fafbfd;
+  --surface: #ffffff;
+  --sunk: #f0f3f8;
+  --raised: #ffffff;
+  --line: #dbe1ec;
+  --line-soft: #e9edf4;
+
+  --ink: #0f1420;
+  --ink-2: #3d465c;
+  --ink-3: #6b7590;
+
+  --accent: #0e6e7e;
+  --accent-hover: #0b5966;
+  --accent-soft: #e3f1f3;
+  --accent-ink: #ffffff;
+
+  /* Semantic state. Never reuse these for chrome. */
+  --ok: #1e7a4c;
+  --ok-soft: #e4f2ea;
+  --warn: #a8741c;
+  --warn-soft: #f8efde;
+  --bad: #a8402f;
+  --bad-soft: #f8e9e6;
+  --info: #3a5bbf;
+  --info-soft: #e8ecfa;
+
+  --focus: #0e6e7e;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+  --shadow-1: 0 1px 2px rgba(15, 20, 32, 0.06);
+  --shadow-2: 0 1px 2px rgba(15, 20, 32, 0.05), 0 10px 28px -14px rgba(15, 20, 32, 0.22);
+
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --row-h: 38px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper: #0b0e15;
+    --surface: #141926;
+    --sunk: #0f131d;
+    --raised: #1a2030;
+    --line: #262e40;
+    --line-soft: #1d2432;
+    --ink: #e8ecf4;
+    --ink-2: #aeb8cc;
+    --ink-3: #7c879f;
+    --accent: #4fbacb;
+    --accent-hover: #6fcedd;
+    --accent-soft: #10303a;
+    --accent-ink: #06222a;
+    --ok: #4fbe86;
+    --ok-soft: #102c1f;
+    --warn: #d9a44b;
+    --warn-soft: #2d2312;
+    --bad: #e0786a;
+    --bad-soft: #2e1815;
+    --info: #8fa6e8;
+    --info-soft: #171d33;
+    --focus: #4fbacb;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -14px rgba(0, 0, 0, 0.75);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #0b0e15;
+  --surface: #141926;
+  --sunk: #0f131d;
+  --raised: #1a2030;
+  --line: #262e40;
+  --line-soft: #1d2432;
+  --ink: #e8ecf4;
+  --ink-2: #aeb8cc;
+  --ink-3: #7c879f;
+  --accent: #4fbacb;
+  --accent-hover: #6fcedd;
+  --accent-soft: #10303a;
+  --accent-ink: #06222a;
+  --ok: #4fbe86;
+  --ok-soft: #102c1f;
+  --warn: #d9a44b;
+  --warn-soft: #2d2312;
+  --bad: #e0786a;
+  --bad-soft: #2e1815;
+  --info: #8fa6e8;
+  --info-soft: #171d33;
+  --focus: #4fbacb;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -14px rgba(0, 0, 0, 0.75);
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Module 21 §8: focus must be visible and logical. One rule, globally, so a new
+   component cannot forget it. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap; border: 0;
+}

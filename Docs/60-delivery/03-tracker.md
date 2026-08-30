@@ -400,6 +400,64 @@ These do not block product development. They **do** block production release.
 
 **The honest read.** 70 P0 items, none assigned, and eight overdue drills. The architecture is well ahead of the operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md` §7. Phase D is not a formality; it is where the product's claims become defensible.
 
+## L. Atlan competitive review (2026-08-30)
+
+Source: `Docs/competitors/Atlan_Concept_Deep_Dive.docx` — a deep-dive against seven Atlan.com
+product pages (Playbooks, Context Lakehouse, Data Marketplace, Context Engineering Studio,
+Context Agents, Data Lineage, Connectors), fetched and rendered the same day.
+
+**Reconciliation note.** That report was written against `20-modules/*.md`'s own
+"Implementation status" callouts and `60-delivery/00-status.md`, not against this file, and
+several of its "gap" claims are now stale against the rows already in sections A–H above —
+this tracker moved faster than the module docs did today. Concretely: it called Studio
+"Pending, form-based authoring only," but **ST-A1/ST-A2/ST-A3/ST-A5 are already DONE** (change
+sets, test harness, diff view, impact preview) — only ST-A4 and ST-A6 remain. It called view
+lineage and BI lineage "does not exist," but **LN-2 is DONE** and **LN-4 is delivered for
+Tableau and Power BI** — only Looker and the `edge_kind` vocabulary cleanup (ST-15, already
+tracked) remain. It called the marketplace/context-product work "partial," but **CX-1 through
+CX-6 are all DONE**. The rows below are only the items from that review with **no existing
+row anywhere in this file** — everything else it flagged is already covered by an ID above and
+is not duplicated here. `Docs/competitors/Atlan_Concept_Deep_Dive.docx` itself has not yet been
+corrected for this and should be read with this note in hand until it is.
+
+| ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
+|---|---|:--:|:--:|:--:|:--:|:--:|---|
+| AT-1 | Saved, scheduled bulk-metadata "playbook" object (filter + action + cron) on top of CT-1 | 04/08 | — | P1 | TODO | — | A `playbook` object persists a filter, an action (tag/classify/own/certify/describe), and a schedule; runs via the existing Temporal scheduler (not a new one); gated by `GovernanceReview` with a confidence-threshold auto-apply branch mirroring GL-2/GL-5 |
+| AT-2 | Open-table-format (Iceberg/Delta) export of catalog + lineage + quality state for customer-owned compute | 10 | — | P2 | TODO | — | A periodic export lands in an Iceberg/Delta table queryable by the bank's own Spark/Trino/DuckDB without going through Atlas's API — a BYOC-style option, not a replacement for PostgreSQL-as-authoritative (INV-1 unaffected) |
+| AT-3 | Conversational natural-language entry point for marketplace / context-product discovery | 19/13 | — | P1 | TODO | — | A "find me X" question against the marketplace routes through the existing `agent_orchestrator.py` governed-question pipeline (screening, retrieval, policy) instead of a separate search stack, and returns policy-filtered results |
+| AT-4 | Slack/Teams surface for governed marketplace discovery | 19 | — | P2 | TODO | — | A Slack/Teams request triggers the same per-read policy evaluation (CX-3) and consumption-lineage recording (CX-4) as an MCP read — no separate, less-governed path |
+| AT-5 | Query-history-ranked documentation worklist for stewards | 05/12 | — | P2 | TODO | — | Stewards see undocumented/under-described tables ranked by real query volume (`query_gateway.py`, `consumption_lineage.py`), not an unranked backlog — distinct from RT-6 (a retrieval-ranking signal), this is a steward-facing prioritization view |
+
+Ph left unassigned (`—`) pending phase-owner triage, per this file's own convention for
+unassigned items. Not yet reflected in the §K summary counts.
+
+
+## M. Experience shell rebuild (2026-08-30)
+
+Decision: `10-architecture/adr/ADR-0021-experience-shell-stack-and-strangle-migration.md`.
+Plan: `40-engineering/08-experience-shell-rebuild-plan.md`. Spec: `20-modules/21-experience-shell.md`.
+
+**Why these rows exist.** UX-1…UX-9 in §I describe *what* the shell must do; none of them
+could be built on `ui/` as it stands — 3,655 lines of imperative DOM assembly with no
+component boundary, no build and no tests. The rows below are the *enabling* work, plus the
+one backend gap the rebuild exposed: `MetadataTableRead` returns eight fields, so a governed
+catalog row costs five further requests per asset (100 rows = 501 requests). That is a
+missing read model, not a defect in the API. UX-3 and UX-7 are satisfied for each screen as
+it adopts the Catalog pattern, so they are not duplicated here.
+
+| ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
+|---|---|:--:|:--:|:--:|:--:|:--:|---|
+| UX-10 | `ui-next/` shell: React 18 + TypeScript strict + Vite, token layer, primitives, persona-aware nav with `legacy` strangle markers | 21 | A | **P0** | DONE | — | Delivered 2026-08-30. `npm run build` green, `dist/` served by the existing nginx unchanged; both themes AA with global visible focus and reduced-motion; unrebuilt screens still reachable via the `legacy` seam; persona selector labelled dev-only and grants nothing |
+| UX-11 | Catalog reference screen — virtualized grid, URL-held filter/selection state, single abortable request per view, bulk selection, evidence pane with permalink | 21/04 | A | **P0** | DONE | — | Delivered 2026-08-30. 1,000,000 rows with 30–42 row elements in the DOM at any scroll depth; keyset paging on approach to the loaded window's end; `aria-rowcount`/absolute `aria-rowindex`; no console errors in either theme; no page-level horizontal scroll at 700px |
+| UX-12 | `CatalogRowRead` read-model endpoint — `GET /v1/organizations/{org}/catalog/rows` | 21/04 | A | **P0** | TODO | — | One request returns description + proposal state, owner, certification, quality, glossary terms and row estimate per asset; preserves the CT-2 `CursorPage` keyset contract including `total: null` under a cursor; permission-filtered by the same gate as the underlying module reads; no writes, so ADR-0004 is untouched. Client already typed against it — set `VITE_USE_FIXTURES=0` when it lands |
+| UX-13 | Asset evidence endpoint — `GET /v1/metadata/tables/{id}/evidence` | 21/09 | A | P1 | TODO | — | Every claim carries a `source` string; composes business meaning, GL-2/GL-5, data quality, consumption lineage (CX-4) and AI decision lineage (LN-3) including the refusal edge where one exists |
+| UX-14 | Generate `ui-next` API types from the FastAPI OpenAPI document | 21 | D | P1 | TODO | — | `src/lib/types.ts` is generated in CI and a drift from `schemas.py` fails the build rather than surfacing at runtime |
+| UX-15 | Migrate review queue, marketplace, lineage refusal view and Studio change sets to the new shell | 21 | B | P1 | TODO | — | Each adopts the Catalog pattern in full (URL state, abortable fetch, virtualization, evidence pane); each screen's `legacy` marker is removed as it lands |
+| UX-16 | Retire `ui/` | 21 | C | P2 | TODO | — | No nav entry marked `legacy`; `ui/` and its nginx route deleted; no regression in the UX-9 browser suite |
+
+Ph assignments follow this file's convention; UX-12 is the only backend row and is the
+critical path for UX-15. Not yet reflected in the §K summary counts.
+
 ## Related documents
 
 - Roadmap: `60-delivery/01-roadmap.md`
