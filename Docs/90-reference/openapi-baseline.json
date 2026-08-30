@@ -19116,6 +19116,78 @@
         "title": "TermSemanticBindingRead",
         "type": "object"
       },
+      "TokenRevocationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "organization_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Id"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "title": "Revoked At",
+            "type": "string"
+          },
+          "self_revocation": {
+            "title": "Self Revocation",
+            "type": "boolean"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "token_expires_at": {
+            "format": "date-time",
+            "title": "Token Expires At",
+            "type": "string"
+          },
+          "token_identifier": {
+            "title": "Token Identifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_identifier",
+          "subject",
+          "organization_id",
+          "self_revocation",
+          "revoked_at",
+          "token_expires_at"
+        ],
+        "title": "TokenRevocationRead",
+        "type": "object"
+      },
+      "TokenRevocationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "reason"
+        ],
+        "title": "TokenRevocationRequest",
+        "type": "object"
+      },
       "ToolCertificationCaseCreate": {
         "additionalProperties": false,
         "properties": {
@@ -59493,6 +59565,134 @@
         "summary": "Search Suggest",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/v1/security/tokens/revoke": {
+      "post": {
+        "operationId": "revoke_token_v1_security_tokens_revoke_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRevocationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenRevocationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke a bearer token (self logout, or admin response to a compromised credential)",
+        "tags": [
+          "identity"
         ]
       }
     },
