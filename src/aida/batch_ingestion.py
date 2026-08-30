@@ -27,6 +27,7 @@ from aida.security import SecurityContext
 from aida.workflows.activities import (
     SnapshotScope,
     deprecate_missing_snapshot,
+    detect_rename_candidates,
     persist_discovery_snapshot,
 )
 
@@ -212,7 +213,8 @@ async def _complete_batch(
         changed = sum(int(chunk.change_counts.get("changed_objects", 0)) for chunk in chunks)
         deprecated = 0
         if batch.snapshot_type == "FULL":
-            deprecated = await deprecate_missing_snapshot(session, datasource, scope)
+            deprecation_result = await deprecate_missing_snapshot(session, datasource, scope)
+            deprecated = deprecation_result.total
             # Gated on the declared version as well as on FULL: a 1.0 batch is
             # authoritative for the 1.0 inventory only and says nothing about the
             # 1.1 axes, so reconciling its silence would retire them.
@@ -220,6 +222,19 @@ async def _complete_batch(
                 deprecated += await deprecate_missing_envelope_extensions(
                     session, datasource, envelope_scope
                 )
+            # CT-4: same-run tombstone-plus-create pairing, exactly as in the
+            # unchunked pull path (`persist_discovery_snapshot`) -- `scope` here
+            # is the same SnapshotScope accumulated across every chunk via
+            # `_process_chunk`, so `scope.created_table_ids` is every table this
+            # batch actually created and `deprecation_result.deprecated_table_ids`
+            # is exactly what this call just tombstoned.
+            await detect_rename_candidates(
+                session,
+                run=run,
+                datasource=datasource,
+                created_table_ids=scope.created_table_ids,
+                deprecated_table_ids=deprecation_result.deprecated_table_ids,
+            )
         object_counts = {**scope.object_counts(), **envelope_scope.object_counts()}
         change_counts = {
             "created_objects": created,

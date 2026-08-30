@@ -19,9 +19,11 @@ than "this table's own child row" -- belong in the allowlist below.
 
 from __future__ import annotations
 
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute
 
@@ -53,7 +55,7 @@ from aida.models import (
 # (model, column name) for every downstream reference to a table's stable ID that
 # should follow a merged rename. See the module docstring for what is deliberately
 # excluded and why.
-TABLE_IDENTITY_DOWNSTREAM_LINKS: tuple[tuple[type, str], ...] = (
+TABLE_IDENTITY_DOWNSTREAM_LINKS: tuple[tuple[type[Any], str], ...] = (
     (MetadataConstraint, "referenced_table_id"),
     (DataQualityPolicy, "table_id"),
     (DataQualityIncident, "table_id"),
@@ -96,10 +98,16 @@ async def merge_table_identity(
     """
     reassigned: dict[str, int] = {}
     for model, column_name in TABLE_IDENTITY_DOWNSTREAM_LINKS:
-        column: InstrumentedAttribute = getattr(model, column_name)
-        result = await session.execute(
-            update(model).where(column == old_table_id).values(**{column_name: new_table_id})
+        column: InstrumentedAttribute[Any] = getattr(model, column_name)
+        result = cast(
+            CursorResult[Any],
+            await session.execute(
+                update(model)
+                .where(column == old_table_id)
+                .values(**{column_name: new_table_id})
+            ),
         )
         if result.rowcount:
-            reassigned[f"{model.__tablename__}.{column_name}"] = result.rowcount
+            tablename = cast(Any, model).__tablename__
+            reassigned[f"{tablename}.{column_name}"] = result.rowcount
     return reassigned

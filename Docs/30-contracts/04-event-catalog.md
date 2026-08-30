@@ -94,6 +94,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `catalog.object.reactivated` | Reappeared | object_id |
 | `catalog.drift.detected` | Run completed with drift | run_id, created, changed, deprecated |
 | `catalog.asset.certified` | Certification granted | object_id, certifier, expires_at |
+| `rename_candidate.decided.v1` | CT-4: steward approved/rejected a proposed rename | candidate_id, status |
+| `cross_source_resolution_candidate.decided.v1` | CT-6: steward approved/rejected a proposed cross-source match | candidate_id, status |
 
 ### Profiling — topic `atlas.catalog.v1`
 

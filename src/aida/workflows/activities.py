@@ -419,6 +419,121 @@ async def deprecate_missing_snapshot(
     )
 
 
+async def detect_rename_candidates(
+    session: AsyncSession,
+    *,
+    run: AnalysisRun,
+    datasource: DataSource,
+    created_table_ids: set[UUID],
+    deprecated_table_ids: set[UUID],
+) -> list[RenameCandidate]:
+    """CT-4: propose that a table tombstoned in this run is really a table just
+    created in this run, renamed.
+
+    Deliberately narrow, per module 04 SS6 and ADR-0017 SS8 ("discovery cannot
+    scan everything, all the time"):
+
+    * Same run only -- this is a same-scan tombstone-plus-create pairing, never
+      a retroactive sweep across history. `created_table_ids` /
+      `deprecated_table_ids` are exactly what THIS call to
+      `persist_discovery_snapshot` just created and tombstoned.
+    * Same schema only -- `RenameCandidate.schema_id` is a single column, not
+      old/new, so a rename that also moves the object to a different schema is
+      out of scope for this heuristic (a steward can still relink by hand via
+      `aida.identity_merge.merge_table_identity`, called directly).
+    * Bounded -- at most `settings.rename_candidate_scan_max_tables` tables on
+      each side are considered, chosen deterministically (sorted by id) so a
+      retry considers the same subset rather than a random one.
+
+    `aida.identity_resolution.score_table_rename` is the sole arbiter of "strong
+    structural match"; this function only bounds candidates, dedupes against
+    already-proposed pairs, and persists what the heuristic proposes. Nothing
+    here merges identity -- that only happens when a steward approves the
+    candidate through the review endpoint, via `aida.identity_merge`.
+    """
+    if not created_table_ids or not deprecated_table_ids:
+        return []
+    settings = get_settings()
+    scan_cap = settings.rename_candidate_scan_max_tables
+    created_ids = sorted(created_table_ids, key=str)[:scan_cap]
+    deprecated_ids = sorted(deprecated_table_ids, key=str)[:scan_cap]
+
+    tables = {
+        table.id: table
+        for table in (
+            await session.scalars(
+                select(MetadataTable).where(
+                    MetadataTable.id.in_(set(created_ids) | set(deprecated_ids))
+                )
+            )
+        ).all()
+    }
+    deprecated_by_schema: dict[UUID, list[MetadataTable]] = {}
+    for table_id in deprecated_ids:
+        table = tables.get(table_id)
+        if table is not None:
+            deprecated_by_schema.setdefault(table.schema_id, []).append(table)
+    if not deprecated_by_schema:
+        return []
+
+    existing_pairs = {
+        (old_id, new_id)
+        for old_id, new_id in (
+            await session.execute(
+                select(RenameCandidate.old_table_id, RenameCandidate.new_table_id)
+            )
+        ).all()
+    }
+
+    all_table_ids = set(tables)
+    columns_by_table: dict[UUID, list[MetadataColumn]] = {}
+    if all_table_ids:
+        for column in (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(MetadataColumn.table_id.in_(all_table_ids))
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+            )
+        ).all():
+            columns_by_table.setdefault(column.table_id, []).append(column)
+
+    created: list[RenameCandidate] = []
+    for new_table_id in created_ids:
+        new_table = tables.get(new_table_id)
+        if new_table is None:
+            continue
+        for old_table in deprecated_by_schema.get(new_table.schema_id, []):
+            if (old_table.id, new_table.id) in existing_pairs:
+                continue
+            match: IdentityMatch | None = score_table_rename(
+                old_table_name=old_table.name,
+                old_columns=columns_by_table.get(old_table.id, []),
+                new_table_name=new_table.name,
+                new_columns=columns_by_table.get(new_table.id, []),
+                min_confidence=settings.rename_candidate_min_confidence,
+            )
+            if match is None:
+                continue
+            candidate = RenameCandidate(
+                organization_id=datasource.organization_id,
+                datasource_id=datasource.id,
+                analysis_run_id=run.id,
+                schema_id=new_table.schema_id,
+                old_table_id=old_table.id,
+                new_table_id=new_table.id,
+                detection_rule=match.detection_rule,
+                confidence=match.confidence,
+                evidence=match.evidence,
+                created_by="metadata-worker",
+            )
+            session.add(candidate)
+            created.append(candidate)
+            existing_pairs.add((old_table.id, new_table.id))
+    if created:
+        await session.flush()
+    return created
+
+
 async def persist_discovery_snapshot(
     session: AsyncSession,
     run: AnalysisRun,
@@ -445,7 +560,12 @@ async def persist_discovery_snapshot(
             counts["schemas"] += 1
             for discovered_table in discovered_schema.tables:
                 table = await _get_or_create_table(
-                    session, datasource, schema, discovered_table, tracker
+                    session,
+                    datasource,
+                    schema,
+                    discovered_table,
+                    tracker,
+                    created_table_ids=snapshot_scope.created_table_ids,
                 )
                 snapshot_scope.table_ids.add(table.id)
                 table_key = (
@@ -519,7 +639,20 @@ async def persist_discovery_snapshot(
                     counts["constraints"] += 1
 
     if deprecate_missing:
-        tracker.deprecated = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        deprecation_result = await deprecate_missing_snapshot(session, datasource, snapshot_scope)
+        tracker.deprecated = deprecation_result.total
+        # CT-4: same-run tombstone-plus-create pairing. Both sides are only known
+        # for certain once deprecation for *this* run has actually happened --
+        # `snapshot_scope.created_table_ids` accumulates as tables are persisted
+        # above, `deprecation_result.deprecated_table_ids` is exactly what this
+        # call just tombstoned.
+        await detect_rename_candidates(
+            session,
+            run=run,
+            datasource=datasource,
+            created_table_ids=snapshot_scope.created_table_ids,
+            deprecated_table_ids=deprecation_result.deprecated_table_ids,
+        )
 
     run.discovered_catalogs = counts["catalogs"]
     run.discovered_schemas = counts["schemas"]
