@@ -782,6 +782,11 @@ class MetadataTable(Base, TimestampMixin):
     deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     source_description: Mapped[str | None] = mapped_column(Text)
+    # CT-4: set when a RenameCandidate naming this (tombstoned) row is approved and merged --
+    # lets anyone still holding this stable ID resolve forward to the object it became.
+    superseded_by_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
 
 
 class MetadataColumn(Base, TimestampMixin):
@@ -1517,6 +1522,52 @@ class TableFamilyCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RenameCandidate(Base, TimestampMixin):
+    """CT-4: a tombstoned object proposed as a rename of a just-created one.
+
+    Detected automatically inside the same scan run that tombstones the old object and
+    creates the new one -- see `aida.workflows.activities.detect_rename_candidates`.
+    Approval is a steward decision (maker-checker) and is the only path that reassigns
+    the old object's downstream links (see `aida.identity_merge`); rejecting a candidate
+    leaves the delete-then-create outcome exactly as it was (module 04 SS6).
+    """
+
+    __tablename__ = "rename_candidate"
+    __table_args__ = (
+        UniqueConstraint("old_table_id", "new_table_id", name="uq_rename_candidate_pair"),
+        Index("ix_rename_candidate_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    analysis_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("analysis_run.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    old_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    new_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CompositeKeyCandidate(Base, TimestampMixin):
     """PR-1: an evidence-backed, review-gated candidate composite (or single) key.
 
@@ -1549,6 +1600,53 @@ class CompositeKeyCandidate(Base, TimestampMixin):
         ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
     )
     column_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CrossSourceResolutionCandidate(Base, TimestampMixin):
+    """CT-6: proposes that two tables in different datasources are the same logical asset.
+
+    The catalog-identity analogue of `RelationshipCandidate`'s cross-source pairing
+    (module 06 RL-5): deterministic, metadata-only matching on name/qualified-name
+    similarity and column shape -- never row values, per ADR-0014. Discovery is scoped
+    and grant-gated exactly like `discover_cross_source_relationship_candidates` --
+    free within one `data_domain`, requiring an ACTIVE `CrossBoundaryGrant` to pair
+    across a domain boundary (ADR-0017 SS4). Approval only confirms the link; unlike a
+    rename candidate it never reassigns either table's downstream references, because
+    both tables remain distinct catalog objects in distinct estates.
+    """
+
+    __tablename__ = "cross_source_resolution_candidate"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_table_id", "target_table_id", name="uq_cross_source_resolution_pair"
+        ),
+        Index("ix_cross_source_resolution_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
     confidence: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

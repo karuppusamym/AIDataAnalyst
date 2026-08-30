@@ -1139,6 +1139,38 @@ class TableFamilyCandidateDecision(ApiModel):
         return self
 
 
+class RenameCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    analysis_run_id: UUID
+    schema_id: UUID
+    old_table_id: UUID
+    new_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    merged_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class RenameCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "RenameCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a rename candidate")
+        return self
+
+
 class CompositeKeyCandidateRead(ApiModel):
     id: UUID
     organization_id: UUID
@@ -1165,6 +1197,50 @@ class CompositeKeyCandidateDecision(ApiModel):
     def require_reason(self) -> "CompositeKeyCandidateDecision":
         if self.decision == "REJECT" and not self.reason:
             raise ValueError("a reason is required when rejecting a composite key candidate")
+        return self
+
+
+class CrossSourceObjectResolutionDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=500, ge=1, le=5000)
+    max_datasource_pairs: int = Field(default=50, ge=1, le=2000)
+    target_data_domain_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Pair this domain's datasources against another data_domain's "
+            "instead of scanning within this domain alone. Requires an ACTIVE "
+            "cross_boundary_grant permitting this domain to see into the "
+            "target one (ADR-0017 SS4) -- rejected with 403 otherwise."
+        ),
+    )
+
+
+class CrossSourceResolutionCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    source_datasource_id: UUID
+    source_table_id: UUID
+    target_datasource_id: UUID
+    target_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrossSourceResolutionCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "CrossSourceResolutionCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a cross-source resolution")
         return self
 
 
