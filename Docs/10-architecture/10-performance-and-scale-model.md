@@ -39,9 +39,20 @@ Excluding source execution time and model provider time, which Atlas does not co
 | Prompt-risk screening | 5 ms | 20 ms | 40 ms | `perf_screen` |
 | Hybrid retrieval | 50 ms | 120 ms | 250 ms | `perf_retrieval` |
 | SQL AST validation | 8 ms | 30 ms | 60 ms | `perf_validate` |
-| Graph neighbourhood (bounded, 1–4 hops) | 400 ms | **2 s** | 4 s | `perf_graph` |
+| Graph neighbourhood (bounded, 1–4 hops) | 20 ms | **100 ms** | 400 ms | `perf_graph` |
 | Impact analysis | 500 ms | 2 s | 5 s | `perf_impact` |
 | Evidence assembly | 20 ms | 50 ms | 100 ms | `perf_evidence` |
+
+**Graph neighbourhood, restated 2026-08-30 with its measurement.** This row previously
+published 400 ms / 2 s / 4 s, which was a placeholder written before the store decision and
+never revisited. ADR-0020 measured **10.8 ms p50 for a 12-hop traversal over 880,000
+column-level edges** on PostgreSQL recursive CTEs — two orders of magnitude inside the old
+number, and inside the "under 100 ms at depth" that the market currently advertises. The
+target above is set at 100 ms p95 because that is a commitment we can defend with a
+measurement rather than the best number we have seen once. Provenance:
+`adr/ADR-0020-graph-store-decision.md`. Every other bolded row in this table is still an
+unmeasured target, and INV-9 binds us to say so before quoting any of them competitively —
+see `Docs/review-2026-08/atlan-context/00-decisions.md` §3.
 
 **Composite budget.** Total Atlas overhead on the interactive path ≤ 300 ms p95 (`03-logical-architecture.md` §6). Bolded rows are the published external commitments.
 

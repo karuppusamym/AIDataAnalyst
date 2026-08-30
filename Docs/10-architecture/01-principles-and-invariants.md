@@ -94,6 +94,17 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Test — Built (2026-08-30).** `tests/test_inv6_value_freedom.py` (13 tests) runs a sentinel fixture through the query gateway and scans control-plane state for the sentinel, and includes `test_the_control_plane_scan_would_notice_a_leak` — a meta-test that fails if the scan stops being able to find one.
 
+**Why this constraint is affordable, evidenced (2026-08-30).** A 43-screen capture of Atlan's
+live product UI was reviewed specifically to find out whether a competitor's context quality
+depends on reading source values. It does not: eight of the nine context agents visible in the
+capture consume only identifiers, lineage, SQL text, dbt logic and prior human prose — the
+input set this invariant already permits — and the ninth emits completeness, accuracy and
+freshness *statistics*, which is what our own profiler emits. Every customer quote in that
+material that names a mechanism names a metadata mechanism. This is written down because the
+belief that value-freedom costs us quality is how an invariant gets quietly relaxed, and the
+evidence says it costs us nothing here. Working paper:
+`Docs/review-2026-08/atlan-context/02-context-agents.md`.
+
 **A leak this test did not cover, and now does.** The scan drove only the query gateway, so the tables metadata envelope 1.1 introduced sat outside it: `metadata_view_definition.definition_sql` and `metadata_routine.body_sql` stored source SQL **raw**, so a view defined `… WHERE ssn = '123-45-6789'` landed verbatim in the control plane. Fixed in migration `d5f8b21c4a03` (redacted column + fingerprint + redaction status, raw columns dropped), with the ingestion path added to the scan. Recorded here because it is the general lesson: *a test is only as strong as the paths its author had in mind*.
 
 ### INV-7 — Attributability of high-impact actions
@@ -117,6 +128,15 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 **Statement.** A connector, adapter, or feature advertises only behaviour that is implemented and passing its certification suite. Planned capability is displayed as planned.
 
 **Enforcement.** Capability flags are derived from the certification result, not hand-declared.
+
+**Scope note (2026-08-30). This invariant binds lineage parsers, not only connectors.** A
+parser that cannot handle a dialect, a construct, or a statement shape must degrade
+*explicitly* — an unresolved reference, a recorded reason, a lower-confidence derivation
+method — never by emitting nothing. Silence is indistinguishable from "this object genuinely
+has no upstreams", and downstream that reads as a gap in the customer's estate rather than a
+gap in our extraction, which is the exact failure this invariant exists to prevent. The
+review that prompted this note found the rule already broken in `sql_lineage_parser.py`
+(tracker `AT-D2`) and one connector advertising a capability nothing consumes (`AT-D3`).
 
 **Test — Built (2026-08-30).** `tests/test_inv9_capability_honesty.py` (11 tests): every advertised capability must trace to a passing certification check, and a capability declared planned must not be reachable as if it were implemented. The invariant is most visible in `src/aida/connectors/registry.py`, which distinguishes `register(...)` from `declare_planned(...)` — Databricks, Teradata and Db2 are declared planned rather than advertised.
 

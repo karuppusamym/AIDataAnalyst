@@ -203,8 +203,26 @@ question; all of it is currently absent.
 Carried forward from the current design and worth restating because the new
 capabilities create pressure on each:
 
-- **No write-back.** Read-only stays read-only. Procedure-derived tools are eligible
-  only when proven read-only by parse.
+- **No write-back to the source.** Read-only stays read-only. Procedure-derived tools are
+  eligible only when proven read-only by parse.
+- **Write-back *into the platform* is three lanes, not a prohibition** (revised 2026-08-30,
+  `review-2026-08/atlan-context/00-decisions.md` §5). The blanket "no write-back" this
+  document used to state was one the platform already broke — consumption edges are written
+  on every read, `metadata_enrichment_proposal` is a model-output write path by design, and
+  `request_data_product_access` ships with `writePosture: MAKER_CHECKER_REQUEST_ONLY`. A
+  prohibition that is violated is worse than a narrow rule that holds, so the rule is:
+  1. **Measured facts** — profiling, quality, freshness, row counts. Deterministic program
+     output; written directly.
+  2. **Platform observations** — consumption, usage, refusals, drift. Written directly, and
+     never authoritative for meaning.
+  3. **Model judgements** — descriptions, business names, inferred relationships. Proposal
+     lane only: inert, typed, capped at 0.70 against the 0.95 auto-publish gate, maker
+     != checker.
+
+  Lane 3 must route through ingestion-time prompt-risk screening, because write-back is a
+  feedback channel into future model input — a model judgement stored today is model context
+  tomorrow. That is a model-risk control rather than a nicety, and it is the hazard neither
+  vendor in this market has named.
 - **No BI/dashboard builder.** The wiki is documentation, not a dashboard canvas.
 - **No ETL execution.** Transformation analysis *reads* transformation logic; it never
   runs it.

@@ -746,7 +746,12 @@ class SnowflakeConnector(SqlExecutor):
         indexes=False,
         partitions=True,
         explain=True,
-        query_history=True,
+        # INV-9 (tracker AT-D3, 2026-08-30). Advertised `True` while nothing in the
+        # platform consumes it -- there is no `get_query_history()` on any connector.
+        # Advertising a capability we do not implement is the exact failure this
+        # invariant exists to prevent, and under-claiming is the correct direction to
+        # fail. Returns to `True` when AT-12 (query-history mining) certifies it.
+        query_history=False,
         delegated_identity=True,
         approximate_statistics=True,
         # Envelope 1.1 (gap/02 N1). Each flag is set because `discover()` reads the
