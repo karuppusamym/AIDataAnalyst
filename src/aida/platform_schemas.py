@@ -169,6 +169,13 @@ class EntitlementOperation(PlatformApiModel):
 
 class MarketplaceProductRead(DataProductVersionRead):
     access_status: Literal["ROLE_GRANTED", "REQUEST_APPROVED", "REQUEST_PENDING", "NOT_REQUESTED"]
+    # CX-9: why this product was ranked where it was for this requester -- the
+    # requester owns/stewards a table in the product's domain (GL-2 ownership,
+    # rolled up through module 08 business-domain tagging) and/or the product's
+    # port composition matches their Analyst/DataScientist vs Viewer/DataConsumer
+    # persona. Explains the default ordering; never hides a product.
+    domain_affinity: bool
+    role_affinity: bool
 
 
 class PortfolioLifecycleRead(PlatformApiModel):

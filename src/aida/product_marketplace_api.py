@@ -1,9 +1,9 @@
 import hashlib
 import json
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -18,6 +18,7 @@ from aida.entitlements import apply_entitlement
 from aida.events import record_audit, record_outbox
 from aida.models import (
     AgentRun,
+    BusinessDomain,
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,
@@ -29,7 +30,9 @@ from aida.models import (
     DataProductVersion,
     GovernanceReview,
     McpConsumptionEvidence,
+    MetadataBusinessAnnotation,
     MetadataTable,
+    OwnershipAssignment,
     Project,
     QueryExecution,
     SemanticModelVersion,
@@ -66,6 +69,29 @@ PRODUCT_AUTHORS = ("PlatformAdmin", "DataProductOwner", "DataSteward", "Metadata
 PRODUCT_READERS = (*PRODUCT_AUTHORS, "Reviewer", "Auditor", "Analyst", "Viewer")
 MARKETPLACE_USERS = ("PlatformAdmin", "Analyst", "Viewer", "DataConsumer", "DataScientist")
 ANALYTICS_READERS = (*PRODUCT_READERS, "Operations")
+
+# CX-9: the two marketplace-consumer role groups from the existing MARKETPLACE_USERS
+# taxonomy (00-product/02-personas-and-jobs.md §2.1/§2.2) that get a role-shaped
+# ranking boost. PlatformAdmin is deliberately excluded from both -- an operator's
+# default view stays neutral rather than impersonating either persona.
+MARKETPLACE_TECHNICAL_ROLES = frozenset({"Analyst", "DataScientist"})
+MARKETPLACE_BUSINESS_ROLES = frozenset({"Viewer", "DataConsumer"})
+
+# CX-9: how much each affinity signal moves a product up the requester's default
+# ordering. Domain ownership dominates role affinity (a requester should never see
+# an unrelated domain's product outrank one from a domain they own because of a
+# role tiebreak); the exact magnitudes are arbitrary except for that ordering, so
+# they live here, named, rather than as inline numbers -- easy to explain to a bank
+# reviewing "why is this ranked here", and easy to change without touching the query.
+MARKETPLACE_DOMAIN_AFFINITY_WEIGHT = 100
+MARKETPLACE_ROLE_AFFINITY_WEIGHT = 10
+
+# CX-9: cap on how many policy-filtered rows get pulled into Python for personalized
+# ranking. A published-product marketplace is a curated, governed catalog -- nothing
+# like the 400k-object raw table catalog -- so this is generous headroom, not a tight
+# budget; sort=catalog (the pre-CX-9 behavior) never pays this cost at all, since it
+# orders and paginates entirely in SQL as before.
+MARKETPLACE_RANK_SCAN_LIMIT = 5000
 
 
 def _canonical_hash(payload: Any) -> str:
@@ -352,6 +378,119 @@ def _version_read(
 
 def _contract_read(contract: DataContractVersion) -> DataContractVersionRead:
     return DataContractVersionRead.model_validate(contract)
+
+
+@dataclass(frozen=True, slots=True)
+class MarketplaceAffinity:
+    """CX-9: the explainable result of scoring one product for one requester.
+
+    ``score`` drives the default ordering; ``domain_affinity`` and ``role_affinity``
+    are surfaced on ``MarketplaceProductRead`` so a caller can see *why* a product
+    was ranked where it was, not just that it was -- the same "explainable, not a
+    black box" bar the rest of this platform holds trust scoring and policy denials
+    to.
+    """
+
+    domain_affinity: bool
+    role_affinity: bool
+    score: int
+
+
+def score_marketplace_product(
+    *,
+    domain_name: str,
+    owned_domains: frozenset[str],
+    roles: frozenset[str],
+    technical_port_count: int,
+    curated_port_count: int,
+) -> MarketplaceAffinity:
+    """CX-9: rank one product for one requester.
+
+    Two independent, additive signals -- no ML, no external call, and pure enough
+    to unit-test without a database or the FastAPI layer:
+
+    - **Domain affinity**: the requester owns or stewards at least one table in the
+      product's business domain (module 08's ``MetadataBusinessAnnotation``,
+      reached from the GL-2 ``OwnershipAssignment`` rows a bulk-ownership operation
+      or the Studio owner picker writes -- see ``_owned_domain_names``). This is
+      Atlan's "ranked by what you own" behavior.
+    - **Role affinity**: an Analyst/DataScientist-shaped requester gets a boost for
+      a technical, table-heavy product (more OUTPUT ports of ``asset_type="TABLE"``
+      than curated ones); a Viewer/DataConsumer-shaped requester gets the boost the
+      other way, toward curated semantic-model/context-product ports -- the
+      Analyst-vs-Business-Consumer split ``00-product/02-personas-and-jobs.md``
+      already draws. A requester in neither role group (e.g. PlatformAdmin) gets no
+      role-based boost.
+
+    Nothing here filters -- every product still appears for every requester who is
+    entitled to discover it (``_is_discoverable``, unchanged); this only reorders.
+    """
+    domain_affinity = domain_name.strip().casefold() in owned_domains
+    if roles & MARKETPLACE_TECHNICAL_ROLES:
+        role_affinity = technical_port_count > curated_port_count
+    elif roles & MARKETPLACE_BUSINESS_ROLES:
+        role_affinity = curated_port_count > technical_port_count
+    else:
+        role_affinity = False
+    score = (MARKETPLACE_DOMAIN_AFFINITY_WEIGHT if domain_affinity else 0) + (
+        MARKETPLACE_ROLE_AFFINITY_WEIGHT if role_affinity else 0
+    )
+    return MarketplaceAffinity(
+        domain_affinity=domain_affinity, role_affinity=role_affinity, score=score
+    )
+
+
+def _port_type_count(ports: Sequence[DataProductPort], *asset_types: str) -> int:
+    return sum(1 for port in ports if port.asset_type in asset_types)
+
+
+async def _owned_domain_names(
+    session: AsyncSession, *, organization_id: UUID, principal_id: str
+) -> frozenset[str]:
+    """CX-9: the business domains (module 08 ``BusinessDomain.display_name``,
+    casefolded) the requester owns or stewards at least one table in.
+
+    This is GL-2 ownership, not a new mechanism: the same ``OwnershipAssignment``
+    rows ``bulk_assign_ownership`` (``api.py``) and the Studio owner picker write,
+    rolled up through each owned table's approved ``MetadataBusinessAnnotation``
+    (module 08 business-domain tagging) to the domain it was assigned to. A table
+    with no business annotation yet contributes no domain -- ranking degrades to
+    role-only, never to an error.
+    """
+    owned_subject_ids = (
+        await session.scalars(
+            select(OwnershipAssignment.subject_id).where(
+                OwnershipAssignment.organization_id == organization_id,
+                OwnershipAssignment.subject_type == "TABLE",
+                OwnershipAssignment.owner_principal == principal_id,
+                OwnershipAssignment.status == "ACTIVE",
+            )
+        )
+    ).all()
+    owned_table_ids: list[UUID] = []
+    for subject_id in owned_subject_ids:
+        try:
+            owned_table_ids.append(UUID(subject_id))
+        except ValueError:
+            continue
+    if not owned_table_ids:
+        return frozenset()
+    display_names = (
+        await session.scalars(
+            select(BusinessDomain.display_name)
+            .join(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.domain_id == BusinessDomain.id,
+            )
+            .where(
+                BusinessDomain.organization_id == organization_id,
+                MetadataBusinessAnnotation.organization_id == organization_id,
+                MetadataBusinessAnnotation.table_id.in_(owned_table_ids),
+            )
+            .distinct()
+        )
+    ).all()
+    return frozenset(name.strip().casefold() for name in display_names)
 
 
 def _is_discoverable(context: SecurityContext, version: DataProductVersion) -> bool:
@@ -952,6 +1091,15 @@ async def search_marketplace(
     classification: str | None = Query(default=None, max_length=30),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    sort: Literal["personalized", "catalog"] = Query(
+        default="personalized",
+        description=(
+            "CX-9: 'personalized' (default) ranks the policy-filtered catalog by the "
+            "requester's domain ownership (GL-2) and role, highest affinity first -- "
+            "nothing is hidden, only reordered. 'catalog' restores the pre-CX-9 "
+            "undifferentiated alphabetical order, identical for every requester."
+        ),
+    ),
     context: SecurityContext = Depends(require_roles(*MARKETPLACE_USERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
@@ -993,12 +1141,49 @@ async def search_marketplace(
         .join(DataProductVersion, DataProductVersion.product_id == DataProduct.id)
         .where(*filters)
     )
-    rows = (
-        await session.execute(base.order_by(DataProductVersion.name).limit(limit).offset(offset))
-    ).all()
     total = await session.scalar(select(func.count()).select_from(base.subquery()))
-    version_ids = [version.id for _, version in rows]
-    ports = await _ports_by_version(session, version_ids)
+    owned_domain_names = await _owned_domain_names(
+        session, organization_id=context.organization_id, principal_id=context.principal_id
+    )
+
+    if sort == "catalog":
+        # Pre-CX-9 behavior, unchanged: SQL orders and paginates directly, so this
+        # path pays none of the ranking cost below.
+        page_rows = (
+            await session.execute(
+                base.order_by(DataProductVersion.name).limit(limit).offset(offset)
+            )
+        ).all()
+        page_ports = await _ports_by_version(session, [version.id for _, version in page_rows])
+    else:
+        candidate_rows = (
+            await session.execute(
+                base.order_by(DataProductVersion.name).limit(MARKETPLACE_RANK_SCAN_LIMIT)
+            )
+        ).all()
+        candidate_ports = await _ports_by_version(
+            session, [version.id for _, version in candidate_rows]
+        )
+        # Stable sort: `candidate_rows` arrives name-ordered, so equal-score rows
+        # keep that order -- the "tie-broken by existing order" the tracker exit
+        # condition calls for, with no separate tie-break key to maintain.
+        ranked_rows = sorted(
+            candidate_rows,
+            key=lambda row: score_marketplace_product(
+                domain_name=row[1].domain_name,
+                owned_domains=owned_domain_names,
+                roles=context.roles,
+                technical_port_count=_port_type_count(candidate_ports[row[1].id], "TABLE"),
+                curated_port_count=_port_type_count(
+                    candidate_ports[row[1].id], "SEMANTIC_MODEL", "CONTEXT_PRODUCT"
+                ),
+            ).score,
+            reverse=True,
+        )
+        page_rows = ranked_rows[offset : offset + limit]
+        page_ports = {version.id: candidate_ports[version.id] for _, version in page_rows}
+
+    version_ids = [version.id for _, version in page_rows]
     requests = (
         (
             await session.scalars(
@@ -1018,14 +1203,25 @@ async def search_marketplace(
         request_by_version.setdefault(item.data_product_version_id, item)
     now = datetime.now(UTC)
     items = []
-    for product, version in rows:
-        base_read = _version_read(product, version, ports[version.id])
+    for product, version in page_rows:
+        base_read = _version_read(product, version, page_ports[version.id])
+        affinity = score_marketplace_product(
+            domain_name=version.domain_name,
+            owned_domains=owned_domain_names,
+            roles=context.roles,
+            technical_port_count=_port_type_count(page_ports[version.id], "TABLE"),
+            curated_port_count=_port_type_count(
+                page_ports[version.id], "SEMANTIC_MODEL", "CONTEXT_PRODUCT"
+            ),
+        )
         items.append(
             MarketplaceProductRead(
                 **base_read.model_dump(),
                 access_status=_request_access_status(
                     context, version, request_by_version.get(version.id), now
                 ),
+                domain_affinity=affinity.domain_affinity,
+                role_affinity=affinity.role_affinity,
             )
         )
     return Page(items=items, limit=limit, offset=offset, total=total or 0)
