@@ -11,6 +11,12 @@ import pytest
 from aida.ai_decision_lineage import (
     AiDecisionEdge,
 )
+from aida.ai_decision_lineage_api import router as decision_router
+
+
+def test_refusal_route_precedes_dynamic_run_route() -> None:
+    paths = [route.path for route in decision_router.routes]
+    assert paths.index("/v1/ai-decisions/refusals") < paths.index("/v1/ai-decisions/{run_id}")
 
 # ---------------------------------------------------------------------------
 # Edge construction

@@ -1,4 +1,4 @@
-const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource } = window.AtlasUI;
+const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource, loadControlCenter } = window.AtlasUI;
 
 let knowledgeGraphEngine = null;
 
@@ -71,9 +71,28 @@ async function loadOrganizationData() {
   ]);
   Object.assign(state, {fleet, runs, reviews, runtime, evaluations});
   await loadIntegrationPolicy();
-  await loadAudit();
+  state.audit = [];
   renderCore();
-  await Promise.all([loadAgentRuns(), loadTables(), loadDbtProjects(), loadOpenLineage(), loadBusinessMeaning(), loadGlossary(), loadSemanticModels(), loadTools(), loadRelationships(), loadSchedule(), loadModelRoutes(), loadQuality(), loadEnterpriseIngestion()]);
+  const activeView = document.querySelector(".view.active")?.id?.replace(/-view$/, "") || location.hash.slice(1) || "home";
+  await loadViewData(activeView);
+}
+
+async function loadViewData(name) {
+  const loaders = {
+    analyst: () => loadAgentRuns(),
+    catalog: () => loadTables({reset:true}),
+    transformations: () => Promise.all([loadDbtProjects(), loadOpenLineage()]),
+    meaning: () => Promise.all([loadBusinessMeaning(), loadGlossary()]),
+    semantics: () => loadSemanticModels(),
+    tools: () => loadTools(),
+    relationships: () => loadRelationships(),
+    agents: () => loadModelRoutes(),
+    controls: () => loadControlCenter(),
+    sources: () => Promise.all([loadSchedule(), loadEnterpriseIngestion()]),
+    quality: () => loadQuality(),
+    audit: () => loadAudit()
+  };
+  if (state.organizationId && loaders[name]) await loaders[name]();
 }
 
 function renderCore() {
@@ -402,10 +421,10 @@ async function validateSql() {
   const sql = $("#analyst-sql").value.trim();
   if (!sql) return notify("Enter candidate SQL to validate.");
   const sourceId = $("#analyst-source").value;
-  const dialect = state.sources.find(item => item.id === sourceId)?.dialect || "postgres";
   try {
-    const result = await api("/v1/query/validate", {method:"POST", body:JSON.stringify({sql, dialect, max_rows:Number($("#analyst-limit").value)})});
-    setHtml("retrieval-preview", `<div class="plan-preview"><div class="plan-head">${badge(result.valid ? "VALID" : "REJECTED")}<strong>${result.applied_row_limit || 0} row ceiling</strong></div><p>${esc(result.violations.length ? result.violations.join(" / ") : "AST, statement type, and deterministic limits passed.")}</p><div class="evidence-strip"><span>${result.referenced_tables.length} tables</span><span>${result.referenced_columns.length} columns</span></div></div>`);
+    const result = await api(`/v1/datasources/${sourceId}/sql-validations`, {method:"POST", body:JSON.stringify({sql, max_rows:Number($("#analyst-limit").value), workspace_id:null})});
+    const findings = (result.findings || []).map(finding => finding.message || finding.code || human(finding.severity));
+    setHtml("retrieval-preview", `<div class="plan-preview"><div class="plan-head">${badge(result.valid ? "VALID" : "REJECTED")}<strong>${result.applied_row_limit || 0} row ceiling</strong></div><p>${esc(findings.length ? findings.join(" / ") : "AST, statement type, deterministic limits, and source cost controls passed.")}</p><div class="evidence-strip"><span>${result.referenced_tables.length} tables</span><span>${result.referenced_columns.length} columns</span><span>${esc(result.estimate?.estimated_cost ?? "No")} cost estimate</span></div></div>`);
   } catch (error) { notify(error.message); }
 }
 
@@ -461,11 +480,31 @@ function renderQueryResult(execution, explanation, target="analysis-result") {
   renderTable(rowsTarget, headers, body, "Query returned no rows");
 }
 
-async function loadTables() {
+async function loadTables({reset=false}={}) {
   const sourceId = $("#catalog-source")?.value;
-  state.tables = sourceId ? await fetchAll(`/v1/datasources/${sourceId}/tables`) : [];
-  if (!state.tables.some(item => item.id === state.selectedTableId)) state.selectedTableId = null;
+  if (reset) state.catalogOffset = 0;
+  if (!sourceId) {
+    state.tables = [];
+    state.catalogTotal = 0;
+    renderTables();
+    return;
+  }
   populateCatalogFilters();
+  const requestId = ++state.catalogRequestId;
+  const params = new URLSearchParams({limit:String(state.catalogPageSize), offset:String(state.catalogOffset)});
+  const query = $("#catalog-search")?.value.trim() || "";
+  const type = $("#catalog-type-filter")?.value || "ALL";
+  const status = $("#catalog-status-filter")?.value || "ACTIVE";
+  if (query.length >= 2) params.set("q", query);
+  if (type !== "ALL") params.set("object_type", type);
+  params.set("status", status);
+  setHtml("tables-table", '<div class="loading">Loading a bounded asset page</div>');
+  const page = await api(`/v1/datasources/${sourceId}/tables?${params}`);
+  if (requestId !== state.catalogRequestId) return;
+  state.tables = page.items;
+  state.catalogTotal = page.total;
+  state.catalogOffset = page.offset;
+  if (!state.tables.some(item => item.id === state.selectedTableId)) state.selectedTableId = null;
   renderTables();
 }
 
@@ -474,26 +513,21 @@ function populateCatalogFilters() {
   const statusFilter = $("#catalog-status-filter");
   if (!typeFilter || !statusFilter) return;
   const selectedType = typeFilter.value || "ALL";
-  const selectedStatus = statusFilter.value || "ALL";
-  const types = [...new Set(state.tables.map(item => item.object_type).filter(Boolean))].sort();
-  const statuses = [...new Set(state.tables.map(item => item.status).filter(Boolean))].sort();
+  const selectedStatus = statusFilter.value || "ACTIVE";
+  const types = ["BASE_TABLE", "TABLE", "VIEW", "MATERIALIZED_VIEW", "EXTERNAL_TABLE"];
+  const statuses = ["ACTIVE", "DEPRECATED"];
   typeFilter.innerHTML = `<option value="ALL">All types</option>${types.map(value => `<option value="${esc(value)}">${esc(human(value))}</option>`).join("")}`;
   statusFilter.innerHTML = `<option value="ALL">All statuses</option>${statuses.map(value => `<option value="${esc(value)}">${esc(human(value))}</option>`).join("")}`;
   typeFilter.value = types.includes(selectedType) ? selectedType : "ALL";
-  statusFilter.value = statuses.includes(selectedStatus) ? selectedStatus : "ALL";
+  statusFilter.value = statuses.includes(selectedStatus) || selectedStatus === "ALL" ? selectedStatus : "ACTIVE";
 }
 
 function renderTables() {
-  const query = $("#catalog-search")?.value.trim().toLowerCase() || "";
-  const type = $("#catalog-type-filter")?.value || "ALL";
-  const status = $("#catalog-status-filter")?.value || "ALL";
-  const visible = state.tables.filter(item => {
-    const searchMatch = !query || `${item.name} ${item.object_type} ${item.status} ${item.source_description || ""}`.toLowerCase().includes(query);
-    return searchMatch && (type === "ALL" || item.object_type === type) && (status === "ALL" || item.status === status);
-  });
-  const cards = visible.map(item => `<button class="asset-card ${state.selectedTableId === item.id ? "active" : ""}" data-table="${item.id}" type="button"><span class="asset-kind">${esc(String(item.object_type || "TB").slice(0, 2).toUpperCase())}</span><span class="asset-card-copy"><strong>${esc(item.name)}</strong><small>${esc(human(item.object_type))} / ${esc(item.source_description || "Technical metadata asset")}</small><span class="asset-card-meta"><i>${esc(human(item.status))}</i><i>${esc(String(item.id).slice(0, 8))}</i></span></span><span class="asset-chevron">&rsaquo;</span></button>`).join("");
+  const cards = state.tables.map(item => `<button class="asset-card ${state.selectedTableId === item.id ? "active" : ""}" data-table="${item.id}" type="button"><span class="asset-kind">${esc(String(item.object_type || "TB").slice(0, 2).toUpperCase())}</span><span class="asset-card-copy"><strong>${esc(item.name)}</strong><small>${esc(human(item.object_type))} / ${esc(item.source_description || "Technical metadata asset")}</small><span class="asset-card-meta"><i>${esc(human(item.status))}</i><i>${esc(String(item.id).slice(0, 8))}</i></span></span><span class="asset-chevron">&rsaquo;</span></button>`).join("");
   setHtml("tables-table", cards || empty("No assets match", "Adjust the search or clear one of the filters."));
-  setHtml("catalog-count", `<strong>${visible.length}</strong><span> of ${state.tables.length} assets</span>`);
+  const start = state.catalogTotal ? state.catalogOffset + 1 : 0;
+  const end = Math.min(state.catalogOffset + state.tables.length, state.catalogTotal);
+  setHtml("catalog-count", `<span><strong>${start}-${end}</strong> of ${state.catalogTotal.toLocaleString()} assets</span><span class="catalog-pager"><button class="icon-button" type="button" data-catalog-page="previous" aria-label="Previous asset page" ${state.catalogOffset === 0 ? "disabled" : ""}>&lsaquo;</button><button class="icon-button" type="button" data-catalog-page="next" aria-label="Next asset page" ${end >= state.catalogTotal ? "disabled" : ""}>&rsaquo;</button></span>`);
 }
 
 async function showTable(id) {
@@ -501,7 +535,8 @@ async function showTable(id) {
   renderTables();
   setHtml("table-detail", '<div class="loading">Loading table evidence</div>');
   try {
-    const [columns,constraints,impact,profile,annotation,documentation,termLinks,ownership] = await Promise.all([fetchAll(`/v1/tables/${id}/columns`), fetchAll(`/v1/tables/${id}/constraints`), api(`/v1/metadata/tables/${id}/impact`), api(`/v1/tables/${id}/profile`).catch(() => null), api(`/v1/metadata/tables/${id}/business-annotation`).catch(error => error.status === 404 ? null : Promise.reject(error)), api(`/v1/metadata/tables/${id}/documentation`).catch(error => error.status === 404 ? null : Promise.reject(error)), fetchAll(`/v1/metadata/tables/${id}/glossary-links`), fetchAll(`/v1/organizations/${state.organizationId}/ownership-assignments?subject_type=TABLE&subject_id=${id}`)]);
+    const [columnPage,constraints,impact,profile,annotation,documentation,termLinks,ownership] = await Promise.all([api(`/v1/tables/${id}/columns?limit=500`), fetchAll(`/v1/tables/${id}/constraints`), api(`/v1/metadata/tables/${id}/impact`), api(`/v1/tables/${id}/profile`).catch(() => null), api(`/v1/metadata/tables/${id}/business-annotation`).catch(error => error.status === 404 ? null : Promise.reject(error)), api(`/v1/metadata/tables/${id}/documentation`).catch(error => error.status === 404 ? null : Promise.reject(error)), fetchAll(`/v1/metadata/tables/${id}/glossary-links`), fetchAll(`/v1/organizations/${state.organizationId}/ownership-assignments?subject_type=TABLE&subject_id=${id}`)]);
+    const columns = columnPage.items;
     state.selectedAssetDocumentation = documentation;
     state.selectedAssetLinks = termLinks;
     state.selectedAssetOwnership = ownership;
@@ -556,14 +591,18 @@ async function prepareMetricComposer() {
 
 async function loadMetricTables() {
   const sourceId = $("#metric-source").value;
-  state.metricTables = sourceId ? await fetchAll(`/v1/datasources/${sourceId}/tables`) : [];
+  const page = sourceId ? await api(`/v1/datasources/${sourceId}/tables?limit=100&status=ACTIVE`) : {items:[], total:0};
+  state.metricTables = page.items;
   preserveSelect("metric-table", selectOptions(state.metricTables, item => item.name, state.metricTables.length ? "" : "No active tables"));
+  const tableSelect = $("#metric-table");
+  if (tableSelect && page.total > page.items.length) tableSelect.title = `Showing the first ${page.items.length} of ${page.total.toLocaleString()} tables. Use catalog search to narrow the source inventory.`;
   await loadMetricColumns();
 }
 
 async function loadMetricColumns() {
   const tableId = $("#metric-table").value;
-  state.metricColumns = tableId ? await fetchAll(`/v1/tables/${tableId}/columns`) : [];
+  const page = tableId ? await api(`/v1/tables/${tableId}/columns?limit=500`) : {items:[]};
+  state.metricColumns = page.items;
   const optional = selectOptions(state.metricColumns, item => `${item.name} (${item.physical_type})`, "None");
   preserveSelect("metric-measure", optional); preserveSelect("metric-time", optional);
   preserveSelect("metric-dimensions", selectOptions(state.metricColumns, item => `${item.name} (${human(item.classification)})`));
@@ -753,11 +792,12 @@ async function selectGraphNode(nodeId, redraw=true) {
   state.graphSelectedNodeId = nodeId; if (redraw && knowledgeGraphEngine) knowledgeGraphEngine.select(nodeId);
   setHtml("graph-node-detail", '<div class="loading">Loading governed node evidence</div>');
   try {
-    const [columns,impact,annotation,profile] = await Promise.all([
-      fetchAll(`/v1/tables/${nodeId}/columns`), api(`/v1/metadata/tables/${nodeId}/impact`),
+    const [columnPage,impact,annotation,profile] = await Promise.all([
+      api(`/v1/tables/${nodeId}/columns?limit=500`), api(`/v1/metadata/tables/${nodeId}/impact`),
       api(`/v1/metadata/tables/${nodeId}/business-annotation`).catch(error => error.status === 404 ? null : Promise.reject(error)),
       api(`/v1/tables/${nodeId}/profile`).catch(error => error.status === 404 ? null : Promise.reject(error))
     ]);
+    const columns = columnPage.items;
     const connected = state.graph.edges.filter(edge => edge.source_node_id === nodeId || edge.target_node_id === nodeId);
     const sensitive = columns.filter(column => ["PII","PCI","PHI","SECRET","CONFIDENTIAL"].includes(column.classification)).length;
     const columnRows = columns.slice(0, 60).map(column => `<div class="graph-column-row"><strong>${esc(column.name)}</strong>${badge(column.classification)}<small>${esc(column.physical_type)} · ${column.nullable ? "nullable" : "required"}</small></div>`).join("");
@@ -905,6 +945,7 @@ const NAV_INDEX = [
   {view:"relationships", label:"Knowledge graph", hint:"Relationship intelligence"},
   {view:"governance", label:"Review center", hint:"Maker-checker queue"},
   {view:"agents", label:"AI control center", hint:"Models, agents, evaluations"},
+  {view:"controls", label:"Enterprise control center", hint:"Completed governance and operations APIs"},
   {view:"sources", label:"Source fleet", hint:"Connections and scan policy"},
   {view:"quality", label:"Data quality", hint:"Baselines and incidents"},
   {view:"operations", label:"Operations", hint:"Runs, memory, event delivery"},
@@ -944,6 +985,10 @@ function paletteEntries() {
   const views = visibleNavEntries().map(entry => ({type:"View", label:entry.label, hint:entry.hint, action: () => showView(entry.view)}));
   return [...views, ...dynamic];
 }
+
+window.AtlasUI.paletteEntries = paletteEntries;
+window.showView = showView;
+window.showTable = showTable;
 
 function renderPaletteResults(query) {
   const q = query.trim().toLowerCase();
@@ -1041,11 +1086,12 @@ function showView(name) {
     node.classList.toggle("active", active);
     if (active) node.setAttribute("aria-current", "page"); else node.removeAttribute("aria-current");
   });
-  const titles = {home:"Home",analyst:"Ask Atlas",catalog:"All assets",transformations:"Transformation metadata",meaning:"Business meaning",semantics:"Semantic layer",tools:"Tool registry",relationships:"Knowledge graph",governance:"Review center",agents:"AI governance",sources:"Sources",quality:"Data quality",operations:"Operations",administration:"Administration",audit:"Audit evidence"};
+  const titles = {home:"Home",analyst:"Ask Atlas",catalog:"All assets",transformations:"Transformation metadata",meaning:"Business meaning",semantics:"Semantic layer",tools:"Tool registry",relationships:"Knowledge graph",governance:"Review center",agents:"AI governance",controls:"Enterprise control center",sources:"Sources",quality:"Data quality",operations:"Operations",administration:"Administration",audit:"Audit evidence"};
   $("#page-title").textContent = titles[name] || human(name); history.replaceState(null, "", `#${name}`);
   if (name === "relationships") window.requestAnimationFrame(() => knowledgeGraphEngine?.resizeAndFit());
   if (name === "operations" && $("#ops-memory").classList.contains("active")) loadMemory().catch(error => notify(error.message));
   if (name === "operations" && $("#ops-outbox").classList.contains("active")) loadOutbox().catch(error => notify(error.message));
+  if (!["home","operations","administration","governance"].includes(name)) loadViewData(name).catch(error => notify(error.message));
   document.body.classList.remove("nav-open");
   $("#nav-toggle")?.setAttribute("aria-expanded", "false");
   window.scrollTo({top:0, behavior: reducedMotion ? "auto" : "smooth"});
@@ -1087,9 +1133,18 @@ function bindDirectEvents() {
   $("#refresh-button").addEventListener("click", () => loadOrganizationData().then(() => notify("Organization data refreshed.", true)).catch(error => notify(error.message)));
   $("#organization-select").addEventListener("change", async event => { state.organizationId = event.target.value; localStorage.setItem("aida-organization", state.organizationId); await loadOrganizationData(); });
   $("#preview-plan").addEventListener("click", previewPlan); $("#run-analysis").addEventListener("click", runAnalysis); $("#validate-sql").addEventListener("click", validateSql);
-  $("#analyst-source").addEventListener("change", loadAgentRuns); $("#catalog-source").addEventListener("change", loadTables); $("#catalog-search").addEventListener("input", renderTables);
-  $("#catalog-type-filter").addEventListener("change", renderTables); $("#catalog-status-filter").addEventListener("change", renderTables);
-  $("#clear-catalog-filters").addEventListener("click", () => { $("#catalog-search").value = ""; $("#catalog-type-filter").value = "ALL"; $("#catalog-status-filter").value = "ALL"; renderTables(); });
+  $("#analyst-source").addEventListener("change", loadAgentRuns); $("#catalog-source").addEventListener("change", () => loadTables({reset:true}));
+  let catalogSearchTimer;
+  $("#catalog-search").addEventListener("input", event => {
+    window.clearTimeout(catalogSearchTimer);
+    if (event.target.value.trim().length === 1) {
+      setHtml("catalog-count", "Enter at least 2 characters");
+      return;
+    }
+    catalogSearchTimer = window.setTimeout(() => loadTables({reset:true}).catch(error => notify(error.message)), 300);
+  });
+  $("#catalog-type-filter").addEventListener("change", () => loadTables({reset:true})); $("#catalog-status-filter").addEventListener("change", () => loadTables({reset:true}));
+  $("#clear-catalog-filters").addEventListener("click", () => { $("#catalog-search").value = ""; $("#catalog-type-filter").value = "ALL"; $("#catalog-status-filter").value = "ALL"; loadTables({reset:true}); });
   $("#new-glossary-term").addEventListener("click", () => $("#glossary-term-dialog").showModal());
   $("#new-glossary-category").addEventListener("click", () => $("#glossary-category-dialog").showModal());
   $("#new-ownership-rule").addEventListener("click", () => $("#ownership-rule-dialog").showModal());
@@ -1319,7 +1374,7 @@ function bindDirectEvents() {
     catch { return notify("Catalog payload must be valid JSON."); }
     if (!Array.isArray(catalogs) || !catalogs.length) return notify("Catalog payload must be a non-empty JSON array.");
     if (data.get("snapshot_type") === "FULL" && !window.confirm("A full snapshot retires active metadata omitted from this payload. Continue?")) return;
-    const body = {envelope_version:"1.0", idempotency_key:data.get("idempotency_key"), producer:data.get("producer"), transport:data.get("transport"), snapshot_type:data.get("snapshot_type"), emitted_at:new Date().toISOString(), catalogs};
+    const body = {envelope_version:data.get("envelope_version") || "1.0", idempotency_key:data.get("idempotency_key"), producer:data.get("producer"), transport:data.get("transport"), snapshot_type:data.get("snapshot_type"), emitted_at:new Date().toISOString(), catalogs};
     const button = form.querySelector("button[type=submit]"); button.disabled = true; button.textContent = "Validating contract";
     try {
       const result = await api(`/v1/datasources/${sourceId}/metadata-ingestions`, {method:"POST", body:JSON.stringify(body)});
@@ -1332,7 +1387,7 @@ function bindDirectEvents() {
   $("#batch-create-form").addEventListener("submit", async event => {
     event.preventDefault(); const form = event.target; const data = new FormData(form); const sourceId = data.get("datasource_id");
     if (!sourceId) return notify("Select a data source for this batch.");
-    const body = {envelope_version:"1.0", batch_key:data.get("batch_key"), producer:data.get("producer"), snapshot_type:data.get("snapshot_type"), expected_chunks:Number(data.get("expected_chunks"))};
+    const body = {envelope_version:data.get("envelope_version") || "1.0", batch_key:data.get("batch_key"), producer:data.get("producer"), snapshot_type:data.get("snapshot_type"), expected_chunks:Number(data.get("expected_chunks"))};
     const button = form.querySelector("button[type=submit]"); button.disabled = true; button.textContent = "Creating manifest";
     try { const batch = await api(`/v1/datasources/${sourceId}/metadata-ingestion-batches`, {method:"POST", body:JSON.stringify(body)}); state.selectedBatchId = batch.id; notify("Durable batch manifest created. Upload every numbered chunk before finalizing.", true); await loadEnterpriseIngestion(); }
     catch (error) { notify(error.message); }
@@ -1396,6 +1451,12 @@ function bindDirectEvents() {
 
 function bindDelegatedEvents() {
   document.addEventListener("click", async event => {
+    const catalogPage = event.target.closest("[data-catalog-page]");
+    if (catalogPage && !catalogPage.disabled) {
+      const direction = catalogPage.dataset.catalogPage === "next" ? 1 : -1;
+      state.catalogOffset = Math.max(0, state.catalogOffset + direction * state.catalogPageSize);
+      return loadTables().catch(error => notify(error.message));
+    }
     const go = event.target.closest("[data-go]"); if (go) return showView(go.dataset.go);
     const nav = event.target.closest("[data-view]"); if (nav) return showView(nav.dataset.view);
     const assetTab = event.target.closest("[data-asset-tab]"); if (assetTab) { state.selectedAssetTab = assetTab.dataset.assetTab; $$("[data-asset-tab]").forEach(node => { const active = node === assetTab; node.classList.toggle("active", active); node.setAttribute("aria-selected", String(active)); node.tabIndex = active ? 0 : -1; }); $$("[data-asset-pane]").forEach(node => node.classList.toggle("active", node.dataset.assetPane === state.selectedAssetTab)); return; }

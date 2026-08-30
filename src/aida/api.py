@@ -1421,6 +1421,9 @@ async def gate_read(
 @router.get("/datasources/{datasource_id}/tables", response_model=Page)
 async def list_tables(
     datasource_id: UUID,
+    q: str | None = Query(default=None, min_length=2, max_length=200),
+    object_type: str | None = Query(default=None, max_length=30),
+    table_status: str = Query(default="ACTIVE", alias="status", max_length=30),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
@@ -1442,11 +1445,24 @@ async def list_tables(
         resource_id=str(datasource.id),
         datasource_id=datasource.id,
     )
-    filters = (
+    filters: list[Any] = [
         MetadataTable.organization_id == datasource.organization_id,
         MetadataTable.datasource_id == datasource.id,
-        MetadataTable.status == "ACTIVE",
-    )
+    ]
+    if table_status != "ALL":
+        filters.append(MetadataTable.status == table_status)
+    if object_type and object_type != "ALL":
+        filters.append(MetadataTable.object_type == object_type)
+    if q:
+        normalized_query = q.strip().lower()
+        filters.append(
+            or_(
+                func.lower(MetadataTable.name).contains(normalized_query),
+                func.lower(func.coalesce(MetadataTable.source_description, "")).contains(
+                    normalized_query
+                ),
+            )
+        )
     total = await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
     rows = (
         await session.scalars(

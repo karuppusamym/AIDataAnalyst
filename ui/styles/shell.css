@@ -107,8 +107,11 @@ input:focus, select:focus, textarea:focus { border-color: #758ee3; box-shadow: 0
 .catalog-toolbar { margin-bottom: 14px; padding: 10px; border: 1px solid #e1e5ed; border-radius: 12px; background: #fff; }
 .catalog-toolbar .search-field { width: min(620px, 100%); }
 .catalog-toolbar input { border: 0; background: #f7f8fb; }
-#catalog-count { padding-right: 8px; color: var(--muted); font-size: 10px; }
+#catalog-count { padding-right: 8px; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 10px; }
 #catalog-count strong { color: var(--ink); font-size: 14px; }
+.catalog-pager { display: inline-flex; gap: 4px; }
+.catalog-pager .icon-button { width: 28px; height: 28px; }
+.catalog-pager .icon-button:disabled { opacity: .35; cursor: not-allowed; }
 .asset-explorer { min-height: 680px; display: grid; grid-template-columns: 205px minmax(310px, .72fr) minmax(520px, 1.28fr); border: 1px solid #e0e4ec; border-radius: 15px; overflow: hidden; background: #fff; box-shadow: var(--shadow); }
 .asset-filters { padding: 20px 16px; border-right: 1px solid var(--line); background: #fbfbfd; }
 .filter-heading { margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between; }
