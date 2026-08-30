@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,7 @@ from aida.models import (
     DataSource,
     GlossaryConflict,
     GlossaryLinkProposal,
+    GlossaryTerm,
     GlossaryTermVersion,
     GovernanceReview,
     GovernedToolVersion,
@@ -37,6 +38,7 @@ from aida.models import (
     SemanticMetric,
     SemanticMetricVersion,
     SemanticModelVersion,
+    TermSemanticBinding,
 )
 from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
@@ -48,6 +50,8 @@ from aida.schemas import (
     SemanticModelCloneRequest,
     SemanticModelVersionCreate,
     SemanticModelVersionRead,
+    TermSemanticBindingCreate,
+    TermSemanticBindingRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.semantic_inference import apply_enrichment_proposal
@@ -445,6 +449,284 @@ async def list_metric_versions(
         offset=offset,
         total=total or 0,
     )
+
+
+async def _semantic_metric_and_project(
+    session: AsyncSession, metric_id: UUID, context: SecurityContext
+) -> tuple[SemanticMetric, Project]:
+    metric = await session.get(SemanticMetric, metric_id)
+    if metric is None:
+        raise HTTPException(status_code=404, detail="semantic metric not found")
+    project = await session.get(Project, metric.project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    enforce_organization(context, project.organization_id)
+    return metric, project
+
+
+async def _approved_glossary_term(
+    session: AsyncSession, term_id: UUID, organization_id: UUID
+) -> tuple[GlossaryTerm, GlossaryTermVersion]:
+    term = await session.get(GlossaryTerm, term_id)
+    if term is None or term.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="glossary term not found")
+    approved = await session.scalar(
+        select(GlossaryTermVersion)
+        .where(
+            GlossaryTermVersion.term_id == term.id,
+            GlossaryTermVersion.status == "APPROVED",
+        )
+        .order_by(GlossaryTermVersion.version.desc())
+        .limit(1)
+    )
+    if approved is None:
+        raise HTTPException(status_code=409, detail="only approved glossary terms can be bound")
+    return term, approved
+
+
+def _term_semantic_binding_read(
+    binding: TermSemanticBinding,
+    term: GlossaryTerm,
+    term_version: GlossaryTermVersion,
+    semantic_object_name: str,
+) -> TermSemanticBindingRead:
+    return TermSemanticBindingRead(
+        id=binding.id,
+        organization_id=binding.organization_id,
+        term_id=term.id,
+        term_key=term.term_key,
+        term_display_name=term_version.display_name,
+        term_definition=term_version.definition,
+        semantic_object_type=binding.semantic_object_type,
+        semantic_object_id=binding.semantic_object_id,
+        semantic_object_name=semantic_object_name,
+        status=binding.status,
+        requested_by=binding.requested_by,
+        approved_by=binding.approved_by,
+        approved_at=binding.approved_at,
+        governance_review_id=binding.governance_review_id,
+        created_at=binding.created_at,
+        updated_at=binding.updated_at,
+    )
+
+
+@router.post(
+    "/semantic-metrics/{metric_id}/glossary-bindings",
+    response_model=TermSemanticBindingRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_term_semantic_binding(
+    metric_id: UUID,
+    body: TermSemanticBindingCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> TermSemanticBindingRead:
+    """SM-2: bind `body.term_id` to the metric at `metric_id`.
+
+    Mirrors `request_cross_boundary_grant` (api.py): the binding is created
+    `PENDING_APPROVAL` and filed into the same shared governance review queue
+    every other governed object here uses -- it only becomes `ACTIVE`, and
+    only then eligible to participate in retrieval, once a *different*
+    principal approves it via `POST /governance/reviews/{id}/decision`.
+    """
+    metric, project = await _semantic_metric_and_project(session, metric_id, context)
+    if body.semantic_object_type != "METRIC" or body.semantic_object_id != metric.id:
+        raise HTTPException(
+            status_code=422,
+            detail="semantic_object_type/semantic_object_id must identify the metric in the path",
+        )
+    term, _term_version = await _approved_glossary_term(
+        session, body.term_id, project.organization_id
+    )
+    existing = await session.scalar(
+        select(TermSemanticBinding).where(
+            TermSemanticBinding.term_id == term.id,
+            TermSemanticBinding.semantic_object_type == body.semantic_object_type,
+            TermSemanticBinding.semantic_object_id == body.semantic_object_id,
+            TermSemanticBinding.status.in_(("PENDING_APPROVAL", "ACTIVE")),
+        )
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409, detail="a binding for this term and semantic object already exists"
+        )
+    binding = TermSemanticBinding(
+        organization_id=project.organization_id,
+        term_id=term.id,
+        semantic_object_type=body.semantic_object_type,
+        semantic_object_id=body.semantic_object_id,
+        requested_by=context.principal_id,
+    )
+    session.add(binding)
+    await session.flush()
+    review = GovernanceReview(
+        organization_id=project.organization_id,
+        object_type="TERM_SEMANTIC_BINDING",
+        object_id=str(binding.id),
+        requested_action="BIND",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    binding.governance_review_id = review.id
+    audit_context = replace(context, organization_id=project.organization_id)
+    record_audit(
+        session,
+        audit_context,
+        action="semantic.term_binding.request",
+        resource_type="governance_review",
+        resource_id=str(review.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "binding_id": str(binding.id),
+            "term_id": str(term.id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=project.organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+        },
+    )
+    await session.commit()
+    return _term_semantic_binding_read(binding, term, _term_version, metric.slug)
+
+
+@router.get("/semantic-metrics/{metric_id}/glossary-bindings", response_model=Page)
+async def list_metric_glossary_bindings(
+    metric_id: UUID,
+    binding_status: str | None = Query(default="ACTIVE", alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """SM-2, object -> term direction: which glossary terms are bound to this metric."""
+    metric, _project = await _semantic_metric_and_project(session, metric_id, context)
+    filters = [
+        TermSemanticBinding.semantic_object_type == "METRIC",
+        TermSemanticBinding.semantic_object_id == metric.id,
+    ]
+    if binding_status:
+        filters.append(TermSemanticBinding.status == binding_status.upper())
+    base = (
+        select(TermSemanticBinding, GlossaryTerm, GlossaryTermVersion)
+        .join(GlossaryTerm, GlossaryTerm.id == TermSemanticBinding.term_id)
+        .join(
+            GlossaryTermVersion,
+            (GlossaryTermVersion.term_id == GlossaryTerm.id)
+            & (GlossaryTermVersion.status == "APPROVED"),
+        )
+        .where(*filters)
+    )
+    total = await session.scalar(select(func.count()).select_from(base.subquery()))
+    rows = (
+        await session.execute(
+            base.order_by(TermSemanticBinding.created_at).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[
+            _term_semantic_binding_read(binding, term, term_version, metric.slug)
+            for binding, term, term_version in rows
+        ],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get("/glossary-terms/{term_id}/semantic-bindings", response_model=Page)
+async def list_term_semantic_bindings(
+    term_id: UUID,
+    binding_status: str | None = Query(default="ACTIVE", alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """SM-2, term -> object direction: which semantic objects this term is bound to."""
+    term = await session.get(GlossaryTerm, term_id)
+    if term is None:
+        raise HTTPException(status_code=404, detail="glossary term not found")
+    enforce_organization(context, term.organization_id)
+    term_version = await session.scalar(
+        select(GlossaryTermVersion)
+        .where(GlossaryTermVersion.term_id == term.id, GlossaryTermVersion.status == "APPROVED")
+        .order_by(GlossaryTermVersion.version.desc())
+        .limit(1)
+    )
+    if term_version is None:
+        raise HTTPException(status_code=409, detail="glossary term has no approved version")
+    filters = [TermSemanticBinding.term_id == term.id]
+    if binding_status:
+        filters.append(TermSemanticBinding.status == binding_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(select(TermSemanticBinding).where(*filters).subquery())
+    )
+    bindings = (
+        await session.scalars(
+            select(TermSemanticBinding)
+            .where(*filters)
+            .order_by(TermSemanticBinding.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    items: list[TermSemanticBindingRead] = []
+    for binding in bindings:
+        semantic_object_name = ""
+        if binding.semantic_object_type == "METRIC":
+            metric = await session.get(SemanticMetric, binding.semantic_object_id)
+            semantic_object_name = metric.slug if metric is not None else ""
+        items.append(_term_semantic_binding_read(binding, term, term_version, semantic_object_name))
+    return Page(items=items, limit=limit, offset=offset, total=total or 0)
+
+
+@router.delete("/term-semantic-bindings/{binding_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_term_semantic_binding(
+    binding_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    binding = await session.get(TermSemanticBinding, binding_id)
+    if binding is None:
+        raise HTTPException(status_code=404, detail="term-semantic binding not found")
+    enforce_organization(context, binding.organization_id)
+    await session.delete(binding)
+    record_audit(
+        session,
+        replace(context, organization_id=binding.organization_id),
+        action="semantic.term_binding.delete",
+        resource_type="term_semantic_binding",
+        resource_id=str(binding.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "term_id": str(binding.term_id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
+        },
+    )
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post(
@@ -1066,6 +1348,29 @@ async def decide_governance_review(
             "table_id": str(link_proposal.table_id),
             "term_id": str(link_proposal.term_id),
             "confidence": link_proposal.confidence,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "TERM_SEMANTIC_BINDING":
+        binding = await session.get(TermSemanticBinding, UUID(review.object_id))
+        if binding is None or binding.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if binding.status != "PENDING_APPROVAL":
+            raise HTTPException(status_code=409, detail="binding is no longer pending review")
+        if body.decision == "APPROVE":
+            binding.status = "ACTIVE"
+            binding.approved_by = context.principal_id
+            binding.approved_at = now
+            event_type = "semantic.term_binding_approved.v1"
+        else:
+            binding.status = "REJECTED"
+            event_type = "semantic.term_binding_rejected.v1"
+        aggregate_type = "term_semantic_binding"
+        aggregate_id = str(binding.id)
+        payload = {
+            "binding_id": str(binding.id),
+            "term_id": str(binding.term_id),
+            "semantic_object_type": binding.semantic_object_type,
+            "semantic_object_id": str(binding.semantic_object_id),
             "review_id": str(review.id),
         }
     elif review.object_type == "CROSS_BOUNDARY_GRANT":

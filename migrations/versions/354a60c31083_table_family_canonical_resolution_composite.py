@@ -1,7 +1,15 @@
-"""table family, canonical resolution, composite relationship candidates (RL-1/2/3)
+"""canonical resolution steward override, composite relationship candidates (RL-2/3)
+
+RL-1 (table family / temporal intelligence) is NOT part of this migration: it
+shipped independently as `table_family_candidate` (see
+`68a9ada00969_table_family_intelligence.py`), reached via this revision's
+merged-in parent. A duplicate `table_family` / `table_family_member` pair
+used to be created here; it has been dropped in favor of that shipped
+implementation, and `canonical_table_mapping` below is now additive to
+`table_family_candidate` instead of the removed `table_family`.
 
 Revision ID: 354a60c31083
-Revises: f371492245ae
+Revises: 99823f633c68
 Create Date: 2026-08-30 17:29:50.675792
 """
 
@@ -11,111 +19,36 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "354a60c31083"
-down_revision: str | Sequence[str] | None = "f371492245ae"
+down_revision: str | Sequence[str] | None = "99823f633c68"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    # RL-1: table family / temporal intelligence
-    op.create_table(
-        "table_family",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("datasource_id", sa.Uuid(), nullable=False),
-        sa.Column("family_key", sa.String(length=500), nullable=False),
-        sa.Column("family_type", sa.String(length=30), nullable=False),
-        sa.Column("algorithm_version", sa.String(length=50), nullable=False),
-        sa.Column("confidence", sa.Float(), nullable=False),
-        sa.Column("evidence", sa.JSON(), nullable=False),
-        sa.Column("status", sa.String(length=30), nullable=False),
-        sa.Column("detected_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["datasource_id"], ["datasource.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["organization_id"], ["organization.id"], ondelete="RESTRICT"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("datasource_id", "family_key", name="uq_table_family_key"),
-    )
-    op.create_index(
-        op.f("ix_table_family_datasource_id"), "table_family", ["datasource_id"], unique=False
-    )
-    op.create_index(
-        op.f("ix_table_family_organization_id"), "table_family", ["organization_id"], unique=False
-    )
-    op.create_index(
-        "ix_table_family_org_type", "table_family", ["organization_id", "family_type"], unique=False
-    )
-
-    op.create_table(
-        "table_family_member",
-        sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("family_id", sa.Uuid(), nullable=False),
-        sa.Column("table_id", sa.Uuid(), nullable=False),
-        sa.Column("confidence", sa.Float(), nullable=False),
-        sa.Column("evidence", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["family_id"], ["table_family.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["organization_id"], ["organization.id"], ondelete="RESTRICT"),
-        sa.ForeignKeyConstraint(["table_id"], ["metadata_table.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("table_id", name="uq_table_family_member_table_id"),
-    )
-    op.create_index(
-        op.f("ix_table_family_member_organization_id"),
-        "table_family_member",
-        ["organization_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_table_family_member_family_id"),
-        "table_family_member",
-        ["family_id"],
-        unique=False,
-    )
-
-    # RL-2: canonical table resolution with steward override
+    # RL-2: canonical table resolution with steward override, additive to the
+    # already-shipped `table_family_candidate` (see `68a9ada00969`).
     op.create_table(
         "canonical_table_mapping",
         sa.Column("id", sa.Uuid(), nullable=False),
         sa.Column("organization_id", sa.Uuid(), nullable=False),
-        sa.Column("datasource_id", sa.Uuid(), nullable=False),
-        sa.Column("family_id", sa.Uuid(), nullable=False),
-        sa.Column("detected_canonical_table_id", sa.Uuid(), nullable=False),
-        sa.Column("algorithm_version", sa.String(length=50), nullable=False),
-        sa.Column("confidence", sa.Float(), nullable=False),
-        sa.Column("evidence", sa.JSON(), nullable=False),
-        sa.Column("override_table_id", sa.Uuid(), nullable=True),
-        sa.Column("override_reason", sa.String(length=2000), nullable=True),
-        sa.Column("overridden_by", sa.String(length=255), nullable=True),
-        sa.Column("overridden_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("family_candidate_id", sa.Uuid(), nullable=False),
+        sa.Column("canonical_table_id", sa.Uuid(), nullable=False),
+        sa.Column("resolved_by", sa.String(length=255), nullable=False),
+        sa.Column("rationale", sa.String(length=2000), nullable=False),
+        sa.Column("is_steward_override", sa.Boolean(), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.ForeignKeyConstraint(["datasource_id"], ["datasource.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
-            ["detected_canonical_table_id"], ["metadata_table.id"], ondelete="CASCADE"
+            ["canonical_table_id"], ["metadata_table.id"], ondelete="CASCADE"
         ),
-        sa.ForeignKeyConstraint(["family_id"], ["table_family.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["organization_id"], ["organization.id"], ondelete="RESTRICT"),
         sa.ForeignKeyConstraint(
-            ["override_table_id"], ["metadata_table.id"], ondelete="SET NULL"
+            ["family_candidate_id"], ["table_family_candidate.id"], ondelete="CASCADE"
         ),
+        sa.ForeignKeyConstraint(["organization_id"], ["organization.id"], ondelete="RESTRICT"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("family_id", name="uq_canonical_table_mapping_family"),
-    )
-    op.create_index(
-        op.f("ix_canonical_table_mapping_datasource_id"),
-        "canonical_table_mapping",
-        ["datasource_id"],
-        unique=False,
-    )
-    op.create_index(
-        op.f("ix_canonical_table_mapping_family_id"),
-        "canonical_table_mapping",
-        ["family_id"],
-        unique=False,
+        sa.UniqueConstraint(
+            "family_candidate_id", name="uq_canonical_table_mapping_family_candidate"
+        ),
     )
     op.create_index(
         op.f("ix_canonical_table_mapping_organization_id"),
@@ -124,9 +57,15 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index(
-        op.f("ix_canonical_table_mapping_override_table_id"),
+        op.f("ix_canonical_table_mapping_family_candidate_id"),
         "canonical_table_mapping",
-        ["override_table_id"],
+        ["family_candidate_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_canonical_table_mapping_canonical_table_id"),
+        "canonical_table_mapping",
+        ["canonical_table_id"],
         unique=False,
     )
 
@@ -251,31 +190,15 @@ def downgrade() -> None:
     op.drop_table("relationship_candidate_group")
 
     op.drop_index(
-        op.f("ix_canonical_table_mapping_override_table_id"),
+        op.f("ix_canonical_table_mapping_canonical_table_id"),
+        table_name="canonical_table_mapping",
+    )
+    op.drop_index(
+        op.f("ix_canonical_table_mapping_family_candidate_id"),
         table_name="canonical_table_mapping",
     )
     op.drop_index(
         op.f("ix_canonical_table_mapping_organization_id"),
         table_name="canonical_table_mapping",
     )
-    op.drop_index(
-        op.f("ix_canonical_table_mapping_family_id"), table_name="canonical_table_mapping"
-    )
-    op.drop_index(
-        op.f("ix_canonical_table_mapping_datasource_id"),
-        table_name="canonical_table_mapping",
-    )
     op.drop_table("canonical_table_mapping")
-
-    op.drop_index(
-        op.f("ix_table_family_member_family_id"), table_name="table_family_member"
-    )
-    op.drop_index(
-        op.f("ix_table_family_member_organization_id"), table_name="table_family_member"
-    )
-    op.drop_table("table_family_member")
-
-    op.drop_index("ix_table_family_org_type", table_name="table_family")
-    op.drop_index(op.f("ix_table_family_organization_id"), table_name="table_family")
-    op.drop_index(op.f("ix_table_family_datasource_id"), table_name="table_family")
-    op.drop_table("table_family")

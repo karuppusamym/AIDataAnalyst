@@ -1,15 +1,11 @@
-from datetime import UTC, datetime
 from uuid import UUID
 
+from aida.main import app
 from aida.relationship_intelligence import (
-    CanonicalCandidate,
     ColumnMeta,
-    TableFamilyObservation,
-    base_entity_key,
     composite_group_fingerprint,
-    detect_table_families,
     generate_composite_relationship_candidates,
-    resolve_canonical_member,
+    resolve_canonical_table_id,
 )
 
 
@@ -43,274 +39,54 @@ def column(
 
 
 # --------------------------------------------------------------------------
-# RL-1 -- table family detection
-# --------------------------------------------------------------------------
-
-
-def test_base_entity_key_strips_date_and_history_suffixes() -> None:
-    assert base_entity_key("customer_20240101")[1:] == ("20240101", "date")
-    assert base_entity_key("customer_history")[0] == "customer"
-    assert base_entity_key("customer_history")[2] == "history"
-    assert base_entity_key("customer")[2] is None
-
-
-def test_scd_table_detected_with_effective_expiry_pair_and_current_flag() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(1),
-        table_name="dim_customer",
-        schema_id=uid(100),
-        primary_key_columns=("customer_key",),
-        columns=(
-            column(1, 1, "customer_key", "bigint", nullable=False, ordinal=1),
-            column(1, 2, "effective_from", "date", ordinal=2),
-            column(1, 3, "effective_to", "date", ordinal=3),
-            column(1, 4, "is_current", "boolean", ordinal=4),
-        ),
-        row_count_estimate=500_000,
-        inbound_reference_count=0,
-    )
-
-    groups = detect_table_families([observation])
-
-    assert len(groups) == 1
-    group = groups[0]
-    assert group.family_type == "SCD"
-    assert group.confidence >= 0.6
-    assert group.members[0].table_id == uid(1)
-    assert group.evidence["effective_expiry_pair"] is True
-    assert group.evidence["current_flag_columns"] == ["is_current"]
-
-
-def test_delta_cdc_table_detected_from_operation_column_and_low_cardinality_profile() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(2),
-        table_name="orders_cdc",
-        schema_id=uid(100),
-        primary_key_columns=("order_id",),
-        columns=(
-            column(2, 1, "order_id", "bigint", nullable=False, ordinal=1),
-            column(
-                2,
-                2,
-                "op_type",
-                "varchar",
-                ordinal=2,
-                null_count=0,
-                non_null_count=1000,
-                approximate_distinct_count=3,
-            ),
-            column(2, 3, "cdc_timestamp", "timestamp", ordinal=3),
-        ),
-    )
-
-    groups = detect_table_families([observation])
-
-    assert groups[0].family_type == "DELTA_CDC"
-    assert groups[0].evidence["low_cardinality_operation_column"] is True
-
-
-def test_history_table_detected_from_temporal_columns_and_near_duplicate_keys() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(3),
-        table_name="account_history",
-        schema_id=uid(100),
-        primary_key_columns=("account_id",),
-        columns=(
-            column(
-                3,
-                1,
-                "account_id",
-                "bigint",
-                nullable=False,
-                ordinal=1,
-                null_count=0,
-                non_null_count=10_000,
-                approximate_distinct_count=2_000,
-            ),
-            column(3, 2, "as_of_date", "date", ordinal=2),
-            column(3, 3, "version_number", "integer", ordinal=3),
-        ),
-    )
-
-    groups = detect_table_families([observation])
-
-    assert groups[0].family_type == "HISTORY"
-    assert groups[0].evidence["near_duplicate_keys"] is True
-    assert groups[0].evidence["name_hint"] is True
-
-
-def test_append_only_table_detected_from_insert_audit_without_update_audit() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(4),
-        table_name="event_log",
-        schema_id=uid(100),
-        primary_key_columns=("event_id",),
-        columns=(
-            column(4, 1, "event_id", "bigint", nullable=False, ordinal=1),
-            column(4, 2, "created_at", "timestamp", ordinal=2),
-            column(4, 3, "payload", "jsonb", ordinal=3),
-        ),
-    )
-
-    groups = detect_table_families([observation])
-
-    assert groups[0].family_type == "APPEND_ONLY"
-    assert groups[0].evidence["single_monotonic_primary_key"] is True
-
-
-def test_reference_table_detected_when_small_and_widely_referenced() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(5),
-        table_name="currency",
-        schema_id=uid(100),
-        primary_key_columns=("currency_code",),
-        columns=(column(5, 1, "currency_code", "varchar", nullable=False, ordinal=1),),
-        row_count_estimate=180,
-        inbound_reference_count=6,
-    )
-
-    groups = detect_table_families([observation])
-
-    assert groups[0].family_type == "REFERENCE"
-    assert groups[0].evidence["widely_referenced"] is True
-
-
-def test_snapshot_cluster_detected_across_date_suffixed_siblings() -> None:
-    schema_id = uid(100)
-    observations = [
-        TableFamilyObservation(
-            table_id=uid(10 + i),
-            table_name=f"customer_2024010{i}",
-            schema_id=schema_id,
-            primary_key_columns=("customer_id",),
-            columns=(
-                column(10 + i, 100 + i, "customer_id", "bigint", nullable=False, ordinal=1),
-                column(10 + i, 200 + i, "customer_name", "varchar", ordinal=2),
-            ),
-        )
-        for i in range(1, 6)
-    ]
-
-    groups = detect_table_families(observations)
-
-    assert len(groups) == 1
-    group = groups[0]
-    assert group.family_type == "SNAPSHOT"
-    assert len(group.members) == 5
-    assert group.evidence["member_count"] == 5
-    assert {member.table_id for member in group.members} == {uid(10 + i) for i in range(1, 6)}
-
-
-def test_table_with_no_signal_is_not_assigned_a_family() -> None:
-    observation = TableFamilyObservation(
-        table_id=uid(20),
-        table_name="widgets",
-        schema_id=uid(100),
-        primary_key_columns=("widget_id",),
-        columns=(
-            column(20, 1, "widget_id", "bigint", nullable=False, ordinal=1),
-            column(20, 2, "widget_name", "varchar", ordinal=2),
-            column(20, 3, "updated_at", "timestamp", ordinal=3),
-        ),
-        row_count_estimate=50_000_000,
-        inbound_reference_count=0,
-    )
-
-    groups = detect_table_families([observation])
-
-    assert groups == []
-
-
-def test_detection_is_deterministic_regardless_of_input_order() -> None:
-    schema_id = uid(100)
-    observations = [
-        TableFamilyObservation(
-            table_id=uid(30 + i),
-            table_name=f"account_2024010{i}",
-            schema_id=schema_id,
-            primary_key_columns=("account_id",),
-            columns=(
-                column(30 + i, 300 + i, "account_id", "bigint", nullable=False, ordinal=1),
-                column(30 + i, 400 + i, "balance", "numeric", ordinal=2),
-            ),
-        )
-        for i in range(1, 4)
-    ]
-
-    forward = detect_table_families(observations)
-    backward = detect_table_families(list(reversed(observations)))
-
-    assert forward == backward
-
-
-# --------------------------------------------------------------------------
 # RL-2 -- canonical table resolution
+#
+# Table family detection (RL-1) is NOT in this module -- it shipped
+# independently as ``aida.table_family_intelligence`` (see
+# ``tests/test_table_family_intelligence.py``). ``resolve_canonical_table_id``
+# is the one remaining piece: an explicit steward override always wins,
+# otherwise fall back to the family's own ``TableFamilyCandidate.base_table_id``,
+# which is itself ``None`` for an un-overridden SNAPSHOT family.
 # --------------------------------------------------------------------------
 
 
-def test_single_member_family_is_trivially_canonical() -> None:
-    result = resolve_canonical_member(
-        [CanonicalCandidate(table_id=uid(1), table_name="customer")], family_type="REFERENCE"
+def test_resolve_canonical_prefers_steward_override_over_base_table() -> None:
+    result = resolve_canonical_table_id(
+        base_table_id=uid(1), steward_override_table_id=uid(2)
     )
 
-    assert result.table_id == uid(1)
-    assert result.confidence == 1.0
-    assert result.evidence["reason"] == "ONLY_FAMILY_MEMBER"
+    assert result == uid(2)
 
 
-def test_canonical_resolution_prefers_latest_snapshot_date() -> None:
-    candidates = [
-        CanonicalCandidate(table_id=uid(1), table_name="customer_20240101"),
-        CanonicalCandidate(table_id=uid(2), table_name="customer_20240301"),
-        CanonicalCandidate(table_id=uid(3), table_name="customer_20240201"),
-    ]
+def test_resolve_canonical_falls_back_to_base_table_when_no_override() -> None:
+    result = resolve_canonical_table_id(base_table_id=uid(1), steward_override_table_id=None)
 
-    result = resolve_canonical_member(candidates, family_type="SNAPSHOT")
-
-    assert result.table_id == uid(2)
-    assert result.evidence["selected"]["snapshot_recency_token"] == "20240301"  # noqa: S105 -- date token, not a credential
-    assert len(result.evidence["candidates_considered"]) == 3
+    assert result == uid(1)
 
 
-def test_canonical_resolution_penalizes_history_suffixed_variant() -> None:
-    candidates = [
-        CanonicalCandidate(
-            table_id=uid(1),
-            table_name="customer",
-            inbound_reference_count=5,
-            updated_at=datetime(2024, 6, 1, tzinfo=UTC),
-        ),
-        CanonicalCandidate(
-            table_id=uid(2),
-            table_name="customer_history",
-            inbound_reference_count=1,
-            updated_at=datetime(2024, 6, 1, tzinfo=UTC),
-        ),
-    ]
+def test_resolve_canonical_is_none_when_snapshot_has_no_base_and_no_override() -> None:
+    # A SNAPSHOT TableFamilyCandidate never gets an algorithmic base_table_id
+    # (see that model's docstring); with no steward override either, there is
+    # nothing to resolve to.
+    result = resolve_canonical_table_id(base_table_id=None, steward_override_table_id=None)
 
-    result = resolve_canonical_member(candidates, family_type="HISTORY")
-
-    assert result.table_id == uid(1)
-    assert result.evidence["selected"]["history_or_variant_suffixed"] is False
+    assert result is None
 
 
-def test_canonical_resolution_is_deterministic_on_full_ties() -> None:
-    candidates = [
-        CanonicalCandidate(table_id=uid(9), table_name="alpha"),
-        CanonicalCandidate(table_id=uid(2), table_name="alpha"),
-    ]
-
-    result = resolve_canonical_member(candidates, family_type="REFERENCE")
-
-    # Every signal ties, so the lowest table_id wins as the final tie-break.
-    assert result.table_id == uid(2)
-
-
-def test_resolve_canonical_member_rejects_empty_input() -> None:
-    import pytest
-
-    with pytest.raises(ValueError, match="at least one candidate"):
-        resolve_canonical_member([], family_type="REFERENCE")
+def test_rl2_endpoints_are_exposed_on_the_app() -> None:
+    # The RL-1 endpoints (table-family-candidates/*) live entirely in
+    # aida.table_family_api -- see tests/test_table_family_api.py. These are
+    # only the RL-2 (canonical resolution / steward override) additions.
+    paths = app.openapi()["paths"]
+    expected = {
+        "/v1/datasources/{datasource_id}/canonical-table/resolve",
+        "/v1/table-family-candidates/{family_candidate_id}/canonical",
+        "/v1/table-family-candidates/{family_candidate_id}/canonical/override",
+    }
+    assert expected <= paths.keys()
+    assert "get" in paths["/v1/datasources/{datasource_id}/canonical-table/resolve"]
+    assert "get" in paths["/v1/table-family-candidates/{family_candidate_id}/canonical"]
+    assert "post" in paths["/v1/table-family-candidates/{family_candidate_id}/canonical/override"]
 
 
 # --------------------------------------------------------------------------

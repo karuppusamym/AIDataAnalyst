@@ -36,7 +36,8 @@ S1 (curate rather than author), S4 (know what breaks), R1 (approve with context)
 ```text
 relationship_candidate, relationship_evidence, relationship_decision
 negative_knowledge
-table_family, table_family_member, canonical_table_mapping
+relationship_candidate_group, relationship_candidate_group_member
+table_family_candidate, canonical_table_mapping
 ```
 
 ## 6. Candidate generation

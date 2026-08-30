@@ -19,6 +19,7 @@ from aida.agent_orchestrator import (
     GovernedAgentOrchestrator,
     ModelRouteUnavailable,
 )
+from aida.asset_certification import asset_certification_is_active, current_asset_certification
 from aida.authorization_gate import AuthorizationDenied, gate
 from aida.catalog_bulk_actions import (
     CATALOG_BULK_ACTION_MAX_ITEMS,
@@ -84,12 +85,14 @@ from aida.schemas import (
     AiRuntimeStatusRead,
     AnalysisRunCreate,
     AnalysisRunRead,
+    AssetCertificationRead,
     CatalogBulkActionRunRead,
     CatalogBulkCertifyRequest,
     CatalogBulkClassifyRequest,
     CatalogBulkOwnRequest,
     CatalogBulkSelectionFilter,
     CatalogBulkTagRequest,
+    CertificationDecisionRequest,
     ColumnProfileRead,
     CrossBoundaryGrantCreate,
     CrossBoundaryGrantRead,
@@ -1421,6 +1424,9 @@ async def gate_read(
 @router.get("/datasources/{datasource_id}/tables", response_model=Page)
 async def list_tables(
     datasource_id: UUID,
+    q: str | None = Query(default=None, min_length=2, max_length=200),
+    object_type: str | None = Query(default=None, max_length=30),
+    table_status: str = Query(default="ACTIVE", alias="status", max_length=30),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
@@ -1442,11 +1448,24 @@ async def list_tables(
         resource_id=str(datasource.id),
         datasource_id=datasource.id,
     )
-    filters = (
+    filters: list[Any] = [
         MetadataTable.organization_id == datasource.organization_id,
         MetadataTable.datasource_id == datasource.id,
-        MetadataTable.status == "ACTIVE",
-    )
+    ]
+    if table_status != "ALL":
+        filters.append(MetadataTable.status == table_status)
+    if object_type and object_type != "ALL":
+        filters.append(MetadataTable.object_type == object_type)
+    if q:
+        normalized_query = q.strip().lower()
+        filters.append(
+            or_(
+                func.lower(MetadataTable.name).contains(normalized_query),
+                func.lower(func.coalesce(MetadataTable.source_description, "")).contains(
+                    normalized_query
+                ),
+            )
+        )
     total = await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
     rows = (
         await session.scalars(
@@ -1626,6 +1645,188 @@ async def get_latest_table_profile(
             for column_profile, column in profile_rows
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# CT-5: asset certification lifecycle with expiry (table or column)
+# ---------------------------------------------------------------------------
+
+
+def _asset_certification_read(
+    certification: AssetCertification, *, is_active: bool
+) -> AssetCertificationRead:
+    return AssetCertificationRead(
+        id=certification.id,
+        organization_id=certification.organization_id,
+        table_id=certification.table_id,
+        column_id=certification.column_id,
+        asset_type=certification.asset_type,
+        status=certification.status,
+        rationale=certification.rationale,
+        certified_by=certification.certified_by,
+        expires_at=certification.expires_at,
+        is_active=is_active,
+        created_at=certification.created_at,
+        updated_at=certification.updated_at,
+    )
+
+
+@router.post(
+    "/tables/{table_id}/certification",
+    response_model=AssetCertificationRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def certify_table_asset(
+    table_id: UUID,
+    body: CertificationDecisionRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> AssetCertificationRead:
+    """Module 04's public interface: ``certify_asset(scope, table_id, decision)``.
+
+    Certifies the table itself, or -- module 04's scale note names column as
+    the dominant catalog entity -- one specific column of it. Immediate and
+    role-gated, the same as CT-1's bulk certify action on this same table:
+    a single deliberate certification by an authorized steward, not a batch,
+    so there is no maker-checker review to wait on.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    if table.status != "ACTIVE":
+        raise HTTPException(
+            status_code=409, detail=f"table status is {table.status}, not ACTIVE"
+        )
+    now = datetime.now(UTC)
+    if body.expires_at <= now:
+        raise HTTPException(status_code=422, detail="certification expiry must be in the future")
+    column: MetadataColumn | None = None
+    if body.asset_type == "COLUMN":
+        column = await session.get(MetadataColumn, body.column_id)
+        if (
+            column is None
+            or column.organization_id != table.organization_id
+            or column.table_id != table.id
+        ):
+            raise HTTPException(status_code=404, detail="column not found on this table")
+        if column.status != "ACTIVE":
+            raise HTTPException(
+                status_code=409, detail=f"column status is {column.status}, not ACTIVE"
+            )
+    prior_rows = (
+        await session.scalars(
+            select(AssetCertification).where(
+                AssetCertification.table_id == table.id,
+                AssetCertification.asset_type == body.asset_type,
+                AssetCertification.column_id == (column.id if column else None),
+                AssetCertification.status == "ACTIVE",
+            )
+        )
+    ).all()
+    for prior in prior_rows:
+        prior.status = "SUPERSEDED"
+    certification = AssetCertification(
+        organization_id=table.organization_id,
+        table_id=table.id,
+        column_id=column.id if column else None,
+        asset_type=body.asset_type,
+        rationale=body.rationale,
+        certified_by=context.principal_id,
+        expires_at=body.expires_at,
+    )
+    session.add(certification)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=table.organization_id),
+        action="catalog.asset.certify",
+        resource_type="asset_certification",
+        resource_id=str(certification.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "table_id": str(table.id),
+            "column_id": str(column.id) if column else None,
+            "asset_type": body.asset_type,
+            "expires_at": body.expires_at.isoformat(),
+            "superseded_count": len(prior_rows),
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=table.organization_id,
+        aggregate_type="asset_certification",
+        aggregate_id=str(certification.id),
+        event_type="catalog.asset.certified.v1",
+        payload={
+            "certification_id": str(certification.id),
+            "table_id": str(table.id),
+            "column_id": str(column.id) if column else None,
+            "asset_type": body.asset_type,
+            "expires_at": body.expires_at.isoformat(),
+        },
+    )
+    await session.commit()
+    return _asset_certification_read(
+        certification, is_active=asset_certification_is_active(certification, at=now)
+    )
+
+
+@router.get("/tables/{table_id}/certification", response_model=AssetCertificationRead)
+async def get_table_certification(
+    table_id: UUID,
+    column_id: UUID | None = Query(default=None),
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AssetCertificationRead:
+    """The currently *active* certification for a table, or one of its columns.
+
+    Expiry is enforced here rather than trusted from ``status``: a certification
+    row keeps reading back ``status == "ACTIVE"`` after ``expires_at`` passes
+    (see ``aida.asset_certification``), so this 404s once the active one has
+    expired, even though the row itself is still sitting there as evidence.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+    asset_type = "TABLE"
+    if column_id is not None:
+        column = await session.get(MetadataColumn, column_id)
+        if (
+            column is None
+            or column.organization_id != table.organization_id
+            or column.table_id != table.id
+        ):
+            raise HTTPException(status_code=404, detail="column not found on this table")
+        asset_type = "COLUMN"
+    rows = (
+        await session.scalars(
+            select(AssetCertification)
+            .where(
+                AssetCertification.table_id == table.id,
+                AssetCertification.asset_type == asset_type,
+                AssetCertification.column_id == column_id,
+            )
+            .order_by(AssetCertification.created_at.desc())
+            .limit(20)
+        )
+    ).all()
+    active = current_asset_certification(list(rows), at=datetime.now(UTC))
+    if active is None:
+        raise HTTPException(status_code=404, detail="no active certification found")
+    return _asset_certification_read(active, is_active=True)
 
 
 @router.get(
@@ -2310,6 +2511,11 @@ async def bulk_certify_tables(
         await session.scalars(
             select(AssetCertification).where(
                 AssetCertification.table_id.in_(subject_ids),
+                # CT-5: certification is now also column-scoped (`asset_type ==
+                # "COLUMN"`), with `table_id` still denormalized onto those rows
+                # for lookup. Table-level bulk certify must only ever supersede a
+                # prior *table*-level certification, never a column's.
+                AssetCertification.asset_type == "TABLE",
                 AssetCertification.status == "ACTIVE",
             )
         )

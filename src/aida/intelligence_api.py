@@ -39,17 +39,13 @@ from aida.models import (
     RelationshipCandidateGroup,
     RelationshipCandidateGroupMember,
     SemanticMetricVersion,
-    TableFamily,
-    TableFamilyMember,
+    TableFamilyCandidate,
     TableProfile,
 )
 from aida.relationship_intelligence import (
-    CanonicalCandidate,
     ColumnMeta,
-    TableFamilyObservation,
-    detect_table_families,
     generate_composite_relationship_candidates,
-    resolve_canonical_member,
+    resolve_canonical_table_id,
 )
 from aida.schemas import (
     CanonicalTableMappingRead,
@@ -70,9 +66,6 @@ from aida.schemas import (
     RelationshipCandidateDecision,
     RelationshipCandidateDiscoveryRequest,
     RelationshipCandidateRead,
-    TableFamilyDetectionRequest,
-    TableFamilyMemberRead,
-    TableFamilyRead,
     TableRef,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -1404,11 +1397,13 @@ async def decide_relationship_candidate(
     return candidate
 
 # --------------------------------------------------------------------------
-# RL-1 / RL-2 / RL-3 shared helpers
+# RL-2 / RL-3 shared helpers
 #
 # These fetch rows and hand plain, value-free data to ``aida.relationship_intelligence``
-# (pure, unit-tested detection/scoring/generation logic), then persist and shape the
-# result. No source values are read at any point (ADR-0014).
+# (pure, unit-tested resolution/generation logic), then persist and shape the
+# result. No source values are read at any point (ADR-0014). RL-1 (table
+# family detection) is not here -- see ``aida.table_family_api`` and
+# ``aida.table_family_intelligence``.
 # --------------------------------------------------------------------------
 
 
@@ -1462,42 +1457,6 @@ async def _column_profile_stats(
     return {row.column_id: row for row in rows}
 
 
-async def _inbound_reference_counts(
-    session: AsyncSession, datasource_id: UUID, table_ids: set[UUID]
-) -> dict[UUID, int]:
-    if not table_ids:
-        return {}
-    counts: Counter[UUID] = Counter()
-    fk_rows = (
-        await session.execute(
-            select(MetadataConstraint.referenced_table_id, func.count())
-            .where(
-                MetadataConstraint.datasource_id == datasource_id,
-                MetadataConstraint.status == "ACTIVE",
-                MetadataConstraint.constraint_type == "FOREIGN_KEY",
-                MetadataConstraint.referenced_table_id.in_(table_ids),
-            )
-            .group_by(MetadataConstraint.referenced_table_id)
-        )
-    ).all()
-    for table_id, count in fk_rows:
-        counts[table_id] += count
-    candidate_rows = (
-        await session.execute(
-            select(RelationshipCandidate.target_table_id, func.count())
-            .where(
-                RelationshipCandidate.datasource_id == datasource_id,
-                RelationshipCandidate.status == "APPROVED",
-                RelationshipCandidate.target_table_id.in_(table_ids),
-            )
-            .group_by(RelationshipCandidate.target_table_id)
-        )
-    ).all()
-    for table_id, count in candidate_rows:
-        counts[table_id] += count
-    return dict(counts)
-
-
 def _composite_keys_from_constraints(
     constraints: list[MetadataConstraint], table_ids: set[UUID]
 ) -> tuple[
@@ -1529,65 +1488,19 @@ def _composite_keys_from_constraints(
     return composite_primary_keys, frozenset(declared_composite_fks)
 
 
-async def _build_family_read(session: AsyncSession, family: TableFamily) -> TableFamilyRead:
-    members = (
-        await session.scalars(
-            select(TableFamilyMember)
-            .where(TableFamilyMember.family_id == family.id)
-            .order_by(TableFamilyMember.table_id)
-        )
-    ).all()
-    qualified = await _qualified_names(session, {member.table_id for member in members})
-    return TableFamilyRead(
-        id=family.id,
-        organization_id=family.organization_id,
-        datasource_id=family.datasource_id,
-        family_key=family.family_key,
-        family_type=family.family_type,
-        algorithm_version=family.algorithm_version,
-        confidence=family.confidence,
-        evidence=family.evidence,
-        status=family.status,
-        members=[
-            TableFamilyMemberRead(
-                id=member.id,
-                table_id=member.table_id,
-                qualified_name=qualified.get(member.table_id, ""),
-                confidence=member.confidence,
-                evidence=member.evidence,
-            )
-            for member in members
-        ],
-        created_at=family.created_at,
-        updated_at=family.updated_at,
-    )
-
-
 async def _build_canonical_read(
     session: AsyncSession, mapping: CanonicalTableMapping
 ) -> CanonicalTableMappingRead:
-    ids = {mapping.detected_canonical_table_id}
-    if mapping.override_table_id is not None:
-        ids.add(mapping.override_table_id)
-    qualified = await _qualified_names(session, ids)
-    effective_id = mapping.override_table_id or mapping.detected_canonical_table_id
+    qualified = await _qualified_names(session, {mapping.canonical_table_id})
     return CanonicalTableMappingRead(
         id=mapping.id,
-        family_id=mapping.family_id,
-        detected_canonical_table_id=mapping.detected_canonical_table_id,
-        detected_canonical_qualified_name=qualified.get(mapping.detected_canonical_table_id, ""),
-        override_table_id=mapping.override_table_id,
-        override_qualified_name=(
-            qualified.get(mapping.override_table_id) if mapping.override_table_id else None
-        ),
-        effective_canonical_table_id=effective_id,
-        effective_canonical_qualified_name=qualified.get(effective_id, ""),
-        algorithm_version=mapping.algorithm_version,
-        confidence=mapping.confidence,
-        evidence=mapping.evidence,
-        overridden_by=mapping.overridden_by,
-        override_reason=mapping.override_reason,
-        overridden_at=mapping.overridden_at,
+        organization_id=mapping.organization_id,
+        family_candidate_id=mapping.family_candidate_id,
+        canonical_table_id=mapping.canonical_table_id,
+        canonical_qualified_name=qualified.get(mapping.canonical_table_id, ""),
+        resolved_by=mapping.resolved_by,
+        rationale=mapping.rationale,
+        is_steward_override=mapping.is_steward_override,
         created_at=mapping.created_at,
         updated_at=mapping.updated_at,
     )
@@ -1643,343 +1556,43 @@ async def _build_composite_read(
 
 
 # --------------------------------------------------------------------------
-# RL-1 -- table family / temporal intelligence, and
 # RL-2 -- canonical table resolution with steward override
+#
+# Table family detection/review (RL-1) lives entirely in
+# ``aida.table_family_api`` / ``aida.table_family_intelligence``, backed by
+# ``TableFamilyCandidate``. What follows only resolves, given an APPROVED
+# family, which member is canonical -- filling the one gap that model leaves
+# open (no steward override mechanism, and ``base_table_id`` is explicitly
+# never set for a SNAPSHOT family).
 # --------------------------------------------------------------------------
 
+_CANONICAL_OVERRIDE_ROLES = ("PlatformAdmin", "MetadataReviewer", "DataSteward")
 
-@router.post(
-    "/datasources/{datasource_id}/table-families/detect",
-    response_model=Page,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def detect_table_families_endpoint(
-    datasource_id: UUID,
-    body: TableFamilyDetectionRequest,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
-    ),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> Page:
-    """Detect table families (history/snapshot/delta/SCD/append-only/reference) and
-    resolve a canonical member per family, with steward override left untouched."""
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
 
-    max_tables = min(body.max_tables, settings.table_family_detection_max_tables)
-    tables = (
+async def _find_approved_family_for_table(
+    session: AsyncSession, datasource_id: UUID, table_id: UUID
+) -> TableFamilyCandidate | None:
+    """The APPROVED ``TableFamilyCandidate`` (if any) that ``table_id`` belongs to.
+
+    ``member_table_ids`` is a plain JSON list of stringified ids (not a JSONB
+    column with a containment operator to lean on), so this scans the
+    (small, per-datasource) set of APPROVED candidates and matches in Python
+    -- the same approach ``aida.table_family_api._existing_member_keys``
+    already uses for the analogous re-detection dedupe check.
+    """
+    candidates = (
         await session.scalars(
-            select(MetadataTable)
-            .where(MetadataTable.datasource_id == datasource.id, MetadataTable.status == "ACTIVE")
-            .order_by(MetadataTable.id)
-            .limit(max_tables)
-        )
-    ).all()
-    table_ids = {table.id for table in tables}
-    if not table_ids:
-        return Page(items=[], limit=max_tables, offset=0, total=0)
-
-    columns = (
-        await session.scalars(
-            select(MetadataColumn).where(
-                MetadataColumn.table_id.in_(table_ids), MetadataColumn.status == "ACTIVE"
+            select(TableFamilyCandidate).where(
+                TableFamilyCandidate.datasource_id == datasource_id,
+                TableFamilyCandidate.status == "APPROVED",
             )
         )
     ).all()
-    columns_by_table: dict[UUID, list[MetadataColumn]] = {}
-    for column in columns:
-        columns_by_table.setdefault(column.table_id, []).append(column)
-
-    constraints = (
-        await session.scalars(
-            select(MetadataConstraint).where(
-                MetadataConstraint.datasource_id == datasource.id,
-                MetadataConstraint.status == "ACTIVE",
-                MetadataConstraint.constraint_type == "PRIMARY_KEY",
-                MetadataConstraint.table_id.in_(table_ids),
-            )
-        )
-    ).all()
-    primary_keys_by_table = {
-        constraint.table_id: tuple(constraint.columns) for constraint in constraints
-    }
-
-    profiles_by_table = await _latest_table_profiles(session, datasource.id, table_ids)
-    column_profile_by_column = await _column_profile_stats(
-        session, [profile.id for profile in profiles_by_table.values()]
-    )
-    inbound_counts = await _inbound_reference_counts(session, datasource.id, table_ids)
-
-    observations = []
-    for table in tables:
-        table_columns = columns_by_table.get(table.id, [])
-        column_metas = tuple(
-            ColumnMeta(
-                id=col.id,
-                table_id=col.table_id,
-                name=col.name,
-                physical_type=col.physical_type,
-                nullable=col.nullable,
-                ordinal_position=col.ordinal_position,
-                null_count=(
-                    column_profile_by_column[col.id].null_count
-                    if col.id in column_profile_by_column
-                    else None
-                ),
-                non_null_count=(
-                    column_profile_by_column[col.id].non_null_count
-                    if col.id in column_profile_by_column
-                    else None
-                ),
-                approximate_distinct_count=(
-                    column_profile_by_column[col.id].approximate_distinct_count
-                    if col.id in column_profile_by_column
-                    else None
-                ),
-            )
-            for col in table_columns
-        )
-        profile = profiles_by_table.get(table.id)
-        observations.append(
-            TableFamilyObservation(
-                table_id=table.id,
-                table_name=table.name,
-                schema_id=table.schema_id,
-                primary_key_columns=primary_keys_by_table.get(table.id, ()),
-                columns=column_metas,
-                row_count_estimate=(profile.row_count_estimate if profile else None),
-                inbound_reference_count=inbound_counts.get(table.id, 0),
-                updated_at=table.updated_at,
-            )
-        )
-
-    groups = detect_table_families(observations)
-    observation_by_table = {observation.table_id: observation for observation in observations}
-    touched_families: list[TableFamily] = []
-
-    for group in groups:
-        family = await session.scalar(
-            select(TableFamily).where(
-                TableFamily.datasource_id == datasource.id,
-                TableFamily.family_key == group.family_key,
-            )
-        )
-        if family is None:
-            family = TableFamily(
-                organization_id=datasource.organization_id,
-                datasource_id=datasource.id,
-                family_key=group.family_key,
-                family_type=group.family_type,
-                algorithm_version=group.algorithm_version,
-                confidence=group.confidence,
-                evidence=group.evidence,
-            )
-            session.add(family)
-            await session.flush()
-        else:
-            family.family_type = group.family_type
-            family.algorithm_version = group.algorithm_version
-            family.confidence = group.confidence
-            family.evidence = group.evidence
-            family.detected_at = datetime.now(UTC)
-
-        member_table_ids = {member.table_id for member in group.members}
-        stale_members = (
-            await session.scalars(
-                select(TableFamilyMember).where(
-                    TableFamilyMember.table_id.in_(member_table_ids),
-                    TableFamilyMember.family_id != family.id,
-                )
-            )
-        ).all()
-        for stale in stale_members:
-            await session.delete(stale)
-        if stale_members:
-            await session.flush()
-
-        existing_members = {
-            member.table_id: member
-            for member in (
-                await session.scalars(
-                    select(TableFamilyMember).where(TableFamilyMember.family_id == family.id)
-                )
-            ).all()
-        }
-        for member in group.members:
-            row = existing_members.get(member.table_id)
-            if row is None:
-                session.add(
-                    TableFamilyMember(
-                        organization_id=datasource.organization_id,
-                        family_id=family.id,
-                        table_id=member.table_id,
-                        confidence=member.confidence,
-                        evidence=member.evidence,
-                    )
-                )
-            else:
-                row.confidence = member.confidence
-                row.evidence = member.evidence
-        for table_id, row in existing_members.items():
-            if table_id not in member_table_ids:
-                await session.delete(row)
-        await session.flush()
-
-        candidates = [
-            CanonicalCandidate(
-                table_id=observation.table_id,
-                table_name=observation.table_name,
-                row_count_estimate=observation.row_count_estimate,
-                inbound_reference_count=observation.inbound_reference_count,
-                updated_at=observation.updated_at,
-            )
-            for table_id in member_table_ids
-            if (observation := observation_by_table.get(table_id)) is not None
-        ]
-        resolution = resolve_canonical_member(candidates, family_type=group.family_type)
-        mapping = await session.scalar(
-            select(CanonicalTableMapping).where(CanonicalTableMapping.family_id == family.id)
-        )
-        if mapping is None:
-            mapping = CanonicalTableMapping(
-                organization_id=datasource.organization_id,
-                datasource_id=datasource.id,
-                family_id=family.id,
-                detected_canonical_table_id=resolution.table_id,
-                algorithm_version=resolution.algorithm_version,
-                confidence=resolution.confidence,
-                evidence=resolution.evidence,
-            )
-            session.add(mapping)
-        else:
-            mapping.detected_canonical_table_id = resolution.table_id
-            mapping.algorithm_version = resolution.algorithm_version
-            mapping.confidence = resolution.confidence
-            mapping.evidence = resolution.evidence
-            if (
-                mapping.override_table_id is not None
-                and mapping.override_table_id not in member_table_ids
-            ):
-                # The previously overridden table left the family; the override
-                # no longer refers to a valid member, so it is cleared.
-                mapping.override_table_id = None
-                mapping.override_reason = None
-                mapping.overridden_by = None
-                mapping.overridden_at = None
-        await session.flush()
-
-        record_outbox(
-            session,
-            organization_id=datasource.organization_id,
-            aggregate_type="table_family",
-            aggregate_id=str(family.id),
-            event_type="table_family.detected.v1",
-            payload={
-                "family_id": str(family.id),
-                "family_type": family.family_type,
-                "member_count": len(member_table_ids),
-                "confidence": family.confidence,
-            },
-        )
-        record_outbox(
-            session,
-            organization_id=datasource.organization_id,
-            aggregate_type="canonical_table_mapping",
-            aggregate_id=str(mapping.id),
-            event_type="canonical_table.resolved.v1",
-            payload={
-                "family_id": str(family.id),
-                "canonical_table_id": str(resolution.table_id),
-                "confidence": resolution.confidence,
-            },
-        )
-        touched_families.append(family)
-
-    record_audit(
-        session,
-        replace(context, organization_id=datasource.organization_id),
-        action="table_families.detect",
-        resource_type="datasource",
-        resource_id=str(datasource.id),
-        outcome="SUCCESS",
-        correlation_id=get_correlation_id(),
-        details={
-            "tables_scanned": len(tables),
-            "families_detected": len(touched_families),
-            "table_scan_limit": max_tables,
-            "value_inspection": False,
-        },
-    )
-    await session.commit()
-
-    items = [await _build_family_read(session, family) for family in touched_families]
-    return Page(items=items, limit=max_tables, offset=0, total=len(items))
-
-
-@router.get(
-    "/datasources/{datasource_id}/table-families",
-    response_model=Page,
-)
-async def list_table_families(
-    datasource_id: UUID,
-    family_type: str | None = Query(default=None, max_length=30),
-    limit: int = Query(default=100, ge=1, le=500),
-    offset: int = Query(default=0, ge=0),
-    context: SecurityContext = Depends(require_roles(*GRAPH_READER_ROLES)),
-    session: AsyncSession = Depends(get_session),
-) -> Page:
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
-    filters = [TableFamily.datasource_id == datasource.id]
-    if family_type:
-        filters.append(TableFamily.family_type == family_type.upper())
-    total = await session.scalar(select(func.count()).select_from(TableFamily).where(*filters))
-    rows = (
-        await session.scalars(
-            select(TableFamily)
-            .where(*filters)
-            .order_by(TableFamily.confidence.desc(), TableFamily.family_key)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[await _build_family_read(session, row) for row in rows],
-        limit=limit,
-        offset=offset,
-        total=total or 0,
-    )
-
-
-@router.get(
-    "/datasources/{datasource_id}/tables/{table_id}/family",
-    response_model=TableFamilyRead | None,
-)
-async def get_table_family(
-    datasource_id: UUID,
-    table_id: UUID,
-    context: SecurityContext = Depends(require_roles(*GRAPH_READER_ROLES)),
-    session: AsyncSession = Depends(get_session),
-) -> TableFamilyRead | None:
-    """``get_table_family(scope, table_id)`` from the module 06 public interface."""
-    table = await session.get(MetadataTable, table_id)
-    if table is None or table.datasource_id != datasource_id:
-        raise HTTPException(status_code=404, detail="metadata table not found")
-    enforce_organization(context, table.organization_id)
-    membership = await session.scalar(
-        select(TableFamilyMember).where(TableFamilyMember.table_id == table_id)
-    )
-    if membership is None:
-        return None
-    family = await session.get(TableFamily, membership.family_id)
-    if family is None:
-        return None
-    return await _build_family_read(session, family)
+    target = str(table_id)
+    for candidate in candidates:
+        if target in candidate.member_table_ids:
+            return candidate
+    return None
 
 
 @router.get(
@@ -1994,117 +1607,170 @@ async def resolve_canonical_table(
 ) -> TableRef | None:
     """``resolve_canonical(scope, entity_ref)`` from the module 06 public interface.
 
-    ``entity_ref`` is any table belonging to the family; the effective choice
-    (steward override, if set, else the detected default) is returned as a
-    plain ``TableRef`` -- a clean, documented read path module 12 (retrieval
-    ranking) can consume without joining this module's tables directly.
+    ``entity_ref`` is any table belonging to the family. Resolution order:
+    an explicit steward override (``CanonicalTableMapping``), else the
+    family's own ``base_table_id``, else ``None`` -- e.g. an un-overridden
+    SNAPSHOT family, where the algorithm never names a "current" member.
     """
     table = await session.get(MetadataTable, table_id)
     if table is None or table.datasource_id != datasource_id:
         raise HTTPException(status_code=404, detail="metadata table not found")
     enforce_organization(context, table.organization_id)
-    membership = await session.scalar(
-        select(TableFamilyMember).where(TableFamilyMember.table_id == table_id)
-    )
-    if membership is None:
+    family = await _find_approved_family_for_table(session, datasource_id, table_id)
+    if family is None:
         return None
     mapping = await session.scalar(
-        select(CanonicalTableMapping).where(CanonicalTableMapping.family_id == membership.family_id)
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family.id
+        )
     )
-    if mapping is None:
+    effective_id = resolve_canonical_table_id(
+        base_table_id=family.base_table_id,
+        steward_override_table_id=mapping.canonical_table_id if mapping else None,
+    )
+    if effective_id is None:
         return None
-    effective_id = mapping.override_table_id or mapping.detected_canonical_table_id
     qualified = await _qualified_names(session, {effective_id})
     return TableRef(table_id=effective_id, qualified_name=qualified.get(effective_id, ""))
 
 
 @router.get(
-    "/table-families/{family_id}/canonical",
-    response_model=CanonicalTableMappingRead,
+    "/table-family-candidates/{family_candidate_id}/canonical",
+    response_model=CanonicalTableMappingRead | None,
 )
 async def get_canonical_mapping(
-    family_id: UUID,
+    family_candidate_id: UUID,
     context: SecurityContext = Depends(require_roles(*GRAPH_READER_ROLES)),
     session: AsyncSession = Depends(get_session),
-) -> CanonicalTableMappingRead:
+) -> CanonicalTableMappingRead | None:
+    family = await session.get(TableFamilyCandidate, family_candidate_id)
+    if family is None:
+        raise HTTPException(status_code=404, detail="table family candidate not found")
+    enforce_organization(context, family.organization_id)
     mapping = await session.scalar(
-        select(CanonicalTableMapping).where(CanonicalTableMapping.family_id == family_id)
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family_candidate_id
+        )
     )
     if mapping is None:
-        raise HTTPException(status_code=404, detail="canonical table mapping not found")
-    enforce_organization(context, mapping.organization_id)
+        return None
     return await _build_canonical_read(session, mapping)
 
 
 @router.post(
-    "/table-families/{family_id}/canonical/override",
-    response_model=CanonicalTableMappingRead,
+    "/table-family-candidates/{family_candidate_id}/canonical/override",
+    response_model=CanonicalTableMappingRead | None,
 )
 async def override_canonical_table(
-    family_id: UUID,
+    family_candidate_id: UUID,
     body: CanonicalTableOverrideRequest,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
-    ),
+    context: SecurityContext = Depends(require_roles(*_CANONICAL_OVERRIDE_ROLES)),
     session: AsyncSession = Depends(get_session),
-) -> CanonicalTableMappingRead:
-    """Steward override of the detected canonical table (maker-checker).
+) -> CanonicalTableMappingRead | None:
+    """Steward decision naming (or clearing) the canonical member (maker-checker).
 
-    The system's evidence-backed pick (``detected_canonical_table_id``) is
-    never mutated here; only ``override_table_id`` changes, and it always
-    requires a reason -- setting it to ``None`` explicitly reverts to the
-    detected default, itself an auditable decision.
+    Only accepted against an APPROVED ``TableFamilyCandidate`` -- a family
+    still under review, or rejected, has no canonical member to name yet.
+    ``table_id=None`` clears an existing override (deleting the mapping row)
+    and reverts resolution to the family's own ``base_table_id``; a
+    rationale is always required, including to clear, since either is an
+    auditable decision.
     """
-    mapping = await session.scalar(
-        select(CanonicalTableMapping).where(CanonicalTableMapping.family_id == family_id)
-    )
-    if mapping is None:
-        raise HTTPException(status_code=404, detail="canonical table mapping not found")
-    enforce_organization(context, mapping.organization_id)
-    if body.table_id is not None:
-        member = await session.scalar(
-            select(TableFamilyMember).where(
-                TableFamilyMember.family_id == family_id,
-                TableFamilyMember.table_id == body.table_id,
-            )
+    family = await session.get(TableFamilyCandidate, family_candidate_id)
+    if family is None:
+        raise HTTPException(status_code=404, detail="table family candidate not found")
+    enforce_organization(context, family.organization_id)
+    if family.status != "APPROVED":
+        raise HTTPException(
+            status_code=409,
+            detail="canonical table can only be set for an APPROVED table family candidate",
         )
-        if member is None:
-            raise HTTPException(
-                status_code=409, detail="override target is not a member of this table family"
-            )
-    mapping.override_table_id = body.table_id
-    mapping.override_reason = body.reason
-    mapping.overridden_by = context.principal_id
-    mapping.overridden_at = datetime.now(UTC)
+
+    mapping = await session.scalar(
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family_candidate_id
+        )
+    )
+
+    if body.table_id is None:
+        if mapping is not None:
+            await session.delete(mapping)
+            await session.flush()
+        record_audit(
+            session,
+            replace(context, organization_id=family.organization_id),
+            action="canonical_table.override_cleared",
+            resource_type="table_family_candidate",
+            resource_id=str(family.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"rationale": body.rationale},
+        )
+        record_outbox(
+            session,
+            organization_id=family.organization_id,
+            aggregate_type="table_family_candidate",
+            aggregate_id=str(family.id),
+            event_type="canonical_table.resolved.v1",
+            payload={
+                "family_candidate_id": str(family.id),
+                "canonical_table_id": (
+                    str(family.base_table_id) if family.base_table_id else None
+                ),
+                "steward_override": False,
+            },
+        )
+        await session.commit()
+        return None
+
+    if str(body.table_id) not in family.member_table_ids:
+        raise HTTPException(
+            status_code=409,
+            detail="override target is not a member of this table family",
+        )
+
+    if mapping is None:
+        mapping = CanonicalTableMapping(
+            organization_id=family.organization_id,
+            family_candidate_id=family.id,
+            canonical_table_id=body.table_id,
+            resolved_by=context.principal_id,
+            rationale=body.rationale,
+            is_steward_override=True,
+        )
+        session.add(mapping)
+    else:
+        mapping.canonical_table_id = body.table_id
+        mapping.resolved_by = context.principal_id
+        mapping.rationale = body.rationale
+        mapping.is_steward_override = True
+    await session.flush()
+
     record_audit(
         session,
-        replace(context, organization_id=mapping.organization_id),
+        replace(context, organization_id=family.organization_id),
         action="canonical_table.override",
         resource_type="canonical_table_mapping",
         resource_id=str(mapping.id),
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
-        details={"override_table_id": str(body.table_id) if body.table_id else None},
+        details={"canonical_table_id": str(body.table_id)},
     )
     record_outbox(
         session,
-        organization_id=mapping.organization_id,
+        organization_id=family.organization_id,
         aggregate_type="canonical_table_mapping",
         aggregate_id=str(mapping.id),
         event_type="canonical_table.resolved.v1",
         payload={
-            "family_id": str(mapping.family_id),
-            "canonical_table_id": str(
-                mapping.override_table_id or mapping.detected_canonical_table_id
-            ),
-            "steward_override": body.table_id is not None,
+            "family_candidate_id": str(family.id),
+            "canonical_table_id": str(mapping.canonical_table_id),
+            "steward_override": True,
         },
     )
-    await session.flush()
     result = await _build_canonical_read(session, mapping)
     await session.commit()
     return result
-
 
 # --------------------------------------------------------------------------
 # RL-3 -- composite (multi-column) relationship candidates

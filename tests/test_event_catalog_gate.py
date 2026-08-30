@@ -56,6 +56,7 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     "project.created.v1": "same event as documented `tenant.created` (project level)",
     # --- straight .v1 renames of an already-documented event ---
     "datasource.registered.v1": "same event as documented `datasource.registered`",
+    "catalog.asset.certified.v1": "same event as documented `catalog.asset.certified`",
     "connector.certification.completed.v1": (
         "same event as documented `certification.completed`"
     ),
@@ -143,9 +144,10 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     "data_quality.incident_resolved": (
         "same event as documented `quality.incident_acknowledged` / `.resolved`"
     ),
-    # --- RL-1/RL-2/RL-3 (module 06 table families, canonical resolution, composite
-    # candidates): same `.v1`-suffix drift as the rest of this baseline ---
-    "table_family.detected.v1": "same event as documented `table_family.detected`",
+    # --- RL-2/RL-3 (module 06 canonical resolution, composite candidates): same
+    # `.v1`-suffix drift as the rest of this baseline. RL-1 (table family
+    # detection) is not here: it shipped as `table_family_candidate.decided.v1`,
+    # already directly documented -- no drift entry needed. ---
     "canonical_table.resolved.v1": "same event as documented `canonical_table.resolved`",
     "composite_relationship_candidate.decided.v1": (
         "composite-candidate sibling of the already-documented-as-drift "

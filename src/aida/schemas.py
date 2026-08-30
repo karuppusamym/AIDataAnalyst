@@ -1111,64 +1111,104 @@ class TableRef(ApiModel):
     qualified_name: str
 
 
-class TableFamilyMemberRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    qualified_name: str
-    confidence: float
-    evidence: dict[str, Any]
+class TableFamilyDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2000)
 
 
-class TableFamilyRead(ApiModel):
+class TableFamilyCandidateRead(ApiModel):
     id: UUID
     organization_id: UUID
     datasource_id: UUID
-    family_key: str
-    family_type: Literal[
-        "HISTORY", "SNAPSHOT", "DELTA_CDC", "SCD", "APPEND_ONLY", "REFERENCE"
-    ]
-    algorithm_version: str
+    schema_id: UUID
+    family_type: Literal["SNAPSHOT", "HISTORY", "DELTA", "SCD"]
+    member_table_ids: list[UUID]
+    base_table_id: UUID | None
+    detection_rule: str
     confidence: float
     evidence: dict[str, Any]
     status: str
-    members: list[TableFamilyMemberRead]
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
 
-class TableFamilyDetectionRequest(ApiModel):
-    max_tables: int = Field(default=1_000, ge=1, le=5_000)
+class TableFamilyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "TableFamilyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a table family candidate")
+        return self
 
 
 class CanonicalTableMappingRead(ApiModel):
+    """RL-2: the steward-set canonical member for an APPROVED table family, if any.
+
+    ``resolved_by``/``rationale`` describe the steward decision behind this
+    row -- there is no row at all for a family that has not been explicitly
+    overridden; see ``resolve_canonical`` for how that case falls back to
+    ``TableFamilyCandidate.base_table_id``.
+    """
+
     id: UUID
-    family_id: UUID
-    detected_canonical_table_id: UUID
-    detected_canonical_qualified_name: str
-    override_table_id: UUID | None
-    override_qualified_name: str | None
-    effective_canonical_table_id: UUID
-    effective_canonical_qualified_name: str
-    algorithm_version: str
-    confidence: float
-    evidence: dict[str, Any]
-    overridden_by: str | None
-    override_reason: str | None
-    overridden_at: datetime | None
+    organization_id: UUID
+    family_candidate_id: UUID
+    canonical_table_id: UUID
+    canonical_qualified_name: str
+    resolved_by: str
+    rationale: str
+    is_steward_override: bool
     created_at: datetime
     updated_at: datetime
 
 
 class CanonicalTableOverrideRequest(ApiModel):
-    """Steward override of the detected canonical table (maker-checker).
+    """Steward decision naming (or clearing) the canonical member of an APPROVED family.
 
-    ``table_id`` set to ``None`` clears an existing override and reverts to
-    the system-detected default; a reason is always required so the override
-    (or its reversal) is itself evidence-backed and auditable.
+    ``table_id`` must be one of the family's ``member_table_ids``; it is
+    only accepted against an APPROVED ``TableFamilyCandidate``. Setting it to
+    ``None`` clears an existing override and reverts resolution to the
+    family's own ``base_table_id`` (``None`` for a family type -- e.g.
+    SNAPSHOT -- where the algorithm never picks one) -- itself an auditable
+    decision, so a rationale is always required either way.
     """
 
     table_id: UUID | None = None
-    reason: str = Field(min_length=1, max_length=2000)
+    rationale: str = Field(min_length=1, max_length=2000)
+
+
+class CompositeKeyCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    column_ids: list[UUID]
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompositeKeyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "CompositeKeyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a composite key candidate")
+        return self
 
 
 class CompositeRelationshipCandidateDiscoveryRequest(ApiModel):
@@ -2165,6 +2205,7 @@ class ContextProductDefinition(ApiModel):
     name: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=3, max_length=10_000)
     purpose: str = Field(min_length=10, max_length=1000)
+    owner_type: Literal["INDIVIDUAL", "GROUP"]
     owner_principal: str = Field(min_length=2, max_length=255)
     table_ids: list[UUID] = Field(default_factory=list, max_length=1000)
     semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)
@@ -3094,3 +3135,70 @@ class CatalogBulkActionRunRead(ApiModel):
     results: list[CatalogBulkActionItemRead]
     requested_by: str
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# SM-2: Glossary term binding to semantic objects
+# ---------------------------------------------------------------------------
+
+
+class TermSemanticBindingCreate(ApiModel):
+    term_id: UUID
+    semantic_object_type: Literal["METRIC"] = "METRIC"
+    semantic_object_id: UUID
+
+
+class TermSemanticBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    term_id: UUID
+    term_key: str
+    term_display_name: str
+    term_definition: str
+    semantic_object_type: str
+    semantic_object_id: UUID
+    semantic_object_name: str
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    governance_review_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# CT-5: asset certification lifecycle with expiry (single table or column)
+# ---------------------------------------------------------------------------
+
+
+class CertificationDecisionRequest(ApiModel):
+    """Module 04's ``CertificationDecision``: certify the table itself, or one column."""
+
+    asset_type: Literal["TABLE", "COLUMN"] = "TABLE"
+    column_id: UUID | None = None
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "CertificationDecisionRequest":
+        if self.asset_type == "COLUMN" and self.column_id is None:
+            raise ValueError("certifying a column requires column_id")
+        if self.asset_type == "TABLE" and self.column_id is not None:
+            raise ValueError("column_id is only meaningful when asset_type is COLUMN")
+        return self
+
+
+class AssetCertificationRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    column_id: UUID | None
+    asset_type: str
+    status: str
+    rationale: str
+    certified_by: str
+    expires_at: datetime
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
