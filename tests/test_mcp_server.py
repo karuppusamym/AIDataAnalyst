@@ -844,6 +844,10 @@ class ResourcesReadSession:
         self._catalog_row = catalog_row
         self._columns = columns
         self._latest_profile = latest_profile
+        self.added: list[object] = []
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
 
     async def execute(self, _statement):
         return _FakeReadResult(self._catalog_row)
@@ -888,7 +892,7 @@ def _build_catalog_row(organization_id):
 
 def _read_resource(context, session, datasource_id, schema_name, table_name):
     uri = f"atlas://catalog/{datasource_id}/{schema_name}/{table_name}"
-    result = asyncio.run(_handle_resources_read({"uri": uri}, session, context))
+    result = asyncio.run(_handle_resources_read({"uri": uri}, session, context, "corr-test"))
     return json.loads(result["contents"][0]["text"])
 
 
