@@ -63,6 +63,7 @@
       name: values.get("name"),
       description: values.get("description"),
       purpose: values.get("purpose"),
+      owner_type: values.get("owner_type"),
       owner_principal: values.get("owner_principal"),
       table_ids: split("table_ids"),
       semantic_model_version_ids: split("semantic_model_version_ids"),
