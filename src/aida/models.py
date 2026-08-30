@@ -1474,6 +1474,48 @@ class RelationshipCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class CompositeKeyCandidate(Base, TimestampMixin):
+    """PR-1: an evidence-backed, review-gated candidate composite (or single) key.
+
+    Mirrors ``RelationshipCandidate``'s maker-checker shape. ``column_ids`` is
+    the ordered list of ``MetadataColumn`` ids that make up the candidate key,
+    stored as stringified UUIDs in a JSON list -- the same "list of ids on one
+    row" convention already used by e.g. ``ContextProductVersion.table_ids``.
+    ``evidence`` carries the full per-column profiling stats (null/non-null/
+    approximate-distinct counts) and the ``TableProfile`` context they were
+    computed against, so a reviewer can see why this was proposed without
+    re-querying anything -- see ``aida.composite_key_inference`` for how it is
+    produced and why ``confidence`` is capped well below what a corroborated
+    ``RelationshipCandidate`` might reach.
+    """
+
+    __tablename__ = "composite_key_candidate"
+    __table_args__ = (
+        Index("ix_composite_key_candidate_org_status", "organization_id", "status"),
+        Index("ix_composite_key_candidate_table", "table_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 

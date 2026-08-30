@@ -1104,6 +1104,35 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class CompositeKeyCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    column_ids: list[UUID]
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CompositeKeyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "CompositeKeyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a composite key candidate")
+        return self
+
+
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]
