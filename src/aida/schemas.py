@@ -1654,6 +1654,37 @@ class CoverageSnapshotRead(ApiModel):
     created_at: datetime
 
 
+class UnownedAssetEscalationRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    first_detected_unowned_at: datetime
+    status: str
+    candidate_owner: str | None
+    notification_rule_id: UUID | None
+    channel: str | None
+    recipients: list[str]
+    dedup_key: str | None
+    routed_at: datetime | None
+    escalated_at: datetime | None
+    resolved_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class UnownedAssetBacklogRouteRequest(ApiModel):
+    datasource_id: UUID | None = None
+    domain_id: UUID | None = None
+    line_of_business_id: UUID | None = None
+
+
+class UnownedAssetBacklogRouteResult(ApiModel):
+    organization_id: UUID
+    routed: list[UnownedAssetEscalationRead]
+    escalated: list[UnownedAssetEscalationRead]
+    resolved_count: int
+
+
 class BusinessMapNodeRead(ApiModel):
     id: str
     node_type: Literal["DOMAIN", "ENTITY", "TABLE"]
