@@ -279,6 +279,15 @@ async def validate_tool_plan(
 
     if result.valid:
         plan_record.status = "VALIDATED"
+        record_audit(
+            session,
+            context,
+            action="tool_plan.validate",
+            resource_type="tool_plan",
+            resource_id=str(plan_id),
+            outcome="VALID" if result.valid else "INVALID",
+            correlation_id=get_correlation_id(),
+        )
         await session.commit()
 
     return ValidationResponse(

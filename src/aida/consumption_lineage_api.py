@@ -6,8 +6,6 @@ server and the Context Product REST API whenever a resource read passes
 policy checks.
 """
 
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -24,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.db import get_session
 from aida.schemas import ApiModel
-from aida.security import SecurityContext, get_security_context
+from aida.security import SecurityContext, enforce_organization, get_security_context
 
 router = APIRouter(prefix="/api/v1", tags=["consumption-lineage"])
 
@@ -75,7 +73,7 @@ async def list_consumption_for_resource(
     context: SecurityContext = Depends(get_security_context),
     session: AsyncSession = Depends(get_session),
 ) -> ConsumptionRecordPage:
-    context.require_organization()
+    enforce_organization(context, organization_id)
     items, total = await get_consumption_for_resource(
         session,
         organization_id=organization_id,
@@ -105,7 +103,7 @@ async def list_consumption_by_consumer(
     context: SecurityContext = Depends(get_security_context),
     session: AsyncSession = Depends(get_session),
 ) -> ConsumptionRecordPage:
-    context.require_organization()
+    enforce_organization(context, organization_id)
     items, total = await get_consumption_by_consumer(
         session,
         organization_id=organization_id,
@@ -133,7 +131,7 @@ async def list_consumption_graph(
     context: SecurityContext = Depends(get_security_context),
     session: AsyncSession = Depends(get_session),
 ) -> ConsumptionRecordPage:
-    context.require_organization()
+    enforce_organization(context, organization_id)
     items, total = await get_consumption_graph(
         session,
         organization_id=organization_id,

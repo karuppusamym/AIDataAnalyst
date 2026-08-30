@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.events import record_audit
 from aida.models import DataSource, ProcedureLineageEdge, ViewLineageEdge
 from aida.schemas import (
     ProcedureLineageEdgeRead,
@@ -88,6 +90,16 @@ async def parse_view_lineage_endpoint(
             )
         )
         persisted += 1
+    record_audit(
+        session,
+        context,
+        action="view_lineage.parse",
+        resource_type="datasource",
+        resource_id=str(datasource_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"persisted_edges": persisted, "dialect": body.dialect},
+    )
     await session.flush()
 
     return ViewLineageParseResponse(
@@ -146,6 +158,16 @@ async def parse_procedure_lineage_endpoint(
             )
         )
         persisted += 1
+    record_audit(
+        session,
+        context,
+        action="procedure_lineage.parse",
+        resource_type="datasource",
+        resource_id=str(datasource_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"persisted_edges": persisted, "dialect": body.dialect},
+    )
     await session.flush()
 
     return ViewLineageParseResponse(

@@ -65,6 +65,10 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "shows what the governed retriever would assemble for a question; "
         "persists nothing"
     ),
+    "POST /v1/abac/simulate": (
+        "simulates ABAC policy evaluation over varied attributes; reads "
+        "policies and returns results without persisting decisions"
+    ),
 }
 
 # Read endpoints whose only write is the idempotent creation of a per-organization

@@ -1,7 +1,5 @@
 """AI decision lineage API: query decision edges for runs, assets, and refusals."""
 
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -51,11 +49,13 @@ class AiDecisionRead(ApiModel):
 )
 async def get_run_decisions(
     run_id: UUID,
+    organization_id: UUID = Query(...),
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "DataAdmin", "Analyst", "Viewer")
     ),
 ) -> list[AiDecisionRead]:
+    enforce_organization(context, organization_id)
     records = await get_decisions_for_run(session, run_id)
     return [AiDecisionRead.model_validate(r) for r in records]
 
@@ -67,12 +67,14 @@ async def get_run_decisions(
 )
 async def get_asset_decisions(
     asset_id: str,
+    organization_id: UUID = Query(...),
     limit: int = Query(default=200, ge=1, le=1000),
     session: AsyncSession = Depends(get_session),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "DataAdmin", "Analyst", "Viewer")
     ),
 ) -> list[AiDecisionRead]:
+    enforce_organization(context, organization_id)
     records = await get_decisions_for_asset(session, asset_id, limit=limit)
     return [AiDecisionRead.model_validate(r) for r in records]
 

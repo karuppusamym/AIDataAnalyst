@@ -540,6 +540,15 @@ async def detect_conflicts_endpoint(
         cs.conflict_status = "CONFLICTED"
     else:
         cs.conflict_status = "CLEAN"
+    record_audit(
+        session,
+        context,
+        action="studio.detect_conflicts",
+        resource_type="change_set",
+        resource_id=str(change_set_id),
+        outcome=cs.conflict_status,
+        correlation_id=get_correlation_id(),
+    )
     await session.flush()
 
     return [

@@ -263,6 +263,15 @@ async def get_sla_status(
     sla_record = await record_sla_status(
         session, org_id, contract_id, period_start, period_end
     )
+    record_audit(
+        session,
+        context,
+        action="data_contract.sla_status",
+        resource_type="data_contract",
+        resource_id=str(contract_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+    )
     await session.commit()
 
     return SlaStatusResponse(

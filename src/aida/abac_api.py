@@ -288,6 +288,15 @@ async def evaluate_access(
     )
 
     await _record_decision(session, context, result, body, correlation_id)
+    record_audit(
+        session,
+        context,
+        action="abac.evaluate",
+        resource_type="abac_decision",
+        resource_id=None,
+        outcome=result.decision,
+        correlation_id=correlation_id,
+    )
     await session.commit()
 
     return AbacEvaluateResponse(

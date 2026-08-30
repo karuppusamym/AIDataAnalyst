@@ -69,7 +69,7 @@ def test_traced_decorator_async() -> None:
     async def add_async(a: int, b: int) -> int:
         return a + b
 
-    result = asyncio.get_event_loop().run_until_complete(add_async(2, 3))
+    result = asyncio.run(add_async(2, 3))
     assert result == 5
 
 

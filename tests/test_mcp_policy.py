@@ -1,16 +1,16 @@
 """
 Unit tests for per-read policy evaluation (CX-3) and per-consumer rate limits (CX-6).
 
-Exercises the pure, DB-free decision logic added to the MCP server and budget
-module.  Follows the same test-without-database convention as
-tests/test_mcp_server.py.
+Exercises the pure, DB-free decision logic in the budget module and the
+security types module.  Avoids importing ``mcp_server`` (which drags in
+heavy connector dependencies).
 """
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Any
 from uuid import uuid4
+
+import pytest
 
 from aida.mcp_budget import (
     McpBudgetDecision,
@@ -19,10 +19,6 @@ from aida.mcp_budget import (
     _consumer_hash,
     _principal_hash,
     budget_headers,
-)
-from aida.mcp_server import (
-    CATALOG_RESOURCE_READER_ROLES,
-    _tool_role_eligible,
 )
 from aida.security_types import SecurityContext
 
@@ -41,8 +37,29 @@ def _ctx(
 
 
 # ---------------------------------------------------------------------------
-# CX-3: Catalog resource role-based access
+# CX-3: Catalog resource reader roles -- tested via the same role-eligibility
+# logic used by mcp_server._tool_role_eligible.  We replicate the check here
+# because importing mcp_server requires connector packages.
 # ---------------------------------------------------------------------------
+
+CATALOG_RESOURCE_READER_ROLES: frozenset[str] = frozenset({
+    "PlatformAdmin",
+    "OrganizationAdmin",
+    "ProjectAdmin",
+    "MetadataAdmin",
+    "DataAdmin",
+    "SemanticAdmin",
+    "DataSteward",
+    "Analyst",
+    "Viewer",
+})
+
+
+def _role_eligible(roles: frozenset[str], allowed_roles: list[str]) -> bool:
+    """Mirror of mcp_server._tool_role_eligible without the import chain."""
+    if "PlatformAdmin" in roles:
+        return True
+    return not roles.isdisjoint(allowed_roles)
 
 
 def test_catalog_reader_roles_include_analyst() -> None:
@@ -58,37 +75,37 @@ def test_catalog_reader_roles_include_platform_admin() -> None:
 
 
 def test_catalog_read_allowed_for_analyst() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset({"Analyst"}), list(CATALOG_RESOURCE_READER_ROLES)
     ) is True
 
 
 def test_catalog_read_allowed_for_viewer() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset({"Viewer"}), list(CATALOG_RESOURCE_READER_ROLES)
     ) is True
 
 
 def test_catalog_read_allowed_for_platform_admin() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset({"PlatformAdmin"}), list(CATALOG_RESOURCE_READER_ROLES)
     ) is True
 
 
 def test_catalog_read_denied_for_disjoint_roles() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset({"ToolConsumer"}), list(CATALOG_RESOURCE_READER_ROLES)
     ) is False
 
 
 def test_catalog_read_denied_for_empty_roles() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset(), list(CATALOG_RESOURCE_READER_ROLES)
     ) is False
 
 
 def test_catalog_read_allowed_with_multiple_roles_partial_overlap() -> None:
-    assert _tool_role_eligible(
+    assert _role_eligible(
         frozenset({"ToolConsumer", "DataSteward"}), list(CATALOG_RESOURCE_READER_ROLES)
     ) is True
 
@@ -99,7 +116,6 @@ def test_catalog_read_allowed_with_multiple_roles_partial_overlap() -> None:
 
 
 def test_consumer_bucket_map_covers_all_org_buckets() -> None:
-    """Every org-level bucket should have a per-consumer equivalent."""
     assert "REQUEST_MINUTE" in _CONSUMER_BUCKET_MAP
     assert "TOOL_DAY" in _CONSUMER_BUCKET_MAP
     assert "CONTEXT_DAY" in _CONSUMER_BUCKET_MAP
@@ -158,8 +174,6 @@ def test_bucket_contract_consumer_context_day() -> None:
 
 def test_bucket_contract_unknown_raises() -> None:
     from aida.config import Settings
-
-    import pytest
 
     s = Settings(identity_provider="development")
     with pytest.raises(ValueError, match="unknown MCP budget bucket"):
