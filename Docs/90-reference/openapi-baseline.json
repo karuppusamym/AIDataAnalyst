@@ -2248,6 +2248,89 @@
         "title": "ArchiveStatusRead",
         "type": "object"
       },
+      "AssetCertificationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "asset_type": {
+            "title": "Asset Type",
+            "type": "string"
+          },
+          "certified_by": {
+            "title": "Certified By",
+            "type": "string"
+          },
+          "column_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_active": {
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "table_id",
+          "column_id",
+          "asset_type",
+          "status",
+          "rationale",
+          "certified_by",
+          "expires_at",
+          "is_active",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AssetCertificationRead",
+        "type": "object"
+      },
       "AssetDocumentationVersionCreate": {
         "additionalProperties": false,
         "properties": {
@@ -4354,6 +4437,50 @@
           "tag_key"
         ],
         "title": "CatalogBulkTagRequest",
+        "type": "object"
+      },
+      "CertificationDecisionRequest": {
+        "additionalProperties": false,
+        "description": "Module 04's ``CertificationDecision``: certify the table itself, or one column.",
+        "properties": {
+          "asset_type": {
+            "default": "TABLE",
+            "enum": [
+              "TABLE",
+              "COLUMN"
+            ],
+            "title": "Asset Type",
+            "type": "string"
+          },
+          "column_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Id"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "rationale": {
+            "maxLength": 2000,
+            "minLength": 10,
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rationale",
+          "expires_at"
+        ],
+        "title": "CertificationDecisionRequest",
         "type": "object"
       },
       "ColumnProfileRead": {
@@ -22143,6 +22270,7 @@
     },
     "/v1/ai-decisions/refusals": {
       "get": {
+        "description": "List refusals before the dynamic run route can match ``refusals`` as a UUID.",
         "operationId": "list_refusals_v1_ai_decisions_refusals_get",
         "parameters": [
           {
@@ -34250,6 +34378,52 @@
             "schema": {
               "format": "uuid",
               "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 2,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "ACTIVE",
+              "maxLength": 30,
+              "title": "Status",
               "type": "string"
             }
           },
@@ -55616,6 +55790,283 @@
         "tags": [
           "table-family-intelligence"
         ]
+      }
+    },
+    "/v1/tables/{table_id}/certification": {
+      "get": {
+        "description": "The currently *active* certification for a table, or one of its columns.\n\nExpiry is enforced here rather than trusted from ``status``: a certification\nrow keeps reading back ``status == \"ACTIVE\"`` after ``expires_at`` passes\n(see ``aida.asset_certification``), so this 404s once the active one has\nexpired, even though the row itself is still sitting there as evidence.",
+        "operationId": "get_table_certification_v1_tables__table_id__certification_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "column_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Column Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetCertificationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Table Certification"
+      },
+      "post": {
+        "description": "Module 04's public interface: ``certify_asset(scope, table_id, decision)``.\n\nCertifies the table itself, or -- module 04's scale note names column as\nthe dominant catalog entity -- one specific column of it. Immediate and\nrole-gated, the same as CT-1's bulk certify action on this same table:\na single deliberate certification by an authorized steward, not a batch,\nso there is no maker-checker review to wait on.",
+        "operationId": "certify_table_asset_v1_tables__table_id__certification_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CertificationDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetCertificationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Certify Table Asset"
       }
     },
     "/v1/tables/{table_id}/columns": {

@@ -1153,7 +1153,13 @@ async def _coverage(
     )
     certification_rows = (
         await session.scalars(
-            select(AssetCertification).where(AssetCertification.table_id.in_(table_ids))
+            select(AssetCertification).where(
+                AssetCertification.table_id.in_(table_ids),
+                # CT-5: certification is now also column-scoped; a column's
+                # certification denormalizes its parent table_id but must not
+                # count toward the table's own "certified" coverage dimension.
+                AssetCertification.asset_type != "COLUMN",
+            )
         )
     ).all()
     certified = active_certified_table_ids(list(certification_rows), now=datetime.now(UTC))

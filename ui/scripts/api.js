@@ -34,14 +34,14 @@
 
   async function searchGlobal(query, limit=40, offset=0) {
     if (!state.organizationId || !query?.trim()) return { items: [], total: 0 };
-    const params = `q=${encodeURIComponent(query.trim())}&limit=${limit}&offset=${offset}`;
-    return api(`/v1/organizations/${state.organizationId}/search?${params}`);
+    const params = `q=${encodeURIComponent(query.trim())}&organization_id=${encodeURIComponent(state.organizationId)}&limit=${limit}&offset=${offset}`;
+    return api(`/v1/search?${params}`);
   }
 
   async function searchSuggest(query, limit=10) {
-    if (!state.organizationId || !query?.trim()) return { items: [] };
-    const params = `q=${encodeURIComponent(query.trim())}&limit=${limit}`;
-    return api(`/v1/organizations/${state.organizationId}/search/suggest?${params}`);
+    if (!state.organizationId || !query?.trim()) return [];
+    const params = `q=${encodeURIComponent(query.trim())}&organization_id=${encodeURIComponent(state.organizationId)}&limit=${limit}`;
+    return api(`/v1/search/suggest?${params}`);
   }
 
   Object.assign(window.AtlasUI, { baseHeaders, api, fetchAll, searchGlobal, searchSuggest });
