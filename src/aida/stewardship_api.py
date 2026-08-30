@@ -1180,7 +1180,9 @@ async def _coverage(
             )
         ).all()
         quality_monitored.update(
-            table_id for table_id, datasource_id in table_datasources if datasource_id in source_wide
+            table_id
+            for table_id, datasource_id in table_datasources
+            if datasource_id in source_wide
         )
     semantically_mapped = set(
         await session.scalars(
