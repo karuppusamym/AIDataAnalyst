@@ -113,6 +113,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `relationship.approved` | Checker approved | candidate_id, checker, rationale_ref |
 | `relationship.rejected` | Checker rejected | candidate_id, checker, rationale_ref |
 | `table_family.detected` | Family identified | family_id, family_type, members |
+| `table_family_candidate.decided.v1` | Checker approved or rejected a table-family candidate | candidate_id, status |
 | `canonical_table.resolved` | Canonical chosen | entity_ref, table_id, evidence_ref |
 
 ### Semantics and glossary — topic `atlas.semantics.v1` (key: `organization_id`)
