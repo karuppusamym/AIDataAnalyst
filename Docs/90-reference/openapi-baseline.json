@@ -18794,6 +18794,204 @@
         "title": "StudioDiffRead",
         "type": "object"
       },
+      "StudioEvalMiningResult": {
+        "additionalProperties": false,
+        "properties": {
+          "bi_edges_scanned": {
+            "title": "Bi Edges Scanned",
+            "type": "integer"
+          },
+          "consumption_edges_scanned": {
+            "title": "Consumption Edges Scanned",
+            "type": "integer"
+          },
+          "questions_already_mined": {
+            "title": "Questions Already Mined",
+            "type": "integer"
+          },
+          "questions_created": {
+            "title": "Questions Created",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "consumption_edges_scanned",
+          "bi_edges_scanned",
+          "questions_created",
+          "questions_already_mined",
+          "truncated"
+        ],
+        "title": "StudioEvalMiningResult",
+        "type": "object"
+      },
+      "StudioEvalQuestionRead": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "evidence_edge_id": {
+            "title": "Evidence Edge Id",
+            "type": "string"
+          },
+          "evidence_source": {
+            "title": "Evidence Source",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "mined_at": {
+            "format": "date-time",
+            "title": "Mined At",
+            "type": "string"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "object_type",
+          "object_id",
+          "evidence_source",
+          "evidence_edge_id",
+          "label",
+          "mined_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "StudioEvalQuestionRead",
+        "type": "object"
+      },
+      "StudioEvalResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "eval_question_id": {
+            "format": "uuid",
+            "title": "Eval Question Id",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "eval_question_id",
+          "object_type",
+          "object_id",
+          "label",
+          "passed",
+          "evidence"
+        ],
+        "title": "StudioEvalResultRead",
+        "type": "object"
+      },
+      "StudioEvalRunRead": {
+        "additionalProperties": false,
+        "properties": {
+          "change_set_id": {
+            "format": "uuid",
+            "title": "Change Set Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/StudioEvalResultRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "change_set_id",
+          "started_at",
+          "completed_at",
+          "passed",
+          "evidence",
+          "results"
+        ],
+        "title": "StudioEvalRunRead",
+        "type": "object"
+      },
       "StudioImpactPreview": {
         "additionalProperties": false,
         "properties": {
@@ -61713,6 +61911,135 @@
         ]
       }
     },
+    "/v1/studio/change-sets/{change_set_id}/eval": {
+      "get": {
+        "description": "Return the most recent eval-regression run for a change set.",
+        "operationId": "get_latest_eval_run_v1_studio_change_sets__change_set_id__eval_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "change_set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Change Set Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudioEvalRunRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Latest Eval Run",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/v1/studio/change-sets/{change_set_id}/impact": {
       "get": {
         "description": "Preview the impact of merging a change set.",
@@ -62246,7 +62573,7 @@
     },
     "/v1/studio/change-sets/{change_set_id}/submit": {
       "post": {
-        "description": "Submit a change set for governance review.\n\nAll items must have passed testing (test gate).",
+        "description": "Submit a change set for governance review.\n\nAll items must have passed testing (test gate), and -- ST-A8 -- the most\nrecent eval-regression run for this change set (if any mined questions\nwere touched) must also have passed. A change set that regresses a\nusage-derived question is blocked here exactly like a change set with a\nmalformed item, even when its items individually look well-formed.",
         "operationId": "submit_change_set_v1_studio_change_sets__change_set_id__submit_post",
         "parameters": [
           {
@@ -62375,7 +62702,7 @@
     },
     "/v1/studio/change-sets/{change_set_id}/test": {
       "post": {
-        "description": "Run the test harness against all items in the change set.\n\nTransitions the change set to TESTING, executes validators, then records\nthe result.  All items must pass for the suite to pass.",
+        "description": "Run the test harness against all items in the change set.\n\nTransitions the change set to TESTING, executes validators, then records\nthe result.  All items must pass for the suite to pass.\n\nAlso runs the ST-A8 regression gate: for every changed metric/tool that\nhas a usage-derived `StudioEvalQuestion` (mined from real consumption or\nBI lineage edges via `POST /v1/studio/eval/mine`), re-checks that it\nstill passes the same validator its own item-level test uses. A mined\nquestion that now fails fails the overall suite, exactly like any other\nfailing test -- this is what makes it a *regression* gate rather than a\nduplicate of the item-level check: it fires even for objects whose own\nedit would otherwise look shaped correctly, and it is recorded separately\n(`StudioEvalRun`/`StudioEvalResult`) so the failure is attributable to a\nspecific previously-resolving question, not just \"something failed.\"",
         "operationId": "run_tests_v1_studio_change_sets__change_set_id__test_post",
         "parameters": [
           {
@@ -62497,6 +62824,287 @@
           }
         },
         "summary": "Run Tests",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/v1/studio/eval/mine": {
+      "post": {
+        "description": "Mine recent consumption and BI lineage edges into eval questions.\n\nExplicit, API-triggered pass rather than a scheduled job for now (no\nscheduler wiring in this increment) -- idempotent, so calling it\nrepeatedly (by hand, or from a future schedule) never duplicates a\nquestion for an object already mined.",
+        "operationId": "mine_eval_suite_v1_studio_eval_mine_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudioEvalMiningResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mine Eval Suite",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/v1/studio/eval/questions": {
+      "get": {
+        "description": "List the mined eval question corpus for the organisation.",
+        "operationId": "list_eval_questions_v1_studio_eval_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StudioEvalQuestionRead"
+                  },
+                  "title": "Response List Eval Questions V1 Studio Eval Questions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Eval Questions",
         "tags": [
           "studio"
         ]
