@@ -59,4 +59,4 @@ Connector execution methods are **module-private to the gateway**. The boundary 
 ## Enforcement
 
 - INV-2 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_no_connector_execution_outside_gateway` (static import-graph analysis)
+- Test: `test_no_connector_execution_outside_gateway` (`tests/test_tier0_invariants.py`; AST scan, paired with the import-linter contract and the type-level guarantee — see `10-architecture/01-principles-and-invariants.md`)
