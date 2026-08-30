@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -28,6 +26,12 @@ from aida.models import (
 )
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
+
+# `audit_sql_hash` moved to `aida.signing` (QG-5, KMS-managed HMAC keys); re-exported
+# under its historical name (`as audit_sql_hash`, not a plain import) because existing
+# tests and `sql_redaction.py`'s docstring reference it as `query_gateway.audit_sql_hash`.
+from aida.signing import audit_sql_hash as audit_sql_hash
+from aida.signing import resolve_signing_provider
 from aida.sql_guard import SqlGuard
 from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
 from aida.sql_validation import (
@@ -96,18 +100,6 @@ def redact_sql_literals(sql: str, *, dialect: str) -> str:
     Kept as a name here because existing callers and tests reference it.
     """
     return _redact_sql_literals(sql, dialect=dialect)
-
-
-def audit_sql_hash(key: str, sql: str) -> str:
-    """HMAC-SHA256 the raw SQL text under the configured audit key.
-
-    Keyed (not a bare hash) so the digest is both tamper-evident and
-    unforgeable without the server's ``audit_hmac_key``: an attacker who can
-    read a stored execution record still cannot mint a matching hash for
-    different SQL, and the digest changes if the recorded SQL is altered
-    after the fact.
-    """
-    return hmac.new(key.encode("utf-8"), sql.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def extract_column_lineage(sql: str, *, dialect: str) -> list[dict[str, Any]]:
@@ -221,6 +213,21 @@ class QueryExecutionGateway:
             default_row_limit=settings.default_query_row_limit,
             hard_row_limit=settings.hard_query_row_limit,
         )
+
+    async def _sign_sql(self, sql: str) -> str:
+        """Produce the audit HMAC evidence for `sql` (QG-5).
+
+        Resolved fresh per call, the same shape as the `SecretResolver` this
+        gateway already builds per call rather than caching -- a signer swapped
+        in via config takes effect on the next call, not on the next restart.
+        Deliberately un-guarded by a `try/except`: `resolve_signing_provider`
+        and `SigningProvider.sign` raise `SigningUnavailable`/`SigningError`
+        rather than returning a fallback, and this method lets that propagate
+        so a KMS outage rejects the request instead of silently producing an
+        unsigned or locally-forged audit hash.
+        """
+        provider = resolve_signing_provider(self.settings)
+        return await provider.sign(sql)
 
     async def allowed_tables(self, session: AsyncSession, datasource: DataSource) -> set[str]:
         rows = (
@@ -477,6 +484,7 @@ class QueryExecutionGateway:
             requested_limit=requested_limit,
         )
         report = outcome.report
+        sql_hash = await self._sign_sql(sql)
         record_audit(
             session,
             context,
@@ -487,7 +495,7 @@ class QueryExecutionGateway:
             correlation_id=correlation_id,
             details={
                 "dialect": datasource.dialect,
-                "sql_hash": audit_sql_hash(self.settings.audit_hmac_key, sql),
+                "sql_hash": sql_hash,
                 "referenced_tables": list(report.referenced_tables),
                 "referenced_column_count": len(report.referenced_columns),
                 "finding_codes": list(report.codes()),
@@ -542,7 +550,7 @@ class QueryExecutionGateway:
             datasource_id=datasource.id,
             principal_id=context.principal_id,
             dialect=datasource.dialect,
-            sql_hash=audit_sql_hash(self.settings.audit_hmac_key, sql),
+            sql_hash=await self._sign_sql(sql),
             semantic_version=semantic_version,
         )
         session.add(execution)

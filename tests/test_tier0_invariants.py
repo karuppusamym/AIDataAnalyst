@@ -179,6 +179,7 @@ _SECURE_PRODUCTION_BASELINE: dict[str, Any] = {
     "credential_provider": "vault",
     "allow_development_sql_override": False,
     "audit_hmac_key": "a" * 32,
+    "hmac_signing_provider": "vault_transit",
     "openai_base_url": "https://openai.internal",
     "gemini_base_url": "https://gemini.internal",
     "default_query_row_limit": 100,
@@ -236,6 +237,11 @@ _INCOMPLETE_POSTURE_CASES: list[tuple[str, dict[str, Any], str]] = [
         "production audit HMAC key shorter than 32 characters",
         {"audit_hmac_key": "too-short"},
         "production audit HMAC key must contain at least 32 characters",
+    ),
+    (
+        "application-managed local HMAC signer in production (QG-5)",
+        {"hmac_signing_provider": "local"},
+        "application-managed local HMAC signer is forbidden",
     ),
 ]
 
