@@ -9,10 +9,8 @@ from uuid import uuid4
 import pytest
 
 from aida.ai_decision_lineage import (
-    DECISION_LINEAGE_VERSION,
     AiDecisionEdge,
 )
-
 
 # ---------------------------------------------------------------------------
 # Edge construction

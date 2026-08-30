@@ -13,10 +13,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
-
 
 ObjectType = Literal["METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"]
 Operation = Literal["CREATE", "UPDATE", "DELETE"]

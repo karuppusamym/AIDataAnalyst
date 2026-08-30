@@ -24,15 +24,12 @@ from aida.models import (
     AbacDecisionRecord,
     AgentRun,
     AiDecisionRecord,
-    AuditEvent,
     CompliancePackRecord,
     ContractViolationRecord,
-    DataContractVersion,
     DataQualityObservation,
     GovernanceReview,
     ModelRouteConfiguration,
     ToolExecution,
-    utc_now,
 )
 
 # ---------------------------------------------------------------------------
@@ -209,11 +206,20 @@ async def _generate_bcbs_239(
                 EvidenceItem(
                     source="data_quality_observation",
                     count=total_observations,
-                    summary=f"{pass_rate:.1f}% quality pass rate ({passed_observations}/{total_observations})",
+                    summary=(
+                        f"{pass_rate:.1f}% quality pass rate "
+                        f"({passed_observations}/{total_observations})"
+                    ),
                     details={"pass_rate": pass_rate},
                 )
             ],
-            status="COMPLIANT" if pass_rate >= 90 else "NON_COMPLIANT" if total_observations > 0 else "NOT_ASSESSED",
+            status=(
+                "COMPLIANT"
+                if pass_rate >= 90
+                else "NON_COMPLIANT"
+                if total_observations > 0
+                else "NOT_ASSESSED"
+            ),
         )
     )
 
@@ -483,8 +489,9 @@ async def generate_pack(
     sections = await generator(session, org_id, period_start, period_end)
     generated_at = datetime.now(UTC)
 
+    pack_name = f"{framework} Compliance Pack"
     pack_dict = {
-        "name": f"{framework} Compliance Pack",
+        "name": pack_name,
         "framework": framework,
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
@@ -493,7 +500,7 @@ async def generate_pack(
     checksum = _compute_checksum(pack_dict)
 
     return CompliancePack(
-        name=pack_dict["name"],
+        name=pack_name,
         framework=framework,
         period_start=period_start,
         period_end=period_end,

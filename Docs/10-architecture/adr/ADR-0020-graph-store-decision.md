@@ -116,8 +116,6 @@ the design; it simply had never been shown to be load-bearing.
 
 - **All-paths enumeration** between two nodes, as opposed to reachability. Exponential in
   the worst case, and genuinely a graph-database strength.
-- **All-paths enumeration** between two nodes, as opposed to reachability. Exponential
-  in the worst case, and genuinely a graph-database strength.
 - **Graph algorithms** — shortest path, centrality, community detection. Not currently a
   product requirement; if relationship-inference ever wants clustering, this changes.
 - **Cypher's expressiveness** on heterogeneous edge patterns. A recursive CTE over seven
@@ -169,3 +167,65 @@ the authorization path — when any one of these is measured true on a real esta
 
 Until one of those is a number rather than an intuition, the extra store is cost without
 a case.
+
+## Amendment, 2026-08-30 — configurable rather than removed
+
+The owner's decision, taken after reading this ADR: **keep Neo4j, and make it a
+per-organization setting** — an administrator chooses PostgreSQL or Neo4j for the graph
+read path. The measurement above is unchanged and the default is unchanged; what changes
+is that "reversal" stops being a project and becomes a setting.
+
+**This makes the ADR stronger, not weaker.** The reversal condition above named three
+measurements that would justify a graph store. Under a removal, meeting one of them meant
+reintroducing a store — weeks of work, at exactly the moment the estate was proving the
+need. Under a switch, meeting one of them means changing a value for one organization and
+measuring the result. A decision that can be tested is worth more than a decision that has
+to be defended.
+
+### Shape
+
+The port already has a precedent in this codebase and should copy it exactly:
+`aida/vector_store.py` resolves one of four adapters from a setting, defaults to the one
+that needs no extension, and **probes rather than trusts** the optional backend (ADR-0019).
+The graph port is the same pattern, second application:
+
+| Backend | Meaning |
+|---|---|
+| `postgres` | Default. Edge tables plus recursive CTEs, as measured above |
+| `neo4j` | The existing projection, promoted from a read-through cache to a selectable backend |
+| `disabled` | Lineage exploration returns a refusal with a reason code rather than a degraded answer (INV-4) |
+
+The surface is small, which is the main reason this is cheap: three modules read Neo4j
+today (`api.py`, `lineage_graph_store.py`, `unified_lineage_api.py`), and a boolean
+(`lineage_neo4j_read_enabled`, default `false`) already gates the read path. This
+amendment turns that boolean into a three-valued per-organization setting and gives it a
+conformance suite.
+
+### Three constraints that are not optional
+
+1. **INV-1 bounds where the switch may apply.** PostgreSQL is authoritative and Neo4j is
+   a rebuildable projection that is never read for an authorization, approval or
+   correctness decision. The setting therefore governs **lineage and graph exploration
+   reads only** — never the authorization scope query, never the classification roll-up.
+   That is a real constraint and also the good news: a wrong answer from the graph path
+   is a worse answer, never a security incident.
+2. **Both backends must answer identically, and that is the actual work.** Not "both
+   return something" — identical node sets, identical ordering and tie-breaks, identical
+   cap behaviour and identical truncation reasons. Two backends that disagree turn a
+   config flag into a correctness surface, and the user who hits it has no way to know
+   why. One conformance suite, run against both, is the deliverable that makes the
+   setting safe. This is a week of work and it is the week that matters.
+3. **A backend nothing tests is a backend that breaks silently (INV-9).** No Neo4j runs
+   in the suite today — INV-1's test says so itself. Either Neo4j joins CI as a service
+   container, or the `neo4j` backend ships advertised as uncertified. It must not be
+   offered in an admin console as though it were equally proven.
+
+E5, the projection rebuild drill, stops being deferrable. A projection that has never been
+proven rebuildable should not be offered as a selectable backend.
+
+### Consequence for C7 and E5
+
+Tracker `C7` changes from "remove Neo4j" to "make the graph store a configurable port".
+`E5` is promoted from a deferred drill to a prerequisite of shipping the `neo4j` backend.
+The two overdue drills that removal would have eliminated are back on the list — that is
+the price of the option, and it is worth naming rather than absorbing quietly.

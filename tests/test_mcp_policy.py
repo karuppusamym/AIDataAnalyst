@@ -13,8 +13,8 @@ from uuid import uuid4
 import pytest
 
 from aida.mcp_budget import (
-    McpBudgetDecision,
     _CONSUMER_BUCKET_MAP,
+    McpBudgetDecision,
     _bucket_contract,
     _consumer_hash,
     _principal_hash,

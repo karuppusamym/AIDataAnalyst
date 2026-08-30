@@ -7,13 +7,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.abac import (
-    ABAC_ENGINE_VERSION,
     AbacDecision,
     AbacPolicy,
     evaluate,
@@ -118,7 +117,7 @@ async def _load_policies(
             policy_key=row.policy_key,
             version=row.version,
             name=row.name,
-            effect=row.effect,
+            effect=_literal(row.effect, ("PERMIT", "DENY"), field="AbacPolicyRecord.effect"),
             subject_conditions=row.subject_conditions,
             resource_conditions=row.resource_conditions,
             environment_conditions=row.environment_conditions,
@@ -222,6 +221,20 @@ async def create_policy(
 
     await session.refresh(record)
     return AbacPolicyRead.model_validate(record)
+
+
+def _literal[T: str](value: str, allowed: tuple[T, ...], *, field: str) -> T:
+    """Narrow a database `String` column to the Literal the domain type declares.
+
+    A `cast()` here would type-check and prove nothing: these columns carry no CHECK
+    constraint, so a value written by an older release, a manual fix or a future enum
+    member would flow into a domain object that claims it cannot exist. This fails closed
+    instead (INV-4) — a value the domain does not model is a 500 naming the field, not a
+    silently malformed object handed to a caller.
+    """
+    if value not in allowed:
+        raise ValueError(f"{field} holds an unmodelled value: {value!r}")
+    return value  # type: ignore[return-value]
 
 
 @router.get(

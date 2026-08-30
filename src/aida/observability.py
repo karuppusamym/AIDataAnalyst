@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import functools
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, TypeVar
+from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-F = TypeVar("F", bound=Callable[..., Any])
 
 # Lightweight span-like record for environments where the OpenTelemetry SDK
 # is not installed.  The configure_* helpers are intentionally no-ops that
@@ -44,6 +44,9 @@ class MetricsConfig:
 
     endpoint: str = "http://localhost:4317"
     service_name: str = "aida-control-plane"
+    # Mirrors `TracingConfig`. Its absence was not cosmetic: `configure_metrics` reads
+    # `config.insecure`, so enabling metrics raised AttributeError before this existed.
+    insecure: bool = True
     export_interval_millis: int = 60_000
     enabled: bool = False
 
@@ -127,7 +130,7 @@ def configure_metrics(config: MetricsConfig) -> bool:
         return False
 
 
-def traced(func: F) -> F:
+def traced[F: Callable[..., Any]](func: F) -> F:
     """Decorator for automatic span creation.
 
     When OpenTelemetry is configured, creates a span with organization_id,
@@ -141,18 +144,25 @@ def traced(func: F) -> F:
         start = time.perf_counter()
 
         if _tracer_configured:
+            # Only tracer *acquisition* is guarded. The wrapped call sits in the `else`
+            # branch on purpose: it used to be inside the `try`, so a function that raised
+            # had its exception swallowed by `except Exception: pass` and was then called
+            # a second time by the fallback below -- a silent duplicate side effect, and
+            # the caller saw only the second failure. Tracing must never change how many
+            # times the thing it observes runs.
             try:
                 from opentelemetry import trace
 
                 tracer = trace.get_tracer(__name__)
+            except Exception:  # pragma: no cover - SDK absent or misconfigured
+                logger.warning("tracing_unavailable", span_name=span_name)
+            else:
                 with tracer.start_as_current_span(span_name) as span:
                     _set_span_attributes(span, kwargs)
                     result = await func(*args, **kwargs)
                     elapsed = time.perf_counter() - start
                     span.set_attribute("duration_ms", round(elapsed * 1000, 2))
                     return result
-            except Exception:
-                pass
 
         result = await func(*args, **kwargs)
         elapsed = time.perf_counter() - start
@@ -169,18 +179,25 @@ def traced(func: F) -> F:
         start = time.perf_counter()
 
         if _tracer_configured:
+            # Only tracer *acquisition* is guarded. The wrapped call sits in the `else`
+            # branch on purpose: it used to be inside the `try`, so a function that raised
+            # had its exception swallowed by `except Exception: pass` and was then called
+            # a second time by the fallback below -- a silent duplicate side effect, and
+            # the caller saw only the second failure. Tracing must never change how many
+            # times the thing it observes runs.
             try:
                 from opentelemetry import trace
 
                 tracer = trace.get_tracer(__name__)
+            except Exception:  # pragma: no cover - SDK absent or misconfigured
+                logger.warning("tracing_unavailable", span_name=span_name)
+            else:
                 with tracer.start_as_current_span(span_name) as span:
                     _set_span_attributes(span, kwargs)
                     result = func(*args, **kwargs)
                     elapsed = time.perf_counter() - start
                     span.set_attribute("duration_ms", round(elapsed * 1000, 2))
                     return result
-            except Exception:
-                pass
 
         result = func(*args, **kwargs)
         elapsed = time.perf_counter() - start

@@ -522,11 +522,15 @@ class AiDependencyGraphRead(PlatformApiModel):
 class FusionScoreDetail(PlatformApiModel):
     """Individual scoring factor in the fusion ranking pipeline."""
 
-    signal: str = Field(description="Signal name: 'lexical', 'vector', 'graph', 'quality_trust', 'usage_popularity'")
+    signal: str = Field(
+        description="Signal name: 'lexical', 'vector', 'graph', 'quality_trust', 'usage_popularity'"
+    )
     raw_score: float = Field(ge=0.0, le=1.0)
     weight: float = Field(ge=0.0, le=1.0)
     weighted_score: float = Field(ge=0.0)
-    rank: int | None = Field(default=None, ge=1, description="Rank within this signal's list (for RRF)")
+    rank: int | None = Field(
+        default=None, ge=1, description="Rank within this signal's list (for RRF)"
+    )
 
 
 class RetrievalEvidence(PlatformApiModel):
@@ -538,7 +542,9 @@ class RetrievalEvidence(PlatformApiModel):
     final_score: float = Field(ge=0.0)
     fusion_method: str = Field(description="'rrf' or 'weighted_linear'")
     factors: list[FusionScoreDetail]
-    graph_expansion_path: list[str] = Field(default_factory=list, description="Node IDs in expansion path")
+    graph_expansion_path: list[str] = Field(
+        default_factory=list, description="Node IDs in expansion path"
+    )
     source_signals: list[str] = Field(default_factory=list, description="Which signals contributed")
     metadata: dict[str, Any] = Field(default_factory=dict)
 

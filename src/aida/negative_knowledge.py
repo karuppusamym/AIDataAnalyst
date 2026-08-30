@@ -12,15 +12,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.models import NegativeAssertionRecord, utc_now
+from aida.models import NegativeAssertionRecord
 
 # ---------------------------------------------------------------------------
 # Domain types

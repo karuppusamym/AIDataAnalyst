@@ -18,10 +18,10 @@ Detection categories:
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
 
 INJECTION_DEFENSE_VERSION = "injection-defense-v1"
 
@@ -54,7 +54,9 @@ class _InjectionPattern:
 
 
 def _pat(threat_type: str, pattern: str, confidence: float) -> _InjectionPattern:
-    return _InjectionPattern(threat_type, re.compile(pattern, re.IGNORECASE | re.DOTALL), confidence)
+    return _InjectionPattern(
+        threat_type, re.compile(pattern, re.IGNORECASE | re.DOTALL), confidence
+    )
 
 
 # Instruction override patterns
@@ -66,7 +68,8 @@ INSTRUCTION_OVERRIDE_PATTERNS: list[_InjectionPattern] = [
     ),
     _pat(
         "INSTRUCTION_OVERRIDE",
-        r"\b(?:new instructions?|updated instructions?|real instructions?)\b.{0,30}\b(?:follow|obey|execute|comply)\b",
+        r"\b(?:new instructions?|updated instructions?|real instructions?)\b"
+        r".{0,30}\b(?:follow|obey|execute|comply)\b",
         0.90,
     ),
     _pat(
@@ -117,7 +120,8 @@ POLICY_BYPASS_PATTERNS: list[_InjectionPattern] = [
 PRIVILEGE_ESCALATION_PATTERNS: list[_InjectionPattern] = [
     _pat(
         "PRIVILEGE_ESCALATION",
-        r"\b(?:act as|become|you are now|impersonate|switch to|pretend to be|roleplay as)\b.{0,40}\b"
+        r"\b(?:act as|become|you are now|impersonate|switch to|pretend to be|roleplay as)\b"
+        r".{0,40}\b"
         r"(?:root|administrator|admin|platform[_ ]?admin|superuser|security[_ ]?officer|sudo)\b",
         0.90,
     ),
@@ -168,11 +172,27 @@ MULTILINGUAL_PATTERNS: list[_InjectionPattern] = [
     # Arabic: "ignore instructions"
     _pat("MULTILINGUAL_INJECTION", r"(?:تجاهل|أهمل).{0,20}(?:التعليمات|الأوامر)", 0.85),
     # Russian/Cyrillic: "ignore instructions"
-    _pat("MULTILINGUAL_INJECTION", r"(?:игнорируй|проигнорируй).{0,20}(?:инструкции|правила|указания)", 0.85),
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"(?:игнорируй|проигнорируй).{0,20}(?:инструкции|правила|указания)",
+        0.85,
+    ),
     # Spanish
-    _pat("MULTILINGUAL_INJECTION", r"\b(?:ignora|olvida|descarta)\b.{0,30}\b(?:instrucciones|reglas|indicaciones)\b.{0,20}\b(?:anteriores|previas|del sistema)\b", 0.85),
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:ignora|olvida|descarta)\b.{0,30}"
+        r"\b(?:instrucciones|reglas|indicaciones)\b.{0,20}"
+        r"\b(?:anteriores|previas|del sistema)\b",
+        0.85,
+    ),
     # French
-    _pat("MULTILINGUAL_INJECTION", r"\b(?:ignore|oublie)\b.{0,30}\b(?:instructions|r[eè]gles|consignes)\b.{0,20}\b(?:pr[eé]c[eé]dentes|du syst[eè]me)\b", 0.85),
+    _pat(
+        "MULTILINGUAL_INJECTION",
+        r"\b(?:ignore|oublie)\b.{0,30}"
+        r"\b(?:instructions|r[eè]gles|consignes)\b.{0,20}"
+        r"\b(?:pr[eé]c[eé]dentes|du syst[eè]me)\b",
+        0.85,
+    ),
 ]
 
 ALL_PATTERNS: list[_InjectionPattern] = (
@@ -254,8 +274,11 @@ def _detect_encoded_payloads(text: str) -> list[str]:
             ]
             if any(kw in decoded_lower for kw in suspicious_keywords):
                 evidence.append(f"base64_encoded_injection:{candidate[:30]}...")
-        except Exception:
-            pass
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            # The candidate simply is not base64, which is the common case and not
+            # interesting. Narrowed from a bare `except Exception`: in a detector, a wide
+            # silent catch means a bug in the decoder reads exactly like "nothing found".
+            continue
 
     # Hex encoding
     if _HEX_RE.search(text):
@@ -340,7 +363,11 @@ def screen_metadata(
 
     for pat in ALL_PATTERNS:
         # Multilingual patterns run on text without homoglyph replacement
-        search_text = normalized_no_homoglyph if pat.threat_type == "MULTILINGUAL_INJECTION" else normalized
+        search_text = (
+            normalized_no_homoglyph
+            if pat.threat_type == "MULTILINGUAL_INJECTION"
+            else normalized
+        )
         if pat.pattern.search(search_text):
             if pat.confidence > max_confidence:
                 max_confidence = pat.confidence

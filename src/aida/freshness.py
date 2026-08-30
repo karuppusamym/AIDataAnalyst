@@ -9,7 +9,7 @@ tables return NOT_CONFIGURED. Configuration requires maker-checker approval.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 

@@ -17,15 +17,13 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.db import get_session
 from aida.full_text_index import build_ts_query, full_text_rank
 from aida.models import (
-    DataSource,
-    MetadataBusinessAnnotation,
     MetadataColumn,
     MetadataTable,
 )
@@ -84,7 +82,9 @@ async def global_search(
     q: str = Query(min_length=1, max_length=500, description="Search query"),
     organization_id: UUID = Query(description="Organization scope"),
     datasource_id: UUID | None = Query(default=None, description="Optional datasource filter"),
-    object_type: str | None = Query(default=None, description="Filter by type: TABLE, COLUMN, ANNOTATION"),
+    object_type: str | None = Query(
+        default=None, description="Filter by type: TABLE, COLUMN, ANNOTATION"
+    ),
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     context: SecurityContext = Depends(
@@ -194,7 +194,9 @@ async def global_search(
                 display_name=hit.display_name,
                 score=hit.ts_rank,
             ),
-            datasource_id=UUID(hit.datasource_id) if hit.datasource_id else None,
+            # `FullTextHit.datasource_id` is already `UUID | None`; wrapping it in
+            # `UUID(...)` raised TypeError for every hit that had one.
+            datasource_id=hit.datasource_id,
         )
         for hit in page
     ]

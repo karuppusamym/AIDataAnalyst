@@ -185,6 +185,14 @@ a column add plus a backfill from `metadata_object_description WHERE object_type
 counts reach the operator only through `MetadataIngestionJob.object_counts` / `MetadataIngestionBatch.object_counts`
 (both JSON, so no migration was needed). Not blocking; noted so the asymmetry is a decision rather than an oversight.
 
+**`workflows/activities.py` — the pull path was not wired when this was written. It is now (2026-08-30):**
+`src/aida/workflows/activities.py` imports `persist_envelope_extensions` at line 27 and calls it at
+line 587, so all three transports persist the 1.1 axes. The tracker row this section proposed
+(`IN-5b`) is closed. The description below is kept as the record of what the gap was and how it
+was closed, not as a live claim.
+
+*Original text follows.*
+
 **`workflows/activities.py` — the pull path is not wired.**
 `persist_envelope_extensions` is called from `ingestion_api.ingest_metadata_envelope` and from
 `batch_ingestion._process_chunk`, so **both push paths** persist the 1.1 axes. The Temporal pull path

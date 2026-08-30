@@ -8,21 +8,20 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
-from aida.models import NegativeAssertionRecord
 from aida.negative_knowledge import (
     lift_suppression,
     query_negatives,
     search_negatives,
 )
 from aida.schemas import ApiModel, Page
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import SecurityContext, require_roles
 
 router = APIRouter(prefix="/v1", tags=["negative-knowledge"])
 

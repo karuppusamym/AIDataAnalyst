@@ -7,7 +7,7 @@ proposal. Scope: `00-product/`, `10-architecture/` (excluding ADR-0005/0017/0018
 
 Method: ground truth was taken from the code — `find`, `grep` for each claimed symbol,
 `compose.yaml`, `pyproject.toml`, `.github/workflows/ci.yml`, `migrations/versions/` — never
-from another document. `gap/01-baseline-reality.md` was used to aim the search, not as
+from another document. `gap/04-documentation-truth-pass.md` was used to aim the search, not as
 evidence; where it has itself gone stale (§6 below) the code won.
 
 **The device.** Corrections are a blockquote beginning **"Implementation status (2026-08-30)"**
@@ -238,7 +238,7 @@ hour, because the concurrent tenancy session is landing code:
   appeared during the pass. **I did not document them** — module 16's spec is mine but this is
   another stream's capability and theirs to describe. Flagging so it is not lost.
 
-**`gap/01-baseline-reality.md` is now partly stale** and is the document the review tells people
+**`gap/04-documentation-truth-pass.md` is now partly stale** and is the document the review tells people
 to read first. Three of its statements are no longer true: CI does not exist (it does,
 `.github/workflows/ci.yml`); the gateway-exclusivity contract is not wired (it is); workspaces
 have no model or table (`Workspace`, `WorkspaceMembership`, `SourceBinding` are in `models.py`
@@ -266,7 +266,7 @@ Column formats match the target sections — section A carries a `Mod` column, s
 
 ```
 | ST-12 | Documentation truth pass (`gap/02` C10) | all | 0 | P0 | DONE | — | Applied 2026-08-30. Every structural claim in `00-product/`, `10-architecture/`, `20-modules/`, `30-contracts/`, `40-engineering/`, `90-reference/` and `Docs/README.md` is either true of the code or carries a dated `Implementation status` callout naming the file that proves otherwise. 28 callouts added; `20-modules/00-module-index.md` gained code-sourced `Module dir?` and `Lives today in` columns for all 21 modules. Record and evidence: `Docs/review-2026-08/gap/04-documentation-truth-pass.md` |
-| ST-13 | Refresh `gap/01-baseline-reality.md` against the post-Phase-0 tree | all | 0 | P1 | TODO | — | Three of its claims are now false (CI absent, gateway-exclusivity contract unwired, no workspace model) and its LOC figures are low. Header dated and corrected, or a "superseded in part" note added |
+| ST-13 | Refresh `gap/04-documentation-truth-pass.md` against the post-Phase-0 tree | all | 0 | P1 | TODO | — | Three of its claims are now false (CI absent, gateway-exclusivity contract unwired, no workspace model) and its LOC figures are low. Header dated and corrected, or a "superseded in part" note added |
 | ST-14 | Reconcile emitted event names with `30-contracts/04-event-catalog.md` | all | 0 | P1 | TODO | — | Decide per event whether to rename the emitted `.v1` type or restate the catalog row, then land whichever. Exit: every `event_type=` argument in `src/` appears in the catalog and vice versa. Blocked on the U2 authorial question in `gap/04` §3 |
 | ST-15 | `edge_kind` vocabulary matches the lineage contract | 09 | 0 | P1 | TODO | — | Code assigns only `SUGGESTED_RELATIONSHIP` (absent from the documented enum) and defaults to `ETL`; `QUERY`/`VIEW`/`PROCEDURE`/`DBT`/`BI`/`AI_DECISION` are never written. Exit: one agreed vocabulary, a DB-level constraint enforcing it, and `30-contracts/06` matching |
 ```

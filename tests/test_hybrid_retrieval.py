@@ -15,37 +15,30 @@ from uuid import UUID, uuid4
 import pytest
 
 from aida.full_text_index import (
-    FullTextHit,
     build_search_document,
     build_ts_query,
     full_text_rank,
 )
 from aida.fusion_ranking import (
-    FactorDetail,
     FusionConfig,
     RankedCandidate,
     SignalScore,
     build_evidence,
     fuse_results,
     merge_candidates,
-    reciprocal_rank_fusion,
-    weighted_linear_fusion,
 )
 from aida.graph_retrieval import (
     GraphEdge,
-    GraphHit,
     GraphNode,
     KnowledgeGraph,
     expand_graph,
 )
 from aida.vector_retrieval import (
     HashEmbeddingProvider,
-    VectorHit,
     build_embedding_text,
     cosine_similarity,
     vector_search,
 )
-
 
 # =====================================================================
 # Full-text index tests (RT-4)

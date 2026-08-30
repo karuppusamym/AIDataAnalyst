@@ -49,14 +49,20 @@ directly from GovernedAgentOrchestrator.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
+from aida.embedding_provider import (
+    AsyncEmbeddingProvider,
+    EmbeddingUnavailable,
+    resolve_embedding_provider,
+)
 from aida.models import (
     BusinessDomain,
     BusinessEntity,
@@ -70,6 +76,7 @@ from aida.models import (
     MetadataColumn,
     MetadataTable,
 )
+from aida.secrets import SecretResolver
 
 # ---------------------------------------------------------------------------
 # Text normalisation & tokenisation
@@ -83,6 +90,9 @@ _STOP_WORDS = frozenset(
         "with", "you", "latest", "all", "give", "tell",
     }
 )
+
+
+logger = structlog.get_logger(__name__)
 
 
 def _tokenise(text: str) -> list[str]:
@@ -514,7 +524,6 @@ async def hybrid_retrieve_enhanced(
     Backward compatible: falls back gracefully when vector/graph data
     is not available.
     """
-    from aida.full_text_index import build_ts_query, full_text_rank
     from aida.fusion_ranking import (
         FusionConfig,
         RankedCandidate,
@@ -523,22 +532,19 @@ async def hybrid_retrieve_enhanced(
         fuse_results,
     )
     from aida.graph_retrieval import (
-        GraphEdge,
         GraphNode,
         KnowledgeGraph,
         expand_graph,
     )
     from aida.vector_retrieval import (
-        HashEmbeddingProvider,
-        VectorHit,
         build_embedding_text,
-        cosine_similarity,
         vector_search,
     )
 
     org_id = organization_id or datasource.organization_id
-    query_tokens = _tokenise(question)
-    scan_limit = settings.agent_retrieval_scan_limit
+    # Tokenisation and the scan cap belong to `hybrid_retrieve`, which is called below and
+    # applies both itself. Recomputing them here produced two unused locals and, worse, a
+    # second place where a cap could drift out of step with the one actually enforced.
     retrieval_limit = settings.agent_retrieval_limit
 
     # ------------------------------------------------------------------
@@ -567,18 +573,39 @@ async def hybrid_retrieve_enhanced(
     # ------------------------------------------------------------------
     # Stage 2: Vector similarity (if enabled)
     # ------------------------------------------------------------------
+    # The vector stage runs only with a real embedding model behind it. It used to build
+    # `HashEmbeddingProvider()` unconditionally and feed the result into fusion as a
+    # signal named "vector" -- but a SHA-256 digest has no semantic structure, so that
+    # score was noise carrying the name of a signal, and fusion could rank on it. With no
+    # provider configured the stage is skipped and the reason recorded, which is a
+    # smaller answer rather than a confidently wrong one (INV-4, INV-9).
+    embedding_provider: AsyncEmbeddingProvider | None = None
+    vector_skipped_reason: str | None = None
     if include_vector:
-        provider = HashEmbeddingProvider()
-        query_emb = provider.embed(question)
-
-        # Build vector candidates from lexical hits (bootstrapping)
-        vector_candidates: list[dict[str, Any]] = []
-        for hit in lexical_hits:
-            text = build_embedding_text(
-                name=hit.display_name,
-                object_type=hit.object_type,
+        try:
+            embedding_provider = resolve_embedding_provider(settings, SecretResolver(settings))
+        except EmbeddingUnavailable as exc:
+            vector_skipped_reason = str(exc)
+            logger.info(
+                "retrieval_vector_stage_skipped",
+                reason=vector_skipped_reason,
+                datasource_id=str(datasource.id),
             )
-            emb = provider.embed(text)
+
+    if include_vector and embedding_provider is not None:
+        # One batched call for the question and every candidate text, rather than a call
+        # per candidate: the provider bills and rate-limits per request, and N+1 network
+        # round trips inside a retrieval path is a latency budget spent on nothing.
+        candidate_texts = [
+            build_embedding_text(name=hit.display_name, object_type=hit.object_type)
+            for hit in lexical_hits
+        ]
+        batch = await embedding_provider.embed([question, *candidate_texts])
+        query_emb = list(batch.vectors[0])
+        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
+
+        vector_candidates: list[dict[str, Any]] = []
+        for hit, emb in zip(lexical_hits, candidate_embeddings, strict=True):
             vector_candidates.append({
                 "object_type": hit.object_type,
                 "object_id": hit.object_id,

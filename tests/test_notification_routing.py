@@ -1,3 +1,6 @@
+import pytest
+from pydantic import ValidationError
+
 from aida.main import app
 from aida.notification_routing import (
     Incident,
@@ -225,9 +228,7 @@ def test_notification_rule_create_validates() -> None:
 
 
 def test_notification_rule_update_requires_change() -> None:
-    import pytest
-
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         NotificationRuleUpdate()
 
 

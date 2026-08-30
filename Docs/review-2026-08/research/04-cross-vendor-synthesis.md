@@ -150,7 +150,7 @@ record does not exist in this market.
 4. **Marketing architecture.** Atlan's Context Lakehouse story and its documented
    backend do not reconcile. Whatever is in the architecture documents should be the
    thing that runs — a discipline the current doc set has partly lost and which
-   `gap/01-baseline-reality.md` documents.
+   `gap/04-documentation-truth-pass.md` documents.
 
 5. **Unbounded agent SQL.** Atlan's `query_asset` and Secoda's `run_sql` hand agents a
    live SQL socket. Defensible for them, wrong here: the differentiator is that an

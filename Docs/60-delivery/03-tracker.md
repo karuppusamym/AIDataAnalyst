@@ -1,7 +1,10 @@
 # Tracker
 
 > Status: **Living document.** Owner: Engineering lead. Update at every increment.
-> This is the single place to answer "what is the state of everything." It consolidates the open-work IDs from every module spec, the security backlog, and the test gaps.
+> The item-level open-work list: one row per work item, from every module spec, the security
+> backlog, the test gaps and the 2026-08 review. For the summary answer to "where are we" — the
+> capability matrix, invariant status, open gaps and the decisions waiting on a person — read
+> `60-delivery/00-status.md` instead. This file is the detail behind it, not a second copy of it.
 
 **Last reviewed:** 2026-08-30
 
@@ -20,6 +23,20 @@
 
 **Rules.** An item is `DONE` only when its exit condition is verifiably met. "Code written" is not `DONE`. `BLOCKED` requires a named blocker. An unassigned P0 is escalated at every review.
 
+### ID prefixes
+
+Two vocabularies meet in this file, and both are stable identifiers rather than sequence numbers.
+
+| Prefix | Meaning | Defined by |
+|---|---|---|
+| `ST-`, `CN-`, `IN-`, `CA-`, `PR-`, `RI-`, `SE-`, `GL-`, `LN-`, `KG-`, `DQ-`, `RT-`, `AG-`, `TL-`, `MG-`, `QG-`, `PG-`, `SD-`, `CP-`, `UX-`, `OB-`, `PF-` | Module open-work, matching the owning spec's table in `20-modules/` | The owning module spec |
+| `BD-` | A decision required from the bank | §J below |
+| `K-`, `C-`, `N-`, `E-`, `D-` | The 2026-08 review's verdict on an existing or proposed capability: **K**eep, **C**orrect, **N**ew, **E**ngineering debt, **D**rop | Re-homed here 2026-08-30 from `review-2026-08/gap/02-gap-diff-and-plan.md`, which stays as the historical plan with the original engineer-week and risk estimates |
+
+A review item and a module item can describe the same work from two directions — `N7` (build an
+ABAC engine) and `PG-7` (module 17 needs a policy decision point) are the same thing. Where that
+happens the row names both, rather than being listed twice.
+
 ---
 
 ## A. Structural foundation
@@ -27,8 +44,8 @@
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
 | ST-01 | Target structure + module template | all | 0 | P0 | DONE | — | `scripts/generate_module.py` generates the full anatomy (§7); `identity_tenancy` scaffold generated from it; `platform-is-the-lowest-layer` import-linter contract (ST-02) passes against the generated tree — verified 2026-08-29 (`lint-imports`: 1 kept, 0 broken) |
-| ST-02 | Import-linter ratchet in CI | all | 0 | P0 | DONE | — | `.github/workflows/ci.yml` added 2026-08-30 with five gates (ruff, mypy, lint-imports, single-Alembic-head, pytest). Three import-linter contracts pass, including the INV-2 gateway-exclusivity contract (QG-7). Recipe verified end-to-end in a clean checkout via `uv sync --frozen --extra dev`: ruff clean, mypy clean on 106 files, 3 contracts kept, 1 Alembic head, 387 tests passing. Pre-existing ruff (6) and mypy (2) failures were fixed so the gate is green from its first run rather than red on arrival. Broader `aida` layering contracts still land with decomposition |
-| ST-03 | Tier 0 invariant suite (9 tests) | all | 0 | P0 | DONE | — | All nine invariants executable in the default `pytest` run with no external service, no skips — verified 2026-08-30 (`ruff check tests` clean; full suite 560 passed, 2 xfailed). `tests/test_tier0_invariants.py` keeps INV-2/3/4/8 plus workspace-level INV-5; INV-1, INV-5 (API surface), INV-6, INV-7 and INV-9 land in `tests/test_inv{1,5,6,7,9}_*.py` on shared harnesses in `tests/support/`. Data-driven throughout: all 199 FastAPI routes enumerated (44 organization-scoped ones driven with a foreign tenant against a session that raises on first use), every connector in the registry, every mapped column, every Cypher statement in `src/aida`. 20 of 20 properties confirmed capable of failing by deliberate mutation. Two strict xfails record codebase gaps, not suite gaps: 13 endpoints in `ai_registry_api`/`product_marketplace_api` commit governed state with no audit row (INV-7), and capability flags are hand-declared rather than derived from certification (INV-9, needs E12). INV-1's live rebuild drill (E5) and INV-6's full ingestion sentinel sweep still need infrastructure; both are proven in-process instead and say so. Detail: `Docs/review-2026-08/gap/06-tier0-invariant-suite.md` One strict xfail remains and it records a codebase gap, not a suite gap: capability flags are hand-declared rather than derived from certification (INV-9, needs E12). The INV-7 xfail was closed 2026-08-30 under ST-17 and is now a passing test with no exemption list, and INV-5's `_TRANSITIVELY_SCOPED_WORKERS` exemption is likewise empty — `plan_profile_tasks` carries an explicit `organization_id` predicate. |
+| ST-02 | Import-linter ratchet in CI | all | 0 | P0 | DONE | — | `.github/workflows/ci.yml` added 2026-08-30 with five gates (ruff, mypy, lint-imports, single-Alembic-head, pytest). Three import-linter contracts pass, including the INV-2 gateway-exclusivity contract (QG-7). Recipe verified end-to-end in a clean checkout via `uv sync --frozen --extra dev`; re-verified 2026-08-30 after the authorization wiring: ruff clean, mypy clean on 120 files, 4 contracts kept, 1 Alembic head, 716 tests passing. Pre-existing ruff (6) and mypy (2) failures were fixed so the gate is green from its first run rather than red on arrival. Broader `aida` layering contracts still land with decomposition |
+| ST-03 | Tier 0 invariant suite (9 tests) | all | 0 | P0 | DONE | — | All nine invariants executable in the default `pytest` run with no external service, no skips — verified 2026-08-30 (`ruff check tests` clean; full suite 716 passed, 1 xfailed). `tests/test_tier0_invariants.py` keeps INV-2/3/4/8 plus workspace-level INV-5; INV-1, INV-5 (API surface), INV-6, INV-7 and INV-9 land in `tests/test_inv{1,5,6,7,9}_*.py` on shared harnesses in `tests/support/`. Data-driven throughout: all 199 FastAPI routes enumerated (44 organization-scoped ones driven with a foreign tenant against a session that raises on first use), every connector in the registry, every mapped column, every Cypher statement in `src/aida`. 20 of 20 properties confirmed capable of failing by deliberate mutation. Two strict xfails record codebase gaps, not suite gaps: 13 endpoints in `ai_registry_api`/`product_marketplace_api` commit governed state with no audit row (INV-7), and capability flags are hand-declared rather than derived from certification (INV-9, needs E12). INV-1's live rebuild drill (E5) and INV-6's full ingestion sentinel sweep still need infrastructure; both are proven in-process instead and say so. Detail: `Docs/review-2026-08/gap/06-tier0-invariant-suite.md` One strict xfail remains and it records a codebase gap, not a suite gap: capability flags are hand-declared rather than derived from certification (INV-9, needs E12). The INV-7 xfail was closed 2026-08-30 under ST-17 and is now a passing test with no exemption list, and INV-5's `_TRANSITIVELY_SCOPED_WORKERS` exemption is likewise empty — `plan_profile_tasks` carries an explicit `organization_id` predicate. |
 | ST-04 | Extract `platform/` | platform | 0 | P0 | IN PROGRESS | — | `db.py`, `config.py`, `logging.py`, `context.py` moved to `atlas.platform`, each with a re-export shim left at the old `aida.*` path so every existing caller (40+ import sites) is unchanged; `platform-is-the-lowest-layer` passes; full local suite green except 3 pre-existing failures in `test_operational_behaviors.py` unrelated to this change (concurrent WIP on `computed_usage_boost` scheduling, ADR-0017 §8). Not yet moved: `events.py`, `main.py` (still imports nearly every domain router — deferred to Phase 5, the `api.py` router split, rather than moved as-is), and the not-yet-built pagination/idempotency/error-taxonomy/telemetry scaffolding |
 | ST-05 | Split `models.py` into module schemas | all | 0 | P0 | TODO | — | No cross-schema FKs except `identity` |
 | ST-06 | Split `schemas.py` → `schemas`/`contracts` | all | 0 | P0 | TODO | — | `module-privacy` passes |
@@ -38,12 +55,12 @@
 | ST-10 | Per-module standalone test jobs | all | 0 | P1 | TODO | — | Each module's tests run alone |
 | ST-11 | Resolve `16 query-gateway`'s layer placement and the `09`↔`16` cycle (`10-architecture/04-module-decomposition.md` §5.3) | 09,16 | 0 | P0 | DONE | — | Resolved 2026-08-30 by checking the code rather than redesigning: no cycle exists. The gateway imports no lineage module and no lineage module imports the gateway; `extract_column_lineage` is defined inside `query_gateway.py`. The mutual edge was an error in the module register, now corrected. Rule recorded: the gateway emits, intelligence modules consume |
 | ST-12 | Documentation truth pass (`gap/02` C10) | all | 0 | P0 | DONE | — | Applied 2026-08-30. Every structural claim in `00-product/`, `10-architecture/`, `20-modules/`, `30-contracts/`, `40-engineering/`, `90-reference/` and `Docs/README.md` is either true of the code or carries a dated `Implementation status` callout naming the file that proves otherwise. 28 callouts added; `20-modules/00-module-index.md` gained code-sourced `Module dir?` and `Lives today in` columns for all 21 modules. Record and evidence: `Docs/review-2026-08/gap/04-documentation-truth-pass.md` |
-| ST-13 | Refresh `gap/01-baseline-reality.md` against the post-Phase-0 tree | all | 0 | P1 | TODO | — | Three of its claims are now false (CI absent, gateway-exclusivity contract unwired, no workspace model) and its LOC figures are low. Header dated and corrected, or a "superseded in part" note added |
+| ST-13 | Refresh the review's baseline snapshot against the post-Phase-0 tree | all | 0 | P1 | **DONE** | — | Resolved 2026-08-30 by retirement rather than refresh. The snapshot (formerly `review-2026-08/gap/01-baseline-reality.md`) was a deliberate point-in-time measurement and almost every number in it had moved — CI, contract count, test count, the workspace model. Refreshing it would have produced a second status document; it is now `_superseded/27-review-baseline-reality.md`, and `60-delivery/00-status.md` holds current state |
 | ST-14 | Reconcile emitted event names with `30-contracts/04-event-catalog.md` | all | 0 | P1 | TODO | — | Decide per event whether to rename the emitted `.v1` type or restate the catalog row, then land whichever. Exit: every `event_type=` argument in `src/` appears in the catalog and vice versa. Blocked on the U2 authorial question in `gap/04` §3 |
 | ST-15 | `edge_kind` vocabulary matches the lineage contract | 09 | 0 | P1 | TODO | — | Code assigns only `SUGGESTED_RELATIONSHIP` (absent from the documented enum) and defaults to `ETL`; `QUERY`/`VIEW`/`PROCEDURE`/`DBT`/`BI`/`AI_DECISION` are never written. Exit: one agreed vocabulary, a DB-level constraint enforcing it, and `30-contracts/06` matching |
 | ST-16 | `validate_sql` split and exposure (`gap/02` N14) | 16,19 | 0 | P0 | DONE | — | Landed 2026-08-30. `_run_validation` in `query_gateway.py` is the single pipeline; `validate()` is the no-execute entry point and `execute()` calls the same pipeline, so the two cannot drift. Exposed as MCP native tool `atlas__validate_sql` and `POST /v1/datasources/{id}/sql-validations`. INV-2 preserved (`execute_read_query` still has one call site; `lint-imports` 4 kept). 16 tests in `tests/test_sql_validation.py`. Detail: `Docs/review-2026-08/gap/05-validate-sql-handoff.md` |
 | ST-17 | INV-7 audit closeout — 13 unaudited mutations | 17,20 | 0 | P0 | DONE | — | Landed 2026-08-30. All 13 endpoints in `ai_registry_api.py` (6) and `product_marketplace_api.py` (7) call `record_audit(...)` in the same transaction as the mutation they describe, carrying principal, resource, tenant boundary, correlation id and outcome; a 14th audits the remediation-independence denial as `DENIED`. `_KNOWN_UNAUDITED_MUTATIONS` is empty and the strict xfail is gone, so a 14th unaudited endpoint fails on arrival and excusing it fails in the same commit. Ratchet mutation-tested by deleting the `record_audit` in `revoke_marketplace_access`. Detail: `Docs/review-2026-08/gap/09-inv7-audit-closeout.md` |
-| ST-18 | Ratify INV-7's meaning of "mutation" for lazily-created default rows | 17 | 0 | P1 | TODO | — | Architecture decides whether "mutation" means "stages a row" or "records an actor's decision", and `10-architecture/01-principles-and-invariants.md` says which. Recommendation and both sides of the trade-off in `gap/09-inv7-audit-closeout.md` §4: recommend "records an actor's decision", because `ensure_default_domain` and `ensure_organization_integration_policy` build their row from constants plus the tenant id, so naming a creator would manufacture attribution rather than preserve it. Exit: the document says which reading binds; if "stages a row" wins, both helpers return a created/found flag, the 8 GET call sites audit on the creating branch only, and `_LAZY_DEFAULT_WRITE_ROUTES` is deleted |
+| ST-18 | Ratify INV-7's meaning of "mutation" for lazily-created default rows | 17 | 0 | P1 | TODO | — | Architecture decides whether "mutation" means "stages a row" or "records an actor's decision", and `10-architecture/01-principles-and-invariants.md` says which. Recommendation and both sides of the trade-off in `review-2026-08/gap/09-inv7-audit-closeout.md` §4: recommend "records an actor's decision", because `ensure_default_domain` and `ensure_organization_integration_policy` build their row from constants plus the tenant id, so naming a creator would manufacture attribution rather than preserve it. Exit: the document says which reading binds; if "stages a row" wins, both helpers return a created/found flag, the 8 GET call sites audit on the creating branch only, and `_LAZY_DEFAULT_WRITE_ROUTES` is deleted |
 
 ## B. Connectors and ingestion
 
@@ -267,6 +284,72 @@
 | CE-2 | SOC 2 Type II | D | P1 | TODO | — | Report issued |
 | CE-3 | ISO 27001 | D | P2 | TODO | — | Certified |
 
+## 2026-08 review items
+
+The review's own vocabulary, carried here so the open-work list is one list. Estimates and risk
+ratings are the review's, and the reasoning behind each sits in
+`review-2026-08/gap/02-gap-diff-and-plan.md` — that file is now the historical plan and is not
+maintained as status.
+
+### Correct — existing capability that needs reshaping
+
+| ID | Item | Wks | Pri | Status | Exit |
+|---|---|:--:|:--:|:--:|---|
+| C1 | Tenancy model → three axes | — | P0 | **DONE** | ADR-0018 accepted; migration steps 1–4 built (`f1a2b3c4d5e6`). Step 5, retiring the old tenancy columns, is deliberately deferred until a repository base class exists (ST-05/06/07) |
+| C2 | `legal_entity` | — | P1 | **DONE** | Withdrawn in ADR-0018 rather than deferred; module 01's domain model corrected |
+| C3 | Agent runtime's last five states | 2 | P1 | TODO | Five independently-gated checkpoints that can each refuse, replacing one `for` loop applied after the gateway returned |
+| C4 | Lineage ↔ gateway cycle (ST-11) | 1 | P0 | **DONE** | No cycle existed in code — it was an error in the module register. The one-directional rule is now an import-linter contract |
+| C5 | Data quality as its own module | 2 | P2 | TODO | Baselines fold into profiling; gates become ABAC conditions — a policy rather than a subsystem |
+| C6 | Module count: 21 → 16 | — | P2 | TODO | Ships with the decomposition (ST-05 onward). Target map in `review-2026-08/target/05-target-architecture.md` §3 |
+| C7 | **Graph store as a configurable port** (was: remove Neo4j) | 2–3 | P1 | TODO | Decided 2026-08-30: keep Neo4j, selectable per organization. Three adapters — `postgres` (default, certified), `neo4j`, `disabled` — copying `vector_store.py`. Exit: (a) the port and the per-organization admin setting; (b) **a conformance suite asserting both backends return identical node sets, ordering, cap behaviour and truncation reasons** — not merely that both return something; (c) Neo4j running in CI, or the backend advertised as uncertified (INV-9); (d) the setting provably cannot reach the authorization path or the classification roll-up (INV-1). ADR-0020 amendment |
+| C8 | Defer Kafka | 1 | P2 | TODO | Keep the outbox (the hard part) and the envelope; remove a broker from a bank deployment |
+| C9 | Lineage confidence model | 1 | P1 | TODO | Store the derivation *method*, not a single number; policy decides what each method may do |
+| C10 | Documentation truth | 2 | P0 | **DONE** | ST-12. 28 dated callouts applied; record in `review-2026-08/gap/04-documentation-truth-pass.md` |
+
+### New — no foundation existed
+
+| ID | Item | Wks | Risk | Status | Note |
+|---|---|:--:|:--:|:--:|---|
+| N1 | Envelope v1.1 — views + DDL, routines + body, functions, comments, grants | 3 | Low | **DONE** | Shipped across PostgreSQL, Oracle, Snowflake, BigQuery. SQL stored redacted + fingerprinted, never raw (`d5f8b21c4a03`) |
+| N2 | View DDL → column-level lineage | 3 | Low | TODO | **Unblocked by N1.** Largest single lineage coverage win; `sqlglot` already in the stack |
+| N3 | Procedure body parsing (T-SQL, PL/SQL first) | 8–10 | **High** | TODO | Uncontested in the market and genuinely hard. Must degrade explicitly rather than silently under-report |
+| N4 | Lineage proposal / review / negative-knowledge workflow | 5 | Medium | TODO | Diff-based, impact-ordered, bulk decisions |
+| N5 | Hybrid retrieval (lexical ∪ vector ∪ graph) | 2 | Medium | IN PROGRESS | **Unblocked 2026-08-30.** Store built (ADR-0019) and the embedding provider chosen and implemented — OpenAI or Gemini, `src/aida/embedding_provider.py`, 12 tests. The fused path no longer feeds hash-derived noise into ranking as a `vector` signal; with no provider configured the stage is skipped and the reason logged. Remaining: embed the catalogue, and run the recall@10 evaluation *after policy filtering* described in `review-2026-08/decisions/02-embedding-model.md` |
+| N6 | Workspace primitive + expiring source bindings | — | — | **DONE** | Expiry enforced and tested; binding approval is maker-checker separated |
+| N7 | ABAC policy engine | — | — | **DONE, MEASURING** | Wired into execute, validate and five read surfaces via `authorization_gate.py`. Denies nothing — shadow mode. Residency attribute still open |
+| N8 | Document ingestion — upload, parse, section, map, claims | 6 | Medium | TODO | Data-dictionary spreadsheets are the highest-value case; build that path first |
+| N9 | Business graph | — | — | **DONE** | Recursive CTE traversal, effective-dated assignments, `as_of` history, materialised roll-up |
+| N10 | Knowledge compilation — pages, blocks, provenance, staleness, diff proposals | 10–12 | Medium | TODO | The differentiator, the largest new build, and the one nobody else has |
+| N11 | Tool generator B — view → tool | 3 | Low | TODO | Views are pre-curated queries; best quality per unit of effort |
+| N12 | Tool generator C — procedure → tool | 4 | Medium | TODO | Depends on N3. Eligible only when a parse *proves* the procedure read-only |
+| N13 | Federation planner + DuckDB join layer | 8 | **High** | TODO | Must preserve INV-2 — a leaf query per source, each through the gateway |
+| N14 | `validate_sql` tool | 2 | Low | **DONE** | Shares `_run_validation` with `execute`, so validation and execution cannot drift |
+| N15 | Agent registry + evaluation-gated publication | 5 | Medium | TODO | Makes "production-grade agent" evidenced rather than asserted |
+| N16 | Negative knowledge as a context-product section | 2 | Low | TODO | Nearly free — the data is a by-product of review workflows already running |
+| N17 | Exemplar store + benchmark suites | 4 | Low | TODO | Accuracy is a curation loop, not a model choice |
+| N18 | Ingestion-time prompt-risk screening | 2 | Low | **DONE** | `src/aida/ingest_screening.py`. Screened once at write; flagged text quarantined, not deleted |
+| N19 | UI rebuild on a real framework | 12+ | Medium | TODO | The one place "start from scratch" is the right call |
+
+### Engineering debt that blocks "production-grade"
+
+None of this is architecture. A bank's third-party risk process stops at several of these rows.
+
+| ID | Item | Wks | Status | Note |
+|---|---|:--:|:--:|---|
+| E1 | CI pipeline | 1 | **DONE** | ST-02. Five gates: ruff, mypy, lint-imports, single-head, pytest |
+| E2 | Import-linter gateway exclusivity (QG-7) | 0.5 | **DONE** | Converted INV-2 from convention to proof |
+| E3 | Import-linter module boundary contracts | 2 | TODO | Ships with the restructure (ST-05 onward) |
+| E4 | Tier-0 invariant suite | 4 | **DONE** | All nine have tests. Three carry named limits — `00-status.md` §3 |
+| E5 | Projection rebuild drill | 1 | TODO | Never run. INV-1's remaining limit. **Promoted to a prerequisite of C7** — a projection never proven rebuildable should not be offered as a selectable backend |
+| E6 | PITR restore drill | 1 | TODO | Never run |
+| E7 | Temporal failover drill | 1 | TODO | Never run |
+| E8 | Credential rotation drill | 1 | TODO | Never run |
+| E9 | Kill-switch drill | 0.5 | TODO | Never run — and the AI-safety argument depends on it |
+| E10 | Load / soak at 1M objects | 3 | TODO | p95 targets are published and unmeasured |
+| E11 | Penetration test | ext. | TODO | Not run |
+| E12 | Connector + lineage-parser certification corpus | 3 | TODO | INV-9's one remaining strict xfail is unverifiable without it |
+| E13 | Repo hygiene — `scratch/` in git history | 0.5 | **READY** | Measured: 19 tracked files, 7.9 MB, 9 tarballs, 22 MB `.git`. Touches shared history, so it needs a decision — `00-status.md` §6 decision 6 |
+
 ## I. Drill currency
 
 **A drill that has not been run and timed does not count.** This table is checked at every review; anything older than its cadence is escalated.
@@ -321,5 +404,6 @@ These do not block product development. They **do** block production release.
 
 - Roadmap: `60-delivery/01-roadmap.md`
 - Epic backlog: `60-delivery/02-epic-backlog.md`
-- Status matrix: `60-delivery/04-status-matrix.md`
-- Gap register: `60-delivery/05-gap-register.md`
+- Delivery status (the summary this file details): `60-delivery/00-status.md`
+- Accomplishment log: `60-delivery/06-accomplishment-log.md`
+- The 2026-08 review's original plan and estimates: `review-2026-08/gap/02-gap-diff-and-plan.md`

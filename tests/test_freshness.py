@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from aida.freshness import FreshnessResult, WatermarkConfig, evaluate_freshness
+from aida.freshness import WatermarkConfig, evaluate_freshness
 from aida.main import app
 from aida.schemas import FreshnessConfigUpsert, FreshnessStatusRead
 

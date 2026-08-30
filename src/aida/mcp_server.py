@@ -68,6 +68,7 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.config import Settings, get_settings
+from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
     ContextProductQualityDecision,
@@ -76,7 +77,6 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.mcp_budget import (
     McpBudgetDecision,
     budget_headers,
@@ -84,7 +84,6 @@ from aida.mcp_budget import (
     consume_mcp_consumer_budget,
 )
 from aida.models import (
-    ConsumptionRecord,
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,

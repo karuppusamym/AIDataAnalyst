@@ -125,9 +125,21 @@ class Settings(BaseSettings):
     # cap is a refusal with a reason code, not a truncation, because scoring an
     # arbitrary slice of a larger set returns plausible answers that are wrong.
     vector_bruteforce_candidate_cap: int = Field(default=5_000, ge=100, le=1_000_000)
+    # Which service produces embeddings (N5, decided 2026-08-30: OpenAI or Gemini, the
+    # same two providers the generation path already supports). `unset` is not a disabled
+    # feature but an unmade decision, and it fails closed: `resolve_embedding_provider`
+    # refuses rather than falling back to the deterministic hash double, because a
+    # "vector similarity" score computed from a SHA-256 digest is noise wearing the name
+    # of a signal (INV-4, INV-9).
+    embedding_provider: Literal["unset", "openai", "gemini"] = "unset"
+    # Resolved through the same path as every other model credential, so an embedding key
+    # inherits the same rotation, the same registry and the same production refusal of
+    # `env://`. Empty means unconfigured, which is a refusal.
+    embedding_credential_reference: str = Field(default="", max_length=500)
     # An embedding is only comparable to embeddings made by the same model. These are
     # pinned so that changing the model invalidates the index rather than silently
     # mixing incomparable vectors -- the failure mode of which is quietly bad search.
+    # Left at `unset`, the provider's documented default is used.
     embedding_model_id: str = Field(default="unset", max_length=200)
     embedding_model_version: str = Field(default="unset", max_length=100)
     embedding_dimensions: int = Field(default=768, ge=8, le=8192)

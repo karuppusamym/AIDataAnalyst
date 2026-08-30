@@ -6,7 +6,7 @@
 
 Answers *where did this data come from* — and, uniquely, *why did the agent choose this path*. Data lineage is table stakes; **AI decision lineage is whitespace W3** and no competitor models it.
 
-See `../competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` for the Collibra Data Lineage feature comparison that opened LN-9 through LN-12.
+See `../review-2026-08/research/05-collibra-lineage-and-platform.md` for the Collibra Data Lineage feature comparison that opened LN-9 through LN-12.
 
 ## 2. Jobs served
 

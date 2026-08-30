@@ -2993,7 +2993,9 @@ class AbacPolicyRecord(Base, TimestampMixin):
     effect: Mapped[str] = mapped_column(String(10), nullable=False)
     subject_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     resource_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    environment_conditions: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    environment_conditions: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
     priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)

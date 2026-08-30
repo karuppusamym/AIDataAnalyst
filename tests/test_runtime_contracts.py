@@ -5,7 +5,6 @@ from uuid import uuid4
 
 from aida.runtime_contracts import (
     ContractViolation,
-    EnforcementResult,
     QualityExpectation,
     RuntimeContract,
     SchemaExpectation,

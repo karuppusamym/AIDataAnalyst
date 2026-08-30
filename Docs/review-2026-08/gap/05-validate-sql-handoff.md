@@ -93,6 +93,10 @@ One appended `[[tool.importlinter.contracts]]` block — see §5.
 These strings are a published contract: an agent branches on them, so they are
 **append-only**. Renaming one is a breaking change to every MCP client.
 
+> **Moved 2026-08-30.** This table is a published contract and now lives in
+> `30-contracts/09-runtime-request-and-audit-contracts.md` §7, which is where it is maintained.
+> The copy below is left in place as the record of what shipped with N14.
+
 | Code | Severity | `ref` | Raised when |
 |---|---|---|---|
 | `SQL_PARSE_ERROR` | ERROR | — | The statement does not parse for the datasource's dialect |

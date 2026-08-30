@@ -385,7 +385,7 @@ def _extract_from_statement(
         target_table = _extract_target_table(statement)
         if not target_table:
             return []
-        inner_select = statement.find(exp.Select)
+        inner_select: exp.Select | exp.Union | None = statement.find(exp.Select)
         if inner_select is None:
             # Might be a UNION
             inner_select = statement.find(exp.Union)
@@ -400,9 +400,7 @@ def _extract_from_statement(
         target_table = _extract_target_table(statement)
         if not target_table:
             return []
-        inner_select = statement.find(exp.Select)
-        if inner_select is None:
-            inner_select = statement.find(exp.Union)
+        inner_select = statement.find(exp.Select) or statement.find(exp.Union)
         if inner_select is None:
             return []
         return _extract_edges_from_select(
@@ -425,7 +423,7 @@ def _extract_from_statement(
         return edges
 
     # Standalone SELECT (for procedure analysis)
-    if isinstance(statement, (exp.Select, exp.Union)):
+    if isinstance(statement, exp.Select | exp.Union):
         return _extract_edges_from_select(
             statement, "<RESULT>", dialect, table_aliases, has_filter
         )

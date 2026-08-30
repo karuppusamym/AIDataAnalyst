@@ -9,7 +9,7 @@ Atlas understands the enterprise data estate, enforces policy *before* any actio
 
 Two properties make it usable rather than decorative:
 
-- **Every claim about current state is honest.** `60-delivery/04-status-matrix.md` says `Pending` where a module does not exist, and `Not run` where a test has not been run.
+- **Every claim about current state is honest.** `60-delivery/00-status.md` says `Pending` where a module does not exist, and `Not run` where a test has not been run.
 - **Every decision names its revisit trigger.** An ADR with no revisit trigger is dogma, not a decision.
 
 > **Documentation-truth pass, 2026-08-30.** The first property above was not holding. The
@@ -34,9 +34,9 @@ Two properties make it usable rather than decorative:
 | **An engineer about to write code** | `40-engineering/01-development-spec.md` → `10-architecture/01-principles-and-invariants.md` → the relevant `20-modules/NN` spec |
 | **Doing product or strategy work** | `00-product/03-market-landscape.md` → `00-product/04-competitive-feature-matrix.md` → `00-product/05-differentiation-and-whitespace.md` |
 | **Reviewing security** | `50-security/01-security-architecture.md` → `50-security/02-threat-model.md` → `50-security/03-ai-safety-controls.md` |
-| **Planning delivery** | `60-delivery/01-roadmap.md` → `60-delivery/03-tracker.md` → `60-delivery/04-status-matrix.md` |
+| **Planning delivery** | `60-delivery/01-roadmap.md` → `60-delivery/03-tracker.md` → `60-delivery/00-status.md` |
 | **Operating the platform** | `40-engineering/07-local-runbook.md` → `10-architecture/09-deployment-topology.md` |
-| **Auditing or assessing risk** | `50-security/04-compliance-and-evidence.md` → `60-delivery/05-gap-register.md` |
+| **Auditing or assessing risk** | `50-security/04-compliance-and-evidence.md` → `60-delivery/00-status.md` |
 
 ## Structure
 
@@ -49,7 +49,7 @@ Docs/
 ├── 30-contracts/      Interfaces we promise not to break
 ├── 40-engineering/    How to build, test, ship, and run it
 ├── 50-security/       Trust model, threats, AI safety, compliance
-├── 60-delivery/       Roadmap, backlog, tracker, status, gaps, history
+├── 60-delivery/       Status (00), roadmap, backlog, tracker, history
 └── 90-reference/      Glossary, decision index, research sources
 ```
 
@@ -65,15 +65,16 @@ Docs/
 | [06 Product surface catalog](00-product/06-product-surface-catalog.md) | Every workbench, workspace, inspector, and console |
 | [07 Packaging and editions](00-product/07-packaging-and-editions.md) | Deployment models, editions, metering, limits |
 
-**Per-vendor deep dives** live in [`competitors/`](competitors/) and complement the segment-level analysis above with module breakdowns, UI-surface detail, and per-vendor weakness assessments:
+**Per-vendor deep dives** all live in [`review-2026-08/research/`](review-2026-08/research/) as of the 2026-08-30 consolidation — the older, shallower set under `competitors/` was retired to `_superseded/`. These complement the segment-level analysis above with primary-source module breakdowns, UI-surface detail, pricing and per-vendor weakness assessments:
 
 | Document | Contents |
 |---|---|
-| [Master strategy and product plan](competitors/00-application-planning-roadmap.md) | Positioning thesis, cross-vendor matrix, portal view architecture |
-| [Atlan](competitors/01-atlan-analysis.md) | Modules, UI surfaces, architecture, weaknesses |
-| [Collibra](competitors/02-collibra-analysis.md) | " |
-| [Alation](competitors/03-alation-analysis.md) | " |
-| [Cloud catalogs: Purview and Databricks](competitors/04-cloud-catalogs-purview-databricks.md) | " |
+| [Collibra](review-2026-08/research/01-collibra.md) | Lineage source matrix by mechanism, the MCP tool split, the AI Copilot's documented limits, pricing |
+| [Atlan](review-2026-08/research/02-atlan.md) | Personas and Purposes, the metadata-vs-data-policy enforcement question, the popularity formula |
+| [Alation, Purview, Unity Catalog, AI-native entrants](review-2026-08/research/03-alation-purview-unity-ainative.md) | The Articles / Document Hubs object model behind our wiki design; Databricks ABAC and Genie |
+| [Cross-vendor synthesis](review-2026-08/research/04-cross-vendor-synthesis.md) | Seven vendors × ~22 capabilities, and the four uncontested spaces derived from it |
+| [Collibra lineage and platform](review-2026-08/research/05-collibra-lineage-and-platform.md) | Screenshot-driven review; the source of the Unified Lineage Explorer requirements |
+| [Collibra marketplace, catalog, MCP, governance](review-2026-08/research/06-collibra-marketplace-and-mcp.md) | Second pass; what was genuinely new beyond the CP-1..CP-14 requirements |
 
 ### 10-architecture — How it is shaped
 
@@ -147,11 +148,10 @@ Full index with reading orders, **and a per-module map from bounded context to t
 
 | Document | Contents |
 |---|---|
+| [00 Delivery status](60-delivery/00-status.md) | **Start here.** The single answer to "where are we": capability matrix, invariant status, open gaps, and the decisions waiting on a person |
 | [01 Roadmap](60-delivery/01-roadmap.md) | Phases 0 and A–E, with exit criteria |
 | [02 Epic backlog](60-delivery/02-epic-backlog.md) | Epics with verifiable acceptance criteria |
-| [03 Tracker](60-delivery/03-tracker.md) | **170 tracked items, drill currency, bank decisions** |
-| [04 Status matrix](60-delivery/04-status-matrix.md) | What is implemented, partial, pending, or blocked |
-| [05 Gap register](60-delivery/05-gap-register.md) | Deliberate simplifications and open enterprise gaps |
+| [03 Tracker](60-delivery/03-tracker.md) | Item-level open work: module IDs, the 2026-08 review's C/N/E items, drill currency, bank decisions |
 | [06 Accomplishment log](60-delivery/06-accomplishment-log.md) | Append-only ledger of verified outcomes |
 | [07 Connector implementation backlog](60-delivery/07-connector-implementation-backlog.md) | Code-level backlog for framework hardening, Oracle, and BigQuery |
 
@@ -178,12 +178,12 @@ If you read nothing else:
 | Document | Update when |
 |---|---|
 | `60-delivery/03-tracker.md` | Every increment |
-| `60-delivery/04-status-matrix.md` | Every increment |
+| `60-delivery/00-status.md` | Every increment |
 | `60-delivery/06-accomplishment-log.md` | Append on every material outcome — never edit |
 | `20-modules/NN` | When that module's capability or open work changes |
 | `10-architecture/adr/` | New ADR for a new decision; **never edit an accepted one** |
 | `00-product/03,04,05` | Quarterly, or after a major vendor announcement |
 | `30-contracts/04-event-catalog.md` | Before publishing any new event |
-| `60-delivery/05-gap-register.md` | When a gap opens, closes, or changes its safe default |
+| `60-delivery/00-status.md` | When a gap opens, closes, or changes its safe default |
 
 **The rule that keeps this honest.** A document that claims a capability the status matrix does not support is a defect. When they disagree, the status matrix wins and the other document gets corrected.

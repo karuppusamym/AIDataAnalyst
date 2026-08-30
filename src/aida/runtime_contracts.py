@@ -10,10 +10,8 @@ and schema fingerprints into a unified enforcement surface.
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
@@ -24,13 +22,7 @@ from aida.models import (
     ContractSlaRecord,
     ContractViolationRecord,
     DataContractVersion,
-    DataQualityObservation,
-    MetadataColumn,
-    MetadataTable,
-    TableProfile,
-    utc_now,
 )
-
 
 # ---------------------------------------------------------------------------
 # Domain types
@@ -275,7 +267,11 @@ def _check_freshness(
             ContractViolation(
                 contract_id=contract.id,
                 violation_type="FRESHNESS_BREACH",
-                severity="CRITICAL" if elapsed_minutes > contract.freshness_sla_minutes * 2 else "WARNING",
+                severity=(
+                    "CRITICAL"
+                    if elapsed_minutes > contract.freshness_sla_minutes * 2
+                    else "WARNING"
+                ),
                 evidence={
                     "sla_minutes": contract.freshness_sla_minutes,
                     "elapsed_minutes": round(elapsed_minutes, 1),

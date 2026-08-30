@@ -14,12 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.models import NotificationRuleRecord, NotificationEventRecord
+from aida.models import NotificationEventRecord, NotificationRuleRecord
 from aida.schemas import (
+    NotificationEventRead,
     NotificationRuleCreate,
     NotificationRuleRead,
     NotificationRuleUpdate,
-    NotificationEventRead,
     Page,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles

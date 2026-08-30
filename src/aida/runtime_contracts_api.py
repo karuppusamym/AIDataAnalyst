@@ -16,18 +16,12 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
-    ContractSlaRecord,
     ContractViolationRecord,
     DataContractVersion,
     DataQualityObservation,
-    MetadataColumn,
-    MetadataTable,
     TableProfile,
 )
 from aida.runtime_contracts import (
-    ContractViolation,
-    EnforcementResult,
-    SlaStatus,
     contract_from_db,
     enforce_at_query_time,
     evaluate_contract,

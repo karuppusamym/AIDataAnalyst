@@ -9,19 +9,17 @@ evidence recording.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
     ToolPlanExecutionRecord,
     ToolPlanRecord,
     ToolPlanStepRecord,
-    utc_now,
 )
 
 # ---------------------------------------------------------------------------
@@ -134,7 +132,10 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
         issues.append(
             ValidationIssue(
                 step_sequence=0,
-                issue=f"plan has {len(plan.steps)} steps, exceeds budget of {plan.budget.max_steps}",
+                issue=(
+                    f"plan has {len(plan.steps)} steps, "
+                    f"exceeds budget of {plan.budget.max_steps}"
+                ),
                 severity="ERROR",
             )
         )
@@ -145,7 +146,10 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
         issues.append(
             ValidationIssue(
                 step_sequence=0,
-                issue=f"total expected cost {total_cost} exceeds budget of {plan.budget.max_cost_units}",
+                issue=(
+                    f"total expected cost {total_cost} "
+                    f"exceeds budget of {plan.budget.max_cost_units}"
+                ),
                 severity="ERROR",
             )
         )
@@ -156,7 +160,10 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
         issues.append(
             ValidationIssue(
                 step_sequence=0,
-                issue=f"total timeout {total_time}s exceeds budget of {plan.budget.max_time_seconds}s",
+                issue=(
+                    f"total timeout {total_time}s "
+                    f"exceeds budget of {plan.budget.max_time_seconds}s"
+                ),
                 severity="WARNING",
             )
         )
@@ -178,7 +185,10 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
                 issues.append(
                     ValidationIssue(
                         step_sequence=step.sequence,
-                        issue=f"dependency on step {dep} which is not a predecessor (circular/forward)",
+                        issue=(
+                            f"dependency on step {dep} which is not a "
+                            "predecessor (circular/forward)"
+                        ),
                         severity="ERROR",
                     )
                 )
@@ -256,7 +266,11 @@ async def execute_plan(
                 StepResult(
                     sequence=step.sequence,
                     status="SKIPPED",
-                    evidence={"reason": "dependency_not_met" if not deps_met else "earlier_failure"},
+                    evidence={
+                        "reason": (
+                            "dependency_not_met" if not deps_met else "earlier_failure"
+                        )
+                    },
                 )
             )
             continue

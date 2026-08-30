@@ -12,10 +12,7 @@ import pytest
 
 from aida.studio import (
     ChangeItem,
-    ChangeSet,
-    Conflict,
     ImpactPreview,
-    TestResult,
     add_item,
     compute_diff,
     compute_impact,

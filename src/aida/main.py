@@ -16,6 +16,7 @@ from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
+from aida.compliance_api import router as compliance_router
 from aida.config import get_settings
 from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
@@ -28,26 +29,25 @@ from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
+from aida.negative_knowledge_api import router as negative_knowledge_router
 from aida.notification_api import router as notification_router
 from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
-from aida.search_api import router as search_router
+from aida.runtime_contracts_api import router as runtime_contracts_router
 from aida.schemas import HealthResponse
+from aida.search_api import router as search_router
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.sql_validation_api import router as sql_validation_router
 from aida.stewardship_api import router as stewardship_router
+from aida.studio_api import router as studio_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
-from aida.runtime_contracts_api import router as runtime_contracts_router
-from aida.compliance_api import router as compliance_router
-from aida.negative_knowledge_api import router as negative_knowledge_router
 from aida.view_lineage_api import router as view_lineage_router
-from aida.studio_api import router as studio_router
 from aida.workspace_api import router as workspace_router
 
 settings = get_settings()

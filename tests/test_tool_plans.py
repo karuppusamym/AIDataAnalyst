@@ -3,8 +3,6 @@
 from datetime import UTC, datetime
 from uuid import uuid4
 
-import pytest
-
 from aida.tool_plans import (
     BudgetConsumed,
     PlanBudget,
@@ -12,7 +10,6 @@ from aida.tool_plans import (
     PlanStep,
     StepResult,
     ToolPlan,
-    ValidationIssue,
     _topological_order,
     validate_plan,
 )
@@ -70,7 +67,13 @@ def test_too_many_steps_fails_validation() -> None:
 
 def test_cost_budget_exceeded_fails() -> None:
     steps = [
-        PlanStep(sequence=1, tool_id="expensive", tool_version="1.0", parameters={}, expected_cost=200.0),
+        PlanStep(
+            sequence=1,
+            tool_id="expensive",
+            tool_version="1.0",
+            parameters={},
+            expected_cost=200.0,
+        ),
     ]
     plan = _make_plan(steps=steps, budget=PlanBudget(max_cost_units=100.0))
     result = validate_plan(plan)
@@ -130,8 +133,21 @@ def test_tool_availability_all_present() -> None:
 def test_time_budget_warning() -> None:
     """Total timeout exceeding budget is a warning, not error."""
     steps = [
-        PlanStep(sequence=1, tool_id="slow", tool_version="1.0", parameters={}, timeout_seconds=500),
-        PlanStep(sequence=2, tool_id="also-slow", tool_version="1.0", parameters={}, timeout_seconds=500, dependencies=[1]),
+        PlanStep(
+            sequence=1,
+            tool_id="slow",
+            tool_version="1.0",
+            parameters={},
+            timeout_seconds=500,
+        ),
+        PlanStep(
+            sequence=2,
+            tool_id="also-slow",
+            tool_version="1.0",
+            parameters={},
+            timeout_seconds=500,
+            dependencies=[1],
+        ),
     ]
     plan = _make_plan(steps=steps, budget=PlanBudget(max_time_seconds=600))
     result = validate_plan(plan)
@@ -208,7 +224,9 @@ def test_plan_result_completed() -> None:
             StepResult(sequence=1, status="COMPLETED"),
             StepResult(sequence=2, status="COMPLETED"),
         ],
-        budget_consumed=BudgetConsumed(steps_executed=2, time_seconds=10.0, tokens_used=0, cost_units=0),
+        budget_consumed=BudgetConsumed(
+            steps_executed=2, time_seconds=10.0, tokens_used=0, cost_units=0
+        ),
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
     )
@@ -225,7 +243,9 @@ def test_plan_result_partial_failure() -> None:
             StepResult(sequence=2, status="FAILED", error_message="tool error"),
             StepResult(sequence=3, status="SKIPPED", evidence={"reason": "earlier_failure"}),
         ],
-        budget_consumed=BudgetConsumed(steps_executed=2, time_seconds=5.0, tokens_used=0, cost_units=0),
+        budget_consumed=BudgetConsumed(
+            steps_executed=2, time_seconds=5.0, tokens_used=0, cost_units=0
+        ),
         started_at=datetime.now(UTC),
         completed_at=datetime.now(UTC),
     )

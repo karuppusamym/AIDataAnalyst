@@ -25,10 +25,8 @@ from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_plans import (
     PlanBudget,
-    PlanResult,
     PlanStep,
     ToolPlan,
-    ValidationResult,
     execute_plan,
     persist_execution,
     persist_plan,
@@ -202,7 +200,9 @@ async def get_tool_plan(
     session: AsyncSession = Depends(get_session),
 ) -> ToolPlanDetailRead:
     """Get tool plan with steps."""
-    org_id = context.require_organization()
+    # Called for its refusal, not its value: a request with no tenant claim is a 400
+    # before anything is loaded. The row's own organization is what scopes the read below.
+    context.require_organization()
 
     plan_record = await session.get(ToolPlanRecord, plan_id)
     if plan_record is None:
@@ -242,7 +242,9 @@ async def validate_tool_plan(
     session: AsyncSession = Depends(get_session),
 ) -> ValidationResponse:
     """Validate a tool plan."""
-    org_id = context.require_organization()
+    # Called for its refusal, not its value: a request with no tenant claim is a 400
+    # before anything is loaded. The row's own organization is what scopes the read below.
+    context.require_organization()
 
     plan_record = await session.get(ToolPlanRecord, plan_id)
     if plan_record is None:
@@ -423,7 +425,9 @@ async def cancel_tool_plan(
     session: AsyncSession = Depends(get_session),
 ) -> ToolPlanRead:
     """Cancel a running or draft tool plan."""
-    org_id = context.require_organization()
+    # Called for its refusal, not its value: a request with no tenant claim is a 400
+    # before anything is loaded. The row's own organization is what scopes the read below.
+    context.require_organization()
 
     plan_record = await session.get(ToolPlanRecord, plan_id)
     if plan_record is None:

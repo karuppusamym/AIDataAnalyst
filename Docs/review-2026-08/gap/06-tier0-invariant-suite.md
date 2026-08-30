@@ -222,7 +222,17 @@ sweep. Closing that needs the same fixture infrastructure as gap items E5/E10.
   `session.commit()` — which holds for every branch, including the rejection paths a fake
   source never reaches.
 
-### 6.1 A live INV-7 breach — 13 endpoints
+### 6.1 An INV-7 breach — 13 endpoints — **CLOSED 2026-08-30**
+
+> **Status update (2026-08-30).** All thirteen endpoints now audit. The strict xfail this section
+> describes is gone; `test_every_mutation_audits` passes with an **empty** exemption dict, and
+> `test_no_unaudited_mutation_remains` asserts it stays empty. The closure record — the endpoint →
+> handler → audit-action-name mapping, and the reasoning behind each name — is
+> `gap/09-inv7-audit-closeout.md`. §12 rows 1 and 3 below are likewise done. The section is kept
+> because the *finding* is the useful part: a data-driven scan found thirteen governed mutations
+> that a hand-written test list would have missed.
+
+#### The finding, as originally recorded
 
 `_KNOWN_UNAUDITED_MUTATIONS` in that module is **not an exemption, it is a finding.**
 Thirteen endpoints commit governed state with no audit record:

@@ -12,7 +12,6 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from uuid import UUID
 
 ABAC_ENGINE_VERSION = "abac-engine-v1"
 
@@ -80,7 +79,7 @@ def _match_condition(condition_key: str, condition_value: Any, attributes: dict[
         return False
 
     if isinstance(condition_value, list):
-        if isinstance(attr_value, (list, set, frozenset)):
+        if isinstance(attr_value, list | set | frozenset):
             return bool(set(attr_value) & set(condition_value))
         return attr_value in condition_value
 
@@ -92,9 +91,9 @@ def _match_condition(condition_key: str, condition_value: Any, attributes: dict[
         return True
 
     # Scalar comparison
-    if isinstance(attr_value, (list, set, frozenset)):
+    if isinstance(attr_value, list | set | frozenset):
         return condition_value in attr_value
-    return attr_value == condition_value
+    return bool(attr_value == condition_value)
 
 
 def _match_conditions(conditions: dict[str, Any], attributes: dict[str, Any]) -> bool:

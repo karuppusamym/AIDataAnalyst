@@ -13,6 +13,262 @@
 
 ---
 
+## 2026-08-30 (tenth entry)
+
+### Cleared the lint backlog — and four of the errors were runtime faults
+
+The ninth entry recorded 168 `ruff` and 16 `mypy` errors arriving with the parallel session's
+~35 new modules, and said they were "surfaced, not repaired". The owner's instruction was to fix
+rather than escalate, so this entry is the repair. **CI is green again**: ruff clean, mypy clean
+on 156 files, 4 import contracts kept, one Alembic head, 1,199 tests passing.
+
+#### The part worth remembering
+
+Most of the 184 were genuine noise — unused imports, import order, long lines. **Four were
+defects that would have failed at runtime**, and they were invisible because nobody reads 168
+warnings looking for the four that matter.
+
+* **`observability.traced` called the function it wrapped twice.** The `try` block enclosed the
+  wrapped call, so any exception was swallowed by `except Exception: pass` and the fallback path
+  then ran the function *again* — a silent duplicate side effect on every traced operation that
+  raised, with the caller seeing only the second failure. The `try` now guards tracer
+  acquisition alone, and the call sits in the `else` branch. Tracing must never change how many
+  times the thing it observes runs.
+* **`studio_api` called `record_outbox` without `aggregate_type` or `aggregate_id`** — both
+  required, so every change-set submit would have raised `TypeError`.
+* **`search_api` wrapped an existing `UUID` in `UUID(...)`** — `TypeError` for every search hit
+  carrying a datasource.
+* **`MetricsConfig` had no `insecure` field** that `configure_metrics` reads — `AttributeError`
+  the moment OTLP metrics were enabled.
+
+Two more were narrowed rather than silenced: a bare `except Exception` inside the injection
+detector, where a wide silent catch makes a decoder bug read exactly like "nothing found"; and
+an `assert False` in a test, which `python -O` deletes, turning the test into one that passes
+either way.
+
+A mistake of my own is worth recording with them: a blanket replacement of
+`org_id = context.require_organization()` hit eleven call sites when only five had an unused
+variable, breaking four functions. `ruff` reported the resulting `F821`s immediately and the
+repair was scoped per-function. The lesson is the ordinary one — a mechanical edit across call
+sites needs the scope check *before* the write, not the linter afterwards.
+
+#### The embedding model is chosen and built (N5)
+
+Decision: **OpenAI or Gemini**, the same two providers the generation path already supports.
+`src/aida/embedding_provider.py` implements both, with 12 tests.
+
+Reusing those two providers was the point rather than a shortcut: a third embedding vendor means
+a second credential path, a second retry policy and a second failure mode for one capability.
+The embedding credential resolves through the same reference mechanism as every model
+credential, inheriting its rotation, registry and production refusal of `env://`.
+
+**The most valuable thing this uncovered was already in the tree.** The fused retrieval path
+built `HashEmbeddingProvider()` *unconditionally* and fed its output into ranking as the
+`vector` signal. A hash has no semantic structure, so that score was noise wearing the name of a
+signal — and from outside, the result looked complete. Resolution now fails closed
+(`EmbeddingUnavailable` with a reason code, no fallback), and the vector stage is **skipped and
+logged** rather than substituted. A smaller answer beats a confidently wrong one, and reporting
+a capability you do not have is what INV-9 forbids.
+
+Three provider responses are refused rather than accepted: wrong vector count, wrong width,
+unparseable shape. Each would otherwise misalign vectors with the texts they describe or store
+something incomparable with what is already indexed — and **neither is detectable downstream**.
+They would surface as quietly bad search months later.
+
+#### Neo4j: configurable, not removed
+
+Recorded in full in the ninth entry; the tracker rows moved with it. C7 becomes "graph store as
+a configurable port" and E5, the projection rebuild drill, is promoted from deferred to a
+prerequisite of shipping the `neo4j` backend.
+
+#### Verification evidence
+
+- `ruff check .` clean · `mypy src` clean on **156** files · `lint-imports` 4 kept, 0 broken ·
+  `alembic heads` = 1 (`d5f8b21c4a03`) · **1,199 tests passing**, no failures, no skips.
+- The four runtime faults above were each confirmed by reading the call site, not by inference
+  from the error text.
+
+#### Current limitations
+
+- **Nothing embeds the catalogue yet.** The provider exists and is tested against mocked
+  transports; no vectors have been produced for real metadata, and no live call to either
+  provider has been made from this repository.
+- **The recall@10 evaluation has not been run** — 200–500 real steward questions, measured
+  *after* policy filtering, per `review-2026-08/decisions/02-embedding-model.md`. Choosing the
+  provider was the blocking decision; proving the choice is a separate piece of work.
+- The lint repair touched 20 files that a parallel session had open. It was done only after
+  confirming no writes since 05:49; if that session resumes on the same files, this is where a
+  conflict will appear.
+- `MAX_BATCH` is declared and not yet enforced by a chunking caller — the batching limit exists
+  as a constant for the backfill that does not exist yet.
+
+---
+
+## 2026-08-30 (ninth entry)
+
+### Neo4j: configurable, not removed — and a tree that moved underneath the last entry
+
+Two things, recorded together because the second changes how to read the first.
+
+#### The graph store becomes a setting (C7, ADR-0020 amendment)
+
+Asked whether both backends could be offered under an admin setting, and whether that was hard.
+It is not, and the reasoning is worth keeping because it reverses the framing of ADR-0020's
+own reversal condition.
+
+That condition said: reintroduce a graph store when p95 lineage traversal exceeds ~200 ms after
+caps, on a real estate. Under a removal, satisfying it meant weeks of work *at exactly the moment
+the estate was proving the need*. As a per-organization setting, satisfying it means changing a
+value for one organization and measuring the result. **A decision that can be tested is worth more
+than a decision that has to be defended**, so the amendment strengthens the ADR rather than
+softening it.
+
+The switch itself is cheap and the honest reason is that the surface is small: three modules read
+Neo4j, a gating boolean (`lineage_neo4j_read_enabled`) already exists, and `vector_store.py` is
+the same port-with-adapters pattern already built once under ADR-0019.
+
+**What actually costs the time is not the switch.** Two backends must answer *identically* —
+identical node sets, ordering, tie-breaks, cap behaviour and truncation reasons — or a
+configuration flag has quietly become a correctness surface, and the user who hits the difference
+has no way to diagnose it. One conformance suite run against both is the deliverable that makes
+the setting safe. Beyond that: no Neo4j runs in the test suite today (INV-1's test says so
+itself), so the second backend either joins CI or ships advertised as uncertified (INV-9); and
+INV-1 confines the setting to lineage and exploration reads, never the authorization path or the
+classification roll-up.
+
+The cost named rather than absorbed: removal would have eliminated two overdue drills. Keeping
+Neo4j puts them back and promotes **E5**, the projection rebuild drill, from deferred to a
+prerequisite. A projection never proven rebuildable should not be offered as a selectable backend.
+
+#### The working tree moved, and it no longer passes lint
+
+The eighth entry's verification block said 716 tests and 120 files, clean. That was true at 04:30
+and false by 12:25. The parallel session restarted, committed three times (latest `2c30a6f`), swept
+this session's authorization work into its commits, and added roughly 35 modules — ABAC API,
+studio, tool plans, view lineage, full-text index, fusion ranking, graph retrieval, compliance
+packs, consumption and AI-decision lineage.
+
+| | 04:30 | 12:25 |
+|---|:--:|:--:|
+| Tests passing | 716 | **1,187** |
+| Source files (mypy) | 120 | 155 |
+| `ruff` | clean | **168 errors** |
+| `mypy --strict` | clean | **16 errors in 7 files** |
+| Import contracts | 4 kept | 4 kept |
+| Alembic heads | 1 | 1 |
+
+**CI would be red.** The failures concentrate in the in-flight modules — `runtime_contracts.py`
+(12), `injection_defense.py` (10), `tool_plans.py` (9), `retrieval.py` (8), `compliance_api.py`
+(8) — and 119 of the 168 are auto-fixable, so this reads as work in progress rather than damage.
+It is recorded because the eighth entry's numbers are now wrong, and this log's own rule is that a
+correction is a new entry rather than an edit.
+
+It is also the first live test of the consolidation rule written four hours earlier. `00-status.md`
+now carries the moving-tree caveat in its header instead of a clean number that would have been
+false within the day — which is the behaviour the rule was written to produce.
+
+#### Verification evidence
+
+- 1,187 tests pass, no failures, no skips; 4 import contracts kept; one Alembic head
+  `d5f8b21c4a03`. `ruff` and `mypy` fail as tabulated above.
+- No code was changed in this entry. ADR-0020 gained an amendment; `00-status.md` §1 and decision
+  5, and tracker rows C7 and E5, were updated to match.
+
+#### Current limitations
+
+- **The lint regression is not this session's to fix.** Touching 46 files another session has open
+  is how two sessions produce a merge conflict neither can explain. It is surfaced, not repaired.
+- The C7 estimate (2–3 weeks) is judgement, not measurement: roughly a week for the port and the
+  admin setting, a week for the conformance suite and the CI service container, plus E5.
+- Nothing has yet been built for C7. This entry records a decision and its cost, not an outcome.
+
+---
+
+## 2026-08-30 (eighth entry)
+
+### Documentation consolidation — twelve status documents down to one
+
+Status had accumulated in twelve places, and four of them disagreed. This entry is the cleanup.
+It changed no code.
+
+#### What was actually wrong
+
+Not sprawl for its own sake — the failure mode was specific. `60-delivery/04-status-matrix.md`
+said 387 tests and Alembic head `9e4c7a12b5f8`; `05-gap-register.md` said retrieval was
+lexical-only; `review-2026-08/gap/01-baseline-reality.md` said CI did not exist and there were two
+import contracts; `10-architecture/01-principles-and-invariants.md` said four of nine invariants
+had no test. Each was true when written. Together they meant **no document could be trusted
+without checking the code**, which is the same as having no status document at all.
+
+Worse, one false claim was sitting in an authoritative *contract*, not a status file:
+`30-contracts/05-metadata-ingestion-envelope.md` stated that the envelope-1.1 pull path did not
+persist the new axes. `workflows/activities.py` imports `persist_envelope_extensions` at line 27
+and calls it at line 587. A reader would have concluded a shipped capability was missing.
+
+#### The consolidation
+
+`60-delivery/00-status.md` is now the single answer to "where are we": at-a-glance figures,
+capability matrix, per-invariant status *with each one's remaining limit*, deliberate
+simplifications, open gaps, the retest register, and the decisions waiting on a person. The two
+documents it absorbed are in `_superseded/`.
+
+Four rules were written into it, because a consolidation with no rule about what happens next just
+resets the clock:
+
+1. **One status claim, one home.** A document that needs to state status links to it. A dated
+   `Implementation status` callout in a design document is the exception and must name the file
+   that proves it.
+2. **The accomplishment log is history, not status.** Being in it is not evidence of still being
+   true.
+3. **A completed work-item write-up keeps its design rationale and loses its status section.** The
+   rationale explains why the code looks the way it does and is worth keeping.
+4. **A superseded document moves to `_superseded/` with a header naming its replacement.** Never
+   edited into agreement, never silently deleted.
+
+#### Also done
+
+- **The review's `C`/`N`/`E`/`D` item vocabulary was re-homed into `03-tracker.md`**, with status
+  per item, so the open-work list is one list. `gap/02` keeps the original week and risk estimates
+  and is now explicitly the historical plan.
+- **All vendor research moved into one folder.** Four shallower competitor analyses were superseded
+  by the review's primary-source research; the two Collibra deep-dives worth keeping moved to join
+  it. `Docs/competitors/` is gone.
+- **The two open decision briefs got their own home**, `review-2026-08/decisions/`. They were
+  buried among completion write-ups with colliding numeric prefixes, which is a poor place for the
+  only two documents in the folder that need someone to *do* something.
+- **A published contract was moved out of a handoff note.** The fourteen SQL-validation finding
+  codes — declared append-only, and a breaking change to every MCP client if renamed — lived in
+  `gap/05-validate-sql-handoff.md`. They are now `30-contracts/09` §7.
+- **`gap/06` presented a closed INV-7 breach as live.** Thirteen endpoints, fixed under ST-17, and
+  the section still read as an open finding. Marked closed, with the finding kept because the
+  finding is the useful part.
+- Two numeric-prefix collisions resolved; the stale "the repository is not under version control"
+  claim in `_superseded/README.md` corrected.
+
+#### Verification evidence
+
+- **Every relative link and backticked document path under `Docs/` resolves**, checked by script
+  across all 130 files. One exception is deliberate and reads as such: ST-13 names the retired
+  baseline snapshot as "formerly" at that path.
+- Code untouched, and re-verified unchanged: `ruff check .` clean, `mypy src` clean on 120 files,
+  `lint-imports` 4 contracts kept, 1 Alembic head, **716 tests passing**, 1 xfailed.
+
+#### Current limitations
+
+- **Paths in earlier entries of this log point at pre-consolidation locations.** This document is
+  append-only, so they were not rewritten — that rule is worth more than the broken links. The
+  mapping is in `_superseded/README.md`. In short: `60-delivery/04-status-matrix.md` and
+  `05-gap-register.md` → `60-delivery/00-status.md`; `Docs/competitors/*` → `_superseded/` or
+  `review-2026-08/research/`; `review-2026-08/gap/01` → `_superseded/27`; `gap/03` and the
+  embedding brief → `review-2026-08/decisions/`.
+- **`Docs/` is 130 files and this pass did not attempt to reduce that.** It removed *contradiction*,
+  not volume. `20-modules/` (21 files) still describes a decomposition the code has not reached,
+  and that is a code problem (ST-05 onward), not a documentation problem.
+- The consolidation is only as durable as rule 1. Nothing enforces it mechanically — there is no
+  test that fails when a second status claim appears, and writing one would mean parsing prose.
+
+---
+
 ## 2026-08-30 (seventh entry)
 
 ### The authorization decision is now wired into production paths (Task #19)

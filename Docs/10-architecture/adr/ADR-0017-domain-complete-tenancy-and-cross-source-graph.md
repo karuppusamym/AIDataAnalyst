@@ -249,6 +249,6 @@ single parent, which is a bigger change than this ADR should absorb speculativel
 - `10-architecture/adr/ADR-0005-tenancy-hierarchy.md` — hierarchy this ADR completes
 - `10-architecture/adr/ADR-0010-bounded-value-free-graph.md` — traversal contract this ADR extends
 - `20-modules/10-knowledge-graph.md` — KG-2, closed by this decision
-- `20-modules/06-relationships.md` — RL-5, closed by this decision
+- `20-modules/06-relationship-intelligence.md` — RL-5, closed by this decision
 - `20-modules/09-lineage.md` — LN-9's per-source unified graph becomes the datasource-level view
   beneath domain-level traversal

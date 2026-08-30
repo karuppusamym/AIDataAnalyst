@@ -1,6 +1,6 @@
+from aida.schemas import TrustFactorRead, TrustScoreRead
 from aida.trust_scoring import (
     AssetContext,
-    TrustScore,
     _compute_grade,
     _score_freshness,
     _score_lineage_depth,
@@ -9,8 +9,6 @@ from aida.trust_scoring import (
     _score_tool_approval,
     compute_trust_score,
 )
-from aida.schemas import TrustFactorRead, TrustScoreRead
-
 
 # --- _compute_grade ---
 

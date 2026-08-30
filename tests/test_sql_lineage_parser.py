@@ -11,14 +11,12 @@ import pytest
 
 from aida.sql_lineage_parser import (
     Confidence,
-    LineageEdge,
     TransformationType,
     _compute_sql_hash,
     _redact_literals,
     parse_procedure_lineage,
     parse_view_lineage,
 )
-
 
 # ---------------------------------------------------------------------------
 # Literal redaction
@@ -144,7 +142,10 @@ class TestViewLineageBasic:
         assert len(filtered) >= 1
 
     def test_aggregation_produces_aggregated_transformation(self) -> None:
-        sql = "CREATE VIEW v AS SELECT department, COUNT(id) AS cnt FROM employees GROUP BY department"
+        sql = (
+            "CREATE VIEW v AS SELECT department, COUNT(id) AS cnt "
+            "FROM employees GROUP BY department"
+        )
         result = parse_view_lineage(sql, "postgres")
 
         agg = [

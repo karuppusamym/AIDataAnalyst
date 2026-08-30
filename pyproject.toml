@@ -80,6 +80,14 @@ ignore_missing_imports = true
 module = ["google", "google.*"]
 ignore_missing_imports = true
 
+# The OTLP exporters are an optional install, imported lazily inside
+# `configure_tracing` / `configure_metrics` and guarded by ImportError, exactly like the
+# optional database drivers above. Without this the module cannot type-check on a machine
+# that has not installed the exporter extra.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.exporter.*"]
+ignore_missing_imports = true
+
 # ST-02 (Docs/40-engineering/06-refactor-plan.md, Phase 0): import-linter with a
 # permissive baseline. The ratchet: contracts below are real and currently pass,
 # so from today the dependency shape cannot get worse, even before the rest of

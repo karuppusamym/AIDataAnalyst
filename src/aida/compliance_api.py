@@ -9,16 +9,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import Field
-from sqlalchemy import and_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.compliance_packs import (
-    CompliancePack,
-    Framework,
     generate_pack,
     persist_pack,
-    _section_to_dict,
 )
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -163,7 +159,9 @@ async def get_compliance_pack(
     session: AsyncSession = Depends(get_session),
 ) -> CompliancePackRead:
     """Get compliance pack detail."""
-    org_id = context.require_organization()
+    # Called for its refusal, not its value: a request with no tenant claim is a 400
+    # before anything is loaded. The row's own organization is what scopes the read below.
+    context.require_organization()
 
     record = await session.get(CompliancePackRecord, pack_id)
     if record is None:
@@ -185,7 +183,9 @@ async def download_compliance_pack(
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """Download compliance pack as structured JSON."""
-    org_id = context.require_organization()
+    # Called for its refusal, not its value: a request with no tenant claim is a 400
+    # before anything is loaded. The row's own organization is what scopes the read below.
+    context.require_organization()
 
     record = await session.get(CompliancePackRecord, pack_id)
     if record is None:

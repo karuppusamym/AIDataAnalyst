@@ -11,10 +11,11 @@ Only tested change sets can be submitted for governance review (test gate).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
@@ -39,7 +40,7 @@ from aida.studio import (
     compute_impact,
     detect_conflicts,
 )
-from aida.studio_test_harness import TestFixture, run_test_suite
+from aida.studio_test_harness import run_test_suite
 
 router = APIRouter(prefix="/v1", tags=["studio"])
 
@@ -90,13 +91,32 @@ async def _load_items(
     return list(rows)
 
 
+def _literal[T: str](value: str, allowed: tuple[T, ...], *, field: str) -> T:
+    """Narrow a database `String` column to the Literal the domain type declares.
+
+    A `cast()` here would type-check and prove nothing: these columns carry no CHECK
+    constraint, so a value written by an older release, a manual fix or a future enum
+    member would flow into a domain object that claims it cannot exist. This fails closed
+    instead (INV-4) — a value the domain does not model is a 500 naming the field, not a
+    silently malformed object handed to a caller.
+    """
+    if value not in allowed:
+        raise ValueError(f"{field} holds an unmodelled value: {value!r}")
+    return value  # type: ignore[return-value]
+
 def _to_domain_item(db_item: StudioChangeItem) -> ChangeItem:
     """Convert a DB model item to the domain ChangeItem dataclass."""
     return ChangeItem(
         id=db_item.id,
-        object_type=db_item.object_type,
+        object_type=_literal(
+            db_item.object_type,
+            ("METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"),
+            field="StudioChangeItem.object_type",
+        ),
         object_id=db_item.object_id,
-        operation=db_item.operation,
+        operation=_literal(
+            db_item.operation, ("CREATE", "UPDATE", "DELETE"), field="StudioChangeItem.operation"
+        ),
         before_snapshot=db_item.before_snapshot,
         after_snapshot=db_item.after_snapshot,
         diff=db_item.diff,
@@ -115,8 +135,16 @@ def _to_domain_change_set(
         author=db_cs.author,
         base_version=db_cs.base_version_hash,
         items=[_to_domain_item(i) for i in db_items],
-        status=db_cs.status,
-        conflict_status=db_cs.conflict_status,
+        status=_literal(
+            db_cs.status,
+            ("DRAFT", "TESTING", "SUBMITTED", "MERGED", "REJECTED"),
+            field="StudioChangeSet.status",
+        ),
+        conflict_status=_literal(
+            db_cs.conflict_status,
+            ("CLEAN", "CONFLICTED", "RESOLVED"),
+            field="StudioChangeSet.conflict_status",
+        ),
     )
 
 
@@ -346,7 +374,7 @@ async def run_tests(
     suite_result = run_test_suite(domain_cs)
 
     # Persist item-level test status back to DB
-    for domain_item, db_item in zip(domain_cs.items, db_items):
+    for domain_item, db_item in zip(domain_cs.items, db_items, strict=False):
         db_item.test_status = domain_item.test_status
 
     test_run = StudioTestRun(
@@ -432,6 +460,8 @@ async def submit_change_set(
     record_outbox(
         session,
         organization_id=context.organization_id,
+        aggregate_type="studio_change_set",
+        aggregate_id=str(cs.id),
         event_type="studio.change_set.submitted",
         payload={
             "change_set_id": str(cs.id),
@@ -527,7 +557,6 @@ async def detect_conflicts_endpoint(
     The caller may supply `current_state` mapping "OBJECT_TYPE:object_id" to the
     current published snapshot.  If omitted, an empty state is used (no conflicts).
     """
-    from typing import Any
 
     cs = await _load_change_set(session, context, change_set_id)
     db_items = await _load_items(session, cs.id)

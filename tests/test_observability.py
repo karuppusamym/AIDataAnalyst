@@ -8,6 +8,7 @@ from aida.observability import (
     configure_tracing,
     traced,
 )
+from aida.schemas import ArchiveStatusRead, SloBudgetRead, SloDefinitionCreate
 from aida.siem_routing import (
     SecurityEvent,
     SiemConfig,
@@ -18,14 +19,12 @@ from aida.siem_routing import (
 from aida.worm_archive import (
     ArchiveConfig,
     AuditEventEnvelope,
-    archive_audit_events,
     apply_legal_hold,
+    archive_audit_events,
     release_legal_hold,
     retention_policy_for_classification,
     validate_archive_integrity,
 )
-from aida.schemas import ArchiveStatusRead, SloBudgetRead, SloDefinitionCreate
-
 
 # --- OB-1: OpenTelemetry tracing/metrics ---
 

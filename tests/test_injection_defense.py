@@ -13,7 +13,6 @@ from aida.injection_corpus import (
     DATA_EXFILTRATIONS,
     HOMOGLYPH_PAYLOADS,
     INSTRUCTION_OVERRIDES,
-    KNOWN_ATTACKS,
     MULTILINGUAL_INJECTIONS,
     OBFUSCATED_PAYLOADS,
     POLICY_BYPASSES,
@@ -21,7 +20,6 @@ from aida.injection_corpus import (
 )
 from aida.injection_defense import (
     INJECTION_DEFENSE_VERSION,
-    ScreeningResult,
     _detect_encoded_payloads,
     _detect_homoglyph_evasion,
     _detect_zero_width_steganography,
@@ -29,7 +27,6 @@ from aida.injection_defense import (
     screen_metadata,
     screen_metadata_batch,
 )
-
 
 # ---------------------------------------------------------------------------
 # All corpus patterns yield zero bypasses

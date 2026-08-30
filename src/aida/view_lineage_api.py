@@ -7,7 +7,7 @@ procedure bodies.  Definitions are parsed only -- never executed.
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
@@ -15,11 +15,11 @@ from aida.db import get_session
 from aida.events import record_audit
 from aida.models import DataSource, ProcedureLineageEdge, ViewLineageEdge
 from aida.schemas import (
+    LineageEdgeRead,
     ProcedureLineageEdgeRead,
     ViewLineageEdgeRead,
     ViewLineageParseRequest,
     ViewLineageParseResponse,
-    LineageEdgeRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_lineage_parser import parse_procedure_lineage, parse_view_lineage

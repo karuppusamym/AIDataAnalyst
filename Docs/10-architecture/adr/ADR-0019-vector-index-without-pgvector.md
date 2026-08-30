@@ -121,3 +121,70 @@ are routinely above a few thousand — that is, if the pre-filter turns out not 
 in practice. Reverse toward `pgvector` if the estate's database standard ever adopts it,
 at which point the local table remains authoritative and the extension becomes an index
 over it rather than a replacement for it.
+
+
+## Amendment, 2026-08-30 — the embedding model is chosen
+
+The owner's decision: **embeddings come from OpenAI or Gemini** — the same two providers the
+generation path already supports. `src/aida/embedding_provider.py` implements both, and
+`Settings.embedding_provider` selects between them.
+
+This closes the one thing this ADR deliberately left open. The port decided *where* vectors
+are searched and needed no extension to do it; nothing produced a vector, because
+`index_signature` pins `(provider, model_id, model_version, dimensions, chunking_version)`
+and choosing wrong means reindexing rather than degrading.
+
+**Reusing the generation providers was the point, not a shortcut.** A third embedding vendor
+would have meant a second credential path, a second retry policy and a second failure mode
+for one capability. Instead the embedding credential resolves through the same reference
+mechanism as every model credential, so it inherits the same rotation, the same registry and
+the same production refusal of `env://`.
+
+### The property that matters most
+
+**A stand-in never silently becomes the real thing.** `vector_retrieval.HashEmbeddingProvider`
+derives a vector from a SHA-256 digest. It is a good test double and a terrible model: a hash
+has no semantic structure, so a "vector similarity" computed from one is noise carrying the
+name of a signal.
+
+The fused retrieval path built that provider **unconditionally** and fed its output into
+ranking as the `vector` signal. Nothing looked wrong from outside — a complete-looking result,
+ranked partly on noise. Two changes fix it:
+
+* `resolve_embedding_provider` fails closed (INV-4). With no provider configured it raises
+  `EmbeddingUnavailable` carrying a reason code, and returns no fallback.
+* The vector stage is **skipped and the reason logged** when that happens, rather than
+  substituted. A smaller answer beats a confidently wrong one, and reporting a capability you
+  do not have is precisely what INV-9 forbids.
+
+### Defaults and shape
+
+| | OpenAI | Gemini |
+|---|---|---|
+| Default model | `text-embedding-3-small` | `gemini-embedding-001` |
+| Endpoint | `POST /embeddings` | `POST /models/{model}:batchEmbedContents` |
+| Width control | `dimensions` | `outputDimensionality` |
+| Credential | `Authorization: Bearer` | `x-goog-api-key` **header** |
+
+Both support dimension reduction, so `embedding_dimensions` is honoured rather than dictated.
+The Gemini key goes in a header rather than a query parameter deliberately: a credential in a
+URL ends up in access logs, proxies and browser history.
+
+One batched call embeds the question and every candidate together — the providers bill and
+rate-limit per request, and N+1 round trips inside a retrieval path spends a latency budget on
+nothing.
+
+### Three refusals worth naming
+
+A response is rejected rather than accepted when it returns the wrong number of vectors, a
+vector of the wrong width, or a shape that does not parse. Each would otherwise misalign
+vectors with the texts they describe, or store something incomparable with what is already
+indexed — and **neither failure is detectable downstream**. They surface as quietly bad search
+months later, which is the worst way for this to go wrong.
+
+### Still open
+
+The model is chosen; the corpus is not embedded. Nothing yet writes vectors for the catalogue,
+and the evaluation described in `review-2026-08/decisions/02-embedding-model.md` — 200–500 real
+steward questions, recall@10 measured *after* policy filtering — has not been run. Choosing the
+provider was the blocking decision; proving the choice is the next piece of work.

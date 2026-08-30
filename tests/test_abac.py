@@ -6,14 +6,12 @@ import pytest
 
 from aida.abac import (
     ABAC_ENGINE_VERSION,
-    AbacDecision,
     AbacPolicy,
-    evaluate,
-    simulate,
     _match_condition,
     _match_conditions,
+    evaluate,
+    simulate,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -103,7 +101,13 @@ class TestEvaluation:
     def test_deny_overrides_permit(self) -> None:
         policies = [
             _policy(id="permit", effect="PERMIT", subject={"role": "admin"}, priority=200),
-            _policy(id="deny", effect="DENY", subject={"role": "admin"}, resource={"classification": "TOP_SECRET"}, priority=100),
+            _policy(
+                id="deny",
+                effect="DENY",
+                subject={"role": "admin"},
+                resource={"classification": "TOP_SECRET"},
+                priority=100,
+            ),
         ]
         result = evaluate(
             {"role": "admin"},
@@ -124,8 +128,12 @@ class TestEvaluation:
             ),
         ]
 
-        assert evaluate({"role": "analyst"}, {"classification": "PUBLIC"}, {}, policies).decision == "PERMIT"
-        assert evaluate({"role": "analyst"}, {"classification": "RESTRICTED"}, {}, policies).decision == "DENY"
+        public = evaluate({"role": "analyst"}, {"classification": "PUBLIC"}, {}, policies)
+        assert public.decision == "PERMIT"
+        restricted = evaluate(
+            {"role": "analyst"}, {"classification": "RESTRICTED"}, {}, policies
+        )
+        assert restricted.decision == "DENY"
 
     def test_environment_conditions_evaluated(self) -> None:
         policies = [
@@ -244,7 +252,13 @@ class TestSimulation:
     def test_simulate_vary_subject_attrs(self) -> None:
         policies = [
             _policy(effect="PERMIT", subject={"role": "admin"}),
-            _policy(id="deny-viewer", effect="DENY", subject={"role": "viewer"}, resource={"classification": "RESTRICTED"}, priority=10),
+            _policy(
+                id="deny-viewer",
+                effect="DENY",
+                subject={"role": "viewer"},
+                resource={"classification": "RESTRICTED"},
+                priority=10,
+            ),
         ]
 
         results = simulate(

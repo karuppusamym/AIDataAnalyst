@@ -8,9 +8,13 @@ without a database, matching the pattern in tests/test_mcp_server.py.
 
 from __future__ import annotations
 
+from datetime import UTC
+
+import pytest
+from pydantic import ValidationError
+
 from aida.consumption_lineage import ConsumptionEdge
 from aida.consumption_lineage_api import ConsumptionRecordPage, ConsumptionRecordRead
-
 
 # ---------------------------------------------------------------------------
 # ConsumptionEdge dataclass
@@ -83,11 +87,10 @@ def test_consumption_edge_immutable() -> None:
         correlation_id="c",
         policy_decision="ALLOW",
     )
-    try:
+    # `assert False` disappears under `python -O`, which would turn this into a test that
+    # passes whether or not the dataclass is frozen.
+    with pytest.raises(AttributeError):
         edge.consumer_id = "b"  # type: ignore[misc]
-        assert False, "Expected frozen dataclass to reject assignment"
-    except AttributeError:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +99,7 @@ def test_consumption_edge_immutable() -> None:
 
 
 def test_consumption_record_read_schema() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
     from uuid import uuid4
 
     record = ConsumptionRecordRead(
@@ -109,7 +112,7 @@ def test_consumption_record_read_schema() -> None:
         channel="MCP",
         correlation_id="corr-100",
         policy_decision="ALLOW",
-        consumed_at=datetime.now(timezone.utc),
+        consumed_at=datetime.now(UTC),
     )
     assert record.consumer_id == "agent-a"
     assert record.details == {}
@@ -124,12 +127,12 @@ def test_consumption_record_page_schema() -> None:
 
 def test_consumption_record_read_rejects_extra_fields() -> None:
     """ApiModel has extra='forbid' -- extra fields must be rejected."""
-    from datetime import datetime, timezone
+    from datetime import datetime
     from uuid import uuid4
 
-    import pytest  # noqa: F811
-
-    with pytest.raises(Exception):
+    # Narrowed from a blind `Exception`: that would also pass on a TypeError from a
+    # renamed field, which is the opposite of what this asserts.
+    with pytest.raises(ValidationError):
         ConsumptionRecordRead(
             id=uuid4(),
             organization_id=uuid4(),
@@ -140,6 +143,6 @@ def test_consumption_record_read_rejects_extra_fields() -> None:
             channel="MCP",
             correlation_id="c",
             policy_decision="ALLOW",
-            consumed_at=datetime.now(timezone.utc),
+            consumed_at=datetime.now(UTC),
             unexpected_field="should fail",
         )

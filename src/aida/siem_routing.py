@@ -140,6 +140,7 @@ def route_to_siem(event: SecurityEvent, config: SiemConfig) -> bool:
             event_type=event.event_type,
             severity=event.severity,
             endpoint=config.endpoint,
+            payload_field_count=len(payload),
         )
         return True
     else:
