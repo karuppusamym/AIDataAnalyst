@@ -10490,6 +10490,195 @@
         "title": "GovernanceDecisionRequest",
         "type": "object"
       },
+      "GovernanceReviewBulkDecisionItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "review_id": {
+            "title": "Review Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "status"
+        ],
+        "title": "GovernanceReviewBulkDecisionItemRead",
+        "type": "object"
+      },
+      "GovernanceReviewBulkDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GovernanceReviewBulkSelectionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rationale_by_review_id": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "format": "uuid"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale By Review Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "review_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 10000,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Ids"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "GovernanceReviewBulkDecisionRequest",
+        "type": "object"
+      },
+      "GovernanceReviewBulkDecisionResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/GovernanceReviewBulkDecisionItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "selection_mode": {
+            "enum": [
+              "EXPLICIT",
+              "FILTER"
+            ],
+            "title": "Selection Mode",
+            "type": "string"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision",
+          "selection_mode",
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "truncated",
+          "results"
+        ],
+        "title": "GovernanceReviewBulkDecisionResultRead",
+        "type": "object"
+      },
+      "GovernanceReviewBulkSelectionFilter": {
+        "additionalProperties": false,
+        "description": "Reuses `list_governance_reviews`'s existing filter shape (status,\nscoped to the caller's organization) plus an optional object_type\nnarrowing, rather than inventing a new query language.",
+        "properties": {
+          "object_type": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "status": {
+            "default": "PENDING",
+            "maxLength": 30,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "GovernanceReviewBulkSelectionFilter",
+        "type": "object"
+      },
       "GovernanceReviewRead": {
         "additionalProperties": false,
         "properties": {
@@ -41337,6 +41526,135 @@
           }
         },
         "summary": "List Governance Reviews",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/bulk-decision": {
+      "post": {
+        "description": "PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING\ngovernance reviews in one call, across whichever object type(s) the\nunified review queue already supports, by explicit id list or by a\nstatus/object-type filter scoped to the caller's organization.\n\nExactly the same maker != checker, PENDING-only, and organization-\nboundary rules as `decide_governance_review` apply per item -- this\ncalls `_apply_governance_review_decision`, the same core the\nsingle-item endpoint calls, so the two paths cannot drift -- but a rule\nviolation on one item marks that item FAILED and continues (RL-6/CT-1's\npartial-success precedent) rather than aborting the whole batch. Each\nitem's dispatch runs inside its own SAVEPOINT (`session.begin_nested`),\nso a failure partway through one item's (possibly multi-table) side\neffects can never leak a partial write into an item reported FAILED --\nverified directly against a real SAVEPOINT rollback, not assumed.\n\nSelection is always a single bulk query: an explicit id list is deduped\nin Python then fetched with one `WHERE id IN (...)`, and a filter pushes\nevery predicate into SQL via `_resolve_governance_review_bulk_subjects`.\nNothing here loads the full review table into Python to filter it there.",
+        "operationId": "bulk_decide_governance_reviews_v1_governance_reviews_bulk_decision_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GovernanceReviewBulkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewBulkDecisionResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Decide Governance Reviews",
         "tags": [
           "semantic-governance"
         ]
