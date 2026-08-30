@@ -2152,13 +2152,28 @@ class DbtResource(Base, TimestampMixin):
 
 
 class DbtLineageEdge(Base, TimestampMixin):
+    """A dependency between two dbt resources in one manifest snapshot.
+
+    `edge_type="DEPENDS_ON"` rows are table-level (one per manifest
+    `depends_on` pair) and have no column granularity -- `source_column` /
+    `target_column` are the empty string on those rows, never NULL, so the
+    widened unique constraint below stays meaningful (Postgres treats NULLs
+    as distinct from one another, which would defeat de-duplication by the
+    full column set). `edge_type="COLUMN_DEPENDS_ON"` rows (LN-5) add
+    column-level detail extracted from `compiled_sql_redacted` where the
+    manifest provides parseable SQL; `transformation_type` / `confidence`
+    are only meaningful on those rows and are NULL on table-level ones.
+    """
+
     __tablename__ = "dbt_lineage_edge"
     __table_args__ = (
         UniqueConstraint(
             "artifact_import_id",
             "source_resource_id",
             "target_resource_id",
-            name="uq_dbt_lineage_edge_import_source_target",
+            "source_column",
+            "target_column",
+            name="uq_dbt_lineage_edge_import_source_target_column",
         ),
     )
 
@@ -2176,6 +2191,10 @@ class DbtLineageEdge(Base, TimestampMixin):
         ForeignKey("dbt_resource.id", ondelete="CASCADE"), nullable=False, index=True
     )
     edge_type: Mapped[str] = mapped_column(String(30), default="DEPENDS_ON", nullable=False)
+    source_column: Mapped[str | None] = mapped_column(String(255), default="", server_default="")
+    target_column: Mapped[str | None] = mapped_column(String(255), default="", server_default="")
+    transformation_type: Mapped[str | None] = mapped_column(String(30))
+    confidence: Mapped[str | None] = mapped_column(String(30))
 
 
 class MetadataIngestionJob(Base, TimestampMixin):
