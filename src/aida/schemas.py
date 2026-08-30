@@ -370,6 +370,8 @@ class AnalysisRunRead(ApiModel):
     discovered_tables: int
     discovered_columns: int
     discovered_constraints: int
+    discovered_indexes: int
+    discovered_partitions: int
     created_objects: int
     changed_objects: int
     deprecated_objects: int
@@ -477,6 +479,28 @@ class MetadataConstraintRead(ApiModel):
     columns: list[str]
     referenced_table_id: UUID | None
     referenced_columns: list[str]
+    status: str
+
+
+class MetadataIndexRead(ApiModel):
+    id: UUID
+    table_id: UUID
+    name: str
+    index_type: str
+    columns: list[str]
+    is_unique: bool
+    is_primary: bool
+    status: str
+
+
+class MetadataPartitionRead(ApiModel):
+    id: UUID
+    table_id: UUID
+    name: str
+    partition_type: str
+    ordinal_position: int
+    key_columns: list[str]
+    high_value: str | None
     status: str
 
 
@@ -1685,4 +1709,10 @@ class Page(ApiModel):
     items: list[Any]
     limit: int
     offset: int
-    total: int
+    total: int | None = None
+    # Present only when the request used cursor-based (keyset) pagination: an
+    # opaque token for the next page, or None once no further rows remain.
+    # `total` is intentionally omitted (None) in that mode -- counting every
+    # matching row is itself an O(n) scan, which cursor pagination exists to
+    # avoid, so it is never computed on the cursor path.
+    next_cursor: str | None = None

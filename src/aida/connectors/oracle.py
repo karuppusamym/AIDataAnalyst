@@ -16,7 +16,9 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_grouped_foreign_key_rows,
+    append_grouped_index_rows,
     append_grouped_key_rows,
+    append_partition_rows,
     assemble_catalog,
     build_table_map_from_column_rows,
 )
@@ -115,8 +117,8 @@ class OracleConnector(Connector):
     dialect = "oracle"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
         constraints=True,
-        indexes=False,
-        partitions=False,
+        indexes=True,
+        partitions=True,
         explain=False,
         delegated_identity=False,
         approximate_statistics=True,
@@ -257,10 +259,112 @@ class OracleConnector(Connector):
                     }
                     for row in _rows_as_dicts(cursor.description, await cursor.fetchall())
                 ]
+
+                # ALL_INDEXES/ALL_IND_COLUMNS mirror ALL_CONSTRAINTS/ALL_CONS_COLUMNS above.
+                # Whether an index backs a PRIMARY KEY constraint is surfaced via a LEFT JOIN
+                # against ALL_CONSTRAINTS on the same (owner, index_name) rather than a second
+                # round trip.
+                indexes_query = f"""
+                    SELECT
+                        ai.owner AS table_schema,
+                        ai.table_name AS table_name,
+                        ai.index_name AS index_name,
+                        ai.index_type AS index_type,
+                        ai.uniqueness AS uniqueness,
+                        aic.column_name AS column_name,
+                        aic.column_position AS ordinal_position,
+                        ac.constraint_type AS backing_constraint_type
+                    FROM ALL_INDEXES ai
+                    JOIN ALL_IND_COLUMNS aic
+                      ON aic.index_owner = ai.owner
+                     AND aic.index_name = ai.index_name
+                     AND aic.table_name = ai.table_name
+                    LEFT JOIN ALL_CONSTRAINTS ac
+                      ON ac.owner = ai.owner
+                     AND ac.constraint_name = ai.index_name
+                     AND ac.constraint_type = 'P'
+                    WHERE {_schema_exclusion_clause("ai.owner")}
+                    ORDER BY ai.owner, ai.table_name, ai.index_name, aic.column_position
+                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                await cursor.execute(indexes_query)
+                index_rows = [
+                    {
+                        "table_schema": row["TABLE_SCHEMA"],
+                        "table_name": row["TABLE_NAME"],
+                        "index_name": row["INDEX_NAME"],
+                        "index_type": row["INDEX_TYPE"],
+                        "is_unique": str(row["UNIQUENESS"]).upper() == "UNIQUE",
+                        "is_primary": row["BACKING_CONSTRAINT_TYPE"] == "P",
+                        "column_name": row["COLUMN_NAME"],
+                    }
+                    for row in _rows_as_dicts(cursor.description, await cursor.fetchall())
+                ]
+
+                partition_type_query = f"""
+                    SELECT owner AS table_schema, table_name AS table_name,
+                           partitioning_type AS partition_type
+                    FROM ALL_PART_TABLES
+                    WHERE {_schema_exclusion_clause("owner")}
+                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                await cursor.execute(partition_type_query)
+                partition_types = {
+                    (row["TABLE_SCHEMA"], row["TABLE_NAME"]): row["PARTITION_TYPE"]
+                    for row in _rows_as_dicts(cursor.description, await cursor.fetchall())
+                }
+
+                partition_key_query = f"""
+                    SELECT owner AS table_schema, name AS table_name,
+                           column_name AS column_name, column_position AS ordinal_position
+                    FROM ALL_PART_KEY_COLUMNS
+                    WHERE object_type = 'TABLE' AND {_schema_exclusion_clause("owner")}
+                    ORDER BY owner, name, column_position
+                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                await cursor.execute(partition_key_query)
+                partition_key_columns: dict[tuple[str, str], list[str]] = {}
+                for row in _rows_as_dicts(cursor.description, await cursor.fetchall()):
+                    key = (row["TABLE_SCHEMA"], row["TABLE_NAME"])
+                    partition_key_columns.setdefault(key, []).append(row["COLUMN_NAME"])
+
+                # HIGH_VALUE is a LONG column; fetching it reliably needs an output-type
+                # handler the async oracledb driver does not expose the same way as the
+                # sync client, so partitions are extracted without a high_value bound
+                # rather than risk a truncated or failed fetch. Bounds can be added once
+                # a certified handling path exists (tracked alongside CN-1a/CN-1b).
+                partitions_query = f"""
+                    SELECT
+                        table_owner AS table_schema,
+                        table_name AS table_name,
+                        partition_name AS partition_name,
+                        partition_position AS ordinal_position
+                    FROM ALL_TAB_PARTITIONS
+                    WHERE {_schema_exclusion_clause("table_owner")}
+                    ORDER BY table_owner, table_name, partition_position
+                    """  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+                await cursor.execute(partitions_query)
+                partition_rows = []
+                for row in _rows_as_dicts(cursor.description, await cursor.fetchall()):
+                    schema_name = row["TABLE_SCHEMA"]
+                    table_name = row["TABLE_NAME"]
+                    partition_rows.append(
+                        {
+                            "table_schema": schema_name,
+                            "table_name": table_name,
+                            "partition_name": row["PARTITION_NAME"],
+                            "ordinal_position": row["ORDINAL_POSITION"],
+                            "partition_type": partition_types.get(
+                                (schema_name, table_name), "UNKNOWN"
+                            ),
+                            "key_columns": partition_key_columns.get(
+                                (schema_name, table_name), []
+                            ),
+                        }
+                    )
         finally:
             await connection.close()
 
-        return _assemble_catalog(catalog_name, column_rows, key_rows, foreign_key_rows)
+        return _assemble_catalog(
+            catalog_name, column_rows, key_rows, foreign_key_rows, index_rows, partition_rows
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await self._connect(timeout_seconds=timeout_seconds)
@@ -411,6 +515,8 @@ def _assemble_catalog(
     column_rows: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],
     foreign_key_rows: list[dict[str, Any]],
+    index_rows: list[dict[str, Any]] | None = None,
+    partition_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
     """Assemble a catalog from already-normalized, lowercase-keyed discovery rows.
 
@@ -418,7 +524,8 @@ def _assemble_catalog(
     uppercase-folded column names into the lowercase keys the shared
     ``aida.connectors.discovery`` helpers expect; this function performs no
     case remapping itself so its contract matches every other caller of those
-    helpers.
+    helpers. ``index_rows`` and ``partition_rows`` are optional so existing
+    callers that only care about columns and constraints are unaffected.
     """
     tables = build_table_map_from_column_rows(column_rows)
     append_grouped_key_rows(
@@ -427,4 +534,8 @@ def _assemble_catalog(
         constraint_type_map={"P": "PRIMARY_KEY", "U": "UNIQUE"},
     )
     append_grouped_foreign_key_rows(tables, foreign_key_rows)
+    if index_rows:
+        append_grouped_index_rows(tables, index_rows)
+    if partition_rows:
+        append_partition_rows(tables, partition_rows)
     return assemble_catalog(str(catalog_name), tables)

@@ -37,11 +37,31 @@ class DiscoveredConstraint:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveredIndex:
+    name: str
+    index_type: str
+    columns: tuple[str, ...]
+    is_unique: bool = False
+    is_primary: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredPartition:
+    name: str
+    partition_type: str
+    ordinal_position: int
+    key_columns: tuple[str, ...] = ()
+    high_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveredTable:
     name: str
     object_type: str
     columns: tuple[DiscoveredColumn, ...]
     constraints: tuple[DiscoveredConstraint, ...] = ()
+    indexes: tuple[DiscoveredIndex, ...] = ()
+    partitions: tuple[DiscoveredPartition, ...] = ()
     source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 

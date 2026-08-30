@@ -6,6 +6,8 @@ from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
     DiscoveredConstraint,
+    DiscoveredIndex,
+    DiscoveredPartition,
     DiscoveredSchema,
     DiscoveredTable,
 )
@@ -16,6 +18,8 @@ class _MutableTable:
     object_type: str
     columns: list[DiscoveredColumn] = field(default_factory=list)
     constraints: list[DiscoveredConstraint] = field(default_factory=list)
+    indexes: list[DiscoveredIndex] = field(default_factory=list)
+    partitions: list[DiscoveredPartition] = field(default_factory=list)
 
 
 TableMap = dict[str, dict[str, _MutableTable]]
@@ -125,6 +129,63 @@ def append_grouped_foreign_key_rows(
         )
 
 
+def append_grouped_index_rows(tables: TableMap, index_rows: Sequence[Mapping[str, Any]]) -> None:
+    """Group flat (table, index, column) rows into one ``DiscoveredIndex`` per index.
+
+    Callers must order rows by the index's own column position so the grouped
+    ``columns`` tuple preserves index-key order (mirrors ``append_grouped_key_rows``).
+    """
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in index_rows:
+        key = (str(row["table_schema"]), str(row["table_name"]), str(row["index_name"]))
+        entry = grouped.setdefault(
+            key,
+            {
+                "index_type": _coerce_optional_str(row.get("index_type")) or "UNKNOWN",
+                "is_unique": bool(row.get("is_unique", False)),
+                "is_primary": bool(row.get("is_primary", False)),
+                "columns": [],
+            },
+        )
+        entry["columns"].append(str(row["column_name"]))
+    for (schema_name, table_name, index_name), entry in grouped.items():
+        table = tables.get(schema_name, {}).get(table_name)
+        if table is None:
+            continue
+        table.indexes.append(
+            DiscoveredIndex(
+                name=index_name,
+                index_type=str(entry["index_type"]),
+                columns=tuple(entry["columns"]),
+                is_unique=bool(entry["is_unique"]),
+                is_primary=bool(entry["is_primary"]),
+            )
+        )
+
+
+def append_partition_rows(tables: TableMap, partition_rows: Sequence[Mapping[str, Any]]) -> None:
+    """Attach one ``DiscoveredPartition`` per row (one row already means one partition).
+
+    Unlike indexes and constraints, a partition's key columns are a property of
+    the parent table's partitioning scheme, not of the individual partition, so
+    callers are expected to have already merged the shared ``key_columns`` list
+    onto every partition row for a given table before calling this.
+    """
+    for row in partition_rows:
+        table = _lookup_table(tables, row["table_schema"], row["table_name"])
+        if table is None:
+            continue
+        table.partitions.append(
+            DiscoveredPartition(
+                name=str(row["partition_name"]),
+                partition_type=_coerce_optional_str(row.get("partition_type")) or "UNKNOWN",
+                ordinal_position=int(row.get("ordinal_position") or 0),
+                key_columns=_tuple_of_strings(row.get("key_columns")),
+                high_value=_coerce_optional_str(row.get("high_value")),
+            )
+        )
+
+
 def assemble_catalog(catalog_name: str, tables: TableMap) -> tuple[DiscoveredCatalog, ...]:
     schemas: list[DiscoveredSchema] = []
     for schema_name, raw_tables in tables.items():
@@ -134,6 +195,8 @@ def assemble_catalog(catalog_name: str, tables: TableMap) -> tuple[DiscoveredCat
                 object_type=raw_table.object_type,
                 columns=tuple(raw_table.columns),
                 constraints=tuple(raw_table.constraints),
+                indexes=tuple(raw_table.indexes),
+                partitions=tuple(raw_table.partitions),
             )
             for table_name, raw_table in raw_tables.items()
         ]

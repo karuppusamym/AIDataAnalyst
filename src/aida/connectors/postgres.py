@@ -14,6 +14,8 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
+    append_grouped_index_rows,
+    append_partition_rows,
     assemble_catalog,
     build_table_map_from_column_rows,
 )
@@ -28,8 +30,8 @@ class PostgresConnector(Connector):
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
         constraints=True,
-        indexes=False,
-        partitions=False,
+        indexes=True,
+        partitions=True,
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
@@ -118,11 +120,103 @@ class PostgresConnector(Connector):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
+            # pg_index/pg_am mirror the pg_constraint query above. Expression indexes
+            # (indkey entries of 0) have no matching pg_attribute row and are silently
+            # dropped by the join rather than reported with a placeholder column name.
+            index_rows = await connection.fetch(
+                """
+                SELECT
+                    ns.nspname AS table_schema,
+                    rel.relname AS table_name,
+                    ic.relname AS index_name,
+                    am.amname AS index_type,
+                    ix.indisunique AS is_unique,
+                    ix.indisprimary AS is_primary,
+                    att.attname AS column_name
+                FROM pg_index ix
+                JOIN pg_class rel ON rel.oid = ix.indrelid
+                JOIN pg_class ic ON ic.oid = ix.indexrelid
+                JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+                JOIN pg_am am ON am.oid = ic.relam
+                JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality)
+                    ON TRUE
+                JOIN pg_attribute att
+                  ON att.attrelid = rel.oid
+                 AND att.attnum = cols.attnum
+                WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY ns.nspname, rel.relname, ic.relname, cols.ordinality
+                """
+            )
+            # Declarative partitioning: pg_inherits lists each partition's parent, and
+            # pg_partitioned_table carries the parent's partitioning strategy and key.
+            partition_key_rows = await connection.fetch(
+                """
+                SELECT
+                    ns.nspname AS table_schema,
+                    rel.relname AS table_name,
+                    att.attname AS column_name,
+                    key.ordinality AS ordinal_position
+                FROM pg_partitioned_table part
+                JOIN pg_class rel ON rel.oid = part.partrelid
+                JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+                JOIN LATERAL unnest(part.partattrs) WITH ORDINALITY AS key(attnum, ordinality)
+                    ON TRUE
+                JOIN pg_attribute att
+                  ON att.attrelid = rel.oid
+                 AND att.attnum = key.attnum
+                WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY ns.nspname, rel.relname, key.ordinality
+                """
+            )
+            partition_rows = await connection.fetch(
+                """
+                SELECT
+                    parent_ns.nspname AS table_schema,
+                    parent.relname AS table_name,
+                    child.relname AS partition_name,
+                    CASE part.partstrat
+                        WHEN 'r' THEN 'RANGE'
+                        WHEN 'l' THEN 'LIST'
+                        WHEN 'h' THEN 'HASH'
+                    END AS partition_type,
+                    pg_get_expr(child.relpartbound, child.oid) AS high_value,
+                    inh.inhseqno AS ordinal_position
+                FROM pg_inherits inh
+                JOIN pg_class parent ON parent.oid = inh.inhparent
+                JOIN pg_class child ON child.oid = inh.inhrelid
+                JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+                JOIN pg_partitioned_table part ON part.partrelid = parent.oid
+                WHERE parent_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY parent_ns.nspname, parent.relname, inh.inhseqno
+                """
+            )
         finally:
             await connection.close()
 
         tables = build_table_map_from_column_rows(rows)
         append_aggregated_constraint_rows(tables, constraint_rows)
+        append_grouped_index_rows(tables, index_rows)
+
+        partition_key_map: dict[tuple[str, str], list[str]] = {}
+        for row in partition_key_rows:
+            key = (str(row["table_schema"]), str(row["table_name"]))
+            partition_key_map.setdefault(key, []).append(str(row["column_name"]))
+        merged_partition_rows = [
+            {
+                "table_schema": str(row["table_schema"]),
+                "table_name": str(row["table_name"]),
+                "partition_name": str(row["partition_name"]),
+                "partition_type": row["partition_type"],
+                "high_value": row["high_value"],
+                "ordinal_position": row["ordinal_position"],
+                "key_columns": partition_key_map.get(
+                    (str(row["table_schema"]), str(row["table_name"])), []
+                ),
+            }
+            for row in partition_rows
+        ]
+        append_partition_rows(tables, merged_partition_rows)
+
         return assemble_catalog(str(catalog_name), tables)
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:

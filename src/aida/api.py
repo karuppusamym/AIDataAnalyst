@@ -26,6 +26,7 @@ from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
+from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.models import (
     AgentEvaluationRun,
     AgentRun,
@@ -36,6 +37,8 @@ from aida.models import (
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
+    MetadataIndex,
+    MetadataPartition,
     MetadataSchema,
     MetadataTable,
     Organization,
@@ -67,6 +70,8 @@ from aida.schemas import (
     LineOfBusinessRead,
     MetadataColumnRead,
     MetadataConstraintRead,
+    MetadataIndexRead,
+    MetadataPartitionRead,
     MetadataTableRead,
     OrganizationCreate,
     OrganizationIntegrationPolicyRead,
@@ -1084,11 +1089,75 @@ async def resume_analysis_run(
     return resumed
 
 
+async def _list_page(
+    session: AsyncSession,
+    *,
+    model: type,
+    filters: tuple,
+    order_columns: tuple,
+    coercers: tuple,
+    read_schema: type,
+    limit: int,
+    offset: int,
+    cursor: str | None,
+) -> Page:
+    """Shared list-endpoint body: keyset pagination when `cursor` is given, plain
+    offset pagination otherwise -- both return a `next_cursor` so a caller can
+    fetch page one by `offset` (and see a `total`) and then walk every page after
+    it purely by cursor, never paying for another `COUNT(*)` or a growing `OFFSET`.
+
+    The keyset branch's `WHERE`/`ORDER BY` use exactly `order_columns` (which
+    callers pair with a composite index whose leading columns match `filters`),
+    so its cost is bounded by `limit` alone -- independent of how many pages a
+    caller has already walked, unlike `offset`, which the database must walk
+    and discard before it can return anything.
+    """
+    total: int | None = None
+    if cursor is not None:
+        try:
+            raw_values = decode_cursor(cursor, arity=len(order_columns))
+            last_values = tuple(coerce(value) for coerce, value in zip(coercers, raw_values))
+        except (InvalidCursor, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid cursor") from exc
+        statement = apply_keyset(
+            select(model).where(*filters).order_by(*order_columns),
+            order_columns,
+            last_values,
+        ).limit(limit)
+    else:
+        total = await session.scalar(select(func.count()).select_from(model).where(*filters)) or 0
+        statement = (
+            select(model).where(*filters).order_by(*order_columns).limit(limit).offset(offset)
+        )
+
+    rows = (await session.scalars(statement)).all()
+    next_cursor = (
+        encode_cursor(*(getattr(rows[-1], column.key) for column in order_columns))
+        if len(rows) == limit
+        else None
+    )
+    return Page(
+        items=[read_schema.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total,
+        next_cursor=next_cursor,
+    )
+
+
+_CURSOR_DESCRIPTION = (
+    "Opaque keyset cursor from a previous page's next_cursor. When supplied, "
+    "offset is ignored, no total is computed, and the response cost stays "
+    "bounded by limit no matter how many pages precede it."
+)
+
+
 @router.get("/datasources/{datasource_id}/tables", response_model=Page)
 async def list_tables(
     datasource_id: UUID,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
@@ -1103,21 +1172,16 @@ async def list_tables(
         MetadataTable.datasource_id == datasource.id,
         MetadataTable.status == "ACTIVE",
     )
-    total = await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
-    rows = (
-        await session.scalars(
-            select(MetadataTable)
-            .where(*filters)
-            .order_by(MetadataTable.name)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[MetadataTableRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataTable,
+        filters=filters,
+        order_columns=(MetadataTable.name, MetadataTable.id),
+        coercers=(str, UUID),
+        read_schema=MetadataTableRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
     )
 
 
@@ -1126,6 +1190,7 @@ async def list_columns(
     table_id: UUID,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
@@ -1140,21 +1205,16 @@ async def list_columns(
         MetadataColumn.table_id == table.id,
         MetadataColumn.status == "ACTIVE",
     )
-    total = await session.scalar(select(func.count()).select_from(MetadataColumn).where(*filters))
-    rows = (
-        await session.scalars(
-            select(MetadataColumn)
-            .where(*filters)
-            .order_by(MetadataColumn.ordinal_position)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[MetadataColumnRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataColumn,
+        filters=filters,
+        order_columns=(MetadataColumn.ordinal_position, MetadataColumn.id),
+        coercers=(int, UUID),
+        read_schema=MetadataColumnRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
     )
 
 
@@ -1163,6 +1223,7 @@ async def list_constraints(
     table_id: UUID,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
     context: SecurityContext = Depends(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
@@ -1177,23 +1238,82 @@ async def list_constraints(
         MetadataConstraint.table_id == table.id,
         MetadataConstraint.status == "ACTIVE",
     )
-    total = await session.scalar(
-        select(func.count()).select_from(MetadataConstraint).where(*filters)
-    )
-    rows = (
-        await session.scalars(
-            select(MetadataConstraint)
-            .where(*filters)
-            .order_by(MetadataConstraint.name)
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
-    return Page(
-        items=[MetadataConstraintRead.model_validate(row) for row in rows],
+    return await _list_page(
+        session,
+        model=MetadataConstraint,
+        filters=filters,
+        order_columns=(MetadataConstraint.name, MetadataConstraint.id),
+        coercers=(str, UUID),
+        read_schema=MetadataConstraintRead,
         limit=limit,
         offset=offset,
-        total=total or 0,
+        cursor=cursor,
+    )
+
+
+@router.get("/tables/{table_id}/indexes", response_model=Page)
+async def list_indexes(
+    table_id: UUID,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    filters = (
+        MetadataIndex.organization_id == table.organization_id,
+        MetadataIndex.table_id == table.id,
+        MetadataIndex.status == "ACTIVE",
+    )
+    return await _list_page(
+        session,
+        model=MetadataIndex,
+        filters=filters,
+        order_columns=(MetadataIndex.name, MetadataIndex.id),
+        coercers=(str, UUID),
+        read_schema=MetadataIndexRead,
+        limit=limit,
+        offset=offset,
+        cursor=cursor,
+    )
+
+
+@router.get("/tables/{table_id}/partitions", response_model=Page)
+async def list_partitions(
+    table_id: UUID,
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    filters = (
+        MetadataPartition.organization_id == table.organization_id,
+        MetadataPartition.table_id == table.id,
+        MetadataPartition.status == "ACTIVE",
+    )
+    return await _list_page(
+        session,
+        model=MetadataPartition,
+        filters=filters,
+        order_columns=(MetadataPartition.ordinal_position, MetadataPartition.id),
+        coercers=(int, UUID),
+        read_schema=MetadataPartitionRead,
+        limit=limit,
+        offset=offset,
+        cursor=cursor,
     )
 
 
