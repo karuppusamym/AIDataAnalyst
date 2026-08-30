@@ -926,6 +926,15 @@ class RelationshipCandidateDiscoveryRequest(ApiModel):
 class CrossSourceRelationshipCandidateDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=500, ge=1, le=5000)
     max_datasource_pairs: int = Field(default=50, ge=1, le=2000)
+    target_data_domain_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Pair this domain's datasources against another data_domain's "
+            "instead of scanning within this domain alone. Requires an ACTIVE "
+            "cross_boundary_grant permitting this domain to see into the "
+            "target one (ADR-0017 SS4) -- rejected with 403 otherwise."
+        ),
+    )
 
 
 class RelationshipCandidateRead(ApiModel):
@@ -1083,6 +1092,14 @@ class DomainLineageGraphRead(ApiModel):
     one. Node and edge ids are prefixed per-datasource to guarantee no
     false merge between two different datasources' same-named synthetic
     (unmatched dbt/OpenLineage) nodes.
+
+    A candidate relationship reaching across a data_domain boundary only
+    ever renders as an edge here when an ACTIVE cross_boundary_grant permits
+    this domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-
+    default, never inherited) -- `withheld_cross_boundary_domain_ids` names
+    any domain that has such a candidate but no covering grant, reported
+    rather than silently dropped, mirroring the withheld:"no_grant"
+    transparency this ADR requires everywhere it applies.
     """
 
     data_domain_id: UUID
@@ -1096,6 +1113,7 @@ class DomainLineageGraphRead(ApiModel):
     edge_limit: int = 0
     truncated: bool = False
     truncation_reasons: list[str] = Field(default_factory=list)
+    withheld_cross_boundary_domain_ids: list[UUID] = Field(default_factory=list)
 
 
 class UnifiedLineageImpactNodeRead(ApiModel):

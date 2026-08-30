@@ -15,6 +15,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
 from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
 from aida.models import (
@@ -1074,14 +1075,18 @@ async def discover_cross_source_relationship_candidates(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> Page:
-    """Infer column relationships ACROSS datasources within one data_domain.
+    """Infer column relationships ACROSS datasources within one data_domain --
+    or, when `body.target_data_domain_id` is set, across the boundary into a
+    second domain, gated by an ACTIVE cross_boundary_grant.
 
     Relationship inference is free to cross project/datasource boundaries within
-    a domain (ADR-0017 SS4/SS8) -- this endpoint never crosses a data_domain
-    boundary itself, since it only ever pairs datasources it loaded from this one
-    domain, so no cross_boundary_grant check applies here. A future domain-to-
-    domain variant would call domain_service.check_cross_boundary_grant per pair
-    instead of skipping the check entirely.
+    a domain (ADR-0017 SS4/SS8) -- pairing two datasources that both already
+    belong to `domain_id` never touches a grant. Pairing against a
+    `target_data_domain_id` is different: that crosses a data_domain boundary,
+    so it is refused with 403 unless domain_service.check_cross_boundary_grant
+    confirms an ACTIVE, unexpired grant lets `domain_id` see into the target
+    domain for SUGGESTED_RELATIONSHIP edges -- deny-by-default, never inherited
+    (INV-5), exactly like every other cross-boundary read in this platform.
 
     Bounded like every other discovery path in this platform (ADR-0017 SS8: an
     estate cannot be scanned all at once) -- datasource pairs are capped at
@@ -1092,16 +1097,64 @@ async def discover_cross_source_relationship_candidates(
     if domain is None:
         raise HTTPException(status_code=404, detail="data domain not found")
     enforce_organization(context, domain.organization_id)
-    datasources = (
-        await session.scalars(
-            select(DataSource)
-            .where(DataSource.data_domain_id == domain.id)
-            .order_by(DataSource.name)
+    datasources = list(
+        (
+            await session.scalars(
+                select(DataSource)
+                .where(DataSource.data_domain_id == domain.id)
+                .order_by(DataSource.name)
+            )
+        ).all()
+    )
+
+    target_domain: DataDomain | None = None
+    target_datasources: list[DataSource] = []
+    if body.target_data_domain_id is not None:
+        if body.target_data_domain_id == domain.id:
+            raise HTTPException(
+                status_code=422, detail="target_data_domain_id must differ from domain_id"
+            )
+        target_domain = await session.get(DataDomain, body.target_data_domain_id)
+        if target_domain is None or target_domain.organization_id != domain.organization_id:
+            raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+        allowed = await check_cross_boundary_grant(
+            session,
+            domain.organization_id,
+            target_domain.id,
+            domain.id,
+            edge_kind="SUGGESTED_RELATIONSHIP",
         )
-    ).all()
-    pairs = list(combinations(datasources, 2))
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "cross-domain access denied: no ACTIVE cross_boundary_grant permits "
+                    f"{domain.id} to see into {target_domain.id}"
+                ),
+            )
+        target_datasources = list(
+            (
+                await session.scalars(
+                    select(DataSource)
+                    .where(DataSource.data_domain_id == target_domain.id)
+                    .order_by(DataSource.name)
+                )
+            ).all()
+        )
+
+    if target_domain is not None:
+        # Only cross-boundary pairs -- same-domain pairs on either side stay the
+        # job of a same-domain call against that domain's own id.
+        pairs = [
+            (source_datasource, target_datasource)
+            for source_datasource in datasources
+            for target_datasource in target_datasources
+        ]
+    else:
+        pairs = list(combinations(datasources, 2))
     pairs_available = len(pairs)
     pairs = pairs[: body.max_datasource_pairs]
+    profile_datasources = datasources + target_datasources
 
     async def _load_source_profile(datasource: DataSource) -> dict[str, Any]:
         tables = (
@@ -1151,7 +1204,9 @@ async def discover_cross_source_relationship_candidates(
             "column_count": len(columns),
         }
 
-    profiles = {datasource.id: await _load_source_profile(datasource) for datasource in datasources}
+    profiles = {
+        datasource.id: await _load_source_profile(datasource) for datasource in profile_datasources
+    }
     existing_candidate_pairs = {
         (source_column_id, target_column_id)
         for source_column_id, target_column_id in (
@@ -1228,6 +1283,7 @@ async def discover_cross_source_relationship_candidates(
             "datasource_pairs_available": pairs_available,
             "columns_scanned": columns_scanned,
             "value_inspection": False,
+            "target_data_domain_id": str(target_domain.id) if target_domain else None,
         },
     )
     await session.commit()

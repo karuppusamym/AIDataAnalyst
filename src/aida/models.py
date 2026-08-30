@@ -910,10 +910,12 @@ class RelationshipCandidate(Base, TimestampMixin):
     )
     # datasource_id names the SOURCE side's datasource; target_datasource_id names the
     # target's. Equal for a same-source candidate (the only kind before ADR-0017 phase 5),
-    # different for a cross-source candidate discovered within one data_domain -- inference
-    # never crosses a data_domain boundary here (ADR-0017 SS4/SS8: free within a domain,
-    # gated by cross_boundary_grant beyond it, and that gate is enforced by the domain-scoped
-    # discovery endpoint only ever pairing datasources it already loaded from one domain).
+    # different for a cross-source candidate. Same-domain cross-source pairs are free
+    # (ADR-0017 SS4/SS8); a row where the two datasources belong to different data_domains
+    # can only have been created by discover_cross_source_relationship_candidates after
+    # domain_service.check_cross_boundary_grant confirmed an ACTIVE grant, and is only ever
+    # rendered back into a unified lineage graph the same way -- gated per read, not just
+    # per write, so a later-expired or revoked grant stops the edge from rendering too.
     datasource_id: Mapped[UUID] = mapped_column(
         ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
     )
