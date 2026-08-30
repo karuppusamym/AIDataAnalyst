@@ -13,6 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from aida.analysis_tasks import (
+    TASK_TYPE_DISCOVER_DATASOURCE,
+    TASK_TYPE_FINALIZE_PROFILE_TASKS,
+    TASK_TYPE_MAX_ATTEMPTS,
+    TASK_TYPE_PLAN_PROFILE_TASKS,
+    TASK_TYPE_PROFILE_DATASOURCE,
+    TASK_TYPE_PROFILE_TABLE,
+)
+from aida.classification_feed import (
+    CLASSIFICATION_SOURCE_EXTERNAL,
+    CLASSIFICATION_SOURCE_RULE,
+    RuleClassificationResult,
+    classify_column_name_with_evidence,
+)
 from aida.config import get_settings
 from aida.connectors.base import (
     DiscoveredCatalog,
@@ -25,10 +39,13 @@ from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.ingestion import persist_envelope_extensions
+from aida.key_inference import ColumnStat, infer_key_candidates, key_fingerprint
 from aida.models import (
     AnalysisRun,
+    ClassificationEvidence,
     ColumnProfile,
     DataSource,
+    KeyInferenceCandidate,
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
@@ -39,8 +56,18 @@ from aida.models import (
 from aida.quality_service import evaluate_analysis_run
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
+from aida.task_tracking import finish_task, heartbeat_task, start_task
 
 logger = structlog.get_logger(__name__)
+
+# Worker principal used for both audit evidence and rule-classification
+# evidence rows written from inside a Temporal activity (no human principal
+# is available on this path).
+_METADATA_WORKER_PRINCIPAL = "metadata-worker"
+
+# Bounds the per-table key-candidate search invoked from finalize_profile_tasks
+# (module 05 sec 7 -- every DAG stage is bounded, key inference included).
+MAX_KEY_CANDIDATES_PER_TABLE = 25
 
 
 @dataclass(slots=True)
@@ -93,22 +120,53 @@ def fingerprint(value: object) -> str:
 
 
 def classify_column_name(name: str) -> str:
-    normalized = name.lower()
-    if any(token in normalized for token in ("card_number", "pan_number", "cvv")):
-        return "PCI"
-    if any(
-        token in normalized
-        for token in (
-            "email",
-            "social_security",
-            "ssn",
-            "tax_id",
-            "passport",
-            "customer_name",
+    """Deterministic name-pattern classification (module 05 sec 9).
+
+    Delegates to ``aida.classification_feed`` so the rule set is defined in
+    exactly one place; this wrapper keeps the plain ``str`` return value the
+    rest of discovery already expects.
+    """
+    return classify_column_name_with_evidence(name).classification
+
+
+async def _record_rule_classification_evidence(
+    session: AsyncSession,
+    *,
+    column: MetadataColumn,
+    result: RuleClassificationResult,
+) -> None:
+    """Append the evidence row for a rule-based classification decision.
+
+    Superseding any prior evidence row (``is_current`` flips to False) mirrors
+    ``aida.classification_feed.ingest_classification_feed`` exactly, so the
+    ledger is append-only and one query always finds "the current reason"
+    regardless of whether it was a rule or an authoritative feed override.
+    """
+    await session.execute(
+        update(ClassificationEvidence)
+        .where(
+            ClassificationEvidence.column_id == column.id,
+            ClassificationEvidence.is_current.is_(True),
         )
-    ):
-        return "PII"
-    return "UNCLASSIFIED"
+        .values(is_current=False)
+    )
+    session.add(
+        ClassificationEvidence(
+            organization_id=column.organization_id,
+            column_id=column.id,
+            classification=result.classification,
+            source_type=CLASSIFICATION_SOURCE_RULE,
+            rule_id=result.rule_id,
+            confidence=None,
+            matched_signal={
+                "value_scope": "METADATA_ONLY",
+                "actual_values_inspected": False,
+                **result.matched_signal,
+            },
+            is_current=True,
+            created_by=_METADATA_WORKER_PRINCIPAL,
+        )
+    )
 
 
 async def _get_or_create_catalog(
@@ -225,7 +283,7 @@ async def _get_or_create_column(
     )
     column_fingerprint = fingerprint(asdict(discovered))
     tracker.observe(column, column.fingerprint if column else None, column_fingerprint)
-    inferred_classification = classify_column_name(discovered.name)
+    rule_result = classify_column_name_with_evidence(discovered.name)
     if column is None:
         column = MetadataColumn(
             organization_id=datasource.organization_id,
@@ -235,10 +293,12 @@ async def _get_or_create_column(
             physical_type=discovered.physical_type,
             nullable=discovered.nullable,
             default_expression=discovered.default_expression,
-            classification=inferred_classification,
+            classification=rule_result.classification,
+            classification_source=CLASSIFICATION_SOURCE_RULE,
             fingerprint=column_fingerprint,
         )
         session.add(column)
+        await _record_rule_classification_evidence(session, column=column, result=rule_result)
     else:
         column.status = "ACTIVE"
         column.deprecated_at = None
@@ -247,8 +307,16 @@ async def _get_or_create_column(
         column.nullable = discovered.nullable
         column.default_expression = discovered.default_expression
         column.fingerprint = column_fingerprint
-        if column.classification == "UNCLASSIFIED":
-            column.classification = inferred_classification
+        # An authoritative external classification (see aida.classification_feed)
+        # must never be silently overwritten by rediscovery's rule inference
+        # (module 05 sec 9 exit condition) -- only ever refine an UNCLASSIFIED
+        # column that a feed has not already spoken for.
+        if (
+            column.classification == "UNCLASSIFIED"
+            and column.classification_source != CLASSIFICATION_SOURCE_EXTERNAL
+        ):
+            column.classification = rule_result.classification
+            await _record_rule_classification_evidence(session, column=column, result=rule_result)
     return column
 
 
@@ -553,9 +621,22 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         datasource = await session.get(DataSource, run.datasource_id)
         if datasource is None:
             raise ValueError(f"datasource not found: {run.datasource_id}")
+        await start_task(
+            analysis_run_id=run.id,
+            organization_id=run.organization_id,
+            task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+            table_id=None,
+            max_attempts=TASK_TYPE_MAX_ATTEMPTS[TASK_TYPE_DISCOVER_DATASOURCE],
+        )
         if datasource.status == "DISABLED":
             run.status = "CANCELLED"
             await session.commit()
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+                table_id=None,
+                outcome="CANCELLED",
+            )
             raise ApplicationError(
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
@@ -563,11 +644,23 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
         await session.commit()
 
     activity.heartbeat({"stage": "connecting"})
+    await heartbeat_task(
+        analysis_run_id=run_uuid,
+        task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+        table_id=None,
+        detail={"stage": "connecting"},
+    )
     try:
         dsn = SecretResolver().resolve(datasource.credential_reference)
         connector = connector_registry.create(datasource.connector_type, dsn)
         await connector.test_connection()
         activity.heartbeat({"stage": "discovering"})
+        await heartbeat_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+            table_id=None,
+            detail={"stage": "discovering"},
+        )
         catalogs = await connector.discover()
         if activity.is_cancelled():
             raise asyncio.CancelledError
@@ -616,9 +709,21 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             )
             await session.commit()
         logger.info("datasource_discovery_completed", run_id=run_id, **counts)
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+            table_id=None,
+            outcome="SUCCESS",
+        )
         return {"run_id": run_id, "status": "COMPLETED", **counts}
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+            table_id=None,
+            outcome="CANCELLED",
+        )
         raise
     except Exception as exc:
         logger.exception(
@@ -631,6 +736,14 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 run.error_class = type(exc).__name__
                 run.error_message = str(exc)[:4000]
                 await session.commit()
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+            table_id=None,
+            outcome="ERROR",
+            error_class=type(exc).__name__,
+            error_message=str(exc)[:4000],
+        )
         raise
 
 
@@ -646,9 +759,22 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
         datasource = await session.get(DataSource, run.datasource_id)
         if datasource is None:
             raise ValueError(f"datasource not found: {run.datasource_id}")
+        await start_task(
+            analysis_run_id=run.id,
+            organization_id=run.organization_id,
+            task_type=TASK_TYPE_PROFILE_DATASOURCE,
+            table_id=None,
+            max_attempts=TASK_TYPE_MAX_ATTEMPTS[TASK_TYPE_PROFILE_DATASOURCE],
+        )
         if datasource.status == "DISABLED":
             run.status = "CANCELLED"
             await session.commit()
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PROFILE_DATASOURCE,
+                table_id=None,
+                outcome="CANCELLED",
+            )
             raise ApplicationError(
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
@@ -676,13 +802,18 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
         for table, schema in table_rows:
             if activity.is_cancelled():
                 raise asyncio.CancelledError
-            activity.heartbeat(
-                {
-                    "stage": "profiling",
-                    "schema": schema.name,
-                    "table": table.name,
-                    "profiled_tables": profiled_tables,
-                }
+            heartbeat_detail = {
+                "stage": "profiling",
+                "schema": schema.name,
+                "table": table.name,
+                "profiled_tables": profiled_tables,
+            }
+            activity.heartbeat(heartbeat_detail)
+            await heartbeat_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PROFILE_DATASOURCE,
+                table_id=None,
+                detail=heartbeat_detail,
             )
             async with session_factory() as session:
                 existing = await session.scalar(
@@ -793,9 +924,21 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
             )
             await session.commit()
         logger.info("datasource_profiling_completed", run_id=run_id, **details)
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_DATASOURCE,
+            table_id=None,
+            outcome="SUCCESS",
+        )
         return {"run_id": run_id, "status": "COMPLETED", **details}
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_DATASOURCE,
+            table_id=None,
+            outcome="CANCELLED",
+        )
         raise
     except Exception as exc:
         logger.exception(
@@ -808,6 +951,14 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
                 run.error_class = type(exc).__name__
                 run.error_message = str(exc)[:4000]
                 await session.commit()
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_DATASOURCE,
+            table_id=None,
+            outcome="ERROR",
+            error_class=type(exc).__name__,
+            error_message=str(exc)[:4000],
+        )
         raise
 
 
@@ -822,27 +973,57 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
         datasource = await session.get(DataSource, run.datasource_id)
         if datasource is None:
             raise ValueError(f"datasource not found: {run.datasource_id}")
+        await start_task(
+            analysis_run_id=run.id,
+            organization_id=run.organization_id,
+            task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
+            table_id=None,
+            max_attempts=TASK_TYPE_MAX_ATTEMPTS[TASK_TYPE_PLAN_PROFILE_TASKS],
+        )
         if datasource.status == "DISABLED":
             run.status = "CANCELLED"
             await session.commit()
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
+                table_id=None,
+                outcome="CANCELLED",
+            )
             raise ApplicationError(
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
-        table_ids = list(
-            await session.scalars(
-                select(MetadataTable.id)
-                .where(
-                    # INV-5: the tenant boundary is restated explicitly rather than
-                    # inherited from the datasource FK, so this query is scoped even
-                    # if a future caller hands it a datasource from another tenant.
-                    MetadataTable.organization_id == run.organization_id,
-                    MetadataTable.datasource_id == datasource.id,
-                    MetadataTable.status == "ACTIVE",
-                    MetadataTable.object_type == "BASE_TABLE",
+        try:
+            table_ids = list(
+                await session.scalars(
+                    select(MetadataTable.id)
+                    .where(
+                        # INV-5: the tenant boundary is restated explicitly rather than
+                        # inherited from the datasource FK, so this query is scoped even
+                        # if a future caller hands it a datasource from another tenant.
+                        MetadataTable.organization_id == run.organization_id,
+                        MetadataTable.datasource_id == datasource.id,
+                        MetadataTable.status == "ACTIVE",
+                        MetadataTable.object_type == "BASE_TABLE",
+                    )
+                    .order_by(MetadataTable.id)
+                    .limit(settings.profile_max_tables_per_run)
                 )
-                .order_by(MetadataTable.id)
-                .limit(settings.profile_max_tables_per_run)
             )
+        except Exception as exc:
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
+                table_id=None,
+                outcome="ERROR",
+                error_class=type(exc).__name__,
+                error_message=str(exc)[:4000],
+            )
+            raise
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
+            table_id=None,
+            outcome="SUCCESS",
         )
         return {
             "run_id": run_id,
@@ -863,6 +1044,13 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
         run = await session.get(AnalysisRun, run_uuid)
         if run is None:
             raise ValueError(f"analysis run not found: {run_uuid}")
+        await start_task(
+            analysis_run_id=run.id,
+            organization_id=run.organization_id,
+            task_type=TASK_TYPE_PROFILE_TABLE,
+            table_id=table_uuid,
+            max_attempts=TASK_TYPE_MAX_ATTEMPTS[TASK_TYPE_PROFILE_TABLE],
+        )
         datasource = await session.get(DataSource, run.datasource_id)
         row = (
             await session.execute(
@@ -876,10 +1064,24 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
             )
         ).one_or_none()
         if datasource is None or row is None:
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PROFILE_TABLE,
+                table_id=table_uuid,
+                outcome="ERROR",
+                error_class="ValueError",
+                error_message="profile task dependency is unavailable",
+            )
             raise ValueError("profile task dependency is unavailable")
         if datasource.status == "DISABLED":
             run.status = "CANCELLED"
             await session.commit()
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PROFILE_TABLE,
+                table_id=table_uuid,
+                outcome="CANCELLED",
+            )
             raise ApplicationError(
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
@@ -896,6 +1098,12 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                 .select_from(ColumnProfile)
                 .where(ColumnProfile.table_profile_id == existing.id)
             )
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PROFILE_TABLE,
+                table_id=table_uuid,
+                outcome="SUCCESS",
+            )
             return {"profiled_tables": 1, "profiled_columns": existing_columns or 0}
         columns = (
             await session.scalars(
@@ -909,6 +1117,12 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
         ).all()
 
     activity.heartbeat({"stage": "profiling", "table_id": str(table_uuid)})
+    await heartbeat_task(
+        analysis_run_id=run_uuid,
+        task_type=TASK_TYPE_PROFILE_TABLE,
+        table_id=table_uuid,
+        detail={"stage": "profiling"},
+    )
     connector = connector_registry.create(
         datasource.connector_type,
         SecretResolver().resolve(datasource.credential_reference),
@@ -939,6 +1153,12 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                     .select_from(ColumnProfile)
                     .where(ColumnProfile.table_profile_id == existing.id)
                 )
+                await finish_task(
+                    analysis_run_id=run_uuid,
+                    task_type=TASK_TYPE_PROFILE_TABLE,
+                    table_id=table_uuid,
+                    outcome="SUCCESS",
+                )
                 return {"profiled_tables": 1, "profiled_columns": existing_columns or 0}
             profile = TableProfile(
                 organization_id=datasource.organization_id,
@@ -966,9 +1186,21 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                     )
                 )
             await session.commit()
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_TABLE,
+            table_id=table_uuid,
+            outcome="SUCCESS",
+        )
         return {"profiled_tables": 1, "profiled_columns": len(snapshot.columns)}
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_TABLE,
+            table_id=table_uuid,
+            outcome="CANCELLED",
+        )
         raise
     except Exception as exc:
         async with session_factory() as session:
@@ -978,7 +1210,132 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
                 failed_run.error_class = type(exc).__name__
                 failed_run.error_message = str(exc)[:4000]
                 await session.commit()
+        await finish_task(
+            analysis_run_id=run_uuid,
+            task_type=TASK_TYPE_PROFILE_TABLE,
+            table_id=table_uuid,
+            outcome="ERROR",
+            error_class=type(exc).__name__,
+            error_message=str(exc)[:4000],
+        )
         raise
+
+
+async def _infer_and_persist_key_candidates(
+    session: AsyncSession,
+    run: AnalysisRun,
+) -> int:
+    """The DAG's "infer keys" stage (module 05 sec 6, PR-1) -- run once per
+    analysis run, after every table in it has a completed profile.
+
+    Every candidate is derived purely from ``ColumnProfile``/``TableProfile``
+    value-free statistics (ADR-0014) via ``aida.key_inference``; nothing here
+    reads a source value. Candidates are proposals only -- they land as
+    ``PENDING`` and require a maker-checker decision through
+    ``POST /v1/key-candidates/{id}/decision`` before anything downstream may
+    treat a column (set) as a key. A table_id/key_fingerprint pair already on
+    record (pending, approved, or rejected) is never re-proposed, so a human
+    decision is never silently reopened by the next run.
+    """
+    table_profiles = (
+        await session.scalars(
+            select(TableProfile).where(TableProfile.analysis_run_id == run.id)
+        )
+    ).all()
+    created = 0
+    for table_profile in table_profiles:
+        column_rows = (
+            await session.execute(
+                select(ColumnProfile, MetadataColumn)
+                .join(MetadataColumn, MetadataColumn.id == ColumnProfile.column_id)
+                .where(ColumnProfile.table_profile_id == table_profile.id)
+            )
+        ).all()
+        if not column_rows:
+            continue
+        stats = [
+            ColumnStat(
+                column_id=column.id,
+                column_name=column.name,
+                null_count=column_profile.null_count,
+                non_null_count=column_profile.non_null_count,
+                approximate_distinct_count=column_profile.approximate_distinct_count,
+            )
+            for column_profile, column in column_rows
+        ]
+        columns_by_lower_name = {column.name.lower(): column for _, column in column_rows}
+        constraints = (
+            await session.scalars(
+                select(MetadataConstraint).where(
+                    MetadataConstraint.table_id == table_profile.table_id,
+                    MetadataConstraint.constraint_type == "PRIMARY_KEY",
+                    MetadataConstraint.status == "ACTIVE",
+                )
+            )
+        ).all()
+        declared_primary_keys: set[frozenset[UUID]] = set()
+        for constraint in constraints:
+            declared_columns = frozenset(
+                columns_by_lower_name[name.lower()].id
+                for name in constraint.columns
+                if name.lower() in columns_by_lower_name
+            )
+            if declared_columns:
+                declared_primary_keys.add(declared_columns)
+        candidates = infer_key_candidates(
+            stats,
+            table_profile.row_count_estimate or 0,
+            declared_primary_key_column_ids=frozenset(declared_primary_keys),
+            max_candidates=MAX_KEY_CANDIDATES_PER_TABLE,
+        )
+        if not candidates:
+            continue
+        existing_fingerprints = set(
+            await session.scalars(
+                select(KeyInferenceCandidate.key_fingerprint).where(
+                    KeyInferenceCandidate.table_id == table_profile.table_id
+                )
+            )
+        )
+        for candidate in candidates:
+            fp = key_fingerprint(candidate.column_ids)
+            if fp in existing_fingerprints:
+                continue
+            session.add(
+                KeyInferenceCandidate(
+                    organization_id=run.organization_id,
+                    datasource_id=run.datasource_id,
+                    table_id=table_profile.table_id,
+                    table_profile_id=table_profile.id,
+                    column_ids=[str(column_id) for column_id in candidate.column_ids],
+                    column_names=list(candidate.column_names),
+                    column_count=candidate.column_count,
+                    key_fingerprint=fp,
+                    detection_rule=candidate.detection_rule,
+                    confidence=candidate.confidence,
+                    estimated_distinctness_ratio=candidate.estimated_distinctness_ratio,
+                    evidence=candidate.evidence,
+                    created_by=_METADATA_WORKER_PRINCIPAL,
+                )
+            )
+            existing_fingerprints.add(fp)
+            created += 1
+            # Matches the catalog-documented `key.inferred` row exactly
+            # (Docs/30-contracts/04-event-catalog.md) -- payload
+            # table_id/columns/confidence, one event per proposed candidate.
+            record_outbox(
+                session,
+                organization_id=run.organization_id,
+                aggregate_type="metadata_table",
+                aggregate_id=str(table_profile.table_id),
+                event_type="key.inferred",
+                payload={
+                    "table_id": str(table_profile.table_id),
+                    "columns": list(candidate.column_names),
+                    "confidence": candidate.confidence,
+                },
+            )
+    return created
 
 
 @activity.defn(name="finalize_profile_tasks")
@@ -990,48 +1347,78 @@ async def finalize_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
         run = await session.get(AnalysisRun, run_uuid)
         if run is None:
             raise ValueError(f"analysis run not found: {run_uuid}")
-        run.profiled_tables = profiled_tables
-        run.profiled_columns = profiled_columns
-        run.status = "COMPLETED"
-        run.error_class = None
-        run.error_message = None
-        worker_context = SecurityContext(
-            principal_id="metadata-worker",
-            principal_type="WORKER",
-            organization_id=run.organization_id,
-            roles=frozenset({"MetadataWorker"}),
-        )
-        details = {
-            "profiled_tables": profiled_tables,
-            "profiled_columns": profiled_columns,
-            "profile_version": "safe-v1",
-            "execution_model": "TABLE_TASK_DAG_V1",
-        }
-        quality = await evaluate_analysis_run(
-            session,
+        await start_task(
             analysis_run_id=run.id,
             organization_id=run.organization_id,
-            datasource_id=run.datasource_id,
-            context=worker_context,
+            task_type=TASK_TYPE_FINALIZE_PROFILE_TASKS,
+            table_id=None,
+            max_attempts=TASK_TYPE_MAX_ATTEMPTS[TASK_TYPE_FINALIZE_PROFILE_TASKS],
         )
-        details["quality"] = quality
-        record_audit(
-            session,
-            worker_context,
-            action="metadata.profiling.complete",
-            resource_type="analysis_run",
-            resource_id=str(run.id),
-            outcome="SUCCESS",
-            correlation_id=str(run.id),
-            details=details,
-        )
-        record_outbox(
-            session,
-            organization_id=run.organization_id,
-            aggregate_type="analysis_run",
-            aggregate_id=str(run.id),
-            event_type="metadata.analysis.completed.v1",
-            payload={"run_id": str(run.id), "datasource_id": str(run.datasource_id), **details},
-        )
-        await session.commit()
+        try:
+            run.profiled_tables = profiled_tables
+            run.profiled_columns = profiled_columns
+            run.status = "COMPLETED"
+            run.error_class = None
+            run.error_message = None
+            worker_context = SecurityContext(
+                principal_id="metadata-worker",
+                principal_type="WORKER",
+                organization_id=run.organization_id,
+                roles=frozenset({"MetadataWorker"}),
+            )
+            key_candidates_created = await _infer_and_persist_key_candidates(session, run)
+            details = {
+                "profiled_tables": profiled_tables,
+                "profiled_columns": profiled_columns,
+                "profile_version": "safe-v1",
+                "execution_model": "TABLE_TASK_DAG_V1",
+                "key_candidates_created": key_candidates_created,
+            }
+            quality = await evaluate_analysis_run(
+                session,
+                analysis_run_id=run.id,
+                organization_id=run.organization_id,
+                datasource_id=run.datasource_id,
+                context=worker_context,
+            )
+            details["quality"] = quality
+            record_audit(
+                session,
+                worker_context,
+                action="metadata.profiling.complete",
+                resource_type="analysis_run",
+                resource_id=str(run.id),
+                outcome="SUCCESS",
+                correlation_id=str(run.id),
+                details=details,
+            )
+            record_outbox(
+                session,
+                organization_id=run.organization_id,
+                aggregate_type="analysis_run",
+                aggregate_id=str(run.id),
+                event_type="metadata.analysis.completed.v1",
+                payload={
+                    "run_id": str(run.id),
+                    "datasource_id": str(run.datasource_id),
+                    **details,
+                },
+            )
+            await session.commit()
+        except Exception as exc:
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_FINALIZE_PROFILE_TASKS,
+                table_id=None,
+                outcome="ERROR",
+                error_class=type(exc).__name__,
+                error_message=str(exc)[:4000],
+            )
+            raise
+    await finish_task(
+        analysis_run_id=run_uuid,
+        task_type=TASK_TYPE_FINALIZE_PROFILE_TASKS,
+        table_id=None,
+        outcome="SUCCESS",
+    )
     return {"run_id": str(run_uuid), "status": "COMPLETED", **details}

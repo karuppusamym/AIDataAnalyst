@@ -17,13 +17,16 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
+from aida.key_inference import ColumnStat, infer_key_candidates, key_fingerprint
 from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
 from aida.models import (
     AgentRun,
+    ColumnProfile,
     DataDomain,
     DataSource,
     DbtResource,
     GovernedToolVersion,
+    KeyInferenceCandidate,
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
@@ -34,6 +37,7 @@ from aida.models import (
     QueryMemoryEvidence,
     RelationshipCandidate,
     SemanticMetricVersion,
+    TableProfile,
 )
 from aida.schemas import (
     CrossSourceRelationshipCandidateDiscoveryRequest,
@@ -41,6 +45,9 @@ from aida.schemas import (
     GraphNodeRead,
     GraphSearchRead,
     ImpactAnalysisRead,
+    KeyInferenceCandidateDecision,
+    KeyInferenceCandidateRead,
+    KeyInferenceDiscoveryRequest,
     KnowledgeGraphRead,
     Page,
     QueryFeedbackRead,
@@ -1374,6 +1381,243 @@ async def decide_relationship_candidate(
         aggregate_id=str(candidate.id),
         event_type="relationship_candidate.decided.v1",
         payload={"candidate_id": str(candidate.id), "status": candidate.status},
+    )
+    await session.commit()
+    return candidate
+
+
+@router.post(
+    "/datasources/{datasource_id}/key-candidates/discover",
+    response_model=Page,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def discover_key_candidates(
+    datasource_id: UUID,
+    body: KeyInferenceDiscoveryRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """Propose single-column and bounded 2-4 column composite keys (module 05
+    sec 13, PR-1) from already-computed, value-free ``table_profile`` /
+    ``column_profile`` statistics -- see ``aida.key_inference`` for the
+    independence-upper-bound method behind composite candidates.
+
+    Candidates land ``PENDING`` and require a maker-checker decision through
+    ``POST /v1/key-candidates/{id}/decision`` before anything treats a column
+    (set) as a key -- this endpoint only ever proposes, it never accepts.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+
+    profile_filters = [
+        TableProfile.datasource_id == datasource.id,
+        TableProfile.status == "COMPLETED",
+    ]
+    if body.table_id is not None:
+        profile_filters.append(TableProfile.table_id == body.table_id)
+    profile_rows = (
+        await session.scalars(
+            select(TableProfile)
+            .where(*profile_filters)
+            .order_by(TableProfile.table_id, TableProfile.created_at.desc())
+        )
+    ).all()
+    latest_profile_by_table: dict[UUID, TableProfile] = {}
+    for profile in profile_rows:
+        latest_profile_by_table.setdefault(profile.table_id, profile)
+    if not latest_profile_by_table:
+        raise HTTPException(status_code=409, detail="no completed table profile available")
+
+    created: list[KeyInferenceCandidate] = []
+    for table_id, table_profile in latest_profile_by_table.items():
+        if len(created) >= body.max_candidates:
+            break
+        column_rows = (
+            await session.execute(
+                select(ColumnProfile, MetadataColumn)
+                .join(MetadataColumn, MetadataColumn.id == ColumnProfile.column_id)
+                .where(ColumnProfile.table_profile_id == table_profile.id)
+            )
+        ).all()
+        if not column_rows:
+            continue
+        stats = [
+            ColumnStat(
+                column_id=column.id,
+                column_name=column.name,
+                null_count=column_profile.null_count,
+                non_null_count=column_profile.non_null_count,
+                approximate_distinct_count=column_profile.approximate_distinct_count,
+            )
+            for column_profile, column in column_rows
+        ]
+        columns_by_lower_name = {column.name.lower(): column for _, column in column_rows}
+        constraints = (
+            await session.scalars(
+                select(MetadataConstraint).where(
+                    MetadataConstraint.table_id == table_id,
+                    MetadataConstraint.constraint_type == "PRIMARY_KEY",
+                    MetadataConstraint.status == "ACTIVE",
+                )
+            )
+        ).all()
+        declared_primary_keys: set[frozenset[UUID]] = set()
+        for constraint in constraints:
+            declared_columns = frozenset(
+                columns_by_lower_name[name.lower()].id
+                for name in constraint.columns
+                if name.lower() in columns_by_lower_name
+            )
+            if declared_columns:
+                declared_primary_keys.add(declared_columns)
+        candidates = infer_key_candidates(
+            stats,
+            table_profile.row_count_estimate or 0,
+            min_ratio=body.min_ratio,
+            declared_primary_key_column_ids=frozenset(declared_primary_keys),
+            max_candidates=body.max_candidates - len(created),
+        )
+        if not candidates:
+            continue
+        existing_fingerprints = set(
+            await session.scalars(
+                select(KeyInferenceCandidate.key_fingerprint).where(
+                    KeyInferenceCandidate.table_id == table_id
+                )
+            )
+        )
+        for candidate in candidates:
+            fp = key_fingerprint(candidate.column_ids)
+            if fp in existing_fingerprints:
+                continue
+            row = KeyInferenceCandidate(
+                organization_id=datasource.organization_id,
+                datasource_id=datasource.id,
+                table_id=table_id,
+                table_profile_id=table_profile.id,
+                column_ids=[str(column_id) for column_id in candidate.column_ids],
+                column_names=list(candidate.column_names),
+                column_count=candidate.column_count,
+                key_fingerprint=fp,
+                detection_rule=candidate.detection_rule,
+                confidence=candidate.confidence,
+                estimated_distinctness_ratio=candidate.estimated_distinctness_ratio,
+                evidence=candidate.evidence,
+                created_by=context.principal_id,
+            )
+            session.add(row)
+            created.append(row)
+            existing_fingerprints.add(fp)
+            if len(created) >= body.max_candidates:
+                break
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=datasource.organization_id),
+        action="key_candidates.discover",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "created_candidates": len(created),
+            "tables_scanned": len(latest_profile_by_table),
+            "value_inspection": False,
+        },
+    )
+    await session.commit()
+    return Page(
+        items=[KeyInferenceCandidateRead.model_validate(item) for item in created],
+        limit=body.max_candidates,
+        offset=0,
+        total=len(created),
+    )
+
+
+@router.get("/datasources/{datasource_id}/key-candidates", response_model=Page)
+async def list_key_candidates(
+    datasource_id: UUID,
+    candidate_status: str | None = Query(default=None, max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "MetadataAdmin",
+            "DataAdmin",
+            "DataSteward",
+            "MetadataReviewer",
+            "Analyst",
+            "Auditor",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters = [KeyInferenceCandidate.datasource_id == datasource.id]
+    if candidate_status:
+        filters.append(KeyInferenceCandidate.status == candidate_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(KeyInferenceCandidate).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(KeyInferenceCandidate)
+            .where(*filters)
+            .order_by(KeyInferenceCandidate.confidence.desc(), KeyInferenceCandidate.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[KeyInferenceCandidateRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/key-candidates/{candidate_id}/decision",
+    response_model=KeyInferenceCandidateRead,
+)
+async def decide_key_candidate(
+    candidate_id: UUID,
+    body: KeyInferenceCandidateDecision,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> KeyInferenceCandidate:
+    candidate = await session.get(KeyInferenceCandidate, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="key candidate not found")
+    enforce_organization(context, candidate.organization_id)
+    if candidate.created_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
+    if candidate.status != "PENDING":
+        raise HTTPException(status_code=409, detail="key candidate is already decided")
+    candidate.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    candidate.reviewed_by = context.principal_id
+    candidate.review_reason = body.reason
+    candidate.reviewed_at = datetime.now(UTC)
+    record_audit(
+        session,
+        replace(context, organization_id=candidate.organization_id),
+        action="key_candidate.decide",
+        resource_type="key_inference_candidate",
+        resource_id=str(candidate.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"decision": body.decision},
     )
     await session.commit()
     return candidate

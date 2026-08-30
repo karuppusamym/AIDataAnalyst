@@ -23,6 +23,8 @@ intelligence_api.py), mirroring how ``RelationshipCandidate`` decisions work.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Any
@@ -60,6 +62,20 @@ class KeyCandidate:
     confidence: float
     estimated_distinctness_ratio: float
     evidence: dict[str, Any] = field(default_factory=dict)
+
+
+def key_fingerprint(column_ids: Sequence[UUID]) -> str:
+    """Stable identity for a candidate key's column set, independent of order.
+
+    The single source of truth for deduping ``KeyInferenceCandidate`` rows
+    across repeated discovery -- whether triggered automatically from
+    ``aida.workflows.activities.finalize_profile_tasks`` (the DAG's "infer
+    keys" stage) or manually from the discover API in ``intelligence_api.py``
+    -- so the same column combination on the same table is never proposed
+    twice regardless of which path found it first.
+    """
+    joined = ",".join(sorted(str(column_id) for column_id in column_ids))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
 def _distinctness_ratio(stat: ColumnStat, row_count: int) -> float:
