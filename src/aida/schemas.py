@@ -933,6 +933,81 @@ class GovernanceDecisionRequest(ApiModel):
         return self
 
 
+# PG-3: a single bulk-decision request against the unified governance review
+# queue may touch at most this many reviews -- the exit condition's own
+# number ("10,000-item selection workable"), an order of magnitude above
+# RL-6/CT-1's 500 since the queue-level cap is meant to cover a full backlog
+# sweep across object types, not just one datasource/table's worth of
+# candidates. Whether the caller supplied an explicit id list (rejected
+# outright above this size) or a filter (silently capped -- see
+# `_resolve_governance_review_bulk_subjects` in semantic_api.py), the same
+# bound applies.
+GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS = 10_000
+
+
+class GovernanceReviewBulkSelectionFilter(ApiModel):
+    """Reuses `list_governance_reviews`'s existing filter shape (status,
+    scoped to the caller's organization) plus an optional object_type
+    narrowing, rather than inventing a new query language.
+    """
+
+    object_type: str | None = Field(default=None, max_length=100)
+    status: str = Field(default="PENDING", max_length=30)
+
+
+class GovernanceReviewBulkDecisionRequest(ApiModel):
+    review_ids: list[UUID] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
+    )
+    filter: GovernanceReviewBulkSelectionFilter | None = None
+    decision: Literal["APPROVE", "REJECT"]
+    # A single rationale applied to every decided item that has no entry in
+    # `rationale_by_review_id` -- a convenience default, not the primary
+    # mechanism: PG-3's exit condition asks for *per-item* rationale, so each
+    # item's rationale of record is `rationale_by_review_id[id]` when
+    # present, falling back to this shared value otherwise. An item that ends
+    # up with no rationale at all on a REJECT decision fails only that item
+    # (partial success) -- it does not reject the whole batch.
+    reason: str | None = Field(default=None, max_length=2000)
+    rationale_by_review_id: dict[UUID, str] | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "GovernanceReviewBulkDecisionRequest":
+        _require_exactly_one_selection(self.review_ids, self.filter)
+        if self.rationale_by_review_id is not None:
+            if len(self.rationale_by_review_id) > GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS:
+                raise ValueError("rationale_by_review_id may not exceed the batch cap")
+            for review_id, rationale in self.rationale_by_review_id.items():
+                if not rationale or not rationale.strip():
+                    raise ValueError(f"rationale for review {review_id} must not be blank")
+                if len(rationale) > 2000:
+                    raise ValueError(f"rationale for review {review_id} exceeds 2000 characters")
+        if self.decision == "REJECT" and not self.reason and not self.rationale_by_review_id:
+            raise ValueError(
+                "a rationale is required when rejecting: provide a shared `reason` or a "
+                "`rationale_by_review_id` entry per item"
+            )
+        return self
+
+
+class GovernanceReviewBulkDecisionItemRead(ApiModel):
+    review_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class GovernanceReviewBulkDecisionResultRead(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    selection_mode: Literal["EXPLICIT", "FILTER"]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    truncated: bool
+    results: list[GovernanceReviewBulkDecisionItemRead]
+
+
 class ToolParameterDefinition(ApiModel):
     name: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
     parameter_type: Literal["STRING", "INTEGER", "NUMBER", "BOOLEAN", "DATE"]

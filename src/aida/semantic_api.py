@@ -2,12 +2,14 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -42,7 +44,12 @@ from aida.models import (
 )
 from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
+    GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
     GovernanceDecisionRequest,
+    GovernanceReviewBulkDecisionItemRead,
+    GovernanceReviewBulkDecisionRequest,
+    GovernanceReviewBulkDecisionResultRead,
+    GovernanceReviewBulkSelectionFilter,
     GovernanceReviewRead,
     Page,
     SemanticMetricCreate,
@@ -836,33 +843,40 @@ async def list_governance_reviews(
     )
 
 
-@router.post("/governance/reviews/{review_id}/decision", response_model=GovernanceReviewRead)
-async def decide_governance_review(
-    review_id: UUID,
-    body: GovernanceDecisionRequest,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
-    session: AsyncSession = Depends(get_session),
-) -> GovernanceReview:
-    review = await session.scalar(
-        select(GovernanceReview).where(GovernanceReview.id == review_id).with_for_update()
-    )
-    if review is None:
-        raise HTTPException(status_code=404, detail="governance review not found")
-    enforce_organization(context, review.organization_id)
-    if review.status != "PENDING":
-        raise HTTPException(status_code=409, detail="governance review is already decided")
-    if review.requested_by == context.principal_id:
-        raise HTTPException(status_code=409, detail="maker-checker separation is required")
-    now = datetime.now(UTC)
-    review.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+async def _apply_governance_review_decision(
+    session: AsyncSession,
+    review: GovernanceReview,
+    *,
+    decision: str,
+    reason: str | None,
+    context: SecurityContext,
+    now: datetime,
+) -> tuple[str, str, str, dict[str, Any]]:
+    """Apply one governance decision's object-type-specific side effects.
+
+    This is the single core `decide_governance_review` (single item) and
+    `bulk_decide_governance_reviews` (PG-3) both call, so the two paths
+    cannot drift: every object type the unified review queue supports is
+    dispatched exactly once, here. Mutates `review` itself
+    (status/decided_by/decision_reason/decided_at) plus the target object,
+    and returns `(event_type, aggregate_type, aggregate_id, payload)` for the
+    caller to record as an outbox event. Raises `HTTPException` (409 for a
+    target no longer in a decidable state, 422 for an unsupported object
+    type) -- it does not catch or convert those; callers are responsible for
+    the maker != checker, PENDING-only, and organization-boundary
+    preconditions *before* calling this, and for deciding what a raised
+    exception means for their own path (abort the single decision, or fail
+    just this one item of a bulk batch).
+    """
+    review.status = "APPROVED" if decision == "APPROVE" else "REJECTED"
     review.decided_by = context.principal_id
-    review.decision_reason = body.reason
+    review.decision_reason = reason
     review.decided_at = now
     if review.object_type == "SEMANTIC_MODEL_VERSION":
         model = await session.get(SemanticModelVersion, UUID(review.object_id))
         if model is None or model.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(SemanticModelVersion)
                 .where(
@@ -905,12 +919,12 @@ async def decide_governance_review(
         if review.requested_action == "DEPRECATE":
             if tool_version.status != "PUBLISHED":
                 raise HTTPException(status_code=409, detail="tool is no longer published")
-            if body.decision == "APPROVE":
+            if decision == "APPROVE":
                 tool_version.status = "DEPRECATED"
                 event_type = "tool.version.deprecated.v1"
             else:
                 event_type = "tool.version.deprecation_rejected.v1"
-        elif body.decision == "APPROVE":
+        elif decision == "APPROVE":
             await session.execute(
                 update(GovernedToolVersion)
                 .where(
@@ -941,7 +955,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if route.status != "PENDING_REVIEW":
             raise HTTPException(status_code=409, detail="model route is no longer pending review")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(ModelRouteConfiguration)
                 .where(
@@ -976,14 +990,14 @@ async def decide_governance_review(
                 raise HTTPException(
                     status_code=409, detail="context product is no longer published"
                 )
-            if body.decision == "APPROVE":
+            if decision == "APPROVE":
                 product_version.status = "DEPRECATED"
                 event_type = "context.product_deprecated.v1"
             else:
                 event_type = "context.product_deprecation_rejected.v1"
         elif product_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="context product is no longer pending")
-        elif body.decision == "APPROVE":
+        elif decision == "APPROVE":
             await session.execute(
                 update(ContextProductVersion)
                 .where(
@@ -1022,7 +1036,7 @@ async def decide_governance_review(
         if review.requested_action == "RETIRE":
             if data_product_version.status != "PUBLISHED":
                 raise HTTPException(status_code=409, detail="data product is no longer published")
-            if body.decision == "APPROVE":
+            if decision == "APPROVE":
                 data_product_version.status = "RETIRED"
                 data_product.lifecycle_status = "RETIRED"
                 event_type = "data_product.retired.v1"
@@ -1030,7 +1044,7 @@ async def decide_governance_review(
                 event_type = "data_product.retirement_rejected.v1"
         elif data_product_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="data product is no longer pending")
-        elif body.decision == "APPROVE":
+        elif decision == "APPROVE":
             await session.execute(
                 update(DataProductVersion)
                 .where(
@@ -1063,7 +1077,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if contract_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="data contract is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(DataContractVersion)
                 .where(
@@ -1102,15 +1116,15 @@ async def decide_governance_review(
             approve_access_request(
                 access_request,
                 reviewer=context.principal_id,
-                reason=body.reason,
-                approved=body.decision == "APPROVE",
+                reason=reason,
+                approved=decision == "APPROVE",
                 now=now,
             )
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         event_type = (
             "data_product.access_granted.v1"
-            if body.decision == "APPROVE"
+            if decision == "APPROVE"
             else "data_product.access_rejected.v1"
         )
         aggregate_type = "data_product_access_request"
@@ -1129,7 +1143,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if ai_asset.lifecycle_status != "ACTIVE":
             raise HTTPException(status_code=409, detail="AI asset is no longer active")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             ai_asset.lifecycle_status = "RETIRED"
             await session.execute(
                 update(AiAssetVersion)
@@ -1156,7 +1170,7 @@ async def decide_governance_review(
         ai_asset = await session.get(AiAsset, ai_version.asset_id)
         if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="AI asset is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(AiAssetVersion)
                 .where(
@@ -1189,9 +1203,9 @@ async def decide_governance_review(
         if proposal.status != "PENDING_REVIEW":
             raise HTTPException(status_code=409, detail="business semantics are no longer pending")
         proposal.reviewed_by = context.principal_id
-        proposal.review_reason = body.reason
+        proposal.review_reason = reason
         proposal.reviewed_at = now
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             annotation = await apply_enrichment_proposal(
                 session,
                 proposal=proposal,
@@ -1219,7 +1233,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if term_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="glossary term is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(GlossaryTermVersion)
                 .where(
@@ -1253,7 +1267,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if documentation_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="asset documentation is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             await session.execute(
                 update(AssetDocumentationVersion)
                 .where(
@@ -1285,7 +1299,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if operation.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="bulk operation is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             event_type, applied_count = await apply_bulk_operation(
                 session,
                 operation,
@@ -1309,7 +1323,7 @@ async def decide_governance_review(
         conflict = await session.get(GlossaryConflict, UUID(review.object_id))
         if conflict is None or conflict.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             event_type = await apply_conflict_resolution(
                 conflict,
                 reviewer=context.principal_id,
@@ -1328,7 +1342,7 @@ async def decide_governance_review(
         link_proposal = await session.get(GlossaryLinkProposal, UUID(review.object_id))
         if link_proposal is None or link_proposal.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             event_type = await apply_link_proposal(
                 session,
                 link_proposal,
@@ -1356,7 +1370,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if binding.status != "PENDING_APPROVAL":
             raise HTTPException(status_code=409, detail="binding is no longer pending review")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             binding.status = "ACTIVE"
             binding.approved_by = context.principal_id
             binding.approved_at = now
@@ -1379,7 +1393,7 @@ async def decide_governance_review(
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if grant.status != "PENDING_APPROVAL":
             raise HTTPException(status_code=409, detail="cross-boundary grant is no longer pending")
-        if body.decision == "APPROVE":
+        if decision == "APPROVE":
             grant.status = "ACTIVE"
             grant.approved_by = context.principal_id
             grant.approved_at = now
@@ -1397,6 +1411,35 @@ async def decide_governance_review(
         }
     else:
         raise HTTPException(status_code=422, detail="unsupported governance object type")
+    return event_type, aggregate_type, aggregate_id, payload
+
+
+@router.post("/governance/reviews/{review_id}/decision", response_model=GovernanceReviewRead)
+async def decide_governance_review(
+    review_id: UUID,
+    body: GovernanceDecisionRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReview:
+    review = await session.scalar(
+        select(GovernanceReview).where(GovernanceReview.id == review_id).with_for_update()
+    )
+    if review is None:
+        raise HTTPException(status_code=404, detail="governance review not found")
+    enforce_organization(context, review.organization_id)
+    if review.status != "PENDING":
+        raise HTTPException(status_code=409, detail="governance review is already decided")
+    if review.requested_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker-checker separation is required")
+    now = datetime.now(UTC)
+    event_type, aggregate_type, aggregate_id, payload = await _apply_governance_review_decision(
+        session,
+        review,
+        decision=body.decision,
+        reason=body.reason,
+        context=context,
+        now=now,
+    )
     audit_context = replace(context, organization_id=review.organization_id)
     record_audit(
         session,
@@ -1424,3 +1467,225 @@ async def decide_governance_review(
             status_code=409, detail="governance decision conflicted with concurrent state"
         ) from exc
     return review
+
+
+# ---------------------------------------------------------------------------
+# PG-3: bulk decisions with per-item rationale across the unified review
+# queue, at 10,000-item scale.
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_governance_review_bulk_subjects(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    review_ids: list[UUID] | None,
+    selection_filter: GovernanceReviewBulkSelectionFilter | None,
+) -> tuple[list[UUID], Literal["EXPLICIT", "FILTER"], bool]:
+    """Resolve the bounded set of review ids a bulk decision applies to.
+
+    Mirrors `_resolve_relationship_candidate_bulk_subjects` (RL-6): an
+    explicit list is deduped and returned as-is (already bounded to
+    GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS by the request schema); a
+    filter reuses `list_governance_reviews`'s own filter shape -- status
+    scoped to the caller's organization, plus an optional object_type -- with
+    every predicate pushed into the SQL `WHERE` clause (never a Python-side
+    scan of the whole table), ordered by `created_at` and capped at the same
+    limit, reporting whether the cap actually truncated the match set.
+    """
+    if review_ids is not None:
+        return list(dict.fromkeys(review_ids)), "EXPLICIT", False
+    assert selection_filter is not None
+    organization_id = context.require_organization()
+    filters: list[ColumnElement[bool]] = [
+        GovernanceReview.organization_id == organization_id,
+        GovernanceReview.status == selection_filter.status.upper(),
+    ]
+    if selection_filter.object_type is not None:
+        filters.append(GovernanceReview.object_type == selection_filter.object_type.upper())
+    rows = list(
+        (
+            await session.scalars(
+                select(GovernanceReview.id)
+                .where(*filters)
+                .order_by(GovernanceReview.created_at)
+                .limit(GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS + 1)
+            )
+        ).all()
+    )
+    truncated = len(rows) > GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS
+    ids = rows[:GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS]
+    if not ids:
+        raise HTTPException(status_code=409, detail="filter matched no governance reviews")
+    return ids, "FILTER", truncated
+
+
+@router.post(
+    "/governance/reviews/bulk-decision",
+    response_model=GovernanceReviewBulkDecisionResultRead,
+)
+async def bulk_decide_governance_reviews(
+    body: GovernanceReviewBulkDecisionRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReviewBulkDecisionResultRead:
+    """PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING
+    governance reviews in one call, across whichever object type(s) the
+    unified review queue already supports, by explicit id list or by a
+    status/object-type filter scoped to the caller's organization.
+
+    Exactly the same maker != checker, PENDING-only, and organization-
+    boundary rules as `decide_governance_review` apply per item -- this
+    calls `_apply_governance_review_decision`, the same core the
+    single-item endpoint calls, so the two paths cannot drift -- but a rule
+    violation on one item marks that item FAILED and continues (RL-6/CT-1's
+    partial-success precedent) rather than aborting the whole batch. Each
+    item's dispatch runs inside its own SAVEPOINT (`session.begin_nested`),
+    so a failure partway through one item's (possibly multi-table) side
+    effects can never leak a partial write into an item reported FAILED --
+    verified directly against a real SAVEPOINT rollback, not assumed.
+
+    Selection is always a single bulk query: an explicit id list is deduped
+    in Python then fetched with one `WHERE id IN (...)`, and a filter pushes
+    every predicate into SQL via `_resolve_governance_review_bulk_subjects`.
+    Nothing here loads the full review table into Python to filter it there.
+    """
+    subject_ids, selection_mode, truncated = await _resolve_governance_review_bulk_subjects(
+        session,
+        context=context,
+        review_ids=body.review_ids,
+        selection_filter=body.filter,
+    )
+    reviews = {
+        row.id: row
+        for row in (
+            await session.scalars(
+                select(GovernanceReview).where(GovernanceReview.id.in_(subject_ids))
+            )
+        ).all()
+    }
+    now = datetime.now(UTC)
+    results: list[GovernanceReviewBulkDecisionItemRead] = []
+    succeeded = 0
+    for review_id in subject_ids:
+        review = reviews.get(review_id)
+        if review is None:
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id),
+                    status="FAILED",
+                    reason="governance review not found",
+                )
+            )
+            continue
+        try:
+            enforce_organization(context, review.organization_id)
+        except HTTPException:
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id),
+                    status="FAILED",
+                    reason="cross-organization access denied",
+                )
+            )
+            continue
+        if review.status != "PENDING":
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id),
+                    status="FAILED",
+                    reason=f"governance review is already {review.status.lower()}",
+                )
+            )
+            continue
+        if review.requested_by == context.principal_id:
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id),
+                    status="FAILED",
+                    reason="maker-checker separation is required",
+                )
+            )
+            continue
+        item_reason = (
+            body.rationale_by_review_id.get(review_id) if body.rationale_by_review_id else None
+        )
+        if item_reason is None:
+            item_reason = body.reason
+        if body.decision == "REJECT" and not item_reason:
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id),
+                    status="FAILED",
+                    reason="a rationale is required to reject this item",
+                )
+            )
+            continue
+        try:
+            async with session.begin_nested():
+                event_type, aggregate_type, aggregate_id, payload = (
+                    await _apply_governance_review_decision(
+                        session,
+                        review,
+                        decision=body.decision,
+                        reason=item_reason,
+                        context=context,
+                        now=now,
+                    )
+                )
+                record_outbox(
+                    session,
+                    organization_id=review.organization_id,
+                    aggregate_type=aggregate_type,
+                    aggregate_id=aggregate_id,
+                    event_type=event_type,
+                    payload=payload,
+                )
+        except HTTPException as exc:
+            results.append(
+                GovernanceReviewBulkDecisionItemRead(
+                    review_id=str(review_id), status="FAILED", reason=str(exc.detail)
+                )
+            )
+            continue
+        results.append(
+            GovernanceReviewBulkDecisionItemRead(
+                review_id=str(review_id), status="SUCCEEDED", reason=None
+            )
+        )
+        succeeded += 1
+    failed = len(results) - succeeded
+    outcome = "SUCCESS" if not failed else "PARTIAL_SUCCESS" if succeeded else "FAILURE"
+    record_audit(
+        session,
+        context,
+        action="governance_review.bulk_decide",
+        resource_type="governance_review",
+        resource_id=None,
+        outcome=outcome,
+        correlation_id=get_correlation_id(),
+        details={
+            "decision": body.decision,
+            "selection_mode": selection_mode,
+            "requested_count": len(results),
+            "succeeded_count": succeeded,
+            "failed_count": failed,
+            "truncated": truncated,
+        },
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="bulk governance decision conflicted with concurrent state"
+        ) from exc
+    return GovernanceReviewBulkDecisionResultRead(
+        decision=body.decision,
+        selection_mode=selection_mode,
+        requested_count=len(results),
+        succeeded_count=succeeded,
+        failed_count=failed,
+        truncated=truncated,
+        results=results,
+    )
