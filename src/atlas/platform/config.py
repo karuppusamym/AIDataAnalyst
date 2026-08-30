@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     outbox_max_backoff_seconds: int = Field(default=300, ge=1, le=3600)
     relationship_candidate_scan_max_columns: int = Field(default=100_000, ge=1_000, le=1_000_000)
     cross_source_candidate_max_datasource_pairs: int = Field(default=50, ge=1, le=2_000)
+    relationship_candidate_composite_max_columns: int = Field(default=4, ge=2, le=8)
+    relationship_candidate_composite_max_per_table: int = Field(default=25, ge=1, le=500)
+    table_family_detection_max_tables: int = Field(default=5_000, ge=10, le=100_000)
     usage_boost_enabled_default: bool = False
     usage_boost_refresh_minutes: int = Field(default=60, ge=5, le=1440)
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)

@@ -1104,6 +1104,104 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class TableRef(ApiModel):
+    """A resolved table reference; the return type of ``resolve_canonical``."""
+
+    table_id: UUID
+    qualified_name: str
+
+
+class TableFamilyMemberRead(ApiModel):
+    id: UUID
+    table_id: UUID
+    qualified_name: str
+    confidence: float
+    evidence: dict[str, Any]
+
+
+class TableFamilyRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    family_key: str
+    family_type: Literal[
+        "HISTORY", "SNAPSHOT", "DELTA_CDC", "SCD", "APPEND_ONLY", "REFERENCE"
+    ]
+    algorithm_version: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    members: list[TableFamilyMemberRead]
+    created_at: datetime
+    updated_at: datetime
+
+
+class TableFamilyDetectionRequest(ApiModel):
+    max_tables: int = Field(default=1_000, ge=1, le=5_000)
+
+
+class CanonicalTableMappingRead(ApiModel):
+    id: UUID
+    family_id: UUID
+    detected_canonical_table_id: UUID
+    detected_canonical_qualified_name: str
+    override_table_id: UUID | None
+    override_qualified_name: str | None
+    effective_canonical_table_id: UUID
+    effective_canonical_qualified_name: str
+    algorithm_version: str
+    confidence: float
+    evidence: dict[str, Any]
+    overridden_by: str | None
+    override_reason: str | None
+    overridden_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CanonicalTableOverrideRequest(ApiModel):
+    """Steward override of the detected canonical table (maker-checker).
+
+    ``table_id`` set to ``None`` clears an existing override and reverts to
+    the system-detected default; a reason is always required so the override
+    (or its reversal) is itself evidence-backed and auditable.
+    """
+
+    table_id: UUID | None = None
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class CompositeRelationshipCandidateDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2_000)
+
+
+class CompositeRelationshipCandidateMemberRead(ApiModel):
+    ordinal: int
+    source_column_id: UUID
+    target_column_id: UUID
+    source_column_name: str
+    target_column_name: str
+
+
+class CompositeRelationshipCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table_id: UUID
+    target_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    members: list[CompositeRelationshipCandidateMemberRead]
+    created_at: datetime
+    updated_at: datetime
+
+
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]

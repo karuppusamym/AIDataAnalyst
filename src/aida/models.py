@@ -1474,6 +1474,183 @@ class RelationshipCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RelationshipCandidateGroup(Base, TimestampMixin):
+    """A composite (multi-column) FK-like candidate; see RelationshipCandidateGroupMember.
+
+    ``RelationshipCandidate`` above is single-column only -- its unique
+    constraint is keyed on exactly one source/target column pair, and the
+    knowledge graph and impact-analysis code that reads it assumes the same.
+    Rather than restructure that working, already-consumed shape, composite
+    candidates get their own parent/member pair (RL-3): the parent carries
+    the same maker-checker decision fields as ``RelationshipCandidate``, and
+    an ordered set of column pairs lives in the member table below.
+    """
+
+    __tablename__ = "relationship_candidate_group"
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource_id",
+            "member_fingerprint",
+            name="uq_relationship_candidate_group_fingerprint",
+        ),
+        Index("ix_relationship_candidate_group_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    member_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RelationshipCandidateGroupMember(Base):
+    """One ordered column pair belonging to a composite relationship candidate."""
+
+    __tablename__ = "relationship_candidate_group_member"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id", "ordinal", name="uq_relationship_candidate_group_member_ordinal"
+        ),
+        UniqueConstraint(
+            "group_id",
+            "source_column_id",
+            "target_column_id",
+            name="uq_relationship_candidate_group_member_columns",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("relationship_candidate_group.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+
+class TableFamily(Base, TimestampMixin):
+    """A detected group of related tables: history, snapshot, delta/CDC, SCD,
+
+    append-only, or reference (RL-1). ``family_key`` is a stable, deterministic
+    grouping identity (schema-scoped base entity name, optionally qualified by
+    family type) so re-running detection updates the same row instead of
+    duplicating it.
+    """
+
+    __tablename__ = "table_family"
+    __table_args__ = (
+        UniqueConstraint("datasource_id", "family_key", name="uq_table_family_key"),
+        Index("ix_table_family_org_type", "organization_id", "family_type"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    family_key: Mapped[str] = mapped_column(String(500), nullable=False)
+    family_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DETECTED", nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class TableFamilyMember(Base, TimestampMixin):
+    """One table's membership in a detected family, with per-table evidence.
+
+    A table belongs to at most one family at a time: re-detection replaces
+    its prior membership rather than allowing conflicting assignments.
+    """
+
+    __tablename__ = "table_family_member"
+    __table_args__ = (
+        UniqueConstraint("table_id", name="uq_table_family_member_table_id"),
+        Index("ix_table_family_member_family", "family_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    family_id: Mapped[UUID] = mapped_column(
+        ForeignKey("table_family.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False
+    )
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class CanonicalTableMapping(Base, TimestampMixin):
+    """Which family member an agent should default to (RL-2), with steward override.
+
+    ``detected_canonical_table_id`` is the system's evidence-backed pick and is
+    never mutated by a steward action -- it stays the auditable record of what
+    the algorithm concluded. ``override_table_id`` is set only by an explicit
+    steward decision (maker-checker, like ``RelationshipCandidateDecision``);
+    when present it wins. Retrieval ranking (module 12) reads the effective
+    choice through the ``get_table_family``/``resolve_canonical`` read paths,
+    not by joining this table directly.
+    """
+
+    __tablename__ = "canonical_table_mapping"
+    __table_args__ = (UniqueConstraint("family_id", name="uq_canonical_table_mapping_family"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    family_id: Mapped[UUID] = mapped_column(
+        ForeignKey("table_family.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    detected_canonical_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False
+    )
+    algorithm_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    override_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    )
+    override_reason: Mapped[str | None] = mapped_column(String(2000))
+    overridden_by: Mapped[str | None] = mapped_column(String(255))
+    overridden_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 
