@@ -2997,3 +2997,40 @@ class CatalogBulkActionRunRead(ApiModel):
     results: list[CatalogBulkActionItemRead]
     requested_by: str
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# CT-5: asset certification lifecycle with expiry (single table or column)
+# ---------------------------------------------------------------------------
+
+
+class CertificationDecisionRequest(ApiModel):
+    """Module 04's ``CertificationDecision``: certify the table itself, or one column."""
+
+    asset_type: Literal["TABLE", "COLUMN"] = "TABLE"
+    column_id: UUID | None = None
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_target(self) -> "CertificationDecisionRequest":
+        if self.asset_type == "COLUMN" and self.column_id is None:
+            raise ValueError("certifying a column requires column_id")
+        if self.asset_type == "TABLE" and self.column_id is not None:
+            raise ValueError("column_id is only meaningful when asset_type is COLUMN")
+        return self
+
+
+class AssetCertificationRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    column_id: UUID | None
+    asset_type: str
+    status: str
+    rationale: str
+    certified_by: str
+    expires_at: datetime
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
