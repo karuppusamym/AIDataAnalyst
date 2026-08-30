@@ -317,19 +317,18 @@ def test_the_tenant_free_route_list_stays_closed() -> None:
 
 
 # Workers whose tenant scope is transitive rather than an explicit
-# `organization_id` predicate. Listed individually because the distinction is
-# real: a `datasource_id` filter *is* a tenant scope (a datasource belongs to
-# exactly one organization) but it relies on the FK rather than restating the
-# boundary, so it loses the defence in depth every other query in the platform
-# has. Recorded in `Docs/review-2026-08/gap/06-tier0-invariant-suite.md` as a
-# recommended change under `src/`.
-_TRANSITIVELY_SCOPED_WORKERS: dict[str, str] = {
-    "aida.workflows.activities.plan_profile_tasks": (
-        "selects MetadataTable.id filtered on datasource_id only, having already "
-        "loaded the datasource from the analysis run; correct today, but the only "
-        "worker in the platform without an explicit organization_id predicate"
-    ),
-}
+# `organization_id` predicate. **Empty.** The distinction is real -- a
+# `datasource_id` filter *is* a tenant scope (a datasource belongs to exactly one
+# organization) but it relies on the FK rather than restating the boundary, so it
+# loses the defence in depth every other query in the platform has.
+#
+# `aida.workflows.activities.plan_profile_tasks` was the platform's only entry and
+# now carries an explicit `MetadataTable.organization_id == run.organization_id`
+# predicate (`Docs/review-2026-08/gap/09-inv7-audit-closeout.md` s3). Every
+# background worker is now explicitly scoped, with no exemption, and
+# `test_every_background_worker_is_tenant_scoped` below fails on the first one that
+# is not -- adding an entry here is a visible act, not a quiet one.
+_TRANSITIVELY_SCOPED_WORKERS: dict[str, str] = {}
 
 
 def _temporal_activities() -> list[str]:

@@ -19,18 +19,21 @@ caught too. The same-transaction clause is proven by driving the query gateway's
 real persistence path against a recording session and checking that the audit row
 is present in the batch at every commit boundary.
 
-`_KNOWN_UNAUDITED_MUTATIONS` below is not an exemption -- it is a finding. Eleven
-endpoints commit governed state today with no audit record. They are listed here so
-the property still ratchets (a twelfth fails immediately) and so the breach is
-visible in the code an auditor reads, and `test_no_unaudited_mutation_remains`
-records it as a strict xfail that will turn into a hard failure the moment it is
-fixed, forcing the list to be deleted rather than quietly outliving the bug.
+`_KNOWN_UNAUDITED_MUTATIONS` below **is now empty.** It recorded a finding, not an
+exemption: thirteen endpoints in `aida.ai_registry_api` and
+`aida.product_marketplace_api` committed governed state with no audit record, and
+`test_no_unaudited_mutation_remains` held that finding as a strict xfail so that
+fixing the code would turn into a hard failure and force the entries out. They were
+fixed under `Docs/review-2026-08/gap/09-inv7-audit-closeout.md`; the entries are
+gone and the xfail with them. The empty dict is kept deliberately rather than
+deleted: `test_every_mutation_audits` now covers **every** mutating route with no
+exemption at all, and re-populating the dict to excuse a fourteenth endpoint fails
+`test_no_unaudited_mutation_remains` immediately instead of passing quietly.
 """
 
 from datetime import UTC, datetime
 from uuid import uuid4
 
-import pytest
 from fastapi.routing import APIRoute
 
 from aida.events import record_audit
@@ -66,10 +69,24 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
 
 # Read endpoints whose only write is the idempotent creation of a per-organization
 # default row (`ensure_default_domain`, `ensure_organization_integration_policy`).
-# They are flagged by the derived-mutation scan, correctly -- they do stage a row --
-# but the row records no actor decision, so an audit entry per GET would bury the
-# trail rather than enrich it. Recorded as a judgement call for Architecture in
-# `Docs/review-2026-08/gap/06-tier0-invariant-suite.md` rather than settled here.
+# They are flagged by the derived-mutation scan, correctly -- they do stage a row.
+#
+# The scan is right and the audit entry is still wrong, for a reason this module now
+# *proves* rather than asserts: both helpers build their row from constants and the
+# tenant/parent identifier alone. No caller input reaches the row, so there is no
+# actor decision to attribute -- the row is a pure function of the tenant, and "who
+# created it" has no answer more informative than "the platform, on first read".
+# INV-7 exists to make an actor's choice replayable; there is no choice here.
+# An audit entry per GET would add one row per read of eight endpoints and bury the
+# entries that do record a decision.
+#
+# The carve-out is therefore kept, but made falsifiable:
+# `test_the_lazy_default_write_list_stays_closed` requires each route to still reach
+# the helper its entry names, and `test_lazy_default_writers_record_no_actor_decision`
+# requires those helpers to keep taking no caller-supplied payload. The moment either
+# helper starts accepting a caller's value, the premise is gone and these tests go red.
+# Recommendation and trade-off for Architecture to ratify into the invariants
+# document: `Docs/review-2026-08/gap/09-inv7-audit-closeout.md` s4.
 _LAZY_DEFAULT_WRITE_ROUTES: dict[str, str] = {
     "GET /v1/lines-of-business/{lob_id}/data-domains": "ensure_default_domain",
     "GET /v1/organizations/{organization_id}/integration-policy": (
@@ -91,54 +108,12 @@ _LAZY_DEFAULT_WRITE_ROUTES: dict[str, str] = {
     "GET /v1/openlineage-events/{event_id}": "ensure_organization_integration_policy",
 }
 
-# Endpoints that commit governed state with no audit record. This is a live INV-7
-# breach, not a design exemption -- see the module docstring and
-# `Docs/review-2026-08/gap/06-tier0-invariant-suite.md`. Each entry names what the
-# endpoint writes, so the cost of leaving it unaudited is legible.
-_KNOWN_UNAUDITED_MUTATIONS: dict[str, str] = {
-    "POST /v1/ai-asset-versions/{version_id}/provider-sync": (
-        "rewrites provider evidence, runtime evidence and the version fingerprint; "
-        "emits an outbox event but no audit row"
-    ),
-    "POST /v1/ai-asset-versions/{version_id}/remediations": (
-        "creates an AiRemediation row; emits an outbox event but no audit row"
-    ),
-    "POST /v1/ai-asset-versions/{version_id}/submit": (
-        "transitions an AI asset version into review; no audit row"
-    ),
-    "POST /v1/ai-assets/{asset_id}/retire": (
-        "requests retirement of a registered AI asset; no audit row"
-    ),
-    "POST /v1/ai-assets/{asset_id}/versions": (
-        "creates a new AI asset version; no audit row"
-    ),
-    "PUT /v1/ai-remediations/{remediation_id}": (
-        "updates remediation status and evidence; emits an outbox event but no audit row"
-    ),
-    "POST /v1/data-contract-versions/{contract_id}/submit": (
-        "submits a data contract version for governance review; no audit row"
-    ),
-    "POST /v1/data-product-versions/{version_id}/retire": (
-        "requests retirement of a published data product version; no audit row"
-    ),
-    "POST /v1/data-product-versions/{version_id}/submit": (
-        "submits a data product version for review; emits an outbox event but no audit row"
-    ),
-    "POST /v1/data-products/{product_id}/contracts": (
-        "creates a data contract under a data product; no audit row"
-    ),
-    "POST /v1/marketplace/access-requests/{request_id}/revoke": (
-        "revokes a marketplace entitlement -- an access-removal event, the single "
-        "most audit-relevant action in the marketplace; emits an outbox event but "
-        "no audit row"
-    ),
-    "POST /v1/data-products/{product_id}/versions": (
-        "creates a data product version; no audit row"
-    ),
-    "PUT /v1/data-product-versions/{version_id}": (
-        "updates a data product version in place; no audit row"
-    ),
-}
+# Endpoints that commit governed state with no audit record. Empty, and required to
+# stay empty by `test_no_unaudited_mutation_remains`. This was a live INV-7 breach of
+# thirteen endpoints; all thirteen now call `record_audit` in the same transaction as
+# their mutation (`Docs/review-2026-08/gap/09-inv7-audit-closeout.md`). An entry added
+# here to excuse a new endpoint fails that test rather than weakening this one.
+_KNOWN_UNAUDITED_MUTATIONS: dict[str, str] = {}
 
 
 def _route_key(route: APIRoute) -> str:
@@ -195,26 +170,27 @@ def test_every_mutation_audits() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "INV-7 is breached by 13 endpoints in aida.ai_registry_api and "
-        "aida.product_marketplace_api that commit governed state with no audit "
-        "record (see _KNOWN_UNAUDITED_MUTATIONS). Fixing them requires adding "
-        "record_audit calls under src/, which this workstream does not own. "
-        "Strict xfail so that fixing them turns this into a hard failure and "
-        "forces the exemption list to be deleted."
-    ),
-)
 def test_no_unaudited_mutation_remains() -> None:
-    """INV-7 in full, with no exemptions. Currently fails; see the xfail reason."""
+    """INV-7 in full, with no exemptions.
+
+    Was a strict xfail while thirteen endpoints in `aida.ai_registry_api` and
+    `aida.product_marketplace_api` committed governed state with no audit record.
+    They now audit, so this is an ordinary passing test and the exemption list is
+    empty.
+
+    It stays here as the ratchet's second jaw. `test_every_mutation_audits` skips
+    whatever this dict contains; this test requires it to contain nothing. Excusing
+    a fourteenth unaudited endpoint therefore cannot be done quietly -- it turns
+    this test red in the same commit.
+    """
     assert _KNOWN_UNAUDITED_MUTATIONS == {}
 
 
 def test_the_known_unaudited_list_stays_honest() -> None:
-    """Guards the exemption list itself. Every entry must still name a mounted
-    route that still fails to audit -- otherwise the list drifts into fiction and
-    the ratchet above silently stops ratcheting.
+    """Guards the exemption list itself. Vacuous while the list is empty, which is
+    the point: it is what makes a re-populated list fail fast. Every entry must
+    name a mounted route that still fails to audit -- otherwise the list drifts
+    into fiction and the ratchet above silently stops ratcheting.
     """
     mounted = {_route_key(route): route for route in iter_api_routes()}
     missing = sorted(set(_KNOWN_UNAUDITED_MUTATIONS) - set(mounted))
@@ -245,7 +221,11 @@ def test_the_read_only_post_list_stays_closed() -> None:
 
 def test_the_lazy_default_write_list_stays_closed() -> None:
     """Every route excused as a lazy-default writer must still name a mounted
-    route that still writes. If one stops writing, the excuse must go with it.
+    route that still writes, and must still reach the helper its entry blames.
+
+    The second half is what stops the carve-out becoming a hiding place. Without
+    it, a handler could grow a real, actor-driven mutation and keep its exclusion,
+    because the only thing checked would be that it writes *something*.
     """
     mounted = {_route_key(route): route for route in iter_api_routes()}
     stale = sorted(set(_LAZY_DEFAULT_WRITE_ROUTES) - set(mounted))
@@ -257,6 +237,54 @@ def test_the_lazy_default_write_list_stays_closed() -> None:
     assert no_longer_writing == [], (
         "these routes no longer write and no longer need an exclusion; remove them "
         f"from _LAZY_DEFAULT_WRITE_ROUTES: {no_longer_writing}"
+    )
+
+    wrong_reason = []
+    for key, helper in sorted(_LAZY_DEFAULT_WRITE_ROUTES.items()):
+        endpoint = mounted[key].endpoint
+        if not reaches_call(endpoint.__module__, endpoint.__name__, frozenset({helper})):
+            wrong_reason.append(f"{key} (no longer reaches {helper})")
+    assert wrong_reason == [], (
+        "these routes are excused as lazy-default writers but no longer reach the "
+        f"helper the exclusion blames; their writes are now unaccounted for: {wrong_reason}"
+    )
+
+
+_LAZY_DEFAULT_WRITERS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "ensure_default_domain": ("aida.domain_service", ("session", "lob")),
+    "ensure_organization_integration_policy": (
+        "aida.integration_service",
+        ("session", "organization_id"),
+    ),
+}
+
+
+def test_lazy_default_writers_record_no_actor_decision() -> None:
+    """The premise under the lazy-default carve-out, asserted rather than assumed.
+
+    Eight GET routes are excused from INV-7 because the row they stage records no
+    actor decision: both helpers build it from constants plus the tenant or parent
+    identifier, so it is a pure function of the tenant and there is nothing to
+    attribute. That is only true while the helpers take no caller-supplied value.
+
+    Pins each signature exactly. The moment either helper gains a parameter -- a
+    caller-chosen domain name, a policy override -- the row starts carrying
+    somebody's choice, the carve-out's reasoning collapses, and this test says so
+    instead of the exclusion silently outliving its justification.
+    """
+    import importlib
+    import inspect
+
+    drifted = []
+    for name, (module_name, expected) in sorted(_LAZY_DEFAULT_WRITERS.items()):
+        function = getattr(importlib.import_module(module_name), name)
+        actual = tuple(inspect.signature(function).parameters)
+        if actual != expected:
+            drifted.append(f"{module_name}.{name}: {actual} != {expected}")
+    assert drifted == [], (
+        "a lazy-default writer now takes caller-supplied input, so the row it "
+        "creates records an actor decision and can no longer be excused from "
+        f"INV-7; revisit _LAZY_DEFAULT_WRITE_ROUTES: {drifted}"
     )
 
 
