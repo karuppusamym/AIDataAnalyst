@@ -48,6 +48,7 @@ from aida.sql_validation_api import router as sql_validation_router
 from aida.stewardship_api import router as stewardship_router
 from aida.studio_api import router as studio_router
 from aida.table_family_api import router as table_family_router
+from aida.token_revocation_api import router as token_revocation_router
 from aida.tool_api import router as tool_router
 from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
@@ -130,6 +131,7 @@ app.include_router(compliance_router)
 app.include_router(negative_knowledge_router)
 app.include_router(tool_plans_router)
 app.include_router(table_family_router)
+app.include_router(token_revocation_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents
