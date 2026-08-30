@@ -17,6 +17,9 @@ any test in this suite.
 
 from __future__ import annotations
 
+import asyncio
+import json
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -28,12 +31,22 @@ from aida.mcp_server import (
     _err,
     _handle_initialize,
     _handle_native_lineage_tool_call,
+    _handle_resources_read,
     _handle_tools_call,
     _is_successful_consumption,
     _ok,
     _tool_role_eligible,
 )
-from aida.models import AuditEvent, DataSource, GovernedTool, GovernedToolVersion
+from aida.models import (
+    AuditEvent,
+    DataSource,
+    GovernedTool,
+    GovernedToolVersion,
+    MetadataCatalog,
+    MetadataSchema,
+    MetadataTable,
+    TableProfile,
+)
 from aida.schemas import UnifiedLineageGraphRead
 from aida.security import SecurityContext
 from aida.unified_lineage_api import LineageNodeNotFoundError
@@ -797,3 +810,138 @@ async def test_native_lineage_tool_get_lineage_impact_surfaces_node_not_found(
             {"type": "text", "text": "lineage node 'bogus' not found in this datasource's graph"}
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# resources/read -- row_count_estimate must come from the latest completed
+# TableProfile, not from MetadataTable (which has no such column and raised
+# AttributeError on every catalog resource read before this fix).
+# ---------------------------------------------------------------------------
+
+
+class _FakeReadResult:
+    def __init__(self, value):
+        self._value = value
+
+    def first(self):
+        return self._value
+
+
+class _FakeReadScalars:
+    def __init__(self, values):
+        self._values = values
+
+    def all(self):
+        return self._values
+
+
+class ResourcesReadSession:
+    """Stands in for AsyncSession: returns canned results regardless of the
+    statement passed in, since these tests only need to exercise handler
+    logic, not real query construction."""
+
+    def __init__(self, *, catalog_row, columns, latest_profile):
+        self._catalog_row = catalog_row
+        self._columns = columns
+        self._latest_profile = latest_profile
+        self.added: list[object] = []
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def execute(self, _statement):
+        return _FakeReadResult(self._catalog_row)
+
+    async def scalars(self, _statement):
+        return _FakeReadScalars(self._columns)
+
+    async def scalar(self, _statement):
+        return self._latest_profile
+
+
+def _build_catalog_row(organization_id):
+    datasource_id = uuid4()
+    catalog = MetadataCatalog(
+        id=uuid4(),
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        name="prod-warehouse",
+        status="ACTIVE",
+        fingerprint="cat-fp",
+    )
+    schema = MetadataSchema(
+        id=uuid4(),
+        organization_id=organization_id,
+        catalog_id=catalog.id,
+        name="analytics",
+        status="ACTIVE",
+        fingerprint="schema-fp",
+    )
+    table = MetadataTable(
+        id=uuid4(),
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        schema_id=schema.id,
+        name="orders",
+        object_type="TABLE",
+        status="ACTIVE",
+        fingerprint="table-fp",
+    )
+    return table, schema, catalog, datasource_id
+
+
+def _read_resource(context, session, datasource_id, schema_name, table_name):
+    uri = f"atlas://catalog/{datasource_id}/{schema_name}/{table_name}"
+    result = asyncio.run(_handle_resources_read({"uri": uri}, session, context, "corr-test"))
+    return json.loads(result["contents"][0]["text"])
+
+
+def test_catalog_read_reports_row_count_estimate_from_table_profile() -> None:
+    organization_id = uuid4()
+    context = SecurityContext(
+        principal_id="test-principal",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"Viewer"}),
+    )
+    table, schema, catalog, datasource_id = _build_catalog_row(organization_id)
+    profile = TableProfile(
+        id=uuid4(),
+        organization_id=organization_id,
+        analysis_run_id=uuid4(),
+        datasource_id=datasource_id,
+        table_id=table.id,
+        row_count_estimate=48213,
+        sampled_row_count=5000,
+        status="COMPLETED",
+        created_at=datetime.now(UTC),
+    )
+    session = ResourcesReadSession(
+        catalog_row=(table, schema, catalog),
+        columns=[],
+        latest_profile=profile,
+    )
+
+    payload = _read_resource(context, session, datasource_id, schema.name, table.name)
+
+    assert payload["row_count_estimate"] == 48213
+
+
+def test_catalog_read_reports_null_row_count_when_no_profile_exists() -> None:
+    organization_id = uuid4()
+    context = SecurityContext(
+        principal_id="test-principal",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"Viewer"}),
+    )
+    table, schema, catalog, datasource_id = _build_catalog_row(organization_id)
+    session = ResourcesReadSession(
+        catalog_row=(table, schema, catalog),
+        columns=[],
+        latest_profile=None,
+    )
+
+    payload = _read_resource(context, session, datasource_id, schema.name, table.name)
+
+    assert payload["row_count_estimate"] is None

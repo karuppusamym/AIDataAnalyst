@@ -98,6 +98,7 @@ from aida.models import (
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    TableProfile,
 )
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
@@ -1490,12 +1491,25 @@ async def _handle_resources_read(
         )
     ).all()
 
+    # MetadataTable itself carries no row count — row_count_estimate lives on
+    # TableProfile (one per completed scan), linked back via table_id.
+    latest_profile = await session.scalar(
+        select(TableProfile)
+        .where(
+            TableProfile.organization_id == context.organization_id,
+            TableProfile.table_id == table.id,
+            TableProfile.status == "COMPLETED",
+        )
+        .order_by(TableProfile.created_at.desc())
+        .limit(1)
+    )
+
     metadata_payload = {
         "catalog": catalog.name,
         "schema": schema.name,
         "table": table.name,
         "object_type": table.object_type,
-        "row_count_estimate": table.row_count_estimate,
+        "row_count_estimate": latest_profile.row_count_estimate if latest_profile else None,
         "columns": [
             {
                 "name": col.name,
