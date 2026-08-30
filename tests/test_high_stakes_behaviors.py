@@ -111,11 +111,13 @@ class DeprecationSession:
 
 
 async def test_catalog_tombstoning_executes_updates_for_each_missing_object_level() -> None:
-    observed_ids = [uuid4() for _ in range(5)]
-    missing_ids = [uuid4() for _ in range(5)]
+    # Order matches `_deprecate_missing`'s scalar-query sequence: catalog, table,
+    # schema, column, constraint, index, partition (CT-3 added the last two).
+    observed_ids = [uuid4() for _ in range(7)]
+    missing_ids = [uuid4() for _ in range(7)]
     inventories = [
         {observed_ids[index], missing_ids[index]}
-        for index in range(5)
+        for index in range(7)
     ]
     # A 6th `scalars` call queries which of the about-to-be-tombstoned tables are
     # currently ACTIVE (the CT-4 rename-detection "just tombstoned" input) --
@@ -143,6 +145,8 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
         schema_ids={observed_ids[2]},
         column_ids={observed_ids[3]},
         constraint_ids={observed_ids[4]},
+        index_ids={observed_ids[5]},
+        partition_ids={observed_ids[6]},
     )
 
     deprecated = await deprecate_missing_snapshot(
@@ -151,9 +155,9 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
         observed,
     )
 
-    assert deprecated.total == 5
+    assert deprecated.total == 7
     assert deprecated.deprecated_table_ids == {missing_ids[1]}
-    assert len(session.statements) == 5
+    assert len(session.statements) == 7
     targeted: dict[str, set[UUID]] = {}
     for statement in session.statements:
         table_name = statement.table.name  # type: ignore[attr-defined]
@@ -172,6 +176,8 @@ async def test_catalog_tombstoning_executes_updates_for_each_missing_object_leve
         "metadata_table": {missing_ids[1]},
         "metadata_column": {missing_ids[3]},
         "metadata_constraint": {missing_ids[4]},
+        "metadata_index": {missing_ids[5]},
+        "metadata_partition": {missing_ids[6]},
     }
     assert not any(observed_id in ids for ids in targeted.values() for observed_id in observed_ids)
 

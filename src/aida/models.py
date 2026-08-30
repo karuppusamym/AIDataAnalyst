@@ -764,6 +764,13 @@ class MetadataTable(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("schema_id", "name"),
         Index("ix_metadata_table_org_status", "organization_id", "status"),
+        # Leading (datasource_id, status) matches list_tables' equality filters; the
+        # trailing (name, id) matches its ORDER BY exactly, so the keyset predicate
+        # `(name, id) > (:last_name, :last_id)` can be satisfied by a single index
+        # range seek instead of a table scan, independent of how deep the cursor is.
+        Index(
+            "ix_metadata_table_ds_status_name_id", "datasource_id", "status", "name", "id"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -794,6 +801,16 @@ class MetadataColumn(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("table_id", "name"),
         Index("ix_metadata_column_org_class", "organization_id", "classification"),
+        # Mirrors ix_metadata_table_ds_status_name_id: leading (table_id, status)
+        # matches list_columns' equality filters, trailing (ordinal_position, id)
+        # matches its ORDER BY, so keyset paging stays a single index range seek.
+        Index(
+            "ix_metadata_column_table_status_ordinal_id",
+            "table_id",
+            "status",
+            "ordinal_position",
+            "id",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -843,6 +860,68 @@ class MetadataConstraint(Base, TimestampMixin):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class MetadataIndex(Base, TimestampMixin):
+    __tablename__ = "metadata_index"
+    __table_args__ = (
+        UniqueConstraint("table_id", "name"),
+        Index("ix_metadata_index_org_type", "organization_id", "index_type"),
+        Index("ix_metadata_index_table_status_name_id", "table_id", "status", "name", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    index_type: Mapped[str] = mapped_column(String(30), default="UNKNOWN", nullable=False)
+    columns: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    is_unique: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class MetadataPartition(Base, TimestampMixin):
+    __tablename__ = "metadata_partition"
+    __table_args__ = (
+        UniqueConstraint("table_id", "name"),
+        Index("ix_metadata_partition_org_type", "organization_id", "partition_type"),
+        Index(
+            "ix_metadata_partition_table_status_ordinal_id",
+            "table_id",
+            "status",
+            "ordinal_position",
+            "id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    partition_type: Mapped[str] = mapped_column(String(30), default="UNKNOWN", nullable=False)
+    ordinal_position: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    key_columns: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    high_value: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class AnalysisRun(Base, TimestampMixin):
     __tablename__ = "analysis_run"
     __table_args__ = (Index("ix_analysis_run_org_status", "organization_id", "status"),)
@@ -867,6 +946,8 @@ class AnalysisRun(Base, TimestampMixin):
     discovered_tables: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     discovered_columns: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     discovered_constraints: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    discovered_indexes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    discovered_partitions: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     changed_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     deprecated_objects: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

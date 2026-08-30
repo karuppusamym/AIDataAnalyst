@@ -18,6 +18,8 @@ from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
     DiscoveredConstraint,
+    DiscoveredIndex,
+    DiscoveredPartition,
     DiscoveredSchema,
     DiscoveredTable,
 )
@@ -33,6 +35,8 @@ from aida.models import (
     MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
+    MetadataIndex,
+    MetadataPartition,
     MetadataSchema,
     MetadataTable,
     RenameCandidate,
@@ -71,6 +75,8 @@ class SnapshotScope:
     # snapshot -- the CT-4 rename-detection "just created" side. Not part of object_counts()
     # since it is a detection input, not an inventory total.
     created_table_ids: set[UUID] = field(default_factory=set)
+    index_ids: set[UUID] = field(default_factory=set)
+    partition_ids: set[UUID] = field(default_factory=set)
 
     def object_counts(self) -> dict[str, int]:
         return {
@@ -79,6 +85,8 @@ class SnapshotScope:
             "tables": len(self.table_ids),
             "columns": len(self.column_ids),
             "constraints": len(self.constraint_ids),
+            "indexes": len(self.index_ids),
+            "partitions": len(self.partition_ids),
         }
 
 
@@ -90,6 +98,8 @@ def missing_snapshot_scope(existing: SnapshotScope, observed: SnapshotScope) -> 
         table_ids=existing.table_ids - observed.table_ids,
         column_ids=existing.column_ids - observed.column_ids,
         constraint_ids=existing.constraint_ids - observed.constraint_ids,
+        index_ids=existing.index_ids - observed.index_ids,
+        partition_ids=existing.partition_ids - observed.partition_ids,
     )
 
 
@@ -315,6 +325,84 @@ class DeprecationResult:
     deprecated_table_ids: set[UUID] = field(default_factory=set)
 
 
+async def _get_or_create_index(
+    session: AsyncSession,
+    datasource: DataSource,
+    table: MetadataTable,
+    discovered: DiscoveredIndex,
+    tracker: ChangeTracker,
+) -> MetadataIndex:
+    index = await session.scalar(
+        select(MetadataIndex).where(
+            MetadataIndex.table_id == table.id,
+            MetadataIndex.name == discovered.name,
+        )
+    )
+    index_fingerprint = fingerprint(asdict(discovered))
+    tracker.observe(index, index.fingerprint if index else None, index_fingerprint)
+    if index is None:
+        index = MetadataIndex(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=table.id,
+            name=discovered.name,
+            index_type=discovered.index_type,
+            columns=list(discovered.columns),
+            is_unique=discovered.is_unique,
+            is_primary=discovered.is_primary,
+            fingerprint=index_fingerprint,
+        )
+        session.add(index)
+    else:
+        index.status = "ACTIVE"
+        index.deprecated_at = None
+        index.index_type = discovered.index_type
+        index.columns = list(discovered.columns)
+        index.is_unique = discovered.is_unique
+        index.is_primary = discovered.is_primary
+        index.fingerprint = index_fingerprint
+    return index
+
+
+async def _get_or_create_partition(
+    session: AsyncSession,
+    datasource: DataSource,
+    table: MetadataTable,
+    discovered: DiscoveredPartition,
+    tracker: ChangeTracker,
+) -> MetadataPartition:
+    partition = await session.scalar(
+        select(MetadataPartition).where(
+            MetadataPartition.table_id == table.id,
+            MetadataPartition.name == discovered.name,
+        )
+    )
+    partition_fingerprint = fingerprint(asdict(discovered))
+    tracker.observe(partition, partition.fingerprint if partition else None, partition_fingerprint)
+    if partition is None:
+        partition = MetadataPartition(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=table.id,
+            name=discovered.name,
+            partition_type=discovered.partition_type,
+            ordinal_position=discovered.ordinal_position,
+            key_columns=list(discovered.key_columns),
+            high_value=discovered.high_value,
+            fingerprint=partition_fingerprint,
+        )
+        session.add(partition)
+    else:
+        partition.status = "ACTIVE"
+        partition.deprecated_at = None
+        partition.partition_type = discovered.partition_type
+        partition.ordinal_position = discovered.ordinal_position
+        partition.key_columns = list(discovered.key_columns)
+        partition.high_value = discovered.high_value
+        partition.fingerprint = partition_fingerprint
+    return partition
+
+
 async def _deprecate_missing(
     session: AsyncSession,
     datasource: DataSource,
@@ -324,6 +412,8 @@ async def _deprecate_missing(
     seen_table_ids: set[UUID],
     seen_column_ids: set[UUID],
     seen_constraint_ids: set[UUID],
+    seen_index_ids: set[UUID],
+    seen_partition_ids: set[UUID],
 ) -> DeprecationResult:
     now = datetime.now(UTC)
     catalog_ids = set(
@@ -356,6 +446,16 @@ async def _deprecate_missing(
                 )
             )
         ),
+        index_ids=set(
+            await session.scalars(
+                select(MetadataIndex.id).where(MetadataIndex.datasource_id == datasource.id)
+            )
+        ),
+        partition_ids=set(
+            await session.scalars(
+                select(MetadataPartition.id).where(MetadataPartition.datasource_id == datasource.id)
+            )
+        ),
     )
     missing = missing_snapshot_scope(
         existing,
@@ -365,6 +465,8 @@ async def _deprecate_missing(
             table_ids=seen_table_ids,
             column_ids=seen_column_ids,
             constraint_ids=seen_constraint_ids,
+            index_ids=seen_index_ids,
+            partition_ids=seen_partition_ids,
         ),
     )
     # Captured *before* the UPDATE below flips them: exactly the tables that are about to
@@ -393,6 +495,8 @@ async def _deprecate_missing(
             (MetadataTable, missing.table_ids),
             (MetadataColumn, missing.column_ids),
             (MetadataConstraint, missing.constraint_ids),
+            (MetadataIndex, missing.index_ids),
+            (MetadataPartition, missing.partition_ids),
         )
         if object_ids
     ]
@@ -416,6 +520,8 @@ async def deprecate_missing_snapshot(
         seen_table_ids=scope.table_ids,
         seen_column_ids=scope.column_ids,
         seen_constraint_ids=scope.constraint_ids,
+        seen_index_ids=scope.index_ids,
+        seen_partition_ids=scope.partition_ids,
     )
 
 
@@ -544,7 +650,15 @@ async def persist_discovery_snapshot(
     connector_capabilities: dict[str, Any] | None = None,
     scope: SnapshotScope | None = None,
 ) -> dict[str, int]:
-    counts = {"catalogs": 0, "schemas": 0, "tables": 0, "columns": 0, "constraints": 0}
+    counts = {
+        "catalogs": 0,
+        "schemas": 0,
+        "tables": 0,
+        "columns": 0,
+        "constraints": 0,
+        "indexes": 0,
+        "partitions": 0,
+    }
     tracker = ChangeTracker()
     table_map: dict[tuple[str, str, str], MetadataTable] = {}
     snapshot_scope = scope or SnapshotScope()
@@ -588,6 +702,25 @@ async def persist_discovery_snapshot(
                 # after the table batch is persisted so FULL reconciliation is exact.
                 await session.flush()
                 snapshot_scope.column_ids.update(column.id for column in persisted_columns)
+
+                # Indexes and partitions have no cross-table references (unlike
+                # constraints' foreign keys), so they can be persisted in this same
+                # per-table pass rather than needing the second, table_map-resolving
+                # pass below.
+                for discovered_index in discovered_table.indexes:
+                    index = await _get_or_create_index(
+                        session, datasource, table, discovered_index, tracker
+                    )
+                    await session.flush()
+                    snapshot_scope.index_ids.add(index.id)
+                    counts["indexes"] += 1
+                for discovered_partition in discovered_table.partitions:
+                    partition = await _get_or_create_partition(
+                        session, datasource, table, discovered_partition, tracker
+                    )
+                    await session.flush()
+                    snapshot_scope.partition_ids.add(partition.id)
+                    counts["partitions"] += 1
 
     for discovered_catalog in catalogs:
         for discovered_schema in discovered_catalog.schemas:
@@ -659,6 +792,8 @@ async def persist_discovery_snapshot(
     run.discovered_tables = counts["tables"]
     run.discovered_columns = counts["columns"]
     run.discovered_constraints = counts["constraints"]
+    run.discovered_indexes = counts["indexes"]
+    run.discovered_partitions = counts["partitions"]
     run.created_objects = tracker.created
     run.changed_objects = tracker.changed
     run.deprecated_objects = tracker.deprecated

@@ -246,6 +246,8 @@ async def _complete_batch(
         run.discovered_tables = object_counts["tables"]
         run.discovered_columns = object_counts["columns"]
         run.discovered_constraints = object_counts["constraints"]
+        run.discovered_indexes = object_counts["indexes"]
+        run.discovered_partitions = object_counts["partitions"]
         run.created_objects = created
         run.changed_objects = changed
         run.deprecated_objects = deprecated

@@ -258,9 +258,7 @@ class MetadataViewDefinitionEnvelope(ApiModel):
                 "from an empty definition"
             )
         if self.definition_sql is not None and self.unavailable_reason:
-            raise ValueError(
-                "unavailable_reason is only meaningful when definition_sql is null"
-            )
+            raise ValueError("unavailable_reason is only meaningful when definition_sql is null")
         if self.definition_sql is None and self.truncated:
             raise ValueError("a definition that was never returned cannot be truncated")
         return self
@@ -324,9 +322,7 @@ class MetadataGrantEnvelope(ApiModel):
     grantee: str = Field(min_length=1, max_length=255)
     grantee_type: Literal["USER", "ROLE", "GROUP", "PUBLIC"] = "ROLE"
     privilege: str = Field(pattern=r"^[A-Z][A-Z0-9_ ]{0,49}$")
-    object_type: Literal[
-        "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"
-    ] = "TABLE"
+    object_type: Literal["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"] = "TABLE"
     object_name: str = Field(min_length=1, max_length=255)
     schema_name: str | None = Field(default=None, max_length=255)
     is_grantable: bool = False
@@ -665,6 +661,28 @@ class MetadataConstraintRead(ApiModel):
     columns: list[str]
     referenced_table_id: UUID | None
     referenced_columns: list[str]
+    status: str
+
+
+class MetadataIndexRead(ApiModel):
+    id: UUID
+    table_id: UUID
+    name: str
+    index_type: str
+    columns: list[str]
+    is_unique: bool
+    is_primary: bool
+    status: str
+
+
+class MetadataPartitionRead(ApiModel):
+    id: UUID
+    table_id: UUID
+    name: str
+    partition_type: str
+    ordinal_position: int
+    key_columns: list[str]
+    high_value: str | None
     status: str
 
 
@@ -2256,9 +2274,7 @@ class ContextProductQualityRequirements(ApiModel):
     deny_on_critical_incident: bool = True
 
 
-def _default_context_product_actions() -> list[
-    Literal["READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS"]
-]:
+def _default_context_product_actions() -> list[Literal["READ_CONTEXT", "INVOKE_ELIGIBLE_TOOLS"]]:
     return ["READ_CONTEXT"]
 
 
@@ -2285,9 +2301,7 @@ class ContextProductDefinition(ApiModel):
     quality_requirements: ContextProductQualityRequirements = Field(
         default_factory=ContextProductQualityRequirements
     )
-    policy_summary: ContextProductPolicySummary = Field(
-        default_factory=ContextProductPolicySummary
-    )
+    policy_summary: ContextProductPolicySummary = Field(default_factory=ContextProductPolicySummary)
 
     @model_validator(mode="after")
     def validate_bounded_definition(self) -> "ContextProductDefinition":
@@ -2524,6 +2538,33 @@ class Page(ApiModel):
     limit: int
     offset: int
     total: int
+
+
+class CursorPage(ApiModel):
+    """CT-2: `Page` variant for the high-volume catalog list endpoints (tables,
+    columns, constraints, indexes, partitions) that support genuine keyset
+    pagination alongside the plain offset mode every other `Page` endpoint uses.
+
+    Deliberately not a subclass of `Page`: `total` here is `int | None`, which
+    would narrow-then-widen `Page.total: int` in an unsound way (mypy rightly
+    rejects overriding a field with an incompatible type), and -- separately --
+    `Page` is the response model for dozens of unrelated list endpoints, so
+    widening it there directly would mark every one of them as having a
+    breaking, no-longer-guaranteed `total` field in the OpenAPI contract, when
+    only these five endpoints actually behave that way.
+    """
+
+    items: list[Any]
+    limit: int
+    offset: int
+    # None only on the cursor (keyset) path: counting every matching row is
+    # itself an O(n) scan, which cursor pagination exists to avoid, so it is
+    # never computed there. The first request of a walk (`cursor=None`) always
+    # populates it, same as `Page.total`.
+    total: int | None = None
+    # Present only when the request used cursor-based (keyset) pagination: an
+    # opaque token for the next page, or None once no further rows remain.
+    next_cursor: str | None = None
 
 
 # --- ADR-0018: three-axis tenancy -------------------------------------------

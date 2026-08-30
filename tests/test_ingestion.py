@@ -221,4 +221,6 @@ def test_snapshot_scope_reports_cross_chunk_inventory() -> None:
         "tables": 3,
         "columns": 1,
         "constraints": 0,
+        "indexes": 0,
+        "partitions": 0,
     }
