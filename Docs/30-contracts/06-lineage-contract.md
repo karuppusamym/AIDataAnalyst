@@ -17,6 +17,9 @@
   "edge": {
     "id": "edge_...",
     "kind": "QUERY | VIEW | PROCEDURE | ETL | DBT | BI | AI_DECISION",
+    // Implementation status (2026-08-30): TARGET vocabulary. The code stores a free-text
+    // String(30) defaulting to "ETL" and only ever assigns "SUGGESTED_RELATIONSHIP"
+    // explicitly. See 20-modules/09-lineage.md section 5.
     "from_node": "lin_...",
     "to_node": "lin_...",
     "confidence": 1.0,
@@ -107,7 +110,7 @@ Conventional lineage answers *where did this data come from*. AI decision lineag
 }
 ```
 
-Each decision becomes an `AI_DECISION` edge, making the agent's reasoning **traversable in the same graph as data lineage**.
+Each decision becomes an `AI_DECISION` edge, making the agent's reasoning **traversable in the same graph as data lineage**. **Planned, not built (2026-08-30):** no `AI_DECISION` edge is ever written, and `record_ai_decision` — the function module 09's interface names as the writer — does not exist in `src/`. Agent runs are audited (`AgentRun`, `record_audit`), but that evidence is not projected into the lineage graph, so the "same graph" property this section claims is not yet available to a traversal.
 
 **Why competitors cannot record this.** The `rejected` array requires a runtime in which refusal is a first-class, deterministic event — which requires the execution choke point (ADR-0004) and prompt-risk screening (ADR-0013). A product whose agent simply runs has nothing to record, because it refuses nothing.
 

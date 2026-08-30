@@ -12,6 +12,20 @@ Two properties make it usable rather than decorative:
 - **Every claim about current state is honest.** `60-delivery/04-status-matrix.md` says `Pending` where a module does not exist, and `Not run` where a test has not been run.
 - **Every decision names its revisit trigger.** An ADR with no revisit trigger is dogma, not a decision.
 
+> **Documentation-truth pass, 2026-08-30.** The first property above was not holding. The
+> architecture, contract and engineering documents were written around a 21-module
+> decomposition under `src/atlas/modules/*` of which **1 of 21 exists**, as a 69-line scaffold;
+> the working system is the flat `src/aida/` package. Structural claims across `10-architecture/`,
+> `20-modules/`, `30-contracts/`, `40-engineering/` and `90-reference/` have been re-checked
+> against the code and marked with a dated **Implementation status** callout wherever they
+> describe a target rather than the present. The design prose is unchanged underneath — this
+> separated "is" from "will be", it did not delete the plan. **Convention: a blockquote
+> beginning "Implementation status (date)" states what is true of the code on that date; the
+> prose around it may describe intent.** What changed and the evidence for each correction is
+> in `review-2026-08/gap/04-documentation-truth-pass.md`. Start with
+> `20-modules/00-module-index.md`, whose last two columns map every module to the file its
+> behaviour actually lives in today.
+
 ## Start here
 
 | If you are… | Read, in order |
@@ -81,7 +95,7 @@ Docs/
 
 ### 20-modules — The bounded contexts
 
-Full index with reading orders: [`20-modules/00-module-index.md`](20-modules/00-module-index.md).
+Full index with reading orders, **and a per-module map from bounded context to the file its code actually lives in today**: [`20-modules/00-module-index.md`](20-modules/00-module-index.md). The 21 names below are bounded contexts, not directories.
 
 | L1 Foundation | L2 Intelligence | L3 Runtime | L4/L5 |
 |---|---|---|---|

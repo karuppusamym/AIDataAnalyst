@@ -14,6 +14,23 @@ A2 (can I trust this), S4 (what breaks if this changes), U1/U2 (audit), P2.
 
 ## 3. Responsibilities
 
+> **Implementation status (2026-08-30).** Of the seven sources below, **two are built**.
+> Verified against `src/`:
+>
+> * **Query lineage from executed SELECTs — built.** `extract_column_lineage()` in
+>   `src/aida/query_gateway.py` parses the executed statement and distinguishes DIRECT from
+>   DERIVED. This is real and is the module's strongest part.
+> * **ETL via OpenLineage — built.** `src/aida/openlineage.py` / `openlineage_api.py`.
+> * **dbt from manifests — built.** `src/aida/dbt_artifacts.py` / `dbt_api.py`.
+> * **View and stored-procedure lineage from definitions — does not exist.** There is no
+>   view-DDL parser and no procedure-body parser anywhere in `src/` (searched for
+>   `parse_view`, `view_ddl`, `CREATE VIEW`, `parse_procedure`, `procedure_body` — no
+>   matches). This is `gap/02` items `N1`/`N2`/`N3`, and it is the largest single lineage
+>   coverage gap.
+> * **BI lineage from Tableau, Power BI, Looker — does not exist.** No extractor, no
+>   connector, no ingestion path.
+> * **AI decision lineage — does not exist.** See §5 below.
+
 - Query lineage from executed SELECTs: referenced tables/columns, output-to-source mapping, direct vs. derived.
 - View and stored-procedure lineage from definitions.
 - ETL lineage via OpenLineage ingestion.
@@ -42,6 +59,15 @@ transformation_artifact (dbt manifest, view DDL, procedure body — literals red
 ```
 
 `edge_kind ∈ {QUERY, VIEW, PROCEDURE, ETL, DBT, BI, AI_DECISION}`. Partitioned by time.
+
+> **Implementation status (2026-08-30). The enum above is target and does not match the
+> code.** `edge_kind` is a `String(30)` column on two models in `src/aida/models.py` with the
+> default `"ETL"`, and the **only value the code ever assigns explicitly is
+> `"SUGGESTED_RELATIONSHIP"`** (`intelligence_api.py:1125`, `unified_lineage_api.py:750`) —
+> a value that does not appear in the documented enum at all. `QUERY`, `VIEW`, `PROCEDURE`,
+> `DBT`, `BI` and `AI_DECISION` are never written. There is also no database-level constraint
+> restricting the column to any set of values, and the table is **not partitioned by time**.
+> Reconciling the enum with the emitted values is unscheduled work.
 
 ## 6. AI decision lineage — the differentiator
 
@@ -78,8 +104,8 @@ dbt artifact SQL is **never executed** by Atlas. dbt remains the transformation 
 def get_upstream(scope, node: NodeRef, depth: int, kinds: set[EdgeKind]) -> LineageGraphDTO
 def get_downstream(scope, node: NodeRef, depth: int, kinds: set[EdgeKind]) -> LineageGraphDTO
 def get_impact(scope, node: NodeRef) -> ImpactReportDTO
-def record_query_lineage(execution_id, parsed: ParsedQuery) -> None     # gateway-only
-def record_ai_decision(run_id, decisions: list[DecisionEdge]) -> None   # runtime-only
+def record_query_lineage(execution_id, parsed: ParsedQuery) -> None     # PLANNED - no such function
+def record_ai_decision(run_id, decisions: list[DecisionEdge]) -> None   # PLANNED - no such function
 def ingest_openlineage(scope, event: OpenLineageEvent) -> IngestResult
 def ingest_dbt_manifest(scope, project_id, manifest) -> DbtImportDTO
 ```

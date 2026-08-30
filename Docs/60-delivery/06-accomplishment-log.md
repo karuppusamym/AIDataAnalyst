@@ -13,6 +13,98 @@
 
 ---
 
+## 2026-08-30 (second entry)
+
+### ADR-0018 three-axis tenancy -- schema, engine, API and tests
+
+#### Completed
+
+**Steps 1-4 of the ADR-0018 migration are built. Step 5 is deliberately not.**
+
+*Access axis.* `workspace`, `workspace_membership`, `source_binding` and
+`isolation_boundary` models plus migration `f1a2b3c4d5e6`. A workspace is created with
+its first owner in one call, because a workspace with no owner is one nobody can
+administer and making that state reachable invites it.
+
+*Classification axis.* `business_node` (LOB / SUB_LOB / DOMAIN / SUB_DOMAIN / CONCEPT,
+self-referencing, effective-dated), `business_assignment` (many-to-many, polymorphic
+target, effective-dated) and `business_assignment_rule`. `business_graph.py` provides
+descendant and ancestor traversal by recursive CTE, `nodes_for_target`,
+`classification_scope`, `rollup` and `as_of` history.
+
+*Policy.* `policy_engine.py` -- pure, no I/O, exhaustively unit-testable. DENY is a hard
+ceiling at any priority including PlatformAdmin; default is deny; `principal_kind` is a
+first-class subject attribute; MASK and FILTER obligations accumulate; ALLOW ties break
+deterministically so a decision replays identically a year later.
+
+*Enforcement.* `workspace_service.authorize` is the single entry point, failing closed at
+every step in order: workspace unavailable, cross-organization, no membership, role does
+not permit the action, no active binding, binding expired, outside schema scope,
+classification outside binding, then the policy decision.
+
+*HTTP.* `workspace_api.py` -- workspaces, memberships, source bindings with maker-checker
+approval, business nodes and assignments, `as_of` tree, roll-up, access policies, and an
+`/authorization-probes` endpoint that answers "what would you decide, and why" without
+performing the action. Every mutation audits in the same transaction (INV-7).
+
+*Migration behaviour.* The backfill creates one workspace per project keeping its slug, a
+business node per LOB and per data domain preserving the parent chain, `MIGRATED`
+assignments for every project and datasource, and grandfathered ACTIVE source bindings so
+existing access does not break at the moment the binding model is introduced. Seeded
+policies reproduce today's RBAC outcomes exactly; the one policy that would change
+behaviour (agents denied sensitive classifications) is seeded `DRAFT`.
+
+**INV-5 is now formalised in the Tier-0 invariant suite** -- the first of the five
+previously-unformalised invariants to close. The earlier docstring said INV-5 needed "a
+running app plus a much heavier per-route fake-session harness"; that stopped being true
+once tenant isolation had a single enforcement point, so it is asserted against that
+function with a real in-memory database instead.
+
+*Verified*, in a clean checkout using the exact CI recipe: ruff clean, mypy clean across
+110 files, 3 import contracts kept, 1 Alembic head (`f1a2b3c4d5e6`), **424 tests passing**
+(up from 387; +35 new across `test_policy_engine.py`, `test_workspace_authorization.py`
+and the two new Tier-0 INV-5 cases).
+
+#### Found while doing the above
+
+**A real bug in the recursive CTE traversal, caught by a warning rather than a failure.**
+The first implementation built its live-node predicate against the un-aliased
+`BusinessNode` inside the recursive term, which silently added a second FROM entry -- a
+cartesian product with the whole table, filtering on "some row is live" rather than "this
+row is live". It returned correct results on the small test tree and would have returned
+wrong ones on a real estate. SQLAlchemy emitted a cartesian-product `SAWarning`; the
+predicate helper now takes the entity or alias explicitly and the joins are written out.
+The tests were re-run with warnings escalated to confirm none remain.
+
+#### Notable choices
+
+**These are the first tests in the repository that run against a real database.** SQLite
+in memory, added as a dev-only dependency. The behaviour under test is recursive CTE
+traversal, effective-dated history and multi-step authorization; a fake session would have
+asserted that the fake behaves, not that the SQL does. The full 89-table schema creates
+cleanly on SQLite, so the fixture is a few lines rather than a harness.
+
+#### Known limitations -- explicitly still open
+
+- **Step 5 of the migration is not started.** The tenancy columns are still authoritative
+  and no repository base class exists to scope on `(organization_id, workspace_id)`;
+  `src/atlas/platform/` holds config, context, db and logging only. This depends on the
+  module decomposition (ST-05/06/07).
+- **No endpoint is routed through `authorize` yet.** The entry point, the engine and the
+  probe endpoint exist and are tested; wiring the existing read and execution paths through
+  them is the next change. Until then ABAC decides nothing in production traffic -- which
+  is also why migration day changes no behaviour.
+- **The p95 ≤ 50 ms authorization budget is unmeasured.** `load_policies` runs per request
+  with no cache, and `classification_scope` issues two CTE queries. Both are obvious
+  caching targets and neither has been profiled.
+- **Residency is not an attribute** (tracker PG-1 remains PARTIAL for that reason).
+- Purpose is matchable but not mandatory per session.
+- The migration has been verified for correctness by reading and by schema creation, but
+  **has not been run against a populated PostgreSQL database.** That is a real gap: the
+  backfill is the part most likely to surprise, and it deserves a rehearsal on a copy.
+
+---
+
 ## 2026-08-30
 
 ### Phase 0 — "make the invariants true" (independent architecture review, `Docs/review-2026-08/`)

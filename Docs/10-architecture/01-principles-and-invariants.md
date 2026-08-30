@@ -14,13 +14,25 @@ Principles shape the product. Invariants are what make it safe.
 
 Each invariant names its enforcement point and its test. An invariant without an automated test is a wish.
 
+> **Implementation status (2026-08-30).** By this document's own standard, four of the nine
+> are currently wishes. Tests exist for **INV-2, INV-3, INV-4, INV-5 and INV-8**
+> (`tests/test_tier0_invariants.py` and `tests/test_inv5_tenant_isolation.py`). The tests named
+> below for **INV-1, INV-6, INV-7 and INV-9** do not exist anywhere in `tests/` — verified by
+> searching for each function name across the repository on 2026-08-30. Each is marked
+> **Planned** in place below. The invariants themselves are still binding on design review;
+> what is absent is the automated proof. Closing this is tracker `E4` /
+> `Docs/review-2026-08/gap/02-gap-diff-and-plan.md` §5.
+>
+> *This count is volatile: INV-5's test landed during this pass. Re-verify by grepping for the
+> test names rather than trusting this paragraph.*
+
 ### INV-1 — Single authoritative store
 
 **Statement.** PostgreSQL holds authoritative state. Neo4j, vector indexes, search indexes, Redis, and object-storage indexes are rebuildable projections and are never read as truth for an authorization, approval, or correctness decision.
 
 **Enforcement.** Projections are written only by outbox projectors, never by request-path code. No service dual-writes PostgreSQL and a projection.
 
-**Test.** `test_projection_rebuild`: delete Neo4j and the search index entirely, replay from authoritative state, assert full reconstruction and identical query results.
+**Test — Planned, not written (2026-08-30).** `test_projection_rebuild`: delete Neo4j and the search index entirely, replay from authoritative state, assert full reconstruction and identical query results. No such test exists, and the projection-rebuild drill has never been run. Note also that the "search index" in this statement is itself a target store: there is no search-index dependency or service in the repository, and lexical search runs as BM25-style scoring in PostgreSQL (`src/aida/retrieval.py`).
 
 ### INV-2 — One execution choke point
 
@@ -54,11 +66,20 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 ### INV-5 — Tenant isolation is total
 
-**Statement.** Every governed record carries an organization boundary and, where applicable, legal entity, LOB, and project. Authorization defaults to deny. Cache keys, graph nodes, vector documents, artifacts, events, logs, and metrics preserve these boundaries.
+**Statement.** Every governed record carries an organization boundary and, where applicable, the workspace / business-classification scope defined by the tenancy axis. Authorization defaults to deny. Cache keys, graph nodes, vector documents, artifacts, events, logs, and metrics preserve these boundaries.
 
-**Enforcement.** Repository base class requires a tenant scope argument; there is no unscoped query helper.
+> **Implementation status (2026-08-30).** The earlier wording named `legal entity` as a
+> tenancy level. **`legal_entity` does not exist in `src/` or in any migration** — searched
+> for on 2026-08-30 and found nowhere. It is an ADR-only concept; `gap/02` row C2/D3 is to
+> not build it. The tenancy shape itself is being changed under ADR-0018 (`Workspace`,
+> `WorkspaceMembership`, `SourceBinding`, `BusinessNode` are in `src/aida/models.py` and in
+> `migrations/versions/f1a2b3c4d5e6_adr_0018_three_axis_tenancy.py`); this statement is
+> deliberately phrased to that axis rather than to a fixed path. The authority on the current
+> shape is `20-modules/01-identity-and-tenancy.md` and ADR-0018, not this line.
 
-**Test.** `test_cross_tenant_denial`: every list/read/write endpoint and every background worker is exercised with a foreign tenant context and must deny.
+**Enforcement — Planned.** The intended mechanism is a repository base class that requires a tenant scope argument, with no unscoped query helper. **No such base class exists**: there is no `Repository` class or `TenantScope` type in `src/aida/` or `src/atlas/platform/`, and scoping is applied per query by convention. Ships with the module extraction (`40-engineering/06-refactor-plan.md`). The test below is what currently substitutes for the structural guarantee.
+
+**Test — Built (2026-08-30).** `test_cross_tenant_denial` in `tests/test_inv5_tenant_isolation.py`, which is route-table-driven rather than hand-enumerated: it also asserts that every route requires an authenticated principal, that every route reaches a tenant-boundary check, and that every background worker is tenant-scoped, each with a closed exemption list. `tests/test_tier0_invariants.py` carries a second `test_cross_tenant_denial` plus `test_authorization_defaults_to_deny_without_membership`.
 
 ### INV-6 — Value-freedom of control-plane state
 
@@ -66,7 +87,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Ingestion and profiling validators reject attribute keys associated with samples, row values, secrets, or credentials. Persisted SQL passes a redaction pass.
 
-**Test.** `test_no_source_values_in_control_plane`: run a full end-to-end fixture with sentinel values in source data; scan every platform table, log line, event payload, and trace for the sentinels.
+**Test — Planned, not written (2026-08-30).** `test_no_source_values_in_control_plane`: run a full end-to-end fixture with sentinel values in source data; scan every platform table, log line, event payload, and trace for the sentinels. The *design* boundary is real and was verified by reading `src/aida/semantic_inference.py`, which tags every model-bound field `"value_scope": "METADATA_ONLY"`; what is missing is the end-to-end sentinel harness that would prove it holds everywhere.
 
 ### INV-7 — Attributability of high-impact actions
 
@@ -74,7 +95,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** The unit-of-work commit path requires an audit record for any transaction touching a governed table.
 
-**Test.** `test_every_mutation_audits`: reflection over governed model classes; exercise each mutation endpoint; assert a matching audit row.
+**Test — Planned, not written (2026-08-30).** `test_every_mutation_audits`: reflection over governed model classes; exercise each mutation endpoint; assert a matching audit row. `record_audit` in `src/aida/events.py` writes into the caller's session (so the same-transaction property is structurally available), but nothing asserts that every mutation path calls it.
 
 ### INV-8 — Maker ≠ checker
 
@@ -90,7 +111,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Capability flags are derived from the certification result, not hand-declared.
 
-**Test.** `test_capability_matrix_matches_certification`: assert every advertised capability has a passing certification check.
+**Test — Planned, not written (2026-08-30).** `test_capability_matrix_matches_certification`: assert every advertised capability has a passing certification check. The invariant is nonetheless honoured in the one place it is most visible: `src/aida/connectors/registry.py` distinguishes `register(...)` from `declare_planned(...)`, and Databricks, Teradata and Db2 are declared planned rather than advertised.
 
 ## 3. Design principles
 

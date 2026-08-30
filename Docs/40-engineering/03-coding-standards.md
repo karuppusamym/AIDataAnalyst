@@ -9,7 +9,7 @@
 |---|---|---|
 | `ruff` | Lint + format | Fails CI — **wired** (`.github/workflows/ci.yml`, `quality` job) |
 | `mypy --strict` | Type checking | Fails CI — **wired** (`quality` job) |
-| `import-linter` | Module boundary contracts | Fails CI — **wired** (`quality` job); 3 contracts, incl. INV-2 gateway exclusivity |
+| `import-linter` | Module boundary contracts | Fails CI — **wired** (`quality` job); 4 contracts as of 2026-08-30, incl. INV-2 gateway exclusivity and the C4/ST-11 lineage→gateway direction. Cross-module contracts await the extraction — see `10-architecture/04-module-decomposition.md` §5.2 |
 | `alembic` | Migrations | Single-head check fails CI — **wired** (`migrations` job) |
 | `pytest` | Tests | Fails CI — **wired** (`tests` job); includes the Tier-0 invariant suite |
 | `bandit` / SAST | Security lint | Fails CI on high — **not wired yet**; tool not in `dev` extras |

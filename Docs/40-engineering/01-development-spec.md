@@ -61,6 +61,15 @@ flowchart LR
 
 ## 5. Where does this code go?
 
+> **Implementation status (2026-08-30).** The module names below are bounded contexts, **not
+> directories**. Only `src/atlas/modules/identity_tenancy/` exists, and it is a 69-line
+> scaffold with no business rules; all working code is in the flat `src/aida/` package. Use the
+> table below to decide *which context owns the concern*, then use the "Lives today in" column
+> of the table in `20-modules/00-module-index.md` to find the file. Do not create
+> `src/atlas/modules/<name>/` for a new feature — that is the extraction work (`ST-05`/`06`/`07`),
+> sequenced in `40-engineering/06-refactor-plan.md`, and adding a half-migrated module ahead of
+> it makes the extraction harder rather than easier.
+
 | The change is about… | Module |
 |---|---|
 | Who is asking | 01 identity-tenancy |
@@ -91,6 +100,15 @@ flowchart LR
 ## 6. Writing a new module
 
 Only when an existing module genuinely does not own the concern, and after an ADR.
+
+> **Implementation status (2026-08-30). Target shape.** `scripts/generate_module.py` will
+> generate this tree, and `tests/test_module_scaffold_generator.py` asserts it — that is how
+> `identity_tenancy` was produced. But a generated module is inert today: `models.py` cannot
+> have its "own schema" (no module schemas exist in PostgreSQL), `migrations/` is not wired
+> into Alembic (all 34 revisions live in the repository-root `migrations/versions/`),
+> `repository.py`'s `TenantScope` has no base class to enforce it, `tests/` is outside
+> `testpaths`, and "add its import-linter layer" is not possible because no layers contract
+> exists. Generating a module is currently an act of documentation, not of structure.
 
 ```text
 src/atlas/modules/<name>/
