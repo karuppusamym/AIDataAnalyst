@@ -35,6 +35,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "aiosqlite==0.21.0",
   "import-linter==2.14",
   "mypy==1.17.1",
   "pytest==8.4.2",
@@ -51,6 +52,11 @@ packages = ["src/aida", "src/atlas"]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# The Tier-0 invariant harnesses live in `tests/support/` and are imported as
+# `tests.support.*`, so the repository root has to be importable. Without this,
+# `pytest` collects them only when invoked as `python -m pytest` (which puts the
+# CWD on `sys.path` implicitly) and fails under the bare `pytest` CI runs.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -147,3 +153,41 @@ name = "security_types never depends on api (leaf-module ratchet)"
 type = "forbidden"
 source_modules = ["aida.security_types"]
 forbidden_modules = ["aida.api"]
+
+[[tool.importlinter.contracts]]
+# C4 / ST-11 (`Docs/review-2026-08/gap/02-gap-diff-and-plan.md`, row C4). The review
+# records a lineage-gateway cycle: mutual calls, with L2 -> L3 edges. The tracker
+# records that the cycle is already gone in code -- the gateway *emits* lineage
+# evidence (`extract_column_lineage`, `QueryExecution.column_lineage`, the
+# `query.execution.completed.v1` outbox event) and the lineage and intelligence
+# modules *consume* it from platform state. That is a fact about today's import
+# graph, not a property anything defends.
+#
+# This makes it enforced. The relationship is one-directional by contract: nothing
+# in the lineage/intelligence layer may reach back into `aida.query_gateway`, so the
+# cycle cannot be reintroduced by an import somebody adds without noticing. Verified
+# green before it was written, and it constrains no existing edge.
+#
+# `aida.semantic_intelligence_api` is deliberately NOT a source module here: it
+# imports the `SENSITIVE_CLASSES` constant from the gateway today. That is a shared
+# classification constant rather than a call back into execution, so it is a
+# misplaced-constant problem, not a cycle -- but listing the module would either
+# fail the contract or require an exemption, and exemptions are what
+# `05-ci-cd-and-release.md` forbids. Moving `SENSITIVE_CLASSES` to a leaf module and
+# adding that module here is tracked in
+# `Docs/review-2026-08/gap/05-validate-sql-handoff.md`.
+name = "C4 / ST-11 lineage and intelligence modules never import the query gateway"
+type = "forbidden"
+source_modules = [
+  "aida.unified_lineage",
+  "aida.unified_lineage_api",
+  "aida.lineage_cache",
+  "aida.lineage_graph_store",
+  "aida.openlineage",
+  "aida.openlineage_api",
+  "aida.knowledge_graph",
+  "aida.agent_intelligence",
+  "aida.intelligence_api",
+  "aida.semantic_inference",
+]
+forbidden_modules = ["aida.query_gateway"]

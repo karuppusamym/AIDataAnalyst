@@ -2000,3 +2000,223 @@ class Page(ApiModel):
     limit: int
     offset: int
     total: int
+
+
+# --- ADR-0018: three-axis tenancy -------------------------------------------
+
+
+class WorkspaceCreate(ApiModel):
+    name: str = Field(min_length=2, max_length=200)
+    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
+    purpose: str = Field(default="", max_length=1000)
+    isolation_boundary_id: UUID | None = None
+    monthly_cost_ceiling: int | None = Field(default=None, ge=0)
+
+
+class WorkspaceRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    isolation_boundary_id: UUID | None
+    name: str
+    slug: str
+    purpose: str
+    status: str
+    monthly_cost_ceiling: int | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceMembershipCreate(ApiModel):
+    principal_id: str = Field(min_length=1, max_length=255)
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
+    role: Literal["viewer", "analyst", "steward", "reviewer", "workspace_owner"]
+    expires_at: datetime | None = None
+
+
+class WorkspaceMembershipRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    workspace_id: UUID
+    principal_id: str
+    principal_kind: str
+    role: str
+    granted_by: str
+    expires_at: datetime | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceBindingCreate(ApiModel):
+    datasource_id: UUID
+    purpose: str = Field(min_length=3, max_length=500)
+    schema_scope: list[str] = Field(default_factory=list, max_length=200)
+    permitted_classifications: list[str] = Field(default_factory=list, max_length=50)
+    masking_profile: str = Field(default="DEFAULT", max_length=50)
+    max_query_cost: int | None = Field(default=None, ge=0)
+
+
+class SourceBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    workspace_id: UUID
+    datasource_id: UUID
+    schema_scope: list[str]
+    permitted_classifications: list[str]
+    masking_profile: str
+    purpose: str
+    max_query_cost: int | None
+    status: str
+    requested_by: str
+    approved_by: str | None
+    approved_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceBindingDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    valid_for_days: int = Field(default=365, ge=1, le=1095)
+    rationale: str = Field(default="", max_length=1000)
+
+
+class BusinessNodeCreate(ApiModel):
+    kind: Literal["LOB", "SUB_LOB", "DOMAIN", "SUB_DOMAIN", "CONCEPT"]
+    name: str = Field(min_length=2, max_length=200)
+    code: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,79}$")
+    parent_id: UUID | None = None
+    description: str = Field(default="", max_length=2000)
+    owner_principal: str | None = Field(default=None, max_length=255)
+
+
+class BusinessNodeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    parent_id: UUID | None
+    kind: str
+    name: str
+    code: str
+    description: str
+    owner_principal: str | None
+    origin: str
+    effective_from: datetime
+    effective_to: datetime | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class BusinessAssignmentCreate(ApiModel):
+    business_node_id: UUID
+    target_type: Literal[
+        "PROJECT",
+        "WORKSPACE",
+        "DATASOURCE",
+        "TABLE",
+        "COLUMN",
+        "VIEW",
+        "METRIC",
+        "GLOSSARY_TERM",
+        "DATA_PRODUCT",
+        "KNOWLEDGE_PAGE",
+    ]
+    target_id: str = Field(min_length=1, max_length=120)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class BusinessAssignmentRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    business_node_id: UUID
+    target_type: str
+    target_id: str
+    assignment_kind: str
+    confidence: float | None
+    assigned_by: str
+    confirmed_by: str | None
+    effective_from: datetime
+    effective_to: datetime | None
+    status: str
+
+
+class BusinessNodeRollupRead(ApiModel):
+    business_node_id: UUID
+    descendant_node_count: int
+    assigned_by_target_type: dict[str, int]
+    as_of: datetime
+
+
+class AccessPolicyRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    code: str
+    version: int
+    name: str
+    description: str
+    effect: str
+    priority: int
+    subject_match: dict[str, Any]
+    resource_match: dict[str, Any]
+    action_match: list[str]
+    transform: dict[str, Any]
+    condition: dict[str, Any]
+    origin: str
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AccessPolicyCreate(ApiModel):
+    code: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,79}$")
+    name: str = Field(min_length=2, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    effect: Literal["ALLOW", "DENY", "MASK", "FILTER"]
+    priority: int = Field(default=100, ge=0, le=10000)
+    subject_match: dict[str, Any] = Field(default_factory=dict)
+    resource_match: dict[str, Any] = Field(default_factory=dict)
+    action_match: list[str] = Field(default_factory=list, max_length=20)
+    transform: dict[str, Any] = Field(default_factory=dict)
+    condition: dict[str, Any] = Field(default_factory=dict)
+    # A new policy starts DRAFT so that writing one can never silently change who
+    # can reach what; activation is a separate, auditable step.
+    status: Literal["DRAFT", "ACTIVE"] = "DRAFT"
+
+
+class AuthorizationProbeRequest(ApiModel):
+    """Ask the policy engine what it would decide, without performing the action.
+
+    An access model nobody can interrogate is an access model nobody trusts. This
+    is the "why can this principal see this?" endpoint, and it is deliberately
+    read-only.
+    """
+
+    workspace_id: UUID
+    action: Literal[
+        "READ_METADATA",
+        "READ_DATA",
+        "PROPOSE",
+        "APPROVE",
+        "EXECUTE_TOOL",
+        "CONSUME_CONTEXT",
+        "EXPORT",
+    ]
+    resource_type: str = Field(min_length=1, max_length=40)
+    resource_id: str | None = Field(default=None, max_length=120)
+    datasource_id: UUID | None = None
+    schema_name: str | None = Field(default=None, max_length=200)
+    classifications: list[str] = Field(default_factory=list, max_length=20)
+    certification: str | None = Field(default=None, max_length=40)
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
+
+
+class AuthorizationProbeRead(ApiModel):
+    allowed: bool
+    reason_code: str
+    workspace_id: UUID | None
+    binding_id: UUID | None
+    matched_policy_code: str | None
+    masked_classifications: list[str]
+    row_filters: list[str]
+    evaluated_policy_count: int

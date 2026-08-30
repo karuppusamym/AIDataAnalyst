@@ -35,8 +35,15 @@ P4 (rotate a credential without an outage), and the tenancy foundation for every
 ## 5. Domain model
 
 ```text
-organization, line_of_business, data_domain, project      # in the schema today
-workspace                                                  # target, ADR-0018
+# Access axis (ADR-0018) -- the only axis with permission semantics
+organization, workspace, workspace_membership, source_binding, isolation_boundary
+
+# Classification axis (ADR-0018) -- grants nothing; policy keys on it
+business_node, business_assignment, business_assignment_rule
+
+# Pre-ADR-0018 tenancy levels: still authoritative during the transition
+line_of_business, data_domain, project
+
 principal (kind: USER | WORKLOAD | SYSTEM)
 principal_role, role_mapping
 secret_reference (scheme, path, provider, never a value)

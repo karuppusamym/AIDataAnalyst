@@ -148,6 +148,313 @@ class CrossBoundaryGrant(Base, TimestampMixin):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+# --- ADR-0018: three-axis tenancy -------------------------------------------
+#
+# Axis 1 (access): organization -> workspace. The ONLY axis with permission
+#   semantics. Short and stable, because a reorganisation must not be a data
+#   migration across every governed row.
+# Axis 2 (classification): business_node / business_assignment. Versioned,
+#   many-to-many, effective-dated. Grants nothing; policy keys on it.
+# Axis 3 (technical): datasource -> catalog -> schema -> table -> column.
+#
+# LineOfBusiness and DataDomain above are the pre-ADR-0018 tenancy levels. They
+# remain authoritative until the cutover completes; BusinessNode rows mirroring
+# them are created by migration f1a2b3c4d5e6 so both can be read during the
+# transition. See Docs/10-architecture/adr/ADR-0018-*.md for the migration steps.
+
+
+class IsolationBoundary(Base, TimestampMixin):
+    """A hard wall that no grant can cross (ADR-0018).
+
+    The escape hatch for genuine Chinese walls -- an advisory desk that must not
+    see a trading desk. Deliberately rare and explicit: a bank has a handful, not
+    one per line of business, because everything softer is better expressed as an
+    access policy. `mode="STRICT"` admits no cross-boundary grant by any
+    mechanism, including administrator action; `ADVISORY` records the boundary
+    for reporting but lets an approved grant cross it.
+    """
+
+    __tablename__ = "isolation_boundary"
+    __table_args__ = (UniqueConstraint("organization_id", "code"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(50), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), default="STRICT", nullable=False)
+    description: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class Workspace(Base, TimestampMixin):
+    """The unit of grant, membership, budget and blast radius (ADR-0018).
+
+    Replaces the LOB/domain segment of the old tenancy path. A workspace owns its
+    membership list, the source bindings that decide which datasources it may
+    reach and how, and the projects that scope analysis inside it. Tenancy scope
+    on governed records becomes `(organization_id, workspace_id)`.
+
+    `isolation_boundary_id` is normally NULL -- most workspaces need no hard wall.
+    """
+
+    __tablename__ = "workspace"
+    __table_args__ = (UniqueConstraint("organization_id", "slug"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    isolation_boundary_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("isolation_boundary.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    monthly_cost_ceiling: Mapped[int | None] = mapped_column(BigInteger)
+
+
+class WorkspaceMembership(Base, TimestampMixin):
+    """A principal's role inside one workspace (ADR-0018).
+
+    Roles are additive across memberships; a DENY from policy always wins over a
+    grant from a role. Maker != checker (INV-8) holds regardless of role: a
+    `workspace_owner` who proposes a change still cannot approve it.
+    """
+
+    __tablename__ = "workspace_membership"
+    __table_args__ = (UniqueConstraint("workspace_id", "principal_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_kind: Mapped[str] = mapped_column(String(20), default="HUMAN", nullable=False)
+    role: Mapped[str] = mapped_column(String(40), nullable=False)
+    granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class SourceBinding(Base, TimestampMixin):
+    """A workspace's scoped, expiring permission to reach one datasource (ADR-0018).
+
+    The same warehouse serves many workspaces, and two workspaces on one source
+    can legitimately see different things -- this is where that is expressed and
+    audited. Approval routes to the *source owner*, not a central queue, because
+    central queues are where these requests die.
+
+    Bindings expire. That is the mechanism that stops entitlement creep, and it is
+    the thing almost every platform omits.
+    """
+
+    __tablename__ = "source_binding"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "datasource_id"),
+        Index("ix_source_binding_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    # Empty list = every schema in the datasource; otherwise an allowlist.
+    schema_scope: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # Classifications this workspace may see through this binding. Empty = the
+    # organization default policy decides; an explicit list narrows it further.
+    permitted_classifications: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    masking_profile: Mapped[str] = mapped_column(String(50), default="DEFAULT", nullable=False)
+    purpose: Mapped[str] = mapped_column(String(500), nullable=False)
+    max_query_cost: Mapped[int | None] = mapped_column(BigInteger)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class BusinessNode(Base, TimestampMixin):
+    """A node in the classification tree: LOB, sub-LOB, domain, sub-domain, concept.
+
+    Axis 2 of ADR-0018. Grants nothing on its own -- access policies key on it.
+    Self-referencing to arbitrary depth, effective-dated so that a reorganisation
+    is an update to the tree plus new assignments rather than a migration, and so
+    that last quarter's audit record still resolves against last quarter's tree.
+    """
+
+    __tablename__ = "business_node"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code"),
+        Index("ix_business_node_org_kind", "organization_id", "kind"),
+        Index("ix_business_node_parent", "parent_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    parent_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_node.id", ondelete="RESTRICT"), nullable=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
+    owner_principal: Mapped[str | None] = mapped_column(String(255))
+    # Provenance of the node itself, so a migrated LOB is distinguishable from one
+    # a steward authored. MIGRATED rows were generated from the pre-ADR-0018
+    # line_of_business / data_domain tables.
+    origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    legacy_lob_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("line_of_business.id", ondelete="SET NULL"), nullable=True
+    )
+    legacy_domain_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_domain.id", ondelete="SET NULL"), nullable=True
+    )
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class BusinessAssignment(Base, TimestampMixin):
+    """Many-to-many attachment of a business_node to any governed object (ADR-0018).
+
+    `target_type` / `target_id` is a deliberate polymorphic reference rather than a
+    foreign key: assignments reach tables, columns, views, metrics, glossary terms,
+    data products and knowledge pages, which live in different schemas, and
+    ADR-0015 forbids cross-schema foreign keys. Referential integrity is eventual,
+    reconciled by the same mechanism as every other cross-module reference.
+
+    An asset can carry several assignments. That is the point: a `customer` table
+    belongs to both Retail Banking and Financial Crime, which the pre-ADR-0018
+    containment hierarchy could not express.
+    """
+
+    __tablename__ = "business_assignment"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_node_id", "target_type", "target_id", "effective_from",
+            name="uq_business_assignment_node_target_from",
+        ),
+        Index("ix_business_assignment_target", "organization_id", "target_type", "target_id"),
+        Index("ix_business_assignment_node", "business_node_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=False
+    )
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    # MANUAL: a steward said so. RULE: produced by an assignment rule.
+    # INFERRED: proposed by analysis, never authoritative until confirmed.
+    # MIGRATED: generated from the pre-ADR-0018 tenancy columns.
+    assignment_kind: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_assignment_rule.id", ondelete="SET NULL"), nullable=True
+    )
+    confidence: Mapped[float | None] = mapped_column(Float)
+    assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    confirmed_by: Mapped[str | None] = mapped_column(String(255))
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class BusinessAssignmentRule(Base, TimestampMixin):
+    """A governed rule that proposes assignments (`schema LIKE 'rtl_%' -> Retail Banking`).
+
+    Re-evaluated on catalog drift. Produces *proposals*, never silent
+    reassignment -- a rule that quietly moved assets between domains would make
+    the classification tree untrustworthy exactly when it matters.
+    """
+
+    __tablename__ = "business_assignment_rule"
+    __table_args__ = (UniqueConstraint("organization_id", "code"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Deterministic match spec, e.g. {"schema_like": "rtl_%", "datasource_id": "..."}.
+    # Never a free-form expression -- see the tool-parameter reasoning in module 14.
+    match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AccessPolicy(Base, TimestampMixin):
+    """Attribute-based access policy (ADR-0018).
+
+    RBAC alone stops scaling at exactly the point a bank estate becomes
+    interesting. A policy keys on what a resource *is* -- its classification, its
+    business node, its certification status -- so it covers the column discovered
+    next Tuesday with no administrative action.
+
+    Two properties are load-bearing and are enforced in `policy_engine.py`:
+
+    * DENY is a hard ceiling. It cannot be overridden by any role, including
+      workspace owner and platform admin.
+    * `principal_kind` is a first-class subject attribute, so "humans may see full
+      account numbers, agents never do" is one policy rather than an
+      inexpressible intention.
+
+    Versioned and immutable per version, so a decision made a year ago can be
+    replayed against the policy that was in force.
+    """
+
+    __tablename__ = "access_policy"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code", "version"),
+        Index("ix_access_policy_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(String(2000), default="", nullable=False)
+    effect: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Higher wins among ALLOWs; DENY always wins regardless of priority.
+    priority: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    subject_match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    resource_match: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    action_match: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    transform: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    condition: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class Project(Base, TimestampMixin):
     __tablename__ = "project"
     __table_args__ = (UniqueConstraint("organization_id", "slug"),)

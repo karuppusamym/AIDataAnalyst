@@ -99,6 +99,29 @@ It exists in no schema. Where a legal-entity requirement appears it is either an
 `isolation_boundary` or a classification attribute; both already exist above. ADR-0005's
 mention of it is withdrawn rather than deferred.
 
+## Implementation status (2026-08-30)
+
+Steps 1-4 of the migration below are **built**; step 5 is deliberately a later release.
+
+| Step | State |
+|---|---|
+| 1. Add `workspace` | Done — `workspace`, `workspace_membership`, `source_binding`, `isolation_boundary` models and migration `f1a2b3c4d5e6` |
+| 2. Move LOB/domain into `business_node` + assignments | Done — migration backfills a node per `line_of_business` and per `data_domain`, preserves the parent chain, and writes `MIGRATED` assignments for every project and datasource |
+| 3. Tenancy columns nullable and read-only for one release | **In effect now.** `line_of_business`, `data_domain` and the tenancy columns on `project`/`datasource` are untouched and remain authoritative; the new axes are additive and read alongside them |
+| 4. Policy engine alongside RBAC, seeded to today's outcomes | Done — `policy_engine.py`, `access_policy`, and seeded RBAC-parity policies. The one policy that would change behaviour (agents denied sensitive classifications) is seeded `DRAFT`, so migration day changes nothing |
+| 5. Retire tenancy columns once the repository base class scopes on `(organization_id, workspace_id)` | **Not started.** No repository base class exists yet — `src/atlas/platform/` has config, context, db and logging only. This step depends on the module decomposition (tracker ST-05/06/07) |
+
+Enforcement entry point is `workspace_service.authorize`, which fails closed at every
+step: workspace unavailable, cross-organization, no membership, role does not permit the
+action, no active binding, binding expired, outside the binding's schema scope,
+classification outside the binding, then the policy decision itself.
+
+INV-5 (tenant isolation) is now formalised in the Tier-0 suite against that entry point
+with a real in-memory database — the first of the five previously-unformalised invariants
+to close. What is asserted is that the authorization path denies across an organization
+boundary and denies without membership; what is *not* yet asserted is that every endpoint
+routes through it, which needs an import-linter contract of the kind QG-7 provides for INV-2.
+
 ## Consequences
 
 ### Positive

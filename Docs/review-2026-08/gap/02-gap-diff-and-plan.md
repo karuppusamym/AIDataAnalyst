@@ -1,7 +1,15 @@
 # Gap Diff and Plan — target design vs. current Atlas
 
-Status: **Decision document. Nothing has been changed. Every row below awaits a
-keep/correct/rewrite/drop call.**
+Status: **Decisions taken 2026-08-30. Phase 0 shipped; Phase 1 partially shipped.**
+
+| Decision | Outcome |
+|---|---|
+| Rebuild or restructure? | **Restructure and extend.** The engine is kept |
+| Tenancy model | **Three axes.** ADR-0018 accepted, ADR-0017 superseded before acceptance |
+| Phase 0 | **Shipped.** CI (5 gates), QG-7 gateway-exclusivity contract, ST-11 resolved, documentation truth pass |
+| Phase 1 | **C1, N6, N7, N9 shipped** (workspace, source bindings, ABAC, business graph). N1, N5, C7, C8 not started |
+
+Rows below marked ~~struck~~ are done. The rest still await a call.
 
 Sizing is in engineer-weeks for one competent engineer, and is deliberately rough.
 Risk is the risk of *doing it*, not of leaving it.
@@ -49,8 +57,8 @@ improve on.
 
 | # | Item | Current | Proposed | Weeks | Risk |
 |---|---|---|---|---|---|
-| C1 | **Tenancy model** | LOB and domain are tenancy levels; ADR-0017 proposes deepening this | `org → workspace` for access; LOB/domain become a versioned classification tree; ABAC keys on it | 6–8 | **High** — touches the repository base class and every scoped query. Do it before more modules exist, not after |
-| C2 | **`legal_entity`** | In ADR-0005 and module 01's domain model; **does not exist in code** | Do not build. It is either an isolation boundary or a classification attribute | 0 | None |
+| ~~C1~~ | ~~**Tenancy model**~~ | **SHIPPED 2026-08-30** — ADR-0018 accepted. Migration steps 1–4 built (`f1a2b3c4d5e6`); step 5 (retire tenancy columns) deliberately deferred until a repository base class exists | — | — |
+| ~~C2~~ | ~~**`legal_entity`**~~ | **DONE** — withdrawn in ADR-0018 rather than deferred; module 01's domain model corrected | — | — |
 | C3 | **Agent runtime last 5 states** | Applied in one `for` loop after the gateway returned | Five independently-gated checkpoints that can refuse | 2 | Low |
 | C4 | **Lineage ↔ gateway cycle (`ST-11`)** | Mutual calls; L2→L3 edges | Gateway emits, intelligence consumes. One direction | 1 | Low |
 | C5 | **Data quality as a module** | Module 11 with no independent consumer | Baselines fold into profiling; gates become ABAC conditions. Delivers the D4/W1 "quality gates runtime" whitespace as a policy, not a subsystem | 2 | Low |
@@ -71,10 +79,10 @@ improve on.
 | N3 | **Procedure body parsing (T-SQL, PL/SQL first)** | 8–10 | **High** | Uncontested in the market; genuinely hard; degrade explicitly rather than silently |
 | N4 | **Lineage proposal / review / negative-knowledge workflow** | 5 | Medium | The stated requirement. Diff-based, impact-ordered, bulk decisions |
 | N5 | **pgvector + hybrid retrieval (lexical ∪ vector ∪ graph, policy before ranking)** | 4 | Medium | Everything downstream — wiki search, document mapping, agent context — depends on it |
-| N6 | **Workspace primitive + source bindings with expiry** | 4 | Medium | Ships with C1 |
-| N7 | **ABAC policy engine** | 6 | Medium | `principal_kind = AGENT` alone justifies it |
+| ~~N6~~ | ~~**Workspace primitive + source bindings with expiry**~~ — **SHIPPED**. Expiry enforced and tested; binding approval is maker-checker separated | — | — | — |
+| ~~N7~~ | ~~**ABAC policy engine**~~ — **SHIPPED**. Pure evaluator, 19 unit tests, DENY as a hard ceiling, `principal_kind` first-class. Not yet wired into read/execution paths; residency attribute still open | — | — | — |
 | N8 | **Document ingestion: upload → parse → section → map → claims** | 6 | Medium | Data-dictionary spreadsheets are the highest-value special case; build that path first |
-| N9 | **Business graph (nodes, assignments, rules, effective dates, roll-up)** | 4 | Low | LOB/sub-LOB/domain requirement; a recursive CTE, not a subsystem |
+| ~~N9~~ | ~~**Business graph**~~ — **SHIPPED**. Recursive CTE traversal, effective-dated assignments, `as_of` history, roll-up. An asset can now belong to two sibling domains | — | — | — |
 | N10 | **Knowledge compilation: pages, blocks, provenance, staleness, pinning, diff proposals** | 10–12 | Medium | The differentiator. Largest new build, and the one nobody else has |
 | N11 | **Tool generator B — view → tool** | 3 | Low | Views are pre-curated queries; highest quality-per-effort tool source |
 | N12 | **Tool generator C — procedure → tool (read-only proven by parse)** | 4 | Medium | Depends on N3 |
