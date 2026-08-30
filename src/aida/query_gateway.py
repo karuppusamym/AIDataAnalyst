@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp, parse_one
 
 from aida.authorization_gate import AuthorizationDenied, gate
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
@@ -42,8 +43,6 @@ from aida.sql_validation import (
     resolve_column_references,
     row_limit_finding,
 )
-
-SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"})
 
 
 class QueryRejected(RuntimeError):

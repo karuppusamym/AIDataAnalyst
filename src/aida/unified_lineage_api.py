@@ -314,7 +314,15 @@ async def _build_unified_graph(
         edges = (
             await session.scalars(
                 select(DbtLineageEdge)
-                .where(DbtLineageEdge.artifact_import_id == latest_import.id)
+                .where(
+                    DbtLineageEdge.artifact_import_id == latest_import.id,
+                    # Column-level (LN-5) edges are consumed via the dedicated
+                    # dbt lineage read surface, not folded into this
+                    # table/resource-level graph -- without this filter, one
+                    # column edge per column pair would render as a redundant
+                    # parallel link between the same two dbt-resource nodes.
+                    DbtLineageEdge.edge_type == "DEPENDS_ON",
+                )
                 .limit(edge_limit + 1)
             )
         ).all()

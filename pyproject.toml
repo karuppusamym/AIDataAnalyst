@@ -176,14 +176,22 @@ forbidden_modules = ["aida.api"]
 # cycle cannot be reintroduced by an import somebody adds without noticing. Verified
 # green before it was written, and it constrains no existing edge.
 #
-# `aida.semantic_intelligence_api` is deliberately NOT a source module here: it
-# imports the `SENSITIVE_CLASSES` constant from the gateway today. That is a shared
-# classification constant rather than a call back into execution, so it is a
-# misplaced-constant problem, not a cycle -- but listing the module would either
-# fail the contract or require an exemption, and exemptions are what
-# `05-ci-cd-and-release.md` forbids. Moving `SENSITIVE_CLASSES` to a leaf module and
-# adding that module here is tracked in
-# `Docs/review-2026-08/gap/05-validate-sql-handoff.md`.
+# `SENSITIVE_CLASSES` used to live in `aida.query_gateway`, which made it a
+# misplaced-constant problem rather than a real cycle for any module that only
+# needed the classification vocabulary (`aida.semantic_intelligence_api`,
+# `aida.semantic_inference`, and -- as of the catalog bulk-actions feature --
+# `aida.catalog_bulk_actions`, whose transitive import through `aida.schemas`
+# briefly broke this contract for every module below that imports schemas).
+# Resolved by moving the constant to the leaf module `aida.classification`
+# (tracked in `Docs/review-2026-08/gap/05-validate-sql-handoff.md`).
+#
+# `aida.semantic_intelligence_api` is still deliberately NOT a source module
+# here: with the constant problem fixed, it now has a *different*, real edge
+# into the gateway (`aida.semantic_intelligence_api` -> `aida.tool_api` ->
+# `aida.query_gateway`). That is a separate, unreviewed architectural question
+# (whether `tool_api`'s own gateway dependency should be reachable from the
+# semantic-intelligence layer at all) and is out of scope for the constant
+# fix; resolve it on its own before adding this module here.
 name = "C4 / ST-11 lineage and intelligence modules never import the query gateway"
 type = "forbidden"
 source_modules = [
