@@ -21958,6 +21958,7 @@
     },
     "/v1/ai-decisions/refusals": {
       "get": {
+        "description": "List refusals before the dynamic run route can match ``refusals`` as a UUID.",
         "operationId": "list_refusals_v1_ai_decisions_refusals_get",
         "parameters": [
           {
@@ -33897,6 +33898,52 @@
             "schema": {
               "format": "uuid",
               "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 2,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "ACTIVE",
+              "maxLength": 30,
+              "title": "Status",
               "type": "string"
             }
           },
