@@ -2418,6 +2418,10 @@ class ContextProductVersion(Base, TimestampMixin):
             "'REJECTED', 'DEPRECATION_REVIEW', 'DEPRECATED')",
             name="ck_context_product_version_status",
         ),
+        CheckConstraint(
+            "owner_type IN ('INDIVIDUAL', 'GROUP')",
+            name="ck_context_product_version_owner_type",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2432,6 +2436,7 @@ class ContextProductVersion(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
+    owner_type: Mapped[str] = mapped_column(String(20), default="INDIVIDUAL", nullable=False)
     owner_principal: Mapped[str] = mapped_column(String(255), nullable=False)
     table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     semantic_model_version_ids: Mapped[list[str]] = mapped_column(

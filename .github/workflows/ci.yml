@@ -14,6 +14,11 @@
 #                    identity_tenancy privacy and security_types ratchet contracts
 #   alembic       -- exactly one migration head; a second head is a merge accident
 #                    that only shows up at deploy time
+#   openapi-diff  -- tracker TS-4: a breaking change to the public HTTP API
+#                    (removed path/operation, newly-required request field,
+#                    removed response field, narrowed enum, ...) fails CI
+#                    unless acknowledged with an API version bump. See
+#                    `scripts/openapi_diff.py`.
 #   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
 #
 # A change that breaks any of these does not merge.
@@ -92,6 +97,27 @@ jobs:
             echo "Resolve with a merge revision before this can deploy."
             exit 1
           fi
+
+  openapi-diff:
+    name: OpenAPI diff gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Breaking-change check against committed baseline
+        run: uv run python scripts/openapi_diff.py
 
   tests:
     name: Tests
