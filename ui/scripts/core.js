@@ -20,6 +20,7 @@
     metadataBatches: [], metadataBatchChunks: [], selectedBatchId: null,
     persona: "all", paletteEntries: [], paletteActiveIndex: -1,
     selectedTableId: null, selectedAssetTab: "overview", glossaryTerms: [],
+    catalogTotal: 0, catalogOffset: 0, catalogPageSize: 50, catalogRequestId: 0,
     glossaryCategories: [], glossaryLinkProposals: [], glossaryConflicts: [],
     ownershipRules: [], ownershipAssignments: [], bulkStewardshipOperations: [],
     stewardshipCoverage: null, selectedAssetDocumentation: null, selectedAssetLinks: [],

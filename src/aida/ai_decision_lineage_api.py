@@ -43,6 +43,39 @@ class AiDecisionRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 @router.get(
+    "/ai-decisions/refusals",
+    response_model=Page,
+    summary="List all AI refusal decisions for audit",
+)
+async def list_refusals(
+    organization_id: UUID = Query(...),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
+) -> Page:
+    """List refusals before the dynamic run route can match ``refusals`` as a UUID."""
+    enforce_organization(context, organization_id)
+
+    count_stmt = (
+        select(func.count())
+        .select_from(AiDecisionRecord)
+        .where(
+            AiDecisionRecord.organization_id == organization_id,
+            AiDecisionRecord.decision_type == "REFUSAL",
+        )
+    )
+    total = (await session.execute(count_stmt)).scalar() or 0
+    records = await get_refusals(session, organization_id, limit=limit, offset=offset)
+    return Page(
+        items=[AiDecisionRead.model_validate(record) for record in records],
+        limit=limit,
+        offset=offset,
+        total=total,
+    )
+
+
+@router.get(
     "/ai-decisions/{run_id}",
     response_model=list[AiDecisionRead],
     summary="Get all AI decisions for a specific run",
@@ -58,8 +91,6 @@ async def get_run_decisions(
     enforce_organization(context, organization_id)
     records = await get_decisions_for_run(session, run_id)
     return [AiDecisionRead.model_validate(r) for r in records]
-
-
 @router.get(
     "/ai-decisions/asset/{asset_id}",
     response_model=list[AiDecisionRead],
@@ -78,38 +109,3 @@ async def get_asset_decisions(
     records = await get_decisions_for_asset(session, asset_id, limit=limit)
     return [AiDecisionRead.model_validate(r) for r in records]
 
-
-@router.get(
-    "/ai-decisions/refusals",
-    response_model=Page,
-    summary="List all AI refusal decisions for audit",
-)
-async def list_refusals(
-    organization_id: UUID = Query(...),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_session),
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "DataAdmin")
-    ),
-) -> Page:
-    enforce_organization(context, organization_id)
-
-    count_stmt = (
-        select(func.count())
-        .select_from(AiDecisionRecord)
-        .where(
-            AiDecisionRecord.organization_id == organization_id,
-            AiDecisionRecord.decision_type == "REFUSAL",
-        )
-    )
-    total = (await session.execute(count_stmt)).scalar() or 0
-
-    records = await get_refusals(session, organization_id, limit=limit, offset=offset)
-
-    return Page(
-        items=[AiDecisionRead.model_validate(r) for r in records],
-        limit=limit,
-        offset=offset,
-        total=total,
-    )
