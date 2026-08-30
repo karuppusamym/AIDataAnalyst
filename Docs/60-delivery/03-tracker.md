@@ -238,7 +238,7 @@
 | OB-5 | Compliance pack generation | 20 | E | P1 | TODO | — | Reproducible; WORM-archived |
 | OB-6 | Cost and showback aggregation | 20 | C | P1 | TODO | — | Per LOB |
 | OB-7 | Access review reporting | 20 | B | P1 | TODO | — | Self-service entitlement report |
-| OB-8 | Log-scrubbing verification | 20 | 0 | P0 | TODO | — | Sentinel scan passes |
+| OB-8 | Log-scrubbing verification | 20 | 0 | P0 | DONE | — | `atlas.platform.logging.redact_sensitive_data` is a structlog processor wired into `configure_logging` (before `JSONRenderer`) that redacts secret-shaped keys (password/token/credential/api_key/hmac/dsn/cookie/... denylist, recursive through nested mappings and sequences) and secret-shaped values in free text (JWTs, `user:pass@host` DSNs, `Bearer <token>`, AWS access-key IDs); `tests/test_log_scrubbing.py::test_sentinel_scan_end_to_end_log_output` runs the real pipeline end to end and asserts a sentinel value never reaches rendered stdout while non-sensitive fields survive |
 
 ## H. Testing, performance, and certification
 
@@ -248,7 +248,7 @@
 | TS-2 | Reflection-generated tenant denial coverage | 0 | P0 | DONE | — | `tests/test_inv5_tenant_isolation.py` (2026-08-30) enumerates all 199 FastAPI routes and every worker entry point from the app and registry rather than by hand, with named closed exemption lists |
 | TS-11 | Event-catalog CI gate | 0 | P0 | TODO | — | A test asserts every `event_type=` published from `src/` appears in `30-contracts/04-event-catalog.md`. This is the gate whose absence let the catalog drift; cheap, and it stops the drift recurring after ST-14 |
 | TS-12 | Doc-claim regression test for named artefacts | 0 | P1 | TODO | — | A test asserting that every test function name, module path and import-linter contract name cited in `Docs/` resolves to something real. Exit: the class of defect fixed by ST-12 cannot silently return |
-| TS-3 | Sentinel value-leak scan | 0 | P0 | TODO | — | Tables, logs, events, traces |
+| TS-3 | Sentinel value-leak scan | 0 | P0 | IN PROGRESS | — | Logs closed 2026-08-30 (OB-8: `tests/test_log_scrubbing.py`, live `structlog` redaction processor — this is distinct from and additional to the in-process control-plane scan below, since neither touches rendered log output). Tables and events (audit rows, outbox payloads, persisted SQL) closed in-process by `tests/test_inv6_value_freedom.py::test_no_source_values_in_control_plane` against a fake executor — narrower than the specced fixture in the way that test's own docstring states: it proves the query-execution path is value-free, not the ingestion/profiling pipelines, which need a live source. Traces are not yet applicable — no tracing is emitted until OB-1 (OpenTelemetry export, still TODO) exists |
 | TS-4 | OpenAPI diff gate | 0 | P0 | TODO | — | Breaking change fails CI |
 | TS-5 | Adversarial SQL corpus per dialect | D | P0 | TODO | — | Same as QG-1 |
 | TS-6 | Prompt-injection corpus (incl. indirect) | B | P0 | TODO | — | Same as AG-1/AG-2 |

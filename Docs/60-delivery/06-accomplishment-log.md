@@ -1536,3 +1536,73 @@ features in this list were subsequently closed by R35 below; shared-history clea
   to decide unilaterally.
 - Phase 2 (models/schemas split) and the leaf-module extraction it unblocks remain untouched;
   still gated on the concurrent session's ADR-0017 work landing.
+
+## 2026-08-30 — Log-scrubbing verification (OB-8) closed; TS-3 logs slice closed
+
+### Completed
+
+- A concurrent session was already active on this branch's namesake work (Snowflake/dbt/lineage
+  MCP); picked an unrelated, self-contained P0 gap instead rather than duplicate that effort.
+- `Docs/10-architecture/01-principles-and-invariants.md` INV-6 names
+  `test_no_source_values_in_control_plane` as the invariant test and states it needs a live
+  Neo4j/search stack and a full ingestion pipeline not present in this environment
+  (`tests/test_tier0_invariants.py` module docstring says the same). That full-fixture test is
+  still out of reach here, but the logs slice of INV-6 — OB-8 ("Log-scrubbing verification |
+  Sentinel scan passes") — did not require live infrastructure and had no code behind it at all:
+  `src/atlas/platform/logging.py` configured `structlog` with no redaction processor in the
+  pipeline, and no test anywhere asserted that a secret value never reaches a rendered log line.
+- Added `redact_sensitive_data`, a `structlog` processor in `src/atlas/platform/logging.py`,
+  wired into `configure_logging`'s processor chain immediately before `JSONRenderer`. It redacts
+  by key name (case-insensitive denylist covering password/secret/token/credential/api_key/
+  authorization/jwt/hmac/private_key/connection_string/dsn/cookie and variants, matched on
+  normalized `[^a-z]`-stripped keys so `db_password`, `apiKey`, and `client-secret` all match),
+  recursing through nested dicts, lists, tuples, and sets; a value whose *key* is itself
+  secret-shaped (e.g. `credentials`) is redacted wholesale rather than recursed into, since a
+  nested non-sensitive field inside a container named `credentials` isn't a safe assumption. As
+  defense in depth for secrets logged into free-text messages rather than structured keys, it
+  also pattern-redacts JWTs, `user:pass@host` connection strings, `Bearer <token>` values, and AWS
+  access-key IDs inside string values.
+- Added `tests/test_log_scrubbing.py` (6 tests): key-based redaction, nested-structure redaction,
+  whole-container redaction when the container key itself is sensitive, non-sensitive fields
+  passing through unchanged, free-text pattern redaction, and — the OB-8 exit criterion itself —
+  `test_sentinel_scan_end_to_end_log_output`, which calls the real `configure_logging`, logs a
+  sentinel value under multiple sensitive keys through `structlog.get_logger`, captures real
+  stdout, and asserts the sentinel is absent from the rendered JSON while a `tenant_id` field
+  survives untouched.
+- Updated tracker `OB-8` to DONE and `TS-3` to IN PROGRESS (logs closed; tables/events/traces
+  still blocked on the same live-infrastructure gap as INV-6/`test_no_source_values_in_control_plane`).
+
+### Verification evidence
+
+- `uv run pytest -q` (full suite, Python 3.13 via `uv sync --python 3.13 --extra dev`): all tests
+  pass, including the 6 new tests in `tests/test_log_scrubbing.py` and the pre-existing
+  `tests/test_tier0_invariants.py` and `tests/test_secrets.py` suites (unaffected).
+- `uv run ruff check src/atlas/platform/logging.py tests/test_log_scrubbing.py`: clean. Repo-wide
+  `ruff check .` shows 6 pre-existing findings in unrelated files (`context_product_api.py`
+  import order, a long line in `workflows/scheduler.py`) that predate this change — confirmed via
+  `git status` showing no modification to those files.
+- `uv run mypy src/atlas/platform/logging.py`: clean (strict mode); the processor is typed against
+  `structlog`'s actual `Processor` signature (`MutableMapping[str, Any] -> Mapping[str, Any]`),
+  not a loosened one.
+- `uv run lint-imports`: `Contracts: 2 kept, 0 broken` — unchanged, no new cross-module imports
+  introduced.
+- `uv.lock` had unrelated pre-existing drift from `pyproject.toml` (missing `import-linter`,
+  stale `pyyaml`/`types-pyyaml` entries) surfaced by `uv sync`; reverted with `git checkout --
+  uv.lock` rather than committing it, since re-locking is a separate concern from this change.
+
+### Current limitations
+
+- TS-3's tables/events/traces sentinel scan (the rest of INV-6, `test_no_source_values_in_control_plane`)
+  remains open — it genuinely needs the live Neo4j/search + full ingestion pipeline Tier 3/4
+  infrastructure this environment doesn't have, same as documented for ST-03 above. This entry
+  does not claim otherwise.
+- The key-name denylist is a fixed list, not sourced from a schema; a secret field with a name
+  outside `_SENSITIVE_KEY_TOKENS` (e.g. an idiosyncratic vendor field name) would not be caught by
+  the key-based path and would only be caught if it happened to match one of the value patterns.
+  Extending the denylist as new sensitive field names are found is expected maintenance, not a
+  gap unique to this change.
+- No audit/outbox event payload was found constructing log lines from secret material during this
+  pass (a targeted `grep` across `src/aida` for `structlog.get_logger`/`get_logger(` call sites
+  found none touching `secrets.py`/`security.py`/`query_gateway.py`), so this closes a
+  defense-in-depth gap rather than an active leak — but that was a spot check, not an exhaustive
+  audit of every call site.
