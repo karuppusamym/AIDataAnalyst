@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.api import list_indexes, list_partitions
+from aida.config import Settings
 from aida.connectors.base import (
     DiscoveredCatalog,
     DiscoveredColumn,
@@ -27,6 +28,7 @@ from aida.connectors.base import (
 from aida.db import Base
 from aida.models import (
     AnalysisRun,
+    DataDomain,
     DataSource,
     LineOfBusiness,
     MetadataIndex,
@@ -38,6 +40,8 @@ from aida.security_types import SecurityContext
 from aida.workflows.activities import persist_discovery_snapshot
 
 pytestmark = pytest.mark.asyncio
+
+_SETTINGS = Settings()
 
 
 @pytest.fixture
@@ -58,10 +62,18 @@ async def _seed_datasource_and_run(session: AsyncSession) -> tuple[DataSource, A
     lob = LineOfBusiness(
         id=uuid4(), organization_id=org.id, name="Retail", code=f"RTL{uuid4().hex[:6]}"
     )
+    domain = DataDomain(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        name="Ungoverned",
+        code=f"UNG{uuid4().hex[:6]}",
+    )
     project = Project(
         id=uuid4(),
         organization_id=org.id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         name="Warehouse",
         slug=f"wh-{uuid4().hex[:8]}",
     )
@@ -69,6 +81,7 @@ async def _seed_datasource_and_run(session: AsyncSession) -> tuple[DataSource, A
         id=uuid4(),
         organization_id=org.id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         project_id=project.id,
         name="primary",
         connector_type="oracle",
@@ -86,7 +99,7 @@ async def _seed_datasource_and_run(session: AsyncSession) -> tuple[DataSource, A
         trigger_type="MANUAL",
         status="RUNNING",
     )
-    session.add_all([org, lob, project, datasource, run])
+    session.add_all([org, lob, domain, project, datasource, run])
     await session.flush()
     return datasource, run
 
@@ -173,7 +186,10 @@ async def test_rerun_without_a_partition_deprecates_it_then_reactivates_on_retur
 
     # First run: table has both the index and the partition.
     await persist_discovery_snapshot(
-        session, run, datasource, _catalog_with_account_table(indexes=(index,), partitions=(partition,))
+        session,
+        run,
+        datasource,
+        _catalog_with_account_table(indexes=(index,), partitions=(partition,)),
     )
     await session.commit()
 
@@ -195,7 +211,10 @@ async def test_rerun_without_a_partition_deprecates_it_then_reactivates_on_retur
     # is stable across the deprecate/reactivate cycle -- same row, same id --
     # matching the behaviour already relied on for tables/columns/constraints.
     await persist_discovery_snapshot(
-        session, run, datasource, _catalog_with_account_table(indexes=(index,), partitions=(partition,))
+        session,
+        run,
+        datasource,
+        _catalog_with_account_table(indexes=(index,), partitions=(partition,)),
     )
     await session.commit()
 
@@ -229,9 +248,7 @@ async def test_list_indexes_and_list_partitions_endpoints_return_persisted_rows(
                 ),
             ),
             partitions=(
-                DiscoveredPartition(
-                    name="p2025", partition_type="RANGE", ordinal_position=1
-                ),
+                DiscoveredPartition(name="p2025", partition_type="RANGE", ordinal_position=1),
             ),
         ),
     )
@@ -240,13 +257,25 @@ async def test_list_indexes_and_list_partitions_endpoints_return_persisted_rows(
     context = _context(datasource)
 
     index_page = await list_indexes(
-        table.id, limit=50, offset=0, cursor=None, context=context, session=session
+        table.id,
+        limit=50,
+        offset=0,
+        cursor=None,
+        context=context,
+        session=session,
+        settings=_SETTINGS,
     )
     assert [item.name for item in index_page.items] == ["account_pk"]
     assert index_page.total == 1
 
     partition_page = await list_partitions(
-        table.id, limit=50, offset=0, cursor=None, context=context, session=session
+        table.id,
+        limit=50,
+        offset=0,
+        cursor=None,
+        context=context,
+        session=session,
+        settings=_SETTINGS,
     )
     assert [item.name for item in partition_page.items] == ["p2025"]
     assert partition_page.total == 1

@@ -220,10 +220,9 @@ def test_oracle_assemble_catalog_defaults_to_no_indexes_or_partitions() -> None:
 
 def test_oracle_and_postgres_now_declare_index_and_partition_capability() -> None:
     """CT-3's exit condition is 'populated by >= 2 adapters'; Oracle and
-    PostgreSQL are the most-complete certified/near-certified pull connectors
-    in this codebase (Snowflake is still only a planned/push-only connector
-    per the registry), so those two now honestly advertise the capability
-    they extract.
+    PostgreSQL are the pair this change wires end-to-end (extraction here,
+    persistence in `persist_discovery_snapshot`), so those two now honestly
+    advertise the capability they extract.
     """
     assert OracleConnector.DEFAULT_CAPABILITIES.indexes is True
     assert OracleConnector.DEFAULT_CAPABILITIES.partitions is True
@@ -236,6 +235,3 @@ def test_oracle_and_postgres_now_declare_index_and_partition_capability() -> Non
     assert oracle_definition.capabilities["partitions"] is True
     assert postgres_definition.capabilities["indexes"] is True
     assert postgres_definition.capabilities["partitions"] is True
-
-    snowflake_definition = connector_registry.definition("snowflake")
-    assert snowflake_definition.implementation_status == "PLANNED"

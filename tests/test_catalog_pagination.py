@@ -23,8 +23,10 @@ from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.api import list_columns, list_tables
+from aida.config import Settings
 from aida.db import Base
 from aida.models import (
+    DataDomain,
     DataSource,
     LineOfBusiness,
     MetadataCatalog,
@@ -37,6 +39,8 @@ from aida.models import (
 from aida.security_types import SecurityContext
 
 pytestmark = pytest.mark.asyncio
+
+_SETTINGS = Settings()
 
 
 @pytest.fixture
@@ -57,10 +61,18 @@ async def _seed_datasource(session: AsyncSession) -> tuple[DataSource, MetadataS
     lob = LineOfBusiness(
         id=uuid4(), organization_id=org.id, name="Retail", code=f"RTL{uuid4().hex[:6]}"
     )
+    domain = DataDomain(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        name="Ungoverned",
+        code=f"UNG{uuid4().hex[:6]}",
+    )
     project = Project(
         id=uuid4(),
         organization_id=org.id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         name="Warehouse",
         slug=f"wh-{uuid4().hex[:8]}",
     )
@@ -68,6 +80,7 @@ async def _seed_datasource(session: AsyncSession) -> tuple[DataSource, MetadataS
         id=uuid4(),
         organization_id=org.id,
         line_of_business_id=lob.id,
+        data_domain_id=domain.id,
         project_id=project.id,
         name="primary",
         connector_type="postgres",
@@ -84,7 +97,7 @@ async def _seed_datasource(session: AsyncSession) -> tuple[DataSource, MetadataS
         name="bank",
         fingerprint="fp",
     )
-    session.add_all([org, lob, project, datasource, catalog])
+    session.add_all([org, lob, domain, project, datasource, catalog])
     await session.flush()
     schema = MetadataSchema(
         id=uuid4(),
@@ -141,7 +154,16 @@ async def test_cursor_pagination_walks_every_row_exactly_once_in_order(session) 
     saw_a_count_query = False
     while True:
         page = await list_tables(
-            datasource.id, limit=5, offset=0, cursor=cursor, context=context, session=session
+            datasource.id,
+            q=None,
+            object_type=None,
+            table_status="ACTIVE",
+            limit=5,
+            offset=0,
+            cursor=cursor,
+            context=context,
+            session=session,
+            settings=_SETTINGS,
         )
         page_count += 1
         assert len(page.items) <= 5
@@ -176,7 +198,16 @@ async def test_cursor_pagination_is_stable_under_concurrent_inserts(session) -> 
     context = _context(datasource)
 
     first_page = await list_tables(
-        datasource.id, limit=3, offset=0, cursor=None, context=context, session=session
+        datasource.id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
+        limit=3,
+        offset=0,
+        cursor=None,
+        context=context,
+        session=session,
+        settings=_SETTINGS,
     )
     assert [item.name for item in first_page.items] == [
         "table_0000",
@@ -207,11 +238,15 @@ async def test_cursor_pagination_is_stable_under_concurrent_inserts(session) -> 
 
     second_page = await list_tables(
         datasource.id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
         limit=3,
         offset=0,
         cursor=first_page.next_cursor,
         context=context,
         session=session,
+        settings=_SETTINGS,
     )
     assert [item.name for item in second_page.items] == [
         "table_0003",
@@ -233,7 +268,16 @@ async def test_offset_mode_first_page_reports_total_and_a_continuation_cursor(se
     context = _context(datasource)
 
     page = await list_tables(
-        datasource.id, limit=2, offset=0, cursor=None, context=context, session=session
+        datasource.id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
+        limit=2,
+        offset=0,
+        cursor=None,
+        context=context,
+        session=session,
+        settings=_SETTINGS,
     )
     assert page.total == 4
     assert page.next_cursor is not None  # 2 more rows remain
@@ -247,7 +291,16 @@ async def test_last_page_reports_no_next_cursor(session) -> None:
     context = _context(datasource)
 
     page = await list_tables(
-        datasource.id, limit=10, offset=0, cursor=None, context=context, session=session
+        datasource.id,
+        q=None,
+        object_type=None,
+        table_status="ACTIVE",
+        limit=10,
+        offset=0,
+        cursor=None,
+        context=context,
+        session=session,
+        settings=_SETTINGS,
     )
     assert page.total == 2
     assert page.next_cursor is None
@@ -262,11 +315,15 @@ async def test_invalid_cursor_is_rejected_as_bad_request(session) -> None:
     with pytest.raises(HTTPException) as exc_info:
         await list_tables(
             datasource.id,
+            q=None,
+            object_type=None,
+            table_status="ACTIVE",
             limit=10,
             offset=0,
             cursor="not-a-real-cursor",
             context=context,
             session=session,
+            settings=_SETTINGS,
         )
     assert exc_info.value.status_code == 400
 
@@ -296,7 +353,13 @@ async def test_list_columns_cursor_pagination_orders_by_ordinal_position(session
     cursor: str | None = None
     while True:
         page = await list_columns(
-            table.id, limit=4, offset=0, cursor=cursor, context=context, session=session
+            table.id,
+            limit=4,
+            offset=0,
+            cursor=cursor,
+            context=context,
+            session=session,
+            settings=_SETTINGS,
         )
         seen.extend(item.ordinal_position for item in page.items)
         cursor = page.next_cursor

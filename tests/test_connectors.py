@@ -51,9 +51,9 @@ def test_postgres_advertises_exactly_the_11_axes_it_implements() -> None:
 
     Every `True` below is backed by a named query in `PostgresConnector.discover`;
     the assertions on the SQL are what stop the flag from outliving the behaviour,
-    which is the drift INV-9 exists to catch. `indexes` and `partitions` stay
-    `False` because 1.1 does not implement them here, and an optimistic flag is
-    the failure this test is for.
+    which is the drift INV-9 exists to catch. `indexes` and `partitions` turned
+    `True` under CT-3 (pg_index/pg_am and pg_partitioned_table/pg_inherits
+    queries below), backed by the same drift-detection pattern as the other four.
     """
     definition = connector_registry.definition("postgres")
 
@@ -61,8 +61,8 @@ def test_postgres_advertises_exactly_the_11_axes_it_implements() -> None:
     assert definition.capabilities["routines"] is True
     assert definition.capabilities["object_comments"] is True
     assert definition.capabilities["grants"] is True
-    assert definition.capabilities["indexes"] is False
-    assert definition.capabilities["partitions"] is False
+    assert definition.capabilities["indexes"] is True
+    assert definition.capabilities["partitions"] is True
 
     source = inspect.getsource(postgres)
     assert "pg_get_viewdef" in source
@@ -70,6 +70,8 @@ def test_postgres_advertises_exactly_the_11_axes_it_implements() -> None:
     assert "col_description" in source
     assert "obj_description" in source
     assert "information_schema.role_table_grants" in source
+    assert "pg_index" in source
+    assert "pg_partitioned_table" in source
 
 
 def test_postgres_discovery_assembles_every_11_axis() -> None:

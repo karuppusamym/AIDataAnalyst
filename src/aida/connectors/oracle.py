@@ -30,11 +30,32 @@ from aida.connectors.discovery import (
 from aida.connectors.sql_execution import SqlExecutor
 
 _EXCLUDED_SCHEMAS = (
-    "SYS", "SYSTEM", "OUTLN", "XDB", "ORDS_METADATA", "ORDS_PUBLIC_USER",
-    "APPQOSSYS", "DBSFWUSER", "DBSNMP", "GSMADMIN_INTERNAL", "MDSYS",
-    "OLAPSYS", "ORDDATA", "ORDPLUGINS", "CTXSYS", "WMSYS", "GGSYS",
-    "REMOTE_SCHEDULER_AGENT", "DVSYS", "DVF", "LBACSYS", "AUDSYS",
-    "SYSBACKUP", "SYSKM", "SYSRAC", "SYSDG",
+    "SYS",
+    "SYSTEM",
+    "OUTLN",
+    "XDB",
+    "ORDS_METADATA",
+    "ORDS_PUBLIC_USER",
+    "APPQOSSYS",
+    "DBSFWUSER",
+    "DBSNMP",
+    "GSMADMIN_INTERNAL",
+    "MDSYS",
+    "OLAPSYS",
+    "ORDDATA",
+    "ORDPLUGINS",
+    "CTXSYS",
+    "WMSYS",
+    "GGSYS",
+    "REMOTE_SCHEDULER_AGENT",
+    "DVSYS",
+    "DVF",
+    "LBACSYS",
+    "AUDSYS",
+    "SYSBACKUP",
+    "SYSKM",
+    "SYSRAC",
+    "SYSDG",
 )
 
 
@@ -44,9 +65,7 @@ def _quote_identifier(identifier: str) -> str:
 
 # Oracle LOB and long-form types reject COUNT(DISTINCT ...) and TO_CHAR(...) directly;
 # profiling falls back to honest placeholders instead of failing the whole batch.
-_LOB_LIKE_TYPES = frozenset(
-    {"BLOB", "CLOB", "NCLOB", "LONG", "LONG RAW", "BFILE", "XMLTYPE"}
-)
+_LOB_LIKE_TYPES = frozenset({"BLOB", "CLOB", "NCLOB", "LONG", "LONG RAW", "BFILE", "XMLTYPE"})
 
 
 def _profile_expressions(quoted_column: str, position: int, data_type: str) -> list[str]:
@@ -863,9 +882,7 @@ class OracleConnector(SqlExecutor):
                             "partition_type": partition_types.get(
                                 (schema_name, table_name), "UNKNOWN"
                             ),
-                            "key_columns": partition_key_columns.get(
-                                (schema_name, table_name), []
-                            ),
+                            "key_columns": partition_key_columns.get((schema_name, table_name), []),
                         }
                     )
 
@@ -899,9 +916,7 @@ class OracleConnector(SqlExecutor):
                     )
                     row = await cursor.fetchone()
                     if row is None or row[0] is None:
-                        raise RuntimeError(
-                            "source returned an EXPLAIN PLAN without a total cost"
-                        )
+                        raise RuntimeError("source returned an EXPLAIN PLAN without a total cost")
                     total_cost = float(row[0])
                     estimated_rows = float(row[1]) if row[1] is not None else None
                     return QueryEstimate(
@@ -976,9 +991,7 @@ class OracleConnector(SqlExecutor):
                     "WHERE owner = :1 AND table_name = :2",
                     [schema_name, table_name],
                 )
-                data_types = {
-                    str(row[0]): str(row[1]) for row in await cursor.fetchall()
-                }
+                data_types = {str(row[0]): str(row[1]) for row in await cursor.fetchall()}
 
                 for start in range(0, len(column_names), column_batch_size):
                     batch = column_names[start : start + column_batch_size]
@@ -998,9 +1011,7 @@ class OracleConnector(SqlExecutor):
                     if row is None:
                         continue
                     row_dict = _rows_as_dicts(cursor.description, [row])[0]
-                    sampled_row_count = max(
-                        sampled_row_count, int(row_dict["SAMPLED_ROW_COUNT"])
-                    )
+                    sampled_row_count = max(sampled_row_count, int(row_dict["SAMPLED_ROW_COUNT"]))
                     for position, name in enumerate(batch):
                         snapshots.append(
                             ColumnProfileSnapshot(
@@ -1034,6 +1045,8 @@ def _assemble_catalog(
     foreign_key_rows: list[dict[str, Any]],
     *,
     envelope: _OracleEnvelopeRows | None = None,
+    index_rows: list[dict[str, Any]] | None = None,
+    partition_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
     """Assemble a catalog from already-normalized, lowercase-keyed discovery rows.
 
@@ -1050,6 +1063,10 @@ def _assemble_catalog(
         constraint_type_map={"P": "PRIMARY_KEY", "U": "UNIQUE"},
     )
     append_grouped_foreign_key_rows(tables, foreign_key_rows)
+    if index_rows:
+        append_grouped_index_rows(tables, index_rows)
+    if partition_rows:
+        append_partition_rows(tables, partition_rows)
     catalogs = assemble_catalog(str(catalog_name), tables)
     if envelope is None:
         return catalogs
