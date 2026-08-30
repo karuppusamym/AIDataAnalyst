@@ -209,6 +209,7 @@ class MetadataColumnEnvelope(ApiModel):
     physical_type: str = Field(min_length=1, max_length=255)
     nullable: bool
     default_expression: str | None = Field(default=None, max_length=4000)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
 
 
@@ -221,10 +222,120 @@ class MetadataConstraintEnvelope(ApiModel):
     referenced_columns: list[str] = Field(default_factory=list, max_length=1000)
 
 
+# --- envelope 1.1 (gap/02 N1) -----------------------------------------------
+#
+# 1.1 is additive: every field below is optional, so a 1.0 payload validates
+# unchanged and a 1.0 producer keeps working forever. What 1.1 buys is that the
+# platform can tell "the producer sent no view definitions" apart from "the
+# producer sent them and we dropped them" -- `ingestion.validate_envelope_version`
+# rejects the second case rather than answering 201 to it.
+
+
+class MetadataViewDefinitionEnvelope(ApiModel):
+    """The text a view is defined by, and how much of it the source would give.
+
+    `definition_sql is None` is a first-class state meaning *unavailable*, not
+    *empty*, and it must be explained: the model refuses a null definition with
+    no reason, and refuses a reason alongside a definition. That is deliberately
+    stricter than a nullable string, because an unexplained NULL here becomes a
+    permanently unexplainable gap in lineage coverage (gap/02 N2).
+    """
+
+    definition_sql: str | None = Field(default=None, max_length=1_000_000)
+    is_materialized: bool = False
+    is_updatable: bool | None = None
+    check_option: str | None = Field(default=None, max_length=30)
+    truncated: bool = False
+    unavailable_reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_availability(self) -> "MetadataViewDefinitionEnvelope":
+        if self.definition_sql is None and not self.unavailable_reason:
+            raise ValueError(
+                "a view definition without definition_sql must carry an "
+                "unavailable_reason; an unexplained null is indistinguishable "
+                "from an empty definition"
+            )
+        if self.definition_sql is not None and self.unavailable_reason:
+            raise ValueError(
+                "unavailable_reason is only meaningful when definition_sql is null"
+            )
+        if self.definition_sql is None and self.truncated:
+            raise ValueError("a definition that was never returned cannot be truncated")
+        return self
+
+
+class MetadataRoutineParameterEnvelope(ApiModel):
+    name: str | None = Field(default=None, max_length=255)
+    ordinal_position: int = Field(ge=1, le=10_000)
+    mode: Literal["IN", "OUT", "INOUT", "VARIADIC", "TABLE"] = "IN"
+    physical_type: str = Field(min_length=1, max_length=255)
+    default_expression: str | None = Field(default=None, max_length=4000)
+
+
+class MetadataRoutineEnvelope(ApiModel):
+    """A stored procedure or function, with its body when the source exposes it.
+
+    Same availability rule as a view definition, for the same reason: procedure
+    parsing and procedure-to-tool generation (gap/02 N3, N12) must never mistake
+    "not allowed to read it" for "there is nothing to read".
+    """
+
+    name: str = Field(min_length=1, max_length=255)
+    routine_type: Literal["FUNCTION", "PROCEDURE"]
+    language: str | None = Field(default=None, max_length=50)
+    body_sql: str | None = Field(default=None, max_length=1_000_000)
+    parameters: list[MetadataRoutineParameterEnvelope] = Field(
+        default_factory=list, max_length=1000
+    )
+    return_type: str | None = Field(default=None, max_length=255)
+    is_deterministic: bool | None = None
+    security_mode: Literal["DEFINER", "INVOKER"] | None = None
+    source_description: str | None = Field(default=None, max_length=10_000)
+    truncated: bool = False
+    unavailable_reason: str | None = Field(default=None, max_length=500)
+    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_routine(self) -> "MetadataRoutineEnvelope":
+        ordinals = [parameter.ordinal_position for parameter in self.parameters]
+        if len(ordinals) != len(set(ordinals)):
+            raise ValueError("routine parameter ordinals must be unique within a routine")
+        if self.body_sql is None and not self.unavailable_reason:
+            raise ValueError(
+                "a routine without body_sql must carry an unavailable_reason; an "
+                "unexplained null is indistinguishable from an empty body"
+            )
+        if self.body_sql is not None and self.unavailable_reason:
+            raise ValueError("unavailable_reason is only meaningful when body_sql is null")
+        if self.body_sql is None and self.truncated:
+            raise ValueError("a body that was never returned cannot be truncated")
+        return self
+
+
+class MetadataGrantEnvelope(ApiModel):
+    """One privilege held by one grantee on one source object.
+
+    Evidence about the estate, never authority in this platform: nothing here
+    grants anything and the policy engine does not read it.
+    """
+
+    grantee: str = Field(min_length=1, max_length=255)
+    grantee_type: Literal["USER", "ROLE", "GROUP", "PUBLIC"] = "ROLE"
+    privilege: str = Field(pattern=r"^[A-Z][A-Z0-9_ ]{0,49}$")
+    object_type: Literal[
+        "TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"
+    ] = "TABLE"
+    object_name: str = Field(min_length=1, max_length=255)
+    schema_name: str | None = Field(default=None, max_length=255)
+    is_grantable: bool = False
+
+
 class MetadataTableEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
     object_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,29}$")
     source_description: str | None = Field(default=None, max_length=10_000)
+    view_definition: MetadataViewDefinitionEnvelope | None = None
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     columns: list[MetadataColumnEnvelope] = Field(max_length=10_000)
     constraints: list[MetadataConstraintEnvelope] = Field(default_factory=list, max_length=10_000)
@@ -253,18 +364,29 @@ class MetadataTableEnvelope(ApiModel):
 
 class MetadataSchemaEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     tables: list[MetadataTableEnvelope] = Field(max_length=10_000)
+    routines: list[MetadataRoutineEnvelope] = Field(default_factory=list, max_length=10_000)
+    grants: list[MetadataGrantEnvelope] = Field(default_factory=list, max_length=100_000)
 
 
 class MetadataCatalogEnvelope(ApiModel):
     name: str = Field(min_length=1, max_length=255)
+    source_description: str | None = Field(default=None, max_length=10_000)
     attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
     schemas: list[MetadataSchemaEnvelope] = Field(max_length=5000)
 
 
 class MetadataIngestionCreate(ApiModel):
-    envelope_version: Literal["1.0"] = "1.0"
+    # 1.1 is the current version; 1.0 stays accepted forever (contract §2.1) and
+    # remains the *default*, so a producer that never sent the field keeps the
+    # behaviour it has today. Opting in to 1.1 is explicit, because 1.1 also
+    # opts a FULL snapshot in to reconciling the new axes -- and a producer that
+    # was silently promoted would retire the estate's view definitions on its
+    # next full scan. Declaring 1.0 while sending 1.1 content is rejected by
+    # `ingestion.validate_envelope_version`, not silently stripped.
+    envelope_version: Literal["1.0", "1.1"] = "1.0"
     idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     producer: str = Field(min_length=2, max_length=200)
     transport: Literal["PUSH", "STREAM"] = "PUSH"
@@ -277,6 +399,7 @@ class MetadataIngestionCreate(ApiModel):
         forbidden_fragments = ("sample", "row_value", "password", "secret", "token", "credential")
         total_tables = 0
         total_columns = 0
+        total_routines = 0
         for catalog in self.catalogs:
             if len({schema.name for schema in catalog.schemas}) != len(catalog.schemas):
                 raise ValueError("schema names must be unique within a catalog")
@@ -286,12 +409,18 @@ class MetadataIngestionCreate(ApiModel):
                     raise ValueError("table names must be unique within a schema")
                 self._validate_attributes(schema.attributes, forbidden_fragments)
                 total_tables += len(schema.tables)
+                # Envelope 1.1: a routine carries its own attribute bag, so it is
+                # screened like every other object. An unscreened bag would be a
+                # hole in INV-6 the moment 1.1 producers appear.
+                total_routines += len(schema.routines)
+                for routine in schema.routines:
+                    self._validate_attributes(routine.attributes, forbidden_fragments)
                 for table in schema.tables:
                     self._validate_attributes(table.attributes, forbidden_fragments)
                     for column in table.columns:
                         self._validate_attributes(column.attributes, forbidden_fragments)
                     total_columns += len(table.columns)
-        if total_tables > 50_000 or total_columns > 250_000:
+        if total_tables > 50_000 or total_columns > 250_000 or total_routines > 50_000:
             raise ValueError("envelope exceeds the synchronous ingestion safety boundary")
         return self
 
@@ -334,7 +463,7 @@ class MetadataIngestionRead(ApiModel):
 
 
 class MetadataIngestionBatchCreate(ApiModel):
-    envelope_version: Literal["1.0"] = "1.0"
+    envelope_version: Literal["1.0", "1.1"] = "1.0"
     batch_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
     producer: str = Field(min_length=2, max_length=200)
     snapshot_type: Literal["FULL", "INCREMENTAL"] = "INCREMENTAL"
@@ -2145,6 +2274,9 @@ class BusinessNodeRollupRead(ApiModel):
     descendant_node_count: int
     assigned_by_target_type: dict[str, int]
     as_of: datetime
+    # When the materialised roll-up was last computed. `None` means it has never been
+    # built and the counts were computed live on this request.
+    computed_at: datetime | None = None
 
 
 class AccessPolicyRead(ApiModel):

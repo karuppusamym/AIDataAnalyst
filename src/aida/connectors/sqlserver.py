@@ -17,13 +17,198 @@ from aida.connectors.base import (
 from aida.connectors.discovery import (
     append_grouped_foreign_key_rows,
     append_grouped_key_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
+    build_routines,
     build_table_map_from_column_rows,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
 _SHOWPLAN_NS = "{http://schemas.microsoft.com/sqlserver/2004/07/showplan}"
 _EXCLUDED_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
+
+# --- envelope 1.1 (gap/02 N1) ------------------------------------------------
+#
+# Every definition below reads `sys.sql_modules.definition` rather than
+# `INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` or `syscomments`. That is not
+# a style preference: `ROUTINE_DEFINITION` is `nvarchar(4000)` and silently
+# truncates every longer body, which is precisely the class of object -- a long
+# ETL procedure -- whose text is worth parsing. `sys.sql_modules.definition` is
+# `nvarchar(max)` and does not truncate, so this connector reports
+# `truncated = false` because it is true, not because it did not check.
+#
+# A NULL definition means the module is encrypted (`WITH ENCRYPTION`) or is not
+# visible to this principal. That is recorded as *unavailable with a reason*, so
+# a downstream parser can tell it apart from a view with an empty body.
+
+_VIEW_DEFINITION_SQL = """
+    SELECT
+        s.name AS table_schema,
+        v.name AS table_name,
+        m.definition AS definition,
+        CAST(OBJECTPROPERTY(v.object_id, 'IsIndexed') AS int) AS is_materialized,
+        CAST(OBJECTPROPERTY(v.object_id, 'IsUpdatable') AS int) AS is_updatable,
+        CASE WHEN v.with_check_option = 1 THEN 'CASCADED' ELSE NULL END AS check_option,
+        CASE
+            WHEN m.definition IS NULL
+            THEN 'sys.sql_modules returned no definition: the module is encrypted '
+                 + 'or not visible to this principal'
+            ELSE NULL
+        END AS unavailable_reason
+    FROM sys.views v
+    JOIN sys.schemas s ON s.schema_id = v.schema_id
+    LEFT JOIN sys.sql_modules m ON m.object_id = v.object_id
+    WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, v.name
+"""
+
+_ROUTINE_SQL = """
+    SELECT
+        s.name AS routine_schema,
+        o.name AS routine_name,
+        CAST(o.object_id AS varchar(30)) AS specific_name,
+        CASE o.type WHEN 'P' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type,
+        'SQL' AS language,
+        m.definition AS body,
+        TYPE_NAME(ret.user_type_id) AS return_type,
+        CAST(OBJECTPROPERTY(o.object_id, 'IsDeterministic') AS int) AS is_deterministic,
+        CASE
+            WHEN m.execute_as_principal_id IS NULL THEN 'INVOKER' ELSE 'DEFINER'
+        END AS security_mode,
+        CAST(ep.value AS nvarchar(max)) AS description,
+        CASE
+            WHEN m.definition IS NULL
+            THEN 'sys.sql_modules returned no definition: the module is encrypted '
+                 + 'or not visible to this principal'
+            ELSE NULL
+        END AS unavailable_reason
+    FROM sys.objects o
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    LEFT JOIN sys.sql_modules m ON m.object_id = o.object_id
+    LEFT JOIN sys.parameters ret
+      ON ret.object_id = o.object_id
+     AND ret.parameter_id = 0
+    LEFT JOIN sys.extended_properties ep
+      ON ep.class = 1
+     AND ep.major_id = o.object_id
+     AND ep.minor_id = 0
+     AND ep.name = 'MS_Description'
+    WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, o.name, o.object_id
+"""
+
+_ROUTINE_PARAMETER_SQL = """
+    SELECT
+        s.name AS routine_schema,
+        CAST(p.object_id AS varchar(30)) AS specific_name,
+        p.name AS parameter_name,
+        p.parameter_id AS ordinal_position,
+        CASE WHEN p.is_output = 1 THEN 'OUT' ELSE 'IN' END AS parameter_mode,
+        TYPE_NAME(p.user_type_id) AS data_type,
+        CASE
+            WHEN p.has_default_value = 1
+            THEN CONVERT(nvarchar(4000), p.default_value)
+            ELSE NULL
+        END AS parameter_default
+    FROM sys.parameters p
+    JOIN sys.objects o ON o.object_id = p.object_id
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+      AND p.parameter_id > 0
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, p.object_id, p.parameter_id
+"""
+
+_TABLE_COMMENT_SQL = """
+    SELECT
+        s.name AS table_schema,
+        o.name AS table_name,
+        CAST(ep.value AS nvarchar(max)) AS description
+    FROM sys.extended_properties ep
+    JOIN sys.objects o ON o.object_id = ep.major_id
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    WHERE ep.class = 1
+      AND ep.minor_id = 0
+      AND ep.name = 'MS_Description'
+      AND o.type IN ('U', 'V')
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, o.name
+"""
+
+_COLUMN_COMMENT_SQL = """
+    SELECT
+        s.name AS table_schema,
+        o.name AS table_name,
+        c.name AS column_name,
+        CAST(ep.value AS nvarchar(max)) AS description
+    FROM sys.extended_properties ep
+    JOIN sys.objects o ON o.object_id = ep.major_id
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    JOIN sys.columns c
+      ON c.object_id = ep.major_id
+     AND c.column_id = ep.minor_id
+    WHERE ep.class = 1
+      AND ep.minor_id > 0
+      AND ep.name = 'MS_Description'
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, o.name, c.column_id
+"""
+
+_SCHEMA_COMMENT_SQL = """
+    SELECT
+        s.name AS schema_name,
+        CAST(ep.value AS nvarchar(max)) AS description
+    FROM sys.extended_properties ep
+    JOIN sys.schemas s ON s.schema_id = ep.major_id
+    WHERE ep.class = 3
+      AND ep.name = 'MS_Description'
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name
+"""
+
+_CATALOG_COMMENT_SQL = """
+    SELECT TOP (1) CAST(ep.value AS nvarchar(max)) AS description
+    FROM sys.extended_properties ep
+    WHERE ep.class = 0
+      AND ep.name = 'MS_Description'
+"""
+
+# Object-level GRANT and GRANT WITH GRANT OPTION only. DENY (state 'D') is
+# deliberately excluded: this axis answers "who can already read this", and a
+# DENY is not a privilege. Modelling revocation would need a second axis and a
+# resolution rule, which nothing downstream consumes yet -- so it is left out
+# rather than half-represented.
+_GRANT_SQL = """
+    SELECT
+        s.name AS schema_name,
+        g.name AS grantee,
+        CASE
+            WHEN g.type IN ('R', 'A') THEN 'ROLE' ELSE 'USER'
+        END AS grantee_type,
+        dp.permission_name AS privilege,
+        CASE o.type
+            WHEN 'V' THEN 'VIEW'
+            WHEN 'P' THEN 'PROCEDURE'
+            WHEN 'FN' THEN 'FUNCTION'
+            WHEN 'IF' THEN 'FUNCTION'
+            WHEN 'TF' THEN 'FUNCTION'
+            ELSE 'TABLE'
+        END AS object_type,
+        o.name AS object_name,
+        CASE WHEN dp.state = 'W' THEN 1 ELSE 0 END AS is_grantable
+    FROM sys.database_permissions dp
+    JOIN sys.database_principals g ON g.principal_id = dp.grantee_principal_id
+    JOIN sys.objects o ON o.object_id = dp.major_id
+    JOIN sys.schemas s ON s.schema_id = o.schema_id
+    WHERE dp.class = 1
+      AND dp.state IN ('G', 'W')
+      AND s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+    ORDER BY s.name, o.name, g.name, dp.permission_name
+"""
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -119,6 +304,16 @@ class SqlServerConnector(SqlExecutor):
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag below is backed by a query in
+        # `_discover_sync`, which is what INV-9 requires of a `True`:
+        #   views            -> sys.views + sys.sql_modules.definition
+        #   routines         -> sys.objects/sys.sql_modules + sys.parameters
+        #   object_comments  -> sys.extended_properties, MS_Description
+        #   grants           -> sys.database_permissions, class 1 (object)
+        views=True,
+        routines=True,
+        object_comments=True,
+        grants=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -245,12 +440,42 @@ class SqlServerConnector(SqlExecutor):
                     """
                 )
                 foreign_key_rows = cursor.fetchall()
+
+                cursor.execute(_VIEW_DEFINITION_SQL)
+                view_rows = cursor.fetchall()
+                cursor.execute(_ROUTINE_SQL)
+                routine_rows = cursor.fetchall()
+                cursor.execute(_ROUTINE_PARAMETER_SQL)
+                routine_parameter_rows = cursor.fetchall()
+                cursor.execute(_TABLE_COMMENT_SQL)
+                table_description_rows = cursor.fetchall()
+                cursor.execute(_COLUMN_COMMENT_SQL)
+                column_description_rows = cursor.fetchall()
+                cursor.execute(_SCHEMA_COMMENT_SQL)
+                schema_description_rows = cursor.fetchall()
+                cursor.execute(_CATALOG_COMMENT_SQL)
+                catalog_description_row = cursor.fetchone()
+                cursor.execute(_GRANT_SQL)
+                grant_rows = cursor.fetchall()
             finally:
                 cursor.close()
         finally:
             connection.close()
 
-        return _assemble_catalog(catalog_name, column_rows, key_rows, foreign_key_rows)
+        return _assemble_catalog(
+            catalog_name,
+            column_rows,
+            key_rows,
+            foreign_key_rows,
+            view_rows=view_rows,
+            routine_rows=routine_rows,
+            routine_parameter_rows=routine_parameter_rows,
+            table_description_rows=table_description_rows,
+            column_description_rows=column_description_rows,
+            schema_description_rows=schema_description_rows,
+            catalog_description_row=catalog_description_row,
+            grant_rows=grant_rows,
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         return await asyncio.to_thread(self._estimate_read_query_sync, sql, timeout_seconds)
@@ -406,7 +631,22 @@ def _assemble_catalog(
     column_rows: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],
     foreign_key_rows: list[dict[str, Any]],
+    *,
+    view_rows: list[dict[str, Any]] | None = None,
+    routine_rows: list[dict[str, Any]] | None = None,
+    routine_parameter_rows: list[dict[str, Any]] | None = None,
+    table_description_rows: list[dict[str, Any]] | None = None,
+    column_description_rows: list[dict[str, Any]] | None = None,
+    schema_description_rows: list[dict[str, Any]] | None = None,
+    catalog_description_row: dict[str, Any] | None = None,
+    grant_rows: list[dict[str, Any]] | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
+    """Assemble the envelope from raw row sets.
+
+    The 1.1 row sets default to `None` so the existing 1.0 assembly tests keep
+    calling this with four positional arguments, and so a caller that collected
+    only some axes produces an envelope where the others are genuinely absent.
+    """
     tables = build_table_map_from_column_rows(column_rows)
     append_grouped_key_rows(
         tables,
@@ -414,4 +654,23 @@ def _assemble_catalog(
         constraint_type_map={"PRIMARY KEY": "PRIMARY_KEY", "UNIQUE": "UNIQUE"},
     )
     append_grouped_foreign_key_rows(tables, foreign_key_rows)
-    return assemble_catalog(str(catalog_name), tables)
+    apply_table_descriptions(tables, table_description_rows or [])
+    apply_column_descriptions(tables, column_description_rows or [])
+    apply_view_definitions(tables, view_rows or [])
+    catalog_description = None
+    if catalog_description_row is not None:
+        raw_description = catalog_description_row.get("description")
+        if raw_description is not None:
+            catalog_description = str(raw_description)
+    return assemble_catalog(
+        str(catalog_name),
+        tables,
+        routines=build_routines(routine_rows or [], routine_parameter_rows or []),
+        grants=build_grants(grant_rows or []),
+        schema_descriptions={
+            str(row["schema_name"]): str(row["description"])
+            for row in (schema_description_rows or [])
+            if row.get("description") is not None
+        },
+        catalog_description=catalog_description,
+    )
