@@ -3900,3 +3900,59 @@ class BiMetricColumnEdge(Base, TimestampMixin):
         ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
     )
     edge_kind: Mapped[str] = mapped_column(String(30), default="BI", nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+class AssetTag(Base, TimestampMixin):
+    """A steward-applied label on a table asset (module 04 domain: asset_tag)."""
+
+    __tablename__ = "asset_tag"
+    __table_args__ = (
+        UniqueConstraint("table_id", "tag_key"),
+        Index("ix_asset_tag_org_key", "organization_id", "tag_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    tag_key: Mapped[str] = mapped_column(String(100), nullable=False)
+    tag_value: Mapped[str | None] = mapped_column(String(500))
+    applied_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class CatalogBulkActionRun(Base, TimestampMixin):
+    """Durable partial-success record for a CT-1 catalog bulk action.
+
+    One row per bulk request (tag/classify/own/certify), carrying the
+    per-subject outcome so a caller can retrieve which items succeeded and
+    which failed (and why) after the fact, not just in the synchronous
+    response.
+    """
+
+    __tablename__ = "catalog_bulk_action_run"
+    __table_args__ = (
+        Index(
+            "ix_catalog_bulk_action_run_org_action", "organization_id", "action", "created_at"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(30), nullable=False)
+    selection_mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    parameters: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    requested_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)

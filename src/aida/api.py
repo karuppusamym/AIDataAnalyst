@@ -1,5 +1,6 @@
 from dataclasses import asdict, replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -19,6 +20,18 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.authorization_gate import AuthorizationDenied, gate
+from aida.catalog_bulk_actions import (
+    CATALOG_BULK_ACTION_MAX_ITEMS,
+    CATALOG_BULK_FILTER_SCAN_CAP,
+    BulkPlan,
+    dedupe_preserving_order,
+    match_columns_by_pattern,
+    match_tables_by_filter,
+    plan_certify,
+    plan_classify,
+    plan_own,
+    plan_tag,
+)
 from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
@@ -32,6 +45,9 @@ from aida.models import (
     AgentEvaluationRun,
     AgentRun,
     AnalysisRun,
+    AssetCertification,
+    AssetTag,
+    CatalogBulkActionRun,
     ColumnProfile,
     CrossBoundaryGrant,
     DataDomain,
@@ -45,6 +61,7 @@ from aida.models import (
     MetadataTable,
     Organization,
     OrganizationIntegrationPolicy,
+    OwnershipAssignment,
     Project,
     QueryExecution,
     ScanPolicy,
@@ -67,6 +84,12 @@ from aida.schemas import (
     AiRuntimeStatusRead,
     AnalysisRunCreate,
     AnalysisRunRead,
+    CatalogBulkActionRunRead,
+    CatalogBulkCertifyRequest,
+    CatalogBulkClassifyRequest,
+    CatalogBulkOwnRequest,
+    CatalogBulkSelectionFilter,
+    CatalogBulkTagRequest,
     ColumnProfileRead,
     CrossBoundaryGrantCreate,
     CrossBoundaryGrantRead,
@@ -102,6 +125,22 @@ from aida.secrets import SecretResolver
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
+
+CATALOG_BULK_ACTION_WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward")
+CATALOG_BULK_ACTION_READ_ROLES = (
+    "PlatformAdmin",
+    "MetadataAdmin",
+    "DataAdmin",
+    "DataSteward",
+    "Analyst",
+    "Viewer",
+)
+_CATALOG_BULK_ACTION_EVENT_TYPES = {
+    "TAG": "catalog.asset_tag.applied.v1",
+    "CLASSIFY": "catalog.column.classified.v1",
+    "OWN": "ownership.assigned.v1",
+    "CERTIFY": "certification.granted.v1",
+}
 
 router = APIRouter(prefix="/v1")
 
@@ -1934,3 +1973,423 @@ async def get_agent_run(
         if agent_run.principal_id != context.principal_id:
             raise HTTPException(status_code=403, detail="agent run belongs to another principal")
     return AgentRunRead.model_validate(agent_run)
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_bulk_table_subjects(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    table_ids: list[UUID] | None,
+    selection_filter: CatalogBulkSelectionFilter | None,
+) -> tuple[list[UUID], str, bool]:
+    if table_ids is not None:
+        return dedupe_preserving_order(table_ids), "EXPLICIT", False
+    assert selection_filter is not None
+    datasource = await session.get(DataSource, selection_filter.datasource_id)
+    if datasource is None or datasource.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="data source not found")
+    rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.datasource_id == selection_filter.datasource_id,
+                MetadataTable.status == "ACTIVE",
+            )
+            .order_by(MetadataTable.id)
+            .limit(CATALOG_BULK_FILTER_SCAN_CAP)
+        )
+    ).all()
+    candidates = [(row[0], row[1]) for row in rows]
+    matched, truncated = match_tables_by_filter(
+        candidates,
+        match_field=selection_filter.match_field,
+        match_pattern=selection_filter.match_pattern,
+        cap=CATALOG_BULK_ACTION_MAX_ITEMS,
+    )
+    if not matched:
+        raise HTTPException(status_code=409, detail="filter matched no active tables")
+    return matched, "FILTER", truncated
+
+
+async def _fetch_bulk_tables(
+    session: AsyncSession, *, organization_id: UUID, table_ids: list[UUID]
+) -> dict[UUID, MetadataTable]:
+    rows = (
+        await session.scalars(
+            select(MetadataTable).where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.id.in_(table_ids),
+            )
+        )
+    ).all()
+    return {row.id: row for row in rows}
+
+
+async def _persist_catalog_bulk_action_run(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    organization_id: UUID,
+    action: str,
+    selection_mode: str,
+    parameters: dict[str, Any],
+    plan: BulkPlan,
+) -> CatalogBulkActionRun:
+    run = CatalogBulkActionRun(
+        organization_id=organization_id,
+        action=action,
+        selection_mode=selection_mode,
+        parameters=parameters,
+        requested_count=len(plan.results),
+        succeeded_count=plan.succeeded_count,
+        failed_count=plan.failed_count,
+        results=[item.as_dict() for item in plan.results],
+        requested_by=context.principal_id,
+    )
+    session.add(run)
+    await session.flush()
+    if plan.succeeded_count and plan.failed_count:
+        outcome = "PARTIAL_SUCCESS"
+    elif plan.succeeded_count:
+        outcome = "SUCCESS"
+    else:
+        outcome = "FAILURE"
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action=f"catalog.bulk_{action.lower()}",
+        resource_type="catalog_bulk_action_run",
+        resource_id=str(run.id),
+        outcome=outcome,
+        correlation_id=get_correlation_id(),
+        details={
+            "requested_count": run.requested_count,
+            "succeeded_count": run.succeeded_count,
+            "failed_count": run.failed_count,
+            "selection_mode": selection_mode,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="catalog_bulk_action_run",
+        aggregate_id=str(run.id),
+        event_type=_CATALOG_BULK_ACTION_EVENT_TYPES[action],
+        payload={
+            "run_id": str(run.id),
+            "action": action,
+            "succeeded_count": run.succeeded_count,
+            "failed_count": run.failed_count,
+        },
+    )
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-tag",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_tag_tables(
+    organization_id: UUID,
+    body: CatalogBulkTagRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    existing_tags = (
+        await session.scalars(
+            select(AssetTag).where(
+                AssetTag.table_id.in_(subject_ids),
+                AssetTag.tag_key == body.tag_key,
+            )
+        )
+    ).all()
+    plan = plan_tag(
+        subject_ids,
+        tables=tables,
+        existing_tags={row.table_id: row for row in existing_tags},
+        organization_id=organization_id,
+        tag_key=body.tag_key,
+        tag_value=body.tag_value,
+        applied_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="TAG",
+        selection_mode=selection_mode,
+        parameters={
+            "tag_key": body.tag_key,
+            "tag_value": body.tag_value,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-classify",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_classify_columns(
+    organization_id: UUID,
+    body: CatalogBulkClassifyRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    truncated = False
+    if body.column_ids is not None:
+        subject_ids = dedupe_preserving_order(body.column_ids)
+        selection_mode = "EXPLICIT"
+    else:
+        table_ids, _, table_truncated = await _resolve_bulk_table_subjects(
+            session,
+            organization_id=organization_id,
+            table_ids=body.table_ids,
+            selection_filter=body.filter,
+        )
+        selection_mode = "EXPLICIT" if body.table_ids is not None else "FILTER"
+        truncated = truncated or table_truncated
+        column_rows = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.organization_id == organization_id,
+                    MetadataColumn.table_id.in_(table_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.id)
+                .limit(CATALOG_BULK_FILTER_SCAN_CAP)
+            )
+        ).all()
+        subject_ids, column_truncated = match_columns_by_pattern(
+            column_rows,
+            name_pattern=body.column_name_pattern,
+            cap=CATALOG_BULK_ACTION_MAX_ITEMS,
+        )
+        truncated = truncated or column_truncated
+        if not subject_ids:
+            raise HTTPException(status_code=409, detail="selection matched no active columns")
+    rows = (
+        await session.execute(
+            select(MetadataColumn, MetadataTable)
+            .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+            .where(
+                MetadataColumn.organization_id == organization_id,
+                MetadataColumn.id.in_(subject_ids),
+            )
+        )
+    ).all()
+    columns = {row[0].id: (row[0], row[1]) for row in rows}
+    plan = plan_classify(
+        subject_ids,
+        columns=columns,
+        classification=body.classification,
+    )
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="CLASSIFY",
+        selection_mode=selection_mode,
+        parameters={
+            "classification": body.classification,
+            "column_name_pattern": body.column_name_pattern,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-own",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_assign_ownership(
+    organization_id: UUID,
+    body: CatalogBulkOwnRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    existing_assignments = (
+        await session.scalars(
+            select(OwnershipAssignment).where(
+                OwnershipAssignment.organization_id == organization_id,
+                OwnershipAssignment.subject_type == "TABLE",
+                OwnershipAssignment.subject_id.in_([str(value) for value in subject_ids]),
+                OwnershipAssignment.owner_type == body.owner_type,
+                OwnershipAssignment.owner_principal == body.owner_principal,
+            )
+        )
+    ).all()
+    plan = plan_own(
+        subject_ids,
+        tables=tables,
+        existing_assignments={UUID(row.subject_id): row for row in existing_assignments},
+        organization_id=organization_id,
+        owner_type=body.owner_type,
+        owner_principal=body.owner_principal,
+        assigned_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="OWN",
+        selection_mode=selection_mode,
+        parameters={
+            "owner_type": body.owner_type,
+            "owner_principal": body.owner_principal,
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/organizations/{organization_id}/tables/bulk-certify",
+    response_model=CatalogBulkActionRunRead,
+)
+async def bulk_certify_tables(
+    organization_id: UUID,
+    body: CatalogBulkCertifyRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    if body.expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="certification expiry must be in the future")
+    subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
+        session,
+        organization_id=organization_id,
+        table_ids=body.table_ids,
+        selection_filter=body.filter,
+    )
+    tables = await _fetch_bulk_tables(
+        session, organization_id=organization_id, table_ids=subject_ids
+    )
+    active_certifications = (
+        await session.scalars(
+            select(AssetCertification).where(
+                AssetCertification.table_id.in_(subject_ids),
+                AssetCertification.status == "ACTIVE",
+            )
+        )
+    ).all()
+    grouped_certifications: dict[UUID, list[AssetCertification]] = {}
+    for row in active_certifications:
+        grouped_certifications.setdefault(row.table_id, []).append(row)
+    plan = plan_certify(
+        subject_ids,
+        tables=tables,
+        active_certifications=grouped_certifications,
+        organization_id=organization_id,
+        rationale=body.rationale,
+        expires_at=body.expires_at,
+        certified_by=context.principal_id,
+    )
+    for row in plan.new_rows:
+        session.add(row)
+    run = await _persist_catalog_bulk_action_run(
+        session,
+        context=context,
+        organization_id=organization_id,
+        action="CERTIFY",
+        selection_mode=selection_mode,
+        parameters={
+            "rationale": body.rationale,
+            "expires_at": body.expires_at.isoformat(),
+            "selection_truncated": truncated,
+        },
+        plan=plan,
+    )
+    await session.commit()
+    return run
+
+
+@router.get(
+    "/organizations/{organization_id}/catalog-bulk-actions",
+    response_model=Page,
+)
+async def list_catalog_bulk_action_runs(
+    organization_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    enforce_organization(context, organization_id)
+    filters = (CatalogBulkActionRun.organization_id == organization_id,)
+    total = await session.scalar(
+        select(func.count()).select_from(CatalogBulkActionRun).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(CatalogBulkActionRun)
+            .where(*filters)
+            .order_by(CatalogBulkActionRun.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[CatalogBulkActionRunRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get(
+    "/organizations/{organization_id}/catalog-bulk-actions/{run_id}",
+    response_model=CatalogBulkActionRunRead,
+)
+async def get_catalog_bulk_action_run(
+    organization_id: UUID,
+    run_id: UUID,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CatalogBulkActionRun:
+    enforce_organization(context, organization_id)
+    run = await session.get(CatalogBulkActionRun, run_id)
+    if run is None or run.organization_id != organization_id:
+        raise HTTPException(status_code=404, detail="catalog bulk action run not found")
+    return run

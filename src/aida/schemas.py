@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
 from aida.integration_catalog import normalized_transformation_metadata_integrations
 
 
@@ -2860,3 +2861,103 @@ class BiLineageRead(ApiModel):
     metric_count: int
     matched_column_count: int
     unmatched_column_count: int
+
+
+# ---------------------------------------------------------------------------
+# CT-1: Catalog bulk actions (tag, classify, own, certify)
+# ---------------------------------------------------------------------------
+
+
+def _require_exactly_one_selection(*selections: object) -> None:
+    provided = [value for value in selections if value]
+    if len(provided) != 1:
+        raise ValueError("provide exactly one selection: an explicit id list or a filter")
+
+
+class CatalogBulkSelectionFilter(ApiModel):
+    datasource_id: UUID
+    match_field: Literal["TABLE_NAME", "SCHEMA_NAME", "QUALIFIED_NAME"] = "TABLE_NAME"
+    match_pattern: str = Field(min_length=1, max_length=255)
+
+
+class CatalogBulkTagRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    tag_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    tag_value: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkTagRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkClassifyRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    column_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    column_name_pattern: str = Field(default="*", min_length=1, max_length=255)
+    classification: Literal[
+        "UNCLASSIFIED", "PUBLIC", "INTERNAL", "CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"
+    ]
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkClassifyRequest":
+        _require_exactly_one_selection(self.table_ids, self.column_ids, self.filter)
+        if self.classification not in ALLOWED_CLASSIFICATIONS:
+            raise ValueError("unsupported classification value")
+        return self
+
+
+class CatalogBulkOwnRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    owner_type: Literal["INDIVIDUAL", "GROUP"]
+    owner_principal: str = Field(min_length=2, max_length=255)
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkOwnRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkCertifyRequest(ApiModel):
+    table_ids: list[UUID] | None = Field(
+        default=None, min_length=1, max_length=CATALOG_BULK_ACTION_MAX_ITEMS
+    )
+    filter: CatalogBulkSelectionFilter | None = None
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "CatalogBulkCertifyRequest":
+        _require_exactly_one_selection(self.table_ids, self.filter)
+        return self
+
+
+class CatalogBulkActionItemRead(ApiModel):
+    subject_id: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class CatalogBulkActionRunRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    action: str
+    selection_mode: str
+    parameters: dict[str, Any]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    results: list[CatalogBulkActionItemRead]
+    requested_by: str
+    created_at: datetime
