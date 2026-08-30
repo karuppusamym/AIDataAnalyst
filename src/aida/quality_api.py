@@ -426,3 +426,192 @@ async def quality_summary(
         metadata_scan_status=scan_status,
         source_freshness_status="NOT_CONFIGURED",
     )
+
+
+# --- DQ-2: Freshness Watermark Contracts ----------------------------------------
+
+
+@router.put(
+    "/datasources/{datasource_id}/freshness-config/{table_id}",
+    response_model=FreshnessConfigRead,
+)
+async def upsert_freshness_config(
+    datasource_id: UUID,
+    table_id: UUID,
+    body: FreshnessConfigUpsert,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> FreshnessConfigRead:
+    source = await _source(session, context, datasource_id)
+    table = await session.get(MetadataTable, table_id)
+    if table is None or table.datasource_id != source.id:
+        raise HTTPException(status_code=422, detail="table is not part of this datasource")
+
+    config = await session.scalar(
+        select(FreshnessWatermarkConfig).where(
+            FreshnessWatermarkConfig.table_id == table_id,
+        )
+    )
+    action = (
+        "data_quality.freshness_config.update"
+        if config
+        else "data_quality.freshness_config.create"
+    )
+    if config is None:
+        config = FreshnessWatermarkConfig(
+            organization_id=source.organization_id,
+            datasource_id=source.id,
+            table_id=table_id,
+            watermark_column=body.watermark_column,
+            classification=body.classification,
+            threshold_minutes=body.threshold_minutes,
+            retention_days=body.retention_days,
+            created_by=context.principal_id,
+        )
+        session.add(config)
+    else:
+        config.watermark_column = body.watermark_column
+        config.classification = body.classification
+        config.threshold_minutes = body.threshold_minutes
+        config.retention_days = body.retention_days
+        # Reset approval on update (maker-checker)
+        config.status = "PENDING_APPROVAL"
+        config.approved_by = None
+        config.approved_at = None
+    await session.flush()
+    record_audit(
+        session,
+        context,
+        action=action,
+        resource_type="freshness_watermark_config",
+        resource_id=str(config.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "datasource_id": str(source.id),
+            "table_id": str(table_id),
+            "watermark_column": body.watermark_column,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=source.organization_id,
+        aggregate_type="freshness_watermark_config",
+        aggregate_id=str(config.id),
+        event_type="data_quality.freshness_config.changed.v1",
+        payload={
+            "datasource_id": str(source.id),
+            "table_id": str(table_id),
+            "watermark_column": body.watermark_column,
+        },
+    )
+    await session.commit()
+    await session.refresh(config)
+    return FreshnessConfigRead.model_validate(config)
+
+
+@router.get(
+    "/datasources/{datasource_id}/freshness",
+    response_model=Page,
+)
+async def list_freshness_configs(
+    datasource_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    await _source(session, context, datasource_id)
+    filters = [FreshnessWatermarkConfig.datasource_id == datasource_id]
+    total = await session.scalar(
+        select(func.count()).select_from(FreshnessWatermarkConfig).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(FreshnessWatermarkConfig)
+            .where(*filters)
+            .order_by(FreshnessWatermarkConfig.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[FreshnessConfigRead.model_validate(r) for r in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get(
+    "/datasources/{datasource_id}/freshness/{table_id}",
+    response_model=FreshnessStatusRead,
+)
+async def get_freshness_status(
+    datasource_id: UUID,
+    table_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> FreshnessStatusRead:
+    """Evaluate freshness for a specific table.
+
+    CRITICAL invariant (ADR-0016): scan age is NEVER presented as freshness.
+    This endpoint only uses the actual data watermark timestamp.
+    """
+    await _source(session, context, datasource_id)
+
+    config_row = await session.scalar(
+        select(FreshnessWatermarkConfig).where(
+            FreshnessWatermarkConfig.datasource_id == datasource_id,
+            FreshnessWatermarkConfig.table_id == table_id,
+        )
+    )
+
+    if config_row is None:
+        wm_config = None
+    else:
+        wm_config = WatermarkConfig(
+            table_id=str(config_row.table_id),
+            watermark_column=config_row.watermark_column,
+            classification=config_row.classification,
+            threshold_minutes=config_row.threshold_minutes,
+            retention_days=config_row.retention_days,
+            approved_by=config_row.approved_by,
+            approved_at=config_row.approved_at,
+            status=config_row.status,
+        )
+
+    latest_observation = await session.scalar(
+        select(FreshnessObservation)
+        .where(
+            FreshnessObservation.table_id == table_id,
+            FreshnessObservation.datasource_id == datasource_id,
+        )
+        .order_by(FreshnessObservation.observed_at.desc())
+        .limit(1)
+    )
+
+    latest_watermark = (
+        latest_observation.watermark_value if latest_observation else None
+    )
+    now = datetime.now(UTC)
+    result = evaluate_freshness(wm_config, latest_watermark, evaluation_time=now)
+
+    return FreshnessStatusRead(
+        table_id=table_id,
+        status=result.status,
+        last_watermark=result.last_watermark,
+        age_minutes=result.age_minutes,
+        threshold_minutes=result.threshold_minutes,
+        evidence=result.evidence,
+    )

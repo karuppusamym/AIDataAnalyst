@@ -77,7 +77,12 @@ from aida.context_product_policy import (
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
-from aida.mcp_budget import McpBudgetDecision, consume_mcp_budget
+from aida.mcp_budget import (
+    McpBudgetDecision,
+    budget_headers,
+    consume_mcp_budget,
+    consume_mcp_consumer_budget,
+)
 from aida.models import (
     ConsumptionRecord,
     ContextProduct,
@@ -1958,7 +1963,9 @@ async def mcp_endpoint(
         budget_buckets.append("TOOL_DAY")
     elif method in {"resources/read", "prompts/get"}:
         budget_buckets.append("CONTEXT_DAY")
+    rate_limit_headers: dict[str, str] = {}
     for bucket in budget_buckets:
+        # Org-level budget check
         budget = await consume_mcp_budget(settings, context, bucket)
         if not budget.allowed:
             record_audit(
@@ -1980,8 +1987,40 @@ async def mcp_endpoint(
                     _budget_error_data(budget),
                 ),
                 status_code=429,
-                headers={"Retry-After": str(max(budget.retry_after_seconds, 1))},
+                headers={
+                    "Retry-After": str(max(budget.retry_after_seconds, 1)),
+                    **budget_headers(budget),
+                },
             )
+        rate_limit_headers.update(budget_headers(budget))
+        # CX-6: Per-consumer budget check
+        consumer_budget = await consume_mcp_consumer_budget(settings, context, bucket)
+        if not consumer_budget.allowed:
+            record_audit(
+                session,
+                context,
+                action="mcp.consumer_budget.per_consumer_denied",
+                resource_type="mcp_consumer",
+                resource_id=context.principal_id,
+                outcome="DENIED",
+                correlation_id=correlation_id,
+                details=_budget_error_data(consumer_budget),
+            )
+            await session.commit()
+            return JSONResponse(
+                content=_err(
+                    rpc_id,
+                    _ERR_ACCESS_DENIED,
+                    "MCP per-consumer rate limit exceeded.",
+                    _budget_error_data(consumer_budget),
+                ),
+                status_code=429,
+                headers={
+                    "Retry-After": str(max(consumer_budget.retry_after_seconds, 1)),
+                    **budget_headers(consumer_budget),
+                },
+            )
+        rate_limit_headers.update(budget_headers(consumer_budget))
 
     try:
         # Dispatch to the appropriate handler
@@ -2055,4 +2094,4 @@ async def mcp_endpoint(
             )
         )
         await session.commit()
-    return JSONResponse(content=_ok(rpc_id, result))
+    return JSONResponse(content=_ok(rpc_id, result), headers=rate_limit_headers)

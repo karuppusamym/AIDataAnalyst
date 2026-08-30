@@ -17,6 +17,7 @@ from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.config import get_settings
+from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
 from aida.context_compiler_api import router as context_compiler_router
 from aida.context_product_api import router as context_product_router
@@ -27,6 +28,8 @@ from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
+from aida.notification_api import router as notification_router
+from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.product_marketplace_api import router as product_marketplace_router
@@ -39,6 +42,8 @@ from aida.sql_validation_api import router as sql_validation_router
 from aida.stewardship_api import router as stewardship_router
 from aida.tool_api import router as tool_router
 from aida.unified_lineage_api import router as unified_lineage_router
+from aida.view_lineage_api import router as view_lineage_router
+from aida.studio_api import router as studio_router
 from aida.workspace_api import router as workspace_router
 
 settings = get_settings()
@@ -104,6 +109,11 @@ app.include_router(product_marketplace_router)
 app.include_router(search_router)
 app.include_router(abac_router)
 app.include_router(ai_decision_lineage_router)
+app.include_router(view_lineage_router)
+app.include_router(studio_router)
+app.include_router(notification_router)
+app.include_router(observability_router)
+app.include_router(consumption_lineage_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

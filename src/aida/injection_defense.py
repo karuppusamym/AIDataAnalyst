@@ -191,7 +191,7 @@ ALL_PATTERNS: list[_InjectionPattern] = (
 # ---------------------------------------------------------------------------
 
 _BASE64_RE = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
-_HEX_RE = re.compile(r"(?:0x|\\x)[0-9a-fA-F]{8,}")
+_HEX_RE = re.compile(r"(?:(?:0x|\\x)[0-9a-fA-F]{2}){4,}")
 _URL_ENCODED_RE = re.compile(r"(?:%[0-9a-fA-F]{2}){4,}")
 
 # Zero-width characters that can be used to evade detection
@@ -339,8 +339,13 @@ def screen_metadata(
             pattern_evidence.append(f"pattern_match:{pat.threat_type}")
 
     # Evasion techniques themselves increase confidence
+    encoded_injection = any("base64_encoded_injection" in e for e in evasion_evidence)
     if evasion_evidence and max_confidence > 0:
         max_confidence = min(1.0, max_confidence + 0.05)
+    elif encoded_injection:
+        # Base64-encoded injection content is high-confidence on its own
+        max_confidence = 0.90
+        threat_type = "INSTRUCTION_OVERRIDE"
     elif evasion_evidence and max_confidence == 0:
         # Evasion detected without pattern match -- still suspicious
         # but only flag if multiple evasion techniques are used

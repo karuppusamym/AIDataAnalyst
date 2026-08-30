@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.models import AiDecisionRecord
+    from aida.models import AiDecisionRecord
 
 DECISION_LINEAGE_VERSION = "ai-decision-lineage-v1"
 
@@ -61,6 +61,8 @@ def record_decision(
     edge: AiDecisionEdge,
 ) -> UUID:
     """Persist a single AI decision edge.  Returns the record id."""
+    from aida.models import AiDecisionRecord  # noqa: F811 – lazy to avoid DB init at import
+
     record = AiDecisionRecord(
         organization_id=organization_id,
         run_id=edge.run_id,
@@ -90,6 +92,10 @@ async def get_decisions_for_run(
     run_id: UUID,
 ) -> list[AiDecisionRecord]:
     """Retrieve all decision edges for a given run."""
+    from sqlalchemy import select
+
+    from aida.models import AiDecisionRecord  # noqa: F811
+
     stmt = (
         select(AiDecisionRecord)
         .where(AiDecisionRecord.run_id == run_id)
@@ -104,6 +110,10 @@ async def get_decisions_for_asset(
     limit: int = 200,
 ) -> list[AiDecisionRecord]:
     """Retrieve decision edges involving a specific asset (as target_node)."""
+    from sqlalchemy import select
+
+    from aida.models import AiDecisionRecord  # noqa: F811
+
     stmt = (
         select(AiDecisionRecord)
         .where(AiDecisionRecord.target_node == asset_id)
@@ -120,6 +130,10 @@ async def get_refusals(
     offset: int = 0,
 ) -> list[AiDecisionRecord]:
     """Retrieve all refusal decisions for audit."""
+    from sqlalchemy import select
+
+    from aida.models import AiDecisionRecord  # noqa: F811
+
     stmt = (
         select(AiDecisionRecord)
         .where(
