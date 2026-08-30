@@ -214,6 +214,20 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = Field(default=None, validation_alias="GEMINI_API_KEY")
     allow_development_sql_override: bool = True
     audit_hmac_key: str = "development-only-change-me"
+    # QG-5: which signer produces the audit HMAC evidence in query_gateway.py.
+    # "local" holds `audit_hmac_key` in process config -- the pre-QG-5 behaviour,
+    # kept only as a development fallback and forbidden in production below, the
+    # same shape as `credential_provider`'s "env" refusal. "vault_transit" calls
+    # out to HashiCorp Vault's Transit secrets engine for every sign/verify; the
+    # raw key never enters this process (see aida.signing).
+    hmac_signing_provider: Literal["local", "vault_transit"] = "local"
+    hmac_signing_vault_url: str | None = Field(default=None, max_length=500)
+    hmac_signing_vault_key_name: str = Field(default="audit-hmac", max_length=200)
+    # A reference resolved through the same `SecretResolver` path (and the same
+    # `credential_provider`) as every other credential in this codebase -- the
+    # Vault token authenticates the *request*, not the HMAC key itself.
+    hmac_signing_vault_token_reference: str = Field(default="", max_length=500)
+    hmac_signing_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
 
     @property
     def max_query_estimate_cost(self) -> float:
@@ -253,6 +267,11 @@ class Settings(BaseSettings):
             raise ValueError("production model provider URLs must use HTTPS")
         if self.environment == "production" and len(self.audit_hmac_key) < 32:
             raise ValueError("a production audit HMAC key must contain at least 32 characters")
+        if self.environment == "production" and self.hmac_signing_provider == "local":
+            raise ValueError(
+                "an application-managed local HMAC signer is forbidden in production; "
+                "configure a KMS-backed hmac_signing_provider (QG-5)"
+            )
         return self
 
 
