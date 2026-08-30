@@ -24,6 +24,7 @@ from aida.models import (
     ScanPolicy,
     UnownedAssetEscalation,
 )
+from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,
@@ -536,6 +537,10 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     now = datetime.now(UTC)
     await rebalance_usage_weighted_priorities(settings, now=now)
     await run_owner_routing_pass(settings, now=now)
+    # PR-2's retention contract: expired value-bearing profiling artifacts are
+    # purged every iteration, bounded by profiling_exception_purge_batch_size,
+    # the same "bounded pass every iteration" shape as the two calls above.
+    await purge_expired_value_profile_artifacts(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

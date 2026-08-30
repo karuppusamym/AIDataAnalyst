@@ -108,4 +108,3 @@ async def get_asset_decisions(
     enforce_organization(context, organization_id)
     records = await get_decisions_for_asset(session, asset_id, limit=limit)
     return [AiDecisionRead.model_validate(r) for r in records]
-

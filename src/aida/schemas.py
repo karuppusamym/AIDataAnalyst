@@ -811,6 +811,56 @@ class TableProfileRead(ApiModel):
     columns: list[ColumnProfileRead]
 
 
+class ProfilingExceptionPolicyCreate(ApiModel):
+    """PR-2: request a policy-approved range/top-value profiling exception.
+
+    Scoped to exactly one `(organization_id, datasource_id, classification)`
+    triple (`organization_id` comes from the caller's `SecurityContext`,
+    `datasource_id` from the URL path) -- `classification` must be one of the
+    sensitive classes (`aida.classification.SENSITIVE_CLASSES`); requesting an
+    exception for `UNCLASSIFIED`/`PUBLIC`/`INTERNAL` is rejected up front,
+    since there is nothing sensitive there to gate.
+    """
+
+    classification: str = Field(min_length=1, max_length=30)
+    reason: str = Field(min_length=3, max_length=2000)
+    retention_days: int = Field(ge=1, le=3650)
+
+
+class ProfilingExceptionPolicyRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    classification: str
+    status: str
+    retention_days: int
+    requested_by: str
+    request_reason: str
+    decided_by: str | None
+    decision_reason: str | None
+    decided_at: datetime | None
+    revoked_by: str | None
+    revoked_at: datetime | None
+    revocation_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProfilingExceptionDecisionRequest(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> "ProfilingExceptionDecisionRequest":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a profiling exception policy")
+        return self
+
+
+class ProfilingExceptionRevokeRequest(ApiModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
 class GraphSummaryRead(ApiModel):
     datasource_id: UUID
     catalogs: int
