@@ -9,9 +9,14 @@ a two-stage hybrid BM25 + weighted scoring approach.
 Architecture
 ------------
 Stage 1: Candidate fetch
-  Pull up to agent_retrieval_scan_limit rows from each object type
-  (tables, columns, tools, dbt resources, business annotations, metrics)
-  using the existing org/datasource scope filters.
+  Pull up to agent_retrieval_scan_limit rows from each object type (tables,
+  columns, tools, business annotations, dbt resources, published semantic
+  metrics, and glossary terms bound to a semantic object) using the existing
+  org/datasource scope filters. SM-2: an ACTIVE glossary-term<->semantic-object
+  binding folds the term's definition/synonyms into the metric's candidate
+  text (and the metric's identity into the term's hit metadata), so the
+  binding participates in scoring in both directions instead of being a
+  static link nobody reads at query time.
 
 Stage 2: Hybrid scoring
   Score each candidate with three additive signals:
@@ -70,11 +75,16 @@ from aida.models import (
     DbtArtifactImport,
     DbtProject,
     DbtResource,
+    GlossaryTerm,
+    GlossaryTermVersion,
     GovernedTool,
     GovernedToolVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
     MetadataTable,
+    SemanticMetric,
+    SemanticMetricVersion,
+    TermSemanticBinding,
 )
 from aida.secrets import SecretResolver
 
@@ -467,6 +477,137 @@ async def hybrid_retrieve(
                                 },
                             )
                         )
+
+    # 6. Semantic metrics (SM-2: a bound, ACTIVE glossary term's definition and
+    #    synonyms are folded into the metric's retrievable text, so the binding
+    #    actually participates in scoring rather than sitting as a link nobody
+    #    reads at query time)
+    metric_term_rows = (
+        await session.execute(
+            select(SemanticMetricVersion, SemanticMetric, GlossaryTermVersion)
+            .join(SemanticMetric, SemanticMetric.id == SemanticMetricVersion.metric_id)
+            .join(MetadataTable, MetadataTable.id == SemanticMetricVersion.source_table_id)
+            .outerjoin(
+                TermSemanticBinding,
+                (TermSemanticBinding.semantic_object_type == "METRIC")
+                & (TermSemanticBinding.semantic_object_id == SemanticMetric.id)
+                & (TermSemanticBinding.status == "ACTIVE"),
+            )
+            .outerjoin(
+                GlossaryTermVersion,
+                (GlossaryTermVersion.term_id == TermSemanticBinding.term_id)
+                & (GlossaryTermVersion.status == "APPROVED"),
+            )
+            .where(
+                MetadataTable.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                SemanticMetricVersion.status == "PUBLISHED",
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+
+    metrics_by_id: dict[str, tuple[Any, Any, list[Any]]] = {}
+    for metric_version, metric, bound_term_version in metric_term_rows:
+        entry = metrics_by_id.setdefault(str(metric.id), (metric_version, metric, []))
+        if bound_term_version is not None:
+            entry[2].append(bound_term_version)
+
+    for metric_version, metric, bound_term_versions in metrics_by_id.values():
+        term_text_parts: list[str] = []
+        bound_term_ids: list[str] = []
+        for term_version in bound_term_versions:
+            term_text_parts.append(term_version.display_name)
+            term_text_parts.append(term_version.definition)
+            term_text_parts.extend(term_version.synonyms or [])
+            bound_term_ids.append(str(term_version.term_id))
+        candidate_text = " ".join(
+            filter(
+                None,
+                [metric_version.name, metric_version.description, metric.slug, *term_text_parts],
+            )
+        )
+        bm25 = _bm25_score(query_tokens, candidate_text)
+        exact = _exact_phrase_bonus(question, candidate_text)
+        score = round(min(1.0, bm25 + exact), 4)
+        if score > 0:
+            hit_id = f"SEMANTIC_METRIC:{metric.id}"
+            if hit_id not in seen_ids:
+                seen_ids.add(hit_id)
+                reason_codes = ["BM25_SEMANTIC_METRIC"]
+                if bound_term_ids:
+                    reason_codes.append("GLOSSARY_TERM_BOUND")
+                hits.append(
+                    HybridRetrievalHit(
+                        object_type="SEMANTIC_METRIC",
+                        object_id=str(metric.id),
+                        display_name=metric_version.name,
+                        score=score,
+                        reason_codes=reason_codes,
+                        metadata={
+                            "metric_id": str(metric.id),
+                            "metric_slug": metric.slug,
+                            "bound_term_ids": bound_term_ids,
+                        },
+                    )
+                )
+
+    # 7. Glossary terms (SM-2: the other retrieval direction -- a term hit
+    #    surfaces the semantic objects bound to it, so a search that lands on
+    #    the term itself can resolve to the metric it governs)
+    term_binding_rows = (
+        await session.execute(
+            select(GlossaryTermVersion, GlossaryTerm, SemanticMetric)
+            .join(GlossaryTerm, GlossaryTerm.id == GlossaryTermVersion.term_id)
+            .join(TermSemanticBinding, TermSemanticBinding.term_id == GlossaryTerm.id)
+            .join(
+                SemanticMetric,
+                (TermSemanticBinding.semantic_object_type == "METRIC")
+                & (SemanticMetric.id == TermSemanticBinding.semantic_object_id),
+            )
+            .where(
+                GlossaryTermVersion.status == "APPROVED",
+                GlossaryTerm.organization_id == datasource.organization_id,
+                TermSemanticBinding.status == "ACTIVE",
+                SemanticMetric.project_id == datasource.project_id,
+            )
+            .limit(scan_limit)
+        )
+    ).all()
+
+    terms_by_id: dict[str, tuple[Any, Any, list[Any]]] = {}
+    for term_version, term, bound_metric in term_binding_rows:
+        entry = terms_by_id.setdefault(str(term.id), (term_version, term, []))
+        entry[2].append(bound_metric)
+
+    for term_version, term, bound_metrics in terms_by_id.values():
+        term_text = [
+            term_version.display_name,
+            term_version.definition,
+            *(term_version.synonyms or []),
+        ]
+        candidate_text = " ".join(filter(None, term_text))
+        bm25 = _bm25_score(query_tokens, candidate_text)
+        exact = _exact_phrase_bonus(question, candidate_text)
+        score = round(min(1.0, bm25 + exact), 4)
+        if score > 0:
+            hit_id = f"GLOSSARY_TERM:{term.id}"
+            if hit_id not in seen_ids:
+                seen_ids.add(hit_id)
+                hits.append(
+                    HybridRetrievalHit(
+                        object_type="GLOSSARY_TERM",
+                        object_id=str(term.id),
+                        display_name=term_version.display_name,
+                        score=score,
+                        reason_codes=["BM25_GLOSSARY_TERM", "SEMANTIC_OBJECT_BOUND"],
+                        metadata={
+                            "term_id": str(term.id),
+                            "term_key": term.term_key,
+                            "bound_semantic_object_ids": [str(m.id) for m in bound_metrics],
+                        },
+                    )
+                )
 
     # ------------------------------------------------------------------
     # Sort by score desc, cap at retrieval_limit

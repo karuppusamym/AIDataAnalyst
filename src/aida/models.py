@@ -3996,4 +3996,66 @@ class CatalogBulkActionRun(Base, TimestampMixin):
     succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# SM-2: Glossary term binding to semantic objects
+# ---------------------------------------------------------------------------
+
+
+class TermSemanticBinding(Base, TimestampMixin):
+    """Reviewable link between a glossary term (module 08) and a semantic
+    object (module 07 -- today only a published `SemanticMetric`; a future
+    governed-dimension type from SM-1 binds the same way without a schema
+    change).
+
+    Mirrors `CrossBoundaryGrant`'s maker-checker shape rather than GL-8's
+    evidence-inference shape (`GlossaryLinkProposal`): a binding is a direct
+    steward assertion, not something inferred from approved annotations, so
+    it is created `PENDING_APPROVAL` and only becomes `ACTIVE` once an
+    independent reviewer decides it through the shared governance review
+    queue (`semantic_api.decide_governance_review`,
+    object_type="TERM_SEMANTIC_BINDING"). Only an `ACTIVE` binding
+    participates in retrieval (`retrieval.hybrid_retrieve`).
+
+    `semantic_object_type` is deliberately open so it does not need a schema
+    change when a second semantic-object kind exists; `semantic_object_id`
+    therefore carries no FK constraint of its own -- the same polymorphic
+    subject-reference pattern `OwnershipAssignment.subject_id` already uses
+    elsewhere in this module, just typed as `UUID` here because every
+    semantic object today has a UUID primary key and callers join on it
+    directly (see `retrieval.hybrid_retrieve`).
+    """
+
+    __tablename__ = "term_semantic_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "term_id",
+            "semantic_object_type",
+            "semantic_object_id",
+            name="uq_term_semantic_binding_term_object",
+        ),
+        Index("ix_term_semantic_binding_org_status", "organization_id", "status"),
+        Index(
+            "ix_term_semantic_binding_object",
+            "semantic_object_type",
+            "semantic_object_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    term_id: Mapped[UUID] = mapped_column(
+        ForeignKey("glossary_term.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    semantic_object_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    semantic_object_id: Mapped[UUID] = mapped_column(nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_APPROVAL", nullable=False)
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String(255))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
