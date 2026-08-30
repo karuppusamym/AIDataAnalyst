@@ -512,3 +512,72 @@ class AiProviderSyncRequest(PlatformApiModel):
 class AiDependencyGraphRead(PlatformApiModel):
     nodes: list[dict[str, Any]]
     edges: list[dict[str, Any]]
+
+
+# ---------------------------------------------------------------------------
+# Hybrid Retrieval Engine schemas (RT-1 through RT-9)
+# ---------------------------------------------------------------------------
+
+
+class FusionScoreDetail(PlatformApiModel):
+    """Individual scoring factor in the fusion ranking pipeline."""
+
+    signal: str = Field(
+        description="Signal name: 'lexical', 'vector', 'graph', 'quality_trust', 'usage_popularity'"
+    )
+    raw_score: float = Field(ge=0.0, le=1.0)
+    weight: float = Field(ge=0.0, le=1.0)
+    weighted_score: float = Field(ge=0.0)
+    rank: int | None = Field(
+        default=None, ge=1, description="Rank within this signal's list (for RRF)"
+    )
+
+
+class RetrievalEvidence(PlatformApiModel):
+    """Per-result evidence with full factor breakdown."""
+
+    object_type: str
+    object_id: str
+    display_name: str
+    final_score: float = Field(ge=0.0)
+    fusion_method: str = Field(description="'rrf' or 'weighted_linear'")
+    factors: list[FusionScoreDetail]
+    graph_expansion_path: list[str] = Field(
+        default_factory=list, description="Node IDs in expansion path"
+    )
+    source_signals: list[str] = Field(default_factory=list, description="Which signals contributed")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchFacet(PlatformApiModel):
+    """Facet bucket in search results."""
+
+    field: str
+    value: str
+    count: int = Field(ge=0)
+
+
+class SearchResult(PlatformApiModel):
+    """One result in the global search response."""
+
+    object_type: str
+    object_id: str
+    display_name: str
+    qualified_name: str | None = None
+    description: str | None = None
+    score: float = Field(ge=0.0)
+    evidence: RetrievalEvidence
+    datasource_id: UUID | None = None
+    datasource_name: str | None = None
+    domain_name: str | None = None
+
+
+class SearchSuggestion(PlatformApiModel):
+    """Typeahead suggestion for command palette."""
+
+    text: str
+    object_type: str
+    object_id: str
+    display_name: str
+    qualified_name: str | None = None
+    score: float = Field(ge=0.0)

@@ -23,6 +23,8 @@ from aida.ingestion import (
     envelope_counts,
     envelope_fingerprint,
     envelope_to_discovery,
+    persist_envelope_extensions,
+    validate_envelope_version,
 )
 from aida.models import (
     AnalysisRun,
@@ -214,6 +216,10 @@ async def ingest_metadata_envelope(
 ) -> MetadataIngestionJob:
     if body.emitted_at.tzinfo is None:
         raise HTTPException(status_code=422, detail="emitted_at must include a timezone")
+    try:
+        validate_envelope_version(body.envelope_version, body.catalogs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     datasource = await session.scalar(
         select(DataSource).where(DataSource.id == datasource_id).with_for_update()
     )
@@ -267,24 +273,44 @@ async def ingest_metadata_envelope(
     session.add(ingestion)
     await session.flush()
 
+    discovery = envelope_to_discovery(body)
     counts = await persist_discovery_snapshot(
         session,
         run,
         datasource,
-        envelope_to_discovery(body),
+        discovery,
         deprecate_missing=body.snapshot_type == "FULL",
         connector_capabilities={
             **(datasource.capabilities or {}),
             "canonical_push": True,
         },
     )
+    # Envelope 1.1 axes. Reconciliation is gated on the *declared version* as well
+    # as on FULL: a 1.0 producer is authoritative for the 1.0 inventory and says
+    # nothing about views, routines, descriptions or grants, so treating its
+    # silence as omission would retire that metadata the moment a producer
+    # downgrades. See `ingestion.deprecate_missing_envelope_extensions`.
+    extension_counts = await persist_envelope_extensions(
+        session,
+        datasource,
+        discovery,
+        deprecate_missing=body.snapshot_type == "FULL" and body.envelope_version != "1.0",
+    )
     run.status = "COMPLETED"
     ingestion.status = "COMPLETED"
     ingestion.object_counts = {
-        key: counts[key] for key in ("catalogs", "schemas", "tables", "columns", "constraints")
+        **{
+            key: counts[key]
+            for key in ("catalogs", "schemas", "tables", "columns", "constraints")
+        },
+        **{
+            key: extension_counts[key]
+            for key in ("views", "routines", "routine_parameters", "object_descriptions", "grants")
+        },
     }
     ingestion.change_counts = {
-        key: counts[key] for key in ("created_objects", "changed_objects", "deprecated_objects")
+        key: counts[key] + extension_counts[key]
+        for key in ("created_objects", "changed_objects", "deprecated_objects")
     }
     ingestion.completed_at = datetime.now(UTC)
     record_audit(
@@ -528,6 +554,14 @@ async def upload_metadata_ingestion_chunk(
         raise HTTPException(status_code=409, detail="batch manifest has already been finalized")
     if body.chunk_number > batch.expected_chunks:
         raise HTTPException(status_code=422, detail="chunk_number exceeds expected_chunks")
+    # A chunk carries no version of its own; it inherits the batch manifest's. So
+    # the 1.1 content of a chunk is checked against the version the manifest
+    # declared, and a 1.0 batch that starts shipping view definitions halfway
+    # through is rejected at upload rather than silently stripped at processing.
+    try:
+        validate_envelope_version(batch.envelope_version, body.catalogs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     fingerprint = chunk_fingerprint(body)
     existing = await session.scalar(
         select(MetadataIngestionChunk).where(

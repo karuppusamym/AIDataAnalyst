@@ -68,7 +68,7 @@ Instrumented from day one even if not billed initially.
 | MCP context consumption | context product reads | External agent usage |
 | Seats by persona | named users | Traditional axis; secondary |
 
-**Non-negotiable.** Every meter carries organization, legal entity, LOB, and project so showback works at the boundary the bank actually budgets at (`ADR-0005` isolation hierarchy).
+**Non-negotiable.** Every meter carries organization plus the tenancy scope the platform actually stores, so showback works at the boundary the bank actually budgets at. *(Corrected 2026-08-30: this line named `legal entity`, which does not exist in `src/` or `migrations/` — see `10-architecture/06-data-architecture.md` §2. `ADR-0005`'s hierarchy is superseded by ADR-0018; the scope to meter on is the one ADR-0018 defines. **Metering itself is not implemented** — there is no meter, no usage record and no showback surface in `src/`, so this whole section is a requirement, not a description.)*
 
 ## 5. Limits and quotas
 

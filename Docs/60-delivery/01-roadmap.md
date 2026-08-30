@@ -166,5 +166,5 @@ If only ten things could be done, these:
 
 - Epic backlog: `60-delivery/02-epic-backlog.md`
 - Tracker: `60-delivery/03-tracker.md`
-- Status matrix: `60-delivery/04-status-matrix.md`
+- Status matrix: `60-delivery/00-status.md`
 - Differentiation: `00-product/05-differentiation-and-whitespace.md`

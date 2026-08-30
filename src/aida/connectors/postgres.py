@@ -5,7 +5,6 @@ import asyncpg
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -14,16 +13,159 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
+    build_routines,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-class PostgresConnector(Connector):
+# Envelope 1.1 (gap/02 N1). `pg_get_viewdef` returns the complete reconstructed
+# definition -- PostgreSQL never truncates it -- so `truncated` is left false
+# here rather than guessed. A view whose definition this principal may not read
+# yields NULL, which `apply_view_definitions` records as *unavailable* rather
+# than as an empty view.
+_VIEW_DEFINITION_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        pg_get_viewdef(c.oid, true) AS definition,
+        (c.relkind = 'm') AS is_materialized,
+        v.is_updatable AS is_updatable,
+        v.check_option AS check_option
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN information_schema.views v
+      ON v.table_schema = n.nspname
+     AND v.table_name = c.relname
+    WHERE c.relkind IN ('v', 'm')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname
+"""
+
+# `p.oid` is the overload discriminator: PostgreSQL allows two routines to share
+# a schema and a name, so the name alone is not an identity and the parameter
+# join has to be on the oid. Restricted to prokind 'f'/'p' because
+# `pg_get_functiondef` raises on aggregate and window functions.
+_ROUTINE_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.proname AS routine_name,
+        p.oid::text AS specific_name,
+        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type,
+        l.lanname AS language,
+        pg_get_functiondef(p.oid) AS body,
+        pg_get_function_result(p.oid) AS return_type,
+        (p.provolatile <> 'v') AS is_deterministic,
+        CASE WHEN p.prosecdef THEN 'DEFINER' ELSE 'INVOKER' END AS security_mode,
+        obj_description(p.oid, 'pg_proc') AS description
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.proname, p.oid
+"""
+
+_ROUTINE_PARAMETER_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.oid::text AS specific_name,
+        p.proargnames[arg.ordinality] AS parameter_name,
+        arg.ordinality::int AS ordinal_position,
+        CASE COALESCE(p.proargmodes[arg.ordinality], 'i')
+            WHEN 'i' THEN 'IN'
+            WHEN 'o' THEN 'OUT'
+            WHEN 'b' THEN 'INOUT'
+            WHEN 'v' THEN 'VARIADIC'
+            WHEN 't' THEN 'TABLE'
+            ELSE 'IN'
+        END AS parameter_mode,
+        format_type(arg.type_oid, NULL) AS data_type
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+        WITH ORDINALITY AS arg(type_oid, ordinality) ON TRUE
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.oid, arg.ordinality
+"""
+
+_TABLE_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        obj_description(c.oid, 'pg_class') AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(c.oid, 'pg_class') IS NOT NULL
+    ORDER BY n.nspname, c.relname
+"""
+
+_COLUMN_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        a.attname AS column_name,
+        col_description(c.oid, a.attnum) AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND col_description(c.oid, a.attnum) IS NOT NULL
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+
+_SCHEMA_COMMENT_SQL = """
+    SELECT
+        n.nspname AS schema_name,
+        obj_description(n.oid, 'pg_namespace') AS description
+    FROM pg_namespace n
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(n.oid, 'pg_namespace') IS NOT NULL
+    ORDER BY n.nspname
+"""
+
+_CATALOG_COMMENT_SQL = """
+    SELECT shobj_description(d.oid, 'pg_database')
+    FROM pg_database d
+    WHERE d.datname = current_database()
+"""
+
+# `role_table_grants` is the privileges visible to the connecting role, which is
+# the honest scope: a metadata reader is not a superuser, and reporting only what
+# it can see is preferable to failing the whole discovery on a permission error.
+# PostgreSQL has one principal kind, so `grantee_type` is always ROLE.
+_GRANT_SQL = """
+    SELECT
+        g.table_schema AS schema_name,
+        g.grantee AS grantee,
+        'ROLE' AS grantee_type,
+        g.privilege_type AS privilege,
+        'TABLE' AS object_type,
+        g.table_name AS object_name,
+        g.is_grantable AS is_grantable
+    FROM information_schema.role_table_grants g
+    WHERE g.table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY g.table_schema, g.table_name, g.grantee, g.privilege_type
+"""
+
+
+class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
@@ -33,6 +175,16 @@ class PostgresConnector(Connector):
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag below is backed by a query in
+        # `discover()`, which is what INV-9 requires of a `True`:
+        #   views            -> pg_get_viewdef over pg_class relkind in ('v','m')
+        #   routines         -> pg_proc / pg_get_functiondef plus a parameter query
+        #   object_comments  -> shobj_description / obj_description / col_description
+        #   grants           -> information_schema.role_table_grants
+        views=True,
+        routines=True,
+        object_comments=True,
+        grants=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -118,12 +270,35 @@ class PostgresConnector(Connector):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
+            view_rows = await connection.fetch(_VIEW_DEFINITION_SQL)
+            routine_rows = await connection.fetch(_ROUTINE_SQL)
+            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
+            table_description_rows = await connection.fetch(_TABLE_COMMENT_SQL)
+            column_description_rows = await connection.fetch(_COLUMN_COMMENT_SQL)
+            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
+            grant_rows = await connection.fetch(_GRANT_SQL)
         finally:
             await connection.close()
 
         tables = build_table_map_from_column_rows(rows)
         append_aggregated_constraint_rows(tables, constraint_rows)
-        return assemble_catalog(str(catalog_name), tables)
+        apply_table_descriptions(tables, table_description_rows)
+        apply_column_descriptions(tables, column_description_rows)
+        apply_view_definitions(tables, view_rows)
+        return assemble_catalog(
+            str(catalog_name),
+            tables,
+            routines=build_routines(routine_rows, routine_parameter_rows),
+            grants=build_grants(grant_rows),
+            schema_descriptions={
+                str(row["schema_name"]): str(row["description"])
+                for row in schema_description_rows
+            },
+            catalog_description=(
+                None if catalog_description is None else str(catalog_description)
+            ),
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)

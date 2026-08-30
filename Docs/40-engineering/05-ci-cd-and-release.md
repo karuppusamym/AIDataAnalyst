@@ -21,6 +21,28 @@ flowchart LR
 
 ## 2. Merge gates
 
+> **Implementation status (2026-08-30).** CI exists as of 2026-08-30
+> (`.github/workflows/ci.yml`, tracker `ST-02`) and runs **five** of the fourteen gates below.
+> The pipeline diagram in §1 describes stages C, E, F, G and H that have no job.
+>
+> | Gate | Today |
+> |---|---|
+> | `ruff check` | **Wired** — `quality` job |
+> | `mypy --strict` | **Wired** — `quality` job, but `packages = ["aida"]`, so `src/atlas/` is not type-checked |
+> | `import-linter` | **Wired** — `quality` job; 4 contracts as of 2026-08-30 and growing (see `10-architecture/04-module-decomposition.md` §5.2) |
+> | Tier 0 invariants | **Partially wired** — the `tests` job runs `tests/test_tier0_invariants.py`, which covers 4 of 9 invariants |
+> | Tier 1 module unit | **Partially wired** — all 44 test files run, but there is no tier separation and no per-module suite |
+> | Migration | **Wired** — the `migrations` job asserts exactly one Alembic head. The "irreversible migration" half is not checked |
+> | OpenAPI diff | **Not wired** — no step, and no released spec committed to diff against |
+> | Event catalog | **Not wired** — and the catalog has drifted from the emitted names as a result (`30-contracts/04-event-catalog.md`) |
+> | Audit coverage | **Not wired** — `test_every_mutation_audits` does not exist |
+> | SAST · Dependency audit · Secret scan | **Not wired** — no tool in the `dev` extras |
+> | Docs lint | **Not wired** |
+> | Performance | **Not wired** — no baseline exists to regress against |
+>
+> "Every one of these blocks the merge" is therefore true of five gates today. Closing the
+> rest is tracker `E1` follow-on work.
+
 Every one of these blocks the merge.
 
 | Gate | Blocks on |

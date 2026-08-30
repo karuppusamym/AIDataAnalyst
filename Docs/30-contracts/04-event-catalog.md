@@ -1,7 +1,37 @@
 # Event Catalog
 
-> Status: Authoritative. Owner: Architecture.
-> The named set of domain events Atlas publishes. Adding an event means adding a row here; publishing an uncatalogued event fails CI.
+> Status: Authoritative **as a target naming scheme**. Owner: Architecture.
+> The named set of domain events Atlas publishes. Adding an event means adding a row here.
+
+> **Implementation status (2026-08-30). Most event names in §2 are not the names the code
+> emits.** Verified by extracting every `event_type=` argument passed to `record_outbox` across
+> `src/aida/` and comparing it to this catalog:
+>
+> * The platform emits **~55 event types, all suffixed `.v1`** — e.g.
+>   `datasource.registered.v1`, `metadata.discovery.snapshot.v1`, `query.execution.completed.v1`,
+>   `context.product_consumed.v1`, `relationship_candidate.decided.v1`,
+>   `governance.review_requested.v1`, `workspace.created.v1`.
+> * **Most rows below match nothing in the code.** Spot-checked and absent:
+>   `principal.created`, `tenant.created`, `ingestion.delivered`, `catalog.object.created`,
+>   `catalog.object.changed`, `profile.completed`, `classification.assigned`, `key.inferred`,
+>   `relationship.candidate_generated`, `relationship.approved`, `table_family.detected`,
+>   `semantic.proposal_created`, `lineage.edge_created`, `quality.observation_recorded`,
+>   `quality.sla_breached`, `agent.run_started`, `execution.requested`,
+>   `model.route_version_created`, `model.kill_switch_engaged`, `policy.version_published`,
+>   `audit.event_recorded`, `graph.rebuild.started`, `retrieval.index_lagging`.
+> * **The Semantics-and-glossary section is the exception** and is broadly accurate: its `.v1`
+>   rows were written against the code and match it.
+> * **Topics are wrong.** All eight `atlas.*.v1` topic headings below are target. Everything
+>   goes to the single topic `aida.platform.events.v1`, with the event type in a Kafka header
+>   (`src/aida/projectors/outbox_publisher.py`).
+> * **"publishing an uncatalogued event fails CI" is false.** There is no such check;
+>   `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic head check and
+>   `pytest`. The same applies to step 3 and the closing line of §3 below.
+>
+> Treat §2 as the intended vocabulary and the outbox rows as the current one. Reconciling the
+> two — either renaming emitted events or restating this catalog — is unscheduled work the
+> orchestrator should track; it is not a rename that can be done safely from the docs alone,
+> because consumers key on the emitted names.
 
 ## 1. Envelope
 
@@ -179,11 +209,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 
 1. Add the row to this catalog.
 2. Define the payload schema in the owning module's `events.py`.
-3. Register with the schema registry (`BACKWARD` compatibility).
+3. Register with the schema registry (`BACKWARD` compatibility) — **planned; no schema registry exists (2026-08-30)**.
 4. Confirm the payload carries no values or secrets — the publish-time validator enforces this.
 5. Document consumers, or state explicitly that there are none yet.
 
-CI asserts that every published event type appears in this catalog.
+CI is intended to assert that every published event type appears in this catalog. **It does not (2026-08-30)** — no such gate exists, which is why the drift documented in the status note at the top of this file was able to accumulate unnoticed.
 
 ## Related documents
 
