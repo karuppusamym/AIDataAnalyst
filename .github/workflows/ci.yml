@@ -1,0 +1,141 @@
+# Continuous integration.
+#
+# Until this file existed there was no CI at all, while several documents
+# (`Docs/40-engineering/03-coding-standards.md`, `Docs/30-contracts/01-contract-strategy.md`)
+# stated that various checks "fail CI". Every gate below is one of those claims, made real.
+#
+# The gates, and the claim each one enforces:
+#
+#   ruff          -- Docs/40-engineering/03-coding-standards.md
+#   mypy --strict -- part of INV-2's enforcement: `ConnectorRegistry.create` returns
+#                    `Connector`, which has no SQL-accepting member, so a second
+#                    execution path is a type error rather than a code review question
+#   lint-imports  -- ADR-0004 / INV-2 gateway exclusivity (tracker QG-7), plus the
+#                    identity_tenancy privacy and security_types ratchet contracts
+#   alembic       -- exactly one migration head; a second head is a merge accident
+#                    that only shows up at deploy time
+#   openapi-diff  -- tracker TS-4: a breaking change to the public HTTP API
+#                    (removed path/operation, newly-required request field,
+#                    removed response field, narrowed enum, ...) fails CI
+#                    unless acknowledged with an API version bump. See
+#                    `scripts/openapi_diff.py`.
+#   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
+#
+# A change that breaks any of these does not merge.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Fail rather than silently resolving a different dependency set than the lockfile
+  # pins. A stale `uv.lock` is itself a CI failure.
+  UV_FROZEN: "1"
+
+jobs:
+  quality:
+    name: Lint, types and architecture
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: ruff
+        run: uv run ruff check .
+
+      - name: mypy
+        run: uv run mypy src
+
+      - name: import-linter (architecture contracts)
+        run: uv run lint-imports
+
+  migrations:
+    name: Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Exactly one Alembic head
+        run: |
+          heads="$(uv run alembic heads)"
+          echo "$heads"
+          count="$(printf '%s\n' "$heads" | grep -c '(head)' || true)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected exactly one Alembic head, found $count."
+            echo "Two heads means two migrations were authored against the same parent."
+            echo "Resolve with a merge revision before this can deploy."
+            exit 1
+          fi
+
+  openapi-diff:
+    name: OpenAPI diff gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Breaking-change check against committed baseline
+        run: uv run python scripts/openapi_diff.py
+
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: pytest
+        run: uv run pytest

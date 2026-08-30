@@ -5,7 +5,6 @@ import asyncpg
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -14,25 +13,248 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
+    append_grouped_index_rows,
+    append_partition_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
+    build_routines,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-class PostgresConnector(Connector):
+# Envelope 1.1 (gap/02 N1). `pg_get_viewdef` returns the complete reconstructed
+# definition -- PostgreSQL never truncates it -- so `truncated` is left false
+# here rather than guessed. A view whose definition this principal may not read
+# yields NULL, which `apply_view_definitions` records as *unavailable* rather
+# than as an empty view.
+_VIEW_DEFINITION_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        pg_get_viewdef(c.oid, true) AS definition,
+        (c.relkind = 'm') AS is_materialized,
+        v.is_updatable AS is_updatable,
+        v.check_option AS check_option
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN information_schema.views v
+      ON v.table_schema = n.nspname
+     AND v.table_name = c.relname
+    WHERE c.relkind IN ('v', 'm')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname
+"""
+
+# `p.oid` is the overload discriminator: PostgreSQL allows two routines to share
+# a schema and a name, so the name alone is not an identity and the parameter
+# join has to be on the oid. Restricted to prokind 'f'/'p' because
+# `pg_get_functiondef` raises on aggregate and window functions.
+_ROUTINE_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.proname AS routine_name,
+        p.oid::text AS specific_name,
+        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type,
+        l.lanname AS language,
+        pg_get_functiondef(p.oid) AS body,
+        pg_get_function_result(p.oid) AS return_type,
+        (p.provolatile <> 'v') AS is_deterministic,
+        CASE WHEN p.prosecdef THEN 'DEFINER' ELSE 'INVOKER' END AS security_mode,
+        obj_description(p.oid, 'pg_proc') AS description
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.proname, p.oid
+"""
+
+_ROUTINE_PARAMETER_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.oid::text AS specific_name,
+        p.proargnames[arg.ordinality] AS parameter_name,
+        arg.ordinality::int AS ordinal_position,
+        CASE COALESCE(p.proargmodes[arg.ordinality], 'i')
+            WHEN 'i' THEN 'IN'
+            WHEN 'o' THEN 'OUT'
+            WHEN 'b' THEN 'INOUT'
+            WHEN 'v' THEN 'VARIADIC'
+            WHEN 't' THEN 'TABLE'
+            ELSE 'IN'
+        END AS parameter_mode,
+        format_type(arg.type_oid, NULL) AS data_type
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+        WITH ORDINALITY AS arg(type_oid, ordinality) ON TRUE
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.oid, arg.ordinality
+"""
+
+_TABLE_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        obj_description(c.oid, 'pg_class') AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(c.oid, 'pg_class') IS NOT NULL
+    ORDER BY n.nspname, c.relname
+"""
+
+_COLUMN_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        a.attname AS column_name,
+        col_description(c.oid, a.attnum) AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND col_description(c.oid, a.attnum) IS NOT NULL
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+
+_SCHEMA_COMMENT_SQL = """
+    SELECT
+        n.nspname AS schema_name,
+        obj_description(n.oid, 'pg_namespace') AS description
+    FROM pg_namespace n
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(n.oid, 'pg_namespace') IS NOT NULL
+    ORDER BY n.nspname
+"""
+
+_CATALOG_COMMENT_SQL = """
+    SELECT shobj_description(d.oid, 'pg_database')
+    FROM pg_database d
+    WHERE d.datname = current_database()
+"""
+
+# CT-3/CN-8. Not an envelope 1.1 axis (cost-estimation-only, see DiscoveredIndex),
+# grouped like the constraint query above via pg_index/pg_am. Expression indexes
+# (indkey entries of 0) have no matching pg_attribute row and are silently
+# dropped by the join rather than reported with a placeholder column name.
+_INDEX_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        ic.relname AS index_name,
+        am.amname AS index_type,
+        ix.indisunique AS is_unique,
+        ix.indisprimary AS is_primary,
+        att.attname AS column_name
+    FROM pg_index ix
+    JOIN pg_class rel ON rel.oid = ix.indrelid
+    JOIN pg_class ic ON ic.oid = ix.indexrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN pg_am am ON am.oid = ic.relam
+    JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = cols.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, ic.relname, cols.ordinality
+"""
+
+# Declarative partitioning: pg_partitioned_table carries the parent's
+# partitioning strategy and key; pg_inherits lists each partition's parent.
+_PARTITION_KEY_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        key.ordinality AS ordinal_position
+    FROM pg_partitioned_table part
+    JOIN pg_class rel ON rel.oid = part.partrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN LATERAL unnest(part.partattrs) WITH ORDINALITY AS key(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = key.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, key.ordinality
+"""
+
+_PARTITION_SQL = """
+    SELECT
+        parent_ns.nspname AS table_schema,
+        parent.relname AS table_name,
+        child.relname AS partition_name,
+        CASE part.partstrat
+            WHEN 'r' THEN 'RANGE'
+            WHEN 'l' THEN 'LIST'
+            WHEN 'h' THEN 'HASH'
+        END AS partition_type,
+        pg_get_expr(child.relpartbound, child.oid) AS high_value,
+        inh.inhseqno AS ordinal_position
+    FROM pg_inherits inh
+    JOIN pg_class parent ON parent.oid = inh.inhparent
+    JOIN pg_class child ON child.oid = inh.inhrelid
+    JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+    JOIN pg_partitioned_table part ON part.partrelid = parent.oid
+    WHERE parent_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY parent_ns.nspname, parent.relname, inh.inhseqno
+"""
+
+# `role_table_grants` is the privileges visible to the connecting role, which is
+# the honest scope: a metadata reader is not a superuser, and reporting only what
+# it can see is preferable to failing the whole discovery on a permission error.
+# PostgreSQL has one principal kind, so `grantee_type` is always ROLE.
+_GRANT_SQL = """
+    SELECT
+        g.table_schema AS schema_name,
+        g.grantee AS grantee,
+        'ROLE' AS grantee_type,
+        g.privilege_type AS privilege,
+        'TABLE' AS object_type,
+        g.table_name AS object_name,
+        g.is_grantable AS is_grantable
+    FROM information_schema.role_table_grants g
+    WHERE g.table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY g.table_schema, g.table_name, g.grantee, g.privilege_type
+"""
+
+
+class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
         constraints=True,
-        indexes=False,
-        partitions=False,
+        # CT-3/CN-8: indexes -> pg_index/pg_am; partitions -> pg_partitioned_table
+        # + pg_inherits. See `_INDEX_SQL`/`_PARTITION_SQL` below.
+        indexes=True,
+        partitions=True,
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag below is backed by a query in
+        # `discover()`, which is what INV-9 requires of a `True`:
+        #   views            -> pg_get_viewdef over pg_class relkind in ('v','m')
+        #   routines         -> pg_proc / pg_get_functiondef plus a parameter query
+        #   object_comments  -> shobj_description / obj_description / col_description
+        #   grants           -> information_schema.role_table_grants
+        views=True,
+        routines=True,
+        object_comments=True,
+        grants=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -118,12 +340,63 @@ class PostgresConnector(Connector):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
+            view_rows = await connection.fetch(_VIEW_DEFINITION_SQL)
+            routine_rows = await connection.fetch(_ROUTINE_SQL)
+            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
+            table_description_rows = await connection.fetch(_TABLE_COMMENT_SQL)
+            column_description_rows = await connection.fetch(_COLUMN_COMMENT_SQL)
+            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
+            grant_rows = await connection.fetch(_GRANT_SQL)
+            index_rows = await connection.fetch(_INDEX_SQL)
+            partition_key_rows = await connection.fetch(_PARTITION_KEY_SQL)
+            partition_rows = await connection.fetch(_PARTITION_SQL)
         finally:
             await connection.close()
 
         tables = build_table_map_from_column_rows(rows)
         append_aggregated_constraint_rows(tables, constraint_rows)
-        return assemble_catalog(str(catalog_name), tables)
+        apply_table_descriptions(tables, table_description_rows)
+        apply_column_descriptions(tables, column_description_rows)
+        apply_view_definitions(tables, view_rows)
+        append_grouped_index_rows(tables, index_rows)
+
+        # A partition key is a property of the parent table's partitioning
+        # scheme, not of the individual partition, so it is merged onto every
+        # partition row for that table before `append_partition_rows` groups them.
+        partition_key_map: dict[tuple[str, str], list[str]] = {}
+        for row in partition_key_rows:
+            key = (str(row["table_schema"]), str(row["table_name"]))
+            partition_key_map.setdefault(key, []).append(str(row["column_name"]))
+        merged_partition_rows = [
+            {
+                "table_schema": str(row["table_schema"]),
+                "table_name": str(row["table_name"]),
+                "partition_name": str(row["partition_name"]),
+                "partition_type": row["partition_type"],
+                "high_value": row["high_value"],
+                "ordinal_position": row["ordinal_position"],
+                "key_columns": partition_key_map.get(
+                    (str(row["table_schema"]), str(row["table_name"])), []
+                ),
+            }
+            for row in partition_rows
+        ]
+        append_partition_rows(tables, merged_partition_rows)
+
+        return assemble_catalog(
+            str(catalog_name),
+            tables,
+            routines=build_routines(routine_rows, routine_parameter_rows),
+            grants=build_grants(grant_rows),
+            schema_descriptions={
+                str(row["schema_name"]): str(row["description"])
+                for row in schema_description_rows
+            },
+            catalog_description=(
+                None if catalog_description is None else str(catalog_description)
+            ),
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)

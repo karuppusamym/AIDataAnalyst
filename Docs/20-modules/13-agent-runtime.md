@@ -37,6 +37,20 @@ Every transition is explicit, recorded, and pins the versions in force at that p
 
 **Two ordering properties carry the guarantee.** `SCREENED` precedes retrieval, so hostile input cannot influence what is retrieved or which tool is selected. `VALIDATED` is deterministic and downstream of `GENERATED`, so a model can propose anything but cannot widen what executes.
 
+> **Implementation status (2026-08-30).** All eleven states exist with a real transition table,
+> and the **SCREENED-before-retrieval ordering is verified in the code** — prompt-risk screening
+> runs in `src/aida/agent_orchestrator.py` before the retrieval transition. The first six states
+> are individually gated and can refuse.
+>
+> **The last five are not.** `VALIDATED`, `COSTED`, `EXECUTED`, `EXPLAINED` and `COMPLETED` are
+> applied in a single `for` loop at `agent_orchestrator.py:532-538`, *after*
+> `query_gateway.execute()` has already returned. The work those states describe is genuinely
+> done — validation, cost ceiling, read-only execution and masking all happen inside the
+> gateway, and a refusal there raises before the loop is reached — but at the orchestrator level
+> these five are **retroactive trace entries, not five independent checkpoints**, and the
+> "Failure behaviour: Deny" column above describes gateway behaviour rather than a runtime gate.
+> Splitting them into five separately-gated checkpoints is `gap/02` row `C3` (2 weeks, low risk).
+
 ## 4. Tool-first execution
 
 ```mermaid

@@ -38,6 +38,38 @@ def retry_delay_seconds(attempt_count: int, maximum_seconds: int) -> int:
     return min(exponential_delay, maximum_seconds)
 
 
+def record_publish_success(event: OutboxEvent, *, now: datetime) -> None:
+    """Mark a delivery attempt as successful. Mutates ``event`` in place."""
+    event.status = "PUBLISHED"
+    event.published_at = now
+    event.last_error = None
+    event.attempt_count += 1
+
+
+def record_publish_failure(
+    event: OutboxEvent,
+    error: BaseException,
+    *,
+    max_attempts: int,
+    max_backoff_seconds: int,
+    now: datetime,
+) -> None:
+    """Record a failed delivery attempt, dead-lettering once attempts are exhausted.
+
+    Mutates ``event`` in place. Below ``max_attempts`` the event stays PENDING with
+    an exponential-backoff ``next_attempt_at``; at or beyond it, the event moves to
+    DEAD_LETTER and stops being picked up by :func:`publish_batch` until an operator
+    explicitly requeues it (see ``requeue_outbox_event`` in operational_api.py).
+    """
+    event.attempt_count += 1
+    event.last_error = type(error).__name__
+    if event.attempt_count >= max_attempts:
+        event.status = "DEAD_LETTER"
+    else:
+        delay = retry_delay_seconds(event.attempt_count, max_backoff_seconds)
+        event.next_attempt_at = now + timedelta(seconds=delay)
+
+
 async def publish_batch(producer: AIOKafkaProducer, *, batch_size: int = 100) -> int:
     settings = get_settings()
     now = datetime.now(UTC)
@@ -62,21 +94,15 @@ async def publish_batch(producer: AIOKafkaProducer, *, batch_size: int = 100) ->
                     key=event.aggregate_id.encode(),
                     headers=[("event_type", event.event_type.encode())],
                 )
-                event.status = "PUBLISHED"
-                event.published_at = datetime.now(UTC)
-                event.last_error = None
-                event.attempt_count += 1
+                record_publish_success(event, now=datetime.now(UTC))
             except Exception as exc:
-                event.attempt_count += 1
-                event.last_error = type(exc).__name__
-                if event.attempt_count >= settings.outbox_max_attempts:
-                    event.status = "DEAD_LETTER"
-                else:
-                    delay = retry_delay_seconds(
-                        event.attempt_count,
-                        settings.outbox_max_backoff_seconds,
-                    )
-                    event.next_attempt_at = now + timedelta(seconds=delay)
+                record_publish_failure(
+                    event,
+                    exc,
+                    max_attempts=settings.outbox_max_attempts,
+                    max_backoff_seconds=settings.outbox_max_backoff_seconds,
+                    now=now,
+                )
         return len(events)
 
 

@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.asset_certification import asset_certification_is_active
 from aida.models import (
     AssetCertification,
     AssetTermLink,
@@ -15,6 +16,84 @@ from aida.models import (
     GlossaryTermVersion,
     OwnershipAssignment,
 )
+from aida.schemas import CoverageDimensionRead, StewardshipCoverageRead
+
+COVERAGE_DIMENSIONS = (
+    "documented",
+    "owned",
+    "classified",
+    "certified",
+    "quality_monitored",
+    "semantically_mapped",
+)
+
+
+def build_stewardship_coverage(
+    *,
+    organization_id: UUID,
+    datasource_id: UUID | None,
+    domain_id: UUID | None,
+    line_of_business_id: UUID | None,
+    table_ids: set[UUID],
+    evidence_sets: dict[str, set[UUID]],
+    computed_at: datetime,
+) -> StewardshipCoverageRead:
+    """Compute the six-dimensional score from bounded, table-level evidence."""
+    total = len(table_ids)
+    dimensions: dict[str, CoverageDimensionRead] = {}
+    for name in COVERAGE_DIMENSIONS:
+        covered = len(evidence_sets.get(name, set()) & table_ids)
+        dimensions[name] = CoverageDimensionRead(
+            covered=covered,
+            total=total,
+            percentage=round(covered * 100 / total, 2) if total else 0.0,
+        )
+    overall = (
+        round(sum(dimension.percentage for dimension in dimensions.values()) / len(dimensions), 2)
+        if total
+        else 0.0
+    )
+    owned = evidence_sets.get("owned", set())
+    return StewardshipCoverageRead(
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        domain_id=domain_id,
+        line_of_business_id=line_of_business_id,
+        table_count=total,
+        overall_score=overall,
+        dimensions=dimensions,
+        unowned_table_ids=sorted(table_ids - owned, key=str)[:500],
+        computed_at=computed_at,
+    )
+
+
+def active_certified_table_ids(
+    certifications: list[AssetCertification], *, now: datetime
+) -> set[UUID]:
+    """Table IDs whose *table-level* certification is currently ACTIVE and not expired.
+
+    Certification is a time-bound attestation, not a permanent one: a certification
+    that has passed its ``expires_at`` must stop counting toward the "certified"
+    stewardship-coverage dimension even though its ``status`` row hasn't separately
+    been flipped -- expiry, not just status, gates whether it still counts. The
+    active/expired projection itself is ``aida.asset_certification.asset_certification_is_active``,
+    the single shared definition module 04 (CT-5) also uses for table *and* column
+    certification, so this and the catalog HTTP endpoints can never drift apart on
+    what "currently certified" means.
+
+    CT-5 extended certification to also be column-scoped (``asset_type ==
+    "COLUMN"``), with ``table_id`` still denormalized onto those rows for lookup
+    convenience -- so a column certification is explicitly excluded here rather
+    than silently making its parent table look certified too. Rows predating that
+    column (``asset_type`` unset) are treated as table-level, matching the
+    model's own default.
+    """
+    return {
+        certification.table_id
+        for certification in certifications
+        if certification.asset_type != "COLUMN"
+        and asset_certification_is_active(certification, at=now)
+    }
 
 
 async def apply_bulk_operation(
@@ -118,6 +197,10 @@ async def apply_bulk_operation(
                 update(AssetCertification)
                 .where(
                     AssetCertification.table_id == table_id,
+                    # CT-5: never supersede a column-scoped certification from a
+                    # table-level bulk certify -- they are different assets that
+                    # happen to share table_id as a denormalized lookup column.
+                    AssetCertification.asset_type == "TABLE",
                     AssetCertification.status == "ACTIVE",
                 )
                 .values(status="SUPERSEDED", updated_at=now)
@@ -126,6 +209,7 @@ async def apply_bulk_operation(
                 AssetCertification(
                     organization_id=operation.organization_id,
                     table_id=table_id,
+                    asset_type="TABLE",
                     rationale=parameters["rationale"],
                     certified_by=reviewer,
                     expires_at=expires_at,

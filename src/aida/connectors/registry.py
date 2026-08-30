@@ -6,6 +6,7 @@ from aida.connectors.base import Connector, ConnectorCapabilities
 from aida.connectors.bigquery import BigQueryConnector
 from aida.connectors.oracle import OracleConnector
 from aida.connectors.postgres import PostgresConnector
+from aida.connectors.snowflake import SnowflakeConnector
 from aida.connectors.sqlserver import SqlServerConnector
 
 ConnectorFactory = Callable[[str], Connector]
@@ -160,8 +161,21 @@ connector_registry.register(
     ),
     capabilities=BigQueryConnector.DEFAULT_CAPABILITIES,
 )
+connector_registry.register(
+    "snowflake",
+    SnowflakeConnector,
+    display_name="Snowflake",
+    dialect="snowflake",
+    maturity="BETA",
+    version="1.0.0",
+    notes=(
+        "Pull discovery across multi-database catalogs via INFORMATION_SCHEMA, "
+        "referential constraints, partition-pruned EXPLAIN cost estimation, "
+        "approximate statistics profiling, and warehouse query ID traceability."
+    ),
+    capabilities=SnowflakeConnector.DEFAULT_CAPABILITIES,
+)
 for connector_type, display_name, dialect in (
-    ("snowflake", "Snowflake", "snowflake"),
     ("databricks", "Databricks SQL", "databricks"),
     ("teradata", "Teradata", "teradata"),
     ("db2", "IBM Db2", "db2"),

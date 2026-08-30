@@ -14,6 +14,12 @@ class ConnectorCapabilities:
     query_history: bool = False
     delegated_identity: bool = False
     approximate_statistics: bool = False
+    # Envelope 1.1 (gap/02 N1). Default False so a connector that has not
+    # implemented an axis keeps reporting honestly (INV-9) without any edit.
+    views: bool = False
+    routines: bool = False
+    object_comments: bool = False
+    grants: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +29,7 @@ class DiscoveredColumn:
     physical_type: str
     nullable: bool
     default_expression: str | None = None
+    source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -37,12 +44,114 @@ class DiscoveredConstraint:
 
 
 @dataclass(frozen=True, slots=True)
+class DiscoveredIndex:
+    """CT-3/CN-8. Cost-estimation-only inventory, deliberately not part of the
+    envelope 1.1 axes: nothing in lineage or semantic meaning reads an index, so
+    it carries none of that axis's unavailable-reason machinery and is grouped
+    like a constraint instead.
+    """
+
+    name: str
+    index_type: str
+    columns: tuple[str, ...]
+    is_unique: bool = False
+    is_primary: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredPartition:
+    """CT-3/CN-8. See `DiscoveredIndex` for why this is not an envelope 1.1 axis."""
+
+    name: str
+    partition_type: str
+    ordinal_position: int
+    key_columns: tuple[str, ...] = ()
+    high_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredViewDefinition:
+    """The text a view is defined by, and how much of it the source would give.
+
+    Envelope 1.1 (gap/02 N1). This is the input to view-DDL lineage parsing
+    (N2), which is the largest single lineage-coverage win available, so the
+    envelope carries the definition verbatim and records honestly when it could
+    not: a truncated or unavailable definition must never look like an empty
+    one. `definition_sql is None` with a populated `unavailable_reason` is a
+    first-class state, not an error.
+    """
+
+    definition_sql: str | None
+    is_materialized: bool = False
+    is_updatable: bool | None = None
+    check_option: str | None = None
+    truncated: bool = False
+    unavailable_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredRoutineParameter:
+    name: str | None
+    ordinal_position: int
+    mode: str
+    physical_type: str
+    default_expression: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredRoutine:
+    """A stored procedure or function, with its body when the source exposes it.
+
+    Envelope 1.1 (gap/02 N1/N3/N12). `body_sql` is what procedure-body parsing
+    consumes, and what a read-only proof for procedure-to-tool generation is
+    proved against. Same honesty rule as views: unavailable and empty are
+    different, and `unavailable_reason` says which.
+    """
+
+    name: str
+    routine_type: str
+    language: str | None = None
+    body_sql: str | None = None
+    parameters: tuple[DiscoveredRoutineParameter, ...] = ()
+    return_type: str | None = None
+    is_deterministic: bool | None = None
+    security_mode: str | None = None
+    source_description: str | None = None
+    truncated: bool = False
+    unavailable_reason: str | None = None
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveredGrant:
+    """One privilege held by one grantee on one object.
+
+    Envelope 1.1 (gap/02 N1). Source-side grants are evidence about the estate,
+    never an authority in this platform: nothing here grants anything, and the
+    policy engine does not read it to make a decision. It exists so that "who
+    can already see this" is answerable, and so a workspace source binding can
+    be reviewed against what the source itself permits.
+    """
+
+    grantee: str
+    grantee_type: str
+    privilege: str
+    object_type: str
+    object_name: str
+    schema_name: str | None = None
+    is_grantable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveredTable:
     name: str
     object_type: str
     columns: tuple[DiscoveredColumn, ...]
     constraints: tuple[DiscoveredConstraint, ...] = ()
+    indexes: tuple[DiscoveredIndex, ...] = ()
+    partitions: tuple[DiscoveredPartition, ...] = ()
     source_description: str | None = None
+    view_definition: DiscoveredViewDefinition | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -50,6 +159,9 @@ class DiscoveredTable:
 class DiscoveredSchema:
     name: str
     tables: tuple[DiscoveredTable, ...]
+    routines: tuple[DiscoveredRoutine, ...] = ()
+    grants: tuple[DiscoveredGrant, ...] = ()
+    source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -57,6 +169,7 @@ class DiscoveredSchema:
 class DiscoveredCatalog:
     name: str
     schemas: tuple[DiscoveredSchema, ...]
+    source_description: str | None = None
     attributes: dict[str, Any] = field(default_factory=dict)
 
 
@@ -93,6 +206,14 @@ class TableProfileSnapshot:
 
 
 class Connector(ABC):
+    """Source access with structured arguments only.
+
+    Deliberately has no SQL-accepting member: the `estimate_read_query` /
+    `execute_read_query` pair lives on `aida.connectors.sql_execution.SqlExecutor`
+    so that INV-2 (one execution choke point) is enforced by the type system and
+    the import graph rather than by convention. See that module for the argument.
+    """
+
     connector_type: str
     dialect: str
 
@@ -107,14 +228,6 @@ class Connector(ABC):
 
     @abstractmethod
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def execute_read_query(self, sql: str, *, timeout_seconds: int) -> QueryResult:
         raise NotImplementedError
 
     @abstractmethod

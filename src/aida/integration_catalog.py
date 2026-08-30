@@ -5,6 +5,7 @@ TRANSFORMATION_METADATA_INTEGRATION_KEYS = (
     "openlineage",
     "airflow",
     "generic_elt",
+    "bi",
 )
 
 
@@ -14,6 +15,7 @@ def default_transformation_metadata_integrations() -> dict[str, bool]:
         "openlineage": False,
         "airflow": False,
         "generic_elt": False,
+        "bi": False,
     }
 
 

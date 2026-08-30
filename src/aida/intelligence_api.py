@@ -1,9 +1,11 @@
 import hashlib
 import hmac
+import math
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Literal
+from itertools import combinations
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -14,10 +16,15 @@ from sqlalchemy.sql.elements import ColumnElement
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
+from aida.identity_merge import merge_table_identity
+from aida.identity_resolution import IdentityMatch, score_cross_source_match
 from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
 from aida.models import (
     AgentRun,
+    CrossSourceResolutionCandidate,
+    DataDomain,
     DataSource,
     DbtResource,
     GovernedToolVersion,
@@ -30,9 +37,17 @@ from aida.models import (
     QueryFeedback,
     QueryMemoryEvidence,
     RelationshipCandidate,
+    RelationshipCandidateGroundTruthLabel,
+    RenameCandidate,
     SemanticMetricVersion,
 )
+from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.schemas import (
+    RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
+    CrossSourceObjectResolutionDiscoveryRequest,
+    CrossSourceRelationshipCandidateDiscoveryRequest,
+    CrossSourceResolutionCandidateDecision,
+    CrossSourceResolutionCandidateRead,
     GraphEdgeRead,
     GraphNodeRead,
     GraphSearchRead,
@@ -42,9 +57,17 @@ from aida.schemas import (
     QueryFeedbackRead,
     QueryFeedbackUpsert,
     QueryMemoryEvidenceRead,
+    RelationshipCandidateBulkDecisionItemRead,
+    RelationshipCandidateBulkDecisionRequest,
+    RelationshipCandidateBulkDecisionResultRead,
+    RelationshipCandidateBulkSelectionFilter,
+    RelationshipCandidateCalibrationBucketRead,
+    RelationshipCandidateCalibrationRead,
     RelationshipCandidateDecision,
     RelationshipCandidateDiscoveryRequest,
     RelationshipCandidateRead,
+    RenameCandidateDecision,
+    RenameCandidateRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -1010,6 +1033,7 @@ async def discover_relationship_candidates(
             candidate = RelationshipCandidate(
                 organization_id=datasource.organization_id,
                 datasource_id=datasource.id,
+                target_datasource_id=datasource.id,
                 source_table_id=source.table_id,
                 source_column_id=source.id,
                 target_table_id=target.table_id,
@@ -1045,6 +1069,276 @@ async def discover_relationship_candidates(
             "columns_scanned": len(columns),
             "column_scan_limit": settings.relationship_candidate_scan_max_columns,
             "value_inspection": False,
+        },
+    )
+    await session.commit()
+    return Page(
+        items=[RelationshipCandidateRead.model_validate(item) for item in created],
+        limit=body.max_candidates,
+        offset=0,
+        total=len(created),
+    )
+
+
+@router.post(
+    "/data-domains/{domain_id}/relationship-candidates/discover-cross-source",
+    response_model=Page,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def discover_cross_source_relationship_candidates(
+    domain_id: UUID,
+    body: CrossSourceRelationshipCandidateDiscoveryRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Page:
+    """Infer column relationships ACROSS datasources within one data_domain --
+    or, when `body.target_data_domain_id` is set, across the boundary into a
+    second domain, gated by an ACTIVE cross_boundary_grant.
+
+    Relationship inference is free to cross project/datasource boundaries within
+    a domain (ADR-0017 SS4/SS8) -- pairing two datasources that both already
+    belong to `domain_id` never touches a grant. Pairing against a
+    `target_data_domain_id` is different: that crosses a data_domain boundary,
+    so it is refused with 403 unless domain_service.check_cross_boundary_grant
+    confirms an ACTIVE, unexpired grant lets `domain_id` see into the target
+    domain for SUGGESTED_RELATIONSHIP edges -- deny-by-default, never inherited
+    (INV-5), exactly like every other cross-boundary read in this platform.
+
+    Bounded like every other discovery path in this platform (ADR-0017 SS8: an
+    estate cannot be scanned all at once) -- datasource pairs are capped at
+    max_datasource_pairs and candidates at max_candidates, so a domain with many
+    datasources is triaged over repeated calls rather than in one unbounded pass.
+    """
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    datasources = list(
+        (
+            await session.scalars(
+                select(DataSource)
+                .where(DataSource.data_domain_id == domain.id)
+                .order_by(DataSource.name)
+            )
+        ).all()
+    )
+
+    target_domain: DataDomain | None = None
+    target_datasources: list[DataSource] = []
+    if body.target_data_domain_id is not None:
+        if body.target_data_domain_id == domain.id:
+            raise HTTPException(
+                status_code=422, detail="target_data_domain_id must differ from domain_id"
+            )
+        target_domain = await session.get(DataDomain, body.target_data_domain_id)
+        if target_domain is None or target_domain.organization_id != domain.organization_id:
+            raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+        allowed = await check_cross_boundary_grant(
+            session,
+            domain.organization_id,
+            target_domain.id,
+            domain.id,
+            edge_kind="SUGGESTED_RELATIONSHIP",
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "cross-domain access denied: no ACTIVE cross_boundary_grant permits "
+                    f"{domain.id} to see into {target_domain.id}"
+                ),
+            )
+        target_datasources = list(
+            (
+                await session.scalars(
+                    select(DataSource)
+                    .where(DataSource.data_domain_id == target_domain.id)
+                    .order_by(DataSource.name)
+                )
+            ).all()
+        )
+
+    if target_domain is not None:
+        # Only cross-boundary pairs -- same-domain pairs on either side stay the
+        # job of a same-domain call against that domain's own id.
+        pairs = [
+            (source_datasource, target_datasource)
+            for source_datasource in datasources
+            for target_datasource in target_datasources
+        ]
+    else:
+        pairs = list(combinations(datasources, 2))
+    pairs_available = len(pairs)
+    pairs = pairs[: body.max_datasource_pairs]
+    profile_datasources = datasources + target_datasources
+
+    async def _load_source_profile(datasource: DataSource) -> dict[str, Any]:
+        tables = (
+            await session.scalars(
+                select(MetadataTable).where(
+                    MetadataTable.datasource_id == datasource.id,
+                    MetadataTable.status == "ACTIVE",
+                )
+            )
+        ).all()
+        table_ids = {table.id for table in tables}
+        columns = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.table_id.in_(table_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+                .limit(settings.relationship_candidate_scan_max_columns)
+            )
+        ).all()
+        columns_by_table_name = {
+            (column.table_id, column.name.lower()): column for column in columns
+        }
+        # RL-5: keyed by canonical_column_name (case- AND naming-convention-
+        # normalized: snake_case, camelCase, PascalCase, SCREAMING_CASE all
+        # collapse to the same key), not a bare `.lower()`, so a heterogeneous
+        # estate's real naming differences don't hide an otherwise-matching
+        # candidate. See aida.relationship_naming.
+        columns_by_name: dict[str, list[MetadataColumn]] = {}
+        for column in columns:
+            columns_by_name.setdefault(canonical_column_name(column.name), []).append(column)
+        constraints = (
+            await session.scalars(
+                select(MetadataConstraint).where(
+                    MetadataConstraint.datasource_id == datasource.id,
+                    MetadataConstraint.status == "ACTIVE",
+                    MetadataConstraint.constraint_type == "PRIMARY_KEY",
+                )
+            )
+        ).all()
+        primary_keys: list[MetadataColumn] = []
+        for constraint in constraints:
+            for name in constraint.columns:
+                primary_key_column = columns_by_table_name.get((constraint.table_id, name.lower()))
+                if primary_key_column is not None:
+                    primary_keys.append(primary_key_column)
+        return {
+            "columns_by_name": columns_by_name,
+            "primary_keys": primary_keys,
+            "column_count": len(columns),
+        }
+
+    profiles = {
+        datasource.id: await _load_source_profile(datasource) for datasource in profile_datasources
+    }
+    existing_candidate_pairs = {
+        (source_column_id, target_column_id)
+        for source_column_id, target_column_id in (
+            await session.execute(
+                select(
+                    RelationshipCandidate.source_column_id,
+                    RelationshipCandidate.target_column_id,
+                )
+            )
+        ).all()
+    }
+    created: list[RelationshipCandidate] = []
+    columns_scanned = 0
+    for ds_a, ds_b in pairs:
+        if len(created) >= body.max_candidates:
+            break
+        profile_a = profiles[ds_a.id]
+        profile_b = profiles[ds_b.id]
+        columns_scanned += profile_a["column_count"] + profile_b["column_count"]
+        # Both directions: PKs in ds_a matched from ds_b's columns, and vice versa.
+        for pk_owner, other, other_columns_by_name in (
+            (ds_a, ds_b, profile_b["columns_by_name"]),
+            (ds_b, ds_a, profile_a["columns_by_name"]),
+        ):
+            targets = profiles[pk_owner.id]["primary_keys"]
+            for target in targets:
+                # RL-5: candidates are looked up by canonical name (naming-
+                # convention-normalized), not a bare `.lower()`, so
+                # `customer_id` / `customerId` / `CustomerId` / `CUSTOMER_ID`
+                # across two datasources are recognized as the same key.
+                for source in other_columns_by_name.get(canonical_column_name(target.name), []):
+                    # RL-5: type compatibility is by family (NUMERIC/STRING/
+                    # DATE_TIME/BOOLEAN/BINARY), not literal dialect spelling,
+                    # so e.g. Oracle NUMBER(38,0) matches BigQuery INT64.
+                    source_type_family = physical_type_family(source.physical_type)
+                    target_type_family = physical_type_family(target.physical_type)
+                    if source_type_family != target_type_family:
+                        continue
+                    pair = (source.id, target.id)
+                    if pair in existing_candidate_pairs:
+                        continue
+                    # A literal, dialect-identical match is still the strongest
+                    # signal; a canonical/family-only match is real evidence but
+                    # weaker, and the reviewer sees exactly which is which
+                    # (module 06 SS7 -- evidence must be inspectable, not just a
+                    # confidence number) rather than both being reported as
+                    # "EXACT" the way the pre-RL-5 code would have.
+                    name_is_literal_exact = source.name.lower() == target.name.lower()
+                    type_is_literal_exact = (
+                        source.physical_type.lower() == target.physical_type.lower()
+                    )
+                    if name_is_literal_exact and type_is_literal_exact:
+                        detection_rule = "EXACT_NAME_TYPE_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
+                        confidence = 0.75
+                    elif name_is_literal_exact or type_is_literal_exact:
+                        detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
+                        confidence = 0.65
+                    else:
+                        detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
+                        confidence = 0.55
+                    candidate = RelationshipCandidate(
+                        organization_id=domain.organization_id,
+                        datasource_id=other.id,
+                        target_datasource_id=pk_owner.id,
+                        source_table_id=source.table_id,
+                        source_column_id=source.id,
+                        target_table_id=target.table_id,
+                        target_column_id=target.id,
+                        detection_rule=detection_rule,
+                        confidence=confidence,
+                        evidence={
+                            "column_name_match": "EXACT" if name_is_literal_exact else "CANONICAL",
+                            "physical_type_match": (
+                                "EXACT" if type_is_literal_exact else "FAMILY"
+                            ),
+                            "physical_type_family": target_type_family,
+                            "target_is_primary_key": True,
+                            "source_values_inspected": False,
+                            "source_datasource": other.name,
+                            "target_datasource": pk_owner.name,
+                        },
+                        created_by=context.principal_id,
+                    )
+                    session.add(candidate)
+                    created.append(candidate)
+                    existing_candidate_pairs.add(pair)
+                    if len(created) >= body.max_candidates:
+                        break
+                if len(created) >= body.max_candidates:
+                    break
+            if len(created) >= body.max_candidates:
+                break
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=domain.organization_id),
+        action="relationship_candidates.discover_cross_source",
+        resource_type="data_domain",
+        resource_id=str(domain.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "created_candidates": len(created),
+            "datasource_pairs_scanned": len(pairs),
+            "datasource_pairs_available": pairs_available,
+            "columns_scanned": columns_scanned,
+            "value_inspection": False,
+            "target_data_domain_id": str(target_domain.id) if target_domain else None,
         },
     )
     await session.commit()
@@ -1094,6 +1388,44 @@ async def list_relationship_candidates(
     )
 
 
+def _relationship_candidate_decision_event_type(status: str) -> str:
+    """RL-4: `graph_projector.run_projector` listens for exactly these two
+    literal event types -- not the old, single consolidated
+    `relationship_candidate.decided.v1` -- to trigger `project_unified_lineage`
+    (src/aida/projectors/graph_projector.py). Before this fix the emitted name
+    and the projector's expected names never matched, so an approved or
+    rejected candidate never actually reached Neo4j projection; see
+    Docs/30-contracts/04-event-catalog.md's KNOWN_ST14_DRIFT-adjacent note in
+    tests/test_event_catalog_gate.py for the rename this replaces.
+    """
+    return (
+        "relationship_candidate.approved.v1"
+        if status == "APPROVED"
+        else "relationship_candidate.rejected.v1"
+    )
+
+
+def _relationship_candidate_decision_payload(candidate: RelationshipCandidate) -> dict[str, Any]:
+    return {
+        "candidate_id": str(candidate.id),
+        "status": candidate.status,
+        # RL-4: `datasource_id` is what
+        # graph_projector._event_datasource_id keys on to know which
+        # datasource's unified-lineage graph to rebuild; without it,
+        # project_unified_lineage silently no-ops even once event_type
+        # matches. Same-source candidates project immediately on this event;
+        # a cross-source candidate (datasource_id != target_datasource_id)
+        # still is not projected per-datasource today -- see the module 06
+        # RL-4 report for why that is a separate, larger gap
+        # (build_unified_lineage_graph_payload's single-datasource query only
+        # ever matches same-datasource candidates; the federated
+        # domain-wide graph that does include cross-source edges has no
+        # Neo4j projection path at all yet).
+        "datasource_id": str(candidate.datasource_id),
+        "target_datasource_id": str(candidate.target_datasource_id),
+    }
+
+
 @router.post(
     "/relationship-candidates/{candidate_id}/decision",
     response_model=RelationshipCandidateRead,
@@ -1133,8 +1465,759 @@ async def decide_relationship_candidate(
         organization_id=candidate.organization_id,
         aggregate_type="relationship_candidate",
         aggregate_id=str(candidate.id),
-        event_type="relationship_candidate.decided.v1",
+        event_type=_relationship_candidate_decision_event_type(candidate.status),
+        payload=_relationship_candidate_decision_payload(candidate),
+    )
+    await session.commit()
+    return candidate
+
+
+# --------------------------------------------------------------------------------------------
+# CT-4: rename detection with steward confirmation
+#
+# Detection itself is automatic and lives in `aida.workflows.activities.detect_rename_candidates`
+# (run inside the same scan that tombstones the old object and creates the new one) -- there is
+# no discovery endpoint here because there is nothing for a caller to trigger. What lives here is
+# the review surface: list what was proposed, and let a steward confirm or reject it. Approval is
+# the ONLY path that reassigns the old object's downstream links (`aida.identity_merge`); this
+# heuristic never merges identity on its own (module 04 SS6).
+# --------------------------------------------------------------------------------------------
+
+
+@router.get("/datasources/{datasource_id}/rename-candidates", response_model=Page)
+async def list_rename_candidates(
+    datasource_id: UUID,
+    candidate_status: str | None = Query(default=None, max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters = [RenameCandidate.datasource_id == datasource.id]
+    if candidate_status:
+        filters.append(RenameCandidate.status == candidate_status.upper())
+    total = await session.scalar(select(func.count()).select_from(RenameCandidate).where(*filters))
+    rows = (
+        await session.scalars(
+            select(RenameCandidate)
+            .where(*filters)
+            .order_by(RenameCandidate.confidence.desc(), RenameCandidate.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[RenameCandidateRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/rename-candidates/{candidate_id}/decision",
+    response_model=RenameCandidateRead,
+)
+async def decide_rename_candidate(
+    candidate_id: UUID,
+    body: RenameCandidateDecision,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> RenameCandidate:
+    candidate = await session.get(RenameCandidate, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="rename candidate not found")
+    enforce_organization(context, candidate.organization_id)
+    if candidate.created_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
+    if candidate.status != "PENDING":
+        raise HTTPException(status_code=409, detail="rename candidate is already decided")
+
+    reassigned_links: dict[str, int] | None = None
+    if body.decision == "APPROVE":
+        # The only place identity actually merges -- explicit steward approval,
+        # never automatic (module 04 SS6). Reassigns every downstream reference
+        # to the old table's stable ID onto the new one, then marks the old
+        # (still-tombstoned) row as superseded so anyone still holding its ID
+        # can resolve forward to what it became.
+        reassigned_links = await merge_table_identity(
+            session, old_table_id=candidate.old_table_id, new_table_id=candidate.new_table_id
+        )
+        old_table = await session.get(MetadataTable, candidate.old_table_id)
+        if old_table is not None:
+            old_table.superseded_by_table_id = candidate.new_table_id
+        candidate.status = "APPROVED"
+        candidate.merged_at = datetime.now(UTC)
+    else:
+        candidate.status = "REJECTED"
+    candidate.reviewed_by = context.principal_id
+    candidate.review_reason = body.reason
+    candidate.reviewed_at = datetime.now(UTC)
+    record_audit(
+        session,
+        replace(context, organization_id=candidate.organization_id),
+        action="rename_candidate.decide",
+        resource_type="rename_candidate",
+        resource_id=str(candidate.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"decision": body.decision, "reassigned_links": reassigned_links},
+    )
+    record_outbox(
+        session,
+        organization_id=candidate.organization_id,
+        aggregate_type="rename_candidate",
+        aggregate_id=str(candidate.id),
+        event_type="rename_candidate.decided.v1",
         payload={"candidate_id": str(candidate.id), "status": candidate.status},
     )
     await session.commit()
     return candidate
+
+
+# --------------------------------------------------------------------------------------------
+# CT-6: cross-source object resolution
+#
+# The catalog-identity analogue of `discover_cross_source_relationship_candidates` above: same
+# domain scoping and cross-boundary grant gate (ADR-0017 SS4), same datasource-pair and candidate
+# bounds (ADR-0017 SS8). The question here is "is this table, structurally, the same logical
+# asset as that one?" rather than "does this column reference that primary key?", so matching is
+# whole-table (`aida.identity_resolution.score_cross_source_match`) rather than column-to-PK.
+# Approval only confirms the link -- unlike a rename candidate it never reassigns either table's
+# downstream references, because both tables remain distinct catalog objects in distinct estates.
+# --------------------------------------------------------------------------------------------
+
+
+@router.post(
+    "/data-domains/{domain_id}/cross-source-object-resolution-candidates/discover",
+    response_model=Page,
+)
+async def discover_cross_source_object_resolution_candidates(
+    domain_id: UUID,
+    body: CrossSourceObjectResolutionDiscoveryRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Page:
+    """Propose that a table in one datasource is the same logical asset -- possibly
+    renamed or differently cased -- as a table in another datasource, via
+    deterministic, metadata-only structural matching. Never sampled or live row
+    values (ADR-0014).
+
+    Bounded like every other discovery path in this platform: at most
+    `settings.object_resolution_scan_max_tables_per_datasource` ACTIVE tables are
+    loaded per datasource, datasource pairs are capped at `max_datasource_pairs`,
+    and candidates at `max_candidates`.
+    """
+    domain = await session.get(DataDomain, domain_id)
+    if domain is None:
+        raise HTTPException(status_code=404, detail="data domain not found")
+    enforce_organization(context, domain.organization_id)
+    datasources = list(
+        (
+            await session.scalars(
+                select(DataSource)
+                .where(DataSource.data_domain_id == domain.id)
+                .order_by(DataSource.name)
+            )
+        ).all()
+    )
+
+    target_domain: DataDomain | None = None
+    target_datasources: list[DataSource] = []
+    if body.target_data_domain_id is not None:
+        if body.target_data_domain_id == domain.id:
+            raise HTTPException(
+                status_code=422, detail="target_data_domain_id must differ from domain_id"
+            )
+        target_domain = await session.get(DataDomain, body.target_data_domain_id)
+        if target_domain is None or target_domain.organization_id != domain.organization_id:
+            raise HTTPException(status_code=422, detail="target_data_domain_id not found")
+        allowed = await check_cross_boundary_grant(
+            session,
+            domain.organization_id,
+            target_domain.id,
+            domain.id,
+            edge_kind="SUGGESTED_RELATIONSHIP",
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "cross-domain access denied: no ACTIVE cross_boundary_grant permits "
+                    f"{domain.id} to see into {target_domain.id}"
+                ),
+            )
+        target_datasources = list(
+            (
+                await session.scalars(
+                    select(DataSource)
+                    .where(DataSource.data_domain_id == target_domain.id)
+                    .order_by(DataSource.name)
+                )
+            ).all()
+        )
+
+    if target_domain is not None:
+        pairs = [
+            (source_datasource, target_datasource)
+            for source_datasource in datasources
+            for target_datasource in target_datasources
+        ]
+    else:
+        pairs = list(combinations(datasources, 2))
+    pairs_available = len(pairs)
+    pairs = pairs[: body.max_datasource_pairs]
+    profile_datasources = datasources + target_datasources
+
+    async def _load_table_profiles(datasource: DataSource) -> list[dict[str, Any]]:
+        tables = (
+            await session.scalars(
+                select(MetadataTable)
+                .where(
+                    MetadataTable.datasource_id == datasource.id,
+                    MetadataTable.status == "ACTIVE",
+                )
+                .order_by(MetadataTable.name)
+                .limit(settings.object_resolution_scan_max_tables_per_datasource)
+            )
+        ).all()
+        if not tables:
+            return []
+        table_ids = {table.id for table in tables}
+        columns = (
+            await session.scalars(
+                select(MetadataColumn)
+                .where(
+                    MetadataColumn.table_id.in_(table_ids),
+                    MetadataColumn.status == "ACTIVE",
+                )
+                .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+            )
+        ).all()
+        columns_by_table: dict[UUID, list[MetadataColumn]] = {}
+        for column in columns:
+            columns_by_table.setdefault(column.table_id, []).append(column)
+        schemas_by_id = {
+            schema.id: schema
+            for schema in (
+                await session.scalars(
+                    select(MetadataSchema).where(
+                        MetadataSchema.id.in_({table.schema_id for table in tables})
+                    )
+                )
+            ).all()
+        }
+        return [
+            {
+                "table": table,
+                "schema_name": schemas_by_id[table.schema_id].name
+                if table.schema_id in schemas_by_id
+                else "",
+                "columns": columns_by_table.get(table.id, []),
+            }
+            for table in tables
+        ]
+
+    profiles = {
+        datasource.id: await _load_table_profiles(datasource)
+        for datasource in profile_datasources
+    }
+    existing_candidate_pairs = {
+        (source_table_id, target_table_id)
+        for source_table_id, target_table_id in (
+            await session.execute(
+                select(
+                    CrossSourceResolutionCandidate.source_table_id,
+                    CrossSourceResolutionCandidate.target_table_id,
+                )
+            )
+        ).all()
+    }
+    created: list[CrossSourceResolutionCandidate] = []
+    tables_scanned = 0
+    for ds_a, ds_b in pairs:
+        if len(created) >= body.max_candidates:
+            break
+        entries_a = profiles[ds_a.id]
+        entries_b = profiles[ds_b.id]
+        tables_scanned += len(entries_a) + len(entries_b)
+        for entry_a in entries_a:
+            for entry_b in entries_b:
+                pair = (entry_a["table"].id, entry_b["table"].id)
+                if pair in existing_candidate_pairs:
+                    continue
+                match: IdentityMatch | None = score_cross_source_match(
+                    source_schema_name=entry_a["schema_name"],
+                    source_table_name=entry_a["table"].name,
+                    source_columns=entry_a["columns"],
+                    target_schema_name=entry_b["schema_name"],
+                    target_table_name=entry_b["table"].name,
+                    target_columns=entry_b["columns"],
+                    min_confidence=settings.object_resolution_min_confidence,
+                )
+                if match is None:
+                    continue
+                candidate = CrossSourceResolutionCandidate(
+                    organization_id=domain.organization_id,
+                    source_datasource_id=ds_a.id,
+                    source_table_id=entry_a["table"].id,
+                    target_datasource_id=ds_b.id,
+                    target_table_id=entry_b["table"].id,
+                    detection_rule=match.detection_rule,
+                    confidence=match.confidence,
+                    evidence=match.evidence,
+                    created_by=context.principal_id,
+                )
+                session.add(candidate)
+                created.append(candidate)
+                existing_candidate_pairs.add(pair)
+                if len(created) >= body.max_candidates:
+                    break
+            if len(created) >= body.max_candidates:
+                break
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=domain.organization_id),
+        action="cross_source_resolution_candidates.discover",
+        resource_type="data_domain",
+        resource_id=str(domain.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "created_candidates": len(created),
+            "datasource_pairs_scanned": len(pairs),
+            "datasource_pairs_available": pairs_available,
+            "tables_scanned": tables_scanned,
+            "value_inspection": False,
+            "target_data_domain_id": str(target_domain.id) if target_domain else None,
+        },
+    )
+    await session.commit()
+    return Page(
+        items=[CrossSourceResolutionCandidateRead.model_validate(item) for item in created],
+        limit=body.max_candidates,
+        offset=0,
+        total=len(created),
+    )
+
+
+@router.get(
+    "/datasources/{datasource_id}/cross-source-object-resolution-candidates",
+    response_model=Page,
+)
+async def list_cross_source_object_resolution_candidates(
+    datasource_id: UUID,
+    candidate_status: str | None = Query(default=None, max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters = [
+        or_(
+            CrossSourceResolutionCandidate.source_datasource_id == datasource.id,
+            CrossSourceResolutionCandidate.target_datasource_id == datasource.id,
+        )
+    ]
+    if candidate_status:
+        filters.append(CrossSourceResolutionCandidate.status == candidate_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(CrossSourceResolutionCandidate).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(CrossSourceResolutionCandidate)
+            .where(*filters)
+            .order_by(
+                CrossSourceResolutionCandidate.confidence.desc(),
+                CrossSourceResolutionCandidate.created_at,
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[CrossSourceResolutionCandidateRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/cross-source-object-resolution-candidates/{candidate_id}/decision",
+    response_model=CrossSourceResolutionCandidateRead,
+)
+async def decide_cross_source_object_resolution_candidate(
+    candidate_id: UUID,
+    body: CrossSourceResolutionCandidateDecision,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> CrossSourceResolutionCandidate:
+    candidate = await session.get(CrossSourceResolutionCandidate, candidate_id)
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="cross-source resolution candidate not found")
+    enforce_organization(context, candidate.organization_id)
+    if candidate.created_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
+    if candidate.status != "PENDING":
+        raise HTTPException(
+            status_code=409, detail="cross-source resolution candidate is already decided"
+        )
+    candidate.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    candidate.reviewed_by = context.principal_id
+    candidate.review_reason = body.reason
+    candidate.reviewed_at = datetime.now(UTC)
+    record_audit(
+        session,
+        replace(context, organization_id=candidate.organization_id),
+        action="cross_source_resolution_candidate.decide",
+        resource_type="cross_source_resolution_candidate",
+        resource_id=str(candidate.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"decision": body.decision},
+    )
+    record_outbox(
+        session,
+        organization_id=candidate.organization_id,
+        aggregate_type="cross_source_resolution_candidate",
+        aggregate_id=str(candidate.id),
+        event_type="cross_source_resolution_candidate.decided.v1",
+        payload={"candidate_id": str(candidate.id), "status": candidate.status},
+    )
+    await session.commit()
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# RL-6: bulk review for large candidate sets
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_relationship_candidate_bulk_subjects(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    candidate_ids: list[UUID] | None,
+    selection_filter: RelationshipCandidateBulkSelectionFilter | None,
+) -> tuple[list[UUID], Literal["EXPLICIT", "FILTER"], bool]:
+    """Resolve the bounded set of candidate ids a bulk decision applies to.
+
+    Mirrors `catalog_bulk_actions`'s explicit-ids-or-filter shape (CT-1): an
+    explicit list is deduped and returned as-is (already bounded to
+    RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS by the request schema); a
+    filter is scoped to one datasource -- validated against the caller's
+    organization the same way `discover_relationship_candidates` is -- and
+    only ever matches PENDING candidates (an already-decided candidate has no
+    business being swept into a bulk decision), ordered by confidence
+    descending and capped at the same limit, reporting whether the cap
+    actually truncated the match set.
+    """
+    if candidate_ids is not None:
+        return list(dict.fromkeys(candidate_ids)), "EXPLICIT", False
+    assert selection_filter is not None
+    datasource = await session.get(DataSource, selection_filter.datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters: list[ColumnElement[bool]] = [
+        RelationshipCandidate.datasource_id == datasource.id,
+        RelationshipCandidate.status == "PENDING",
+    ]
+    if selection_filter.min_confidence is not None:
+        filters.append(RelationshipCandidate.confidence >= selection_filter.min_confidence)
+    if selection_filter.max_confidence is not None:
+        filters.append(RelationshipCandidate.confidence <= selection_filter.max_confidence)
+    if selection_filter.detection_rule is not None:
+        filters.append(RelationshipCandidate.detection_rule == selection_filter.detection_rule)
+    rows = list(
+        (
+            await session.scalars(
+                select(RelationshipCandidate.id)
+                .where(*filters)
+                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.created_at)
+                .limit(RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS + 1)
+            )
+        ).all()
+    )
+    truncated = len(rows) > RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS
+    ids = rows[:RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS]
+    if not ids:
+        raise HTTPException(
+            status_code=409, detail="filter matched no PENDING relationship candidates"
+        )
+    return ids, "FILTER", truncated
+
+
+@router.post(
+    "/relationship-candidates/bulk-decision",
+    response_model=RelationshipCandidateBulkDecisionResultRead,
+)
+async def bulk_decide_relationship_candidates(
+    body: RelationshipCandidateBulkDecisionRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> RelationshipCandidateBulkDecisionResultRead:
+    """RL-6: decide up to RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS PENDING
+    relationship candidates in one call, by explicit id list or by a
+    single-datasource filter.
+
+    Exactly the same maker-checker and PENDING-only rules as
+    `decide_relationship_candidate` apply per candidate -- this is not a
+    looser bulk path, just a batched one -- but a rule violation on one
+    candidate marks that candidate FAILED and continues rather than aborting
+    the whole request (CT-1's partial-success precedent), since a reviewer
+    triaging hundreds of candidates should not have the entire batch rejected
+    for one candidate that happens to be their own or already decided.
+    """
+    subject_ids, selection_mode, truncated = await _resolve_relationship_candidate_bulk_subjects(
+        session,
+        context=context,
+        candidate_ids=body.candidate_ids,
+        selection_filter=body.filter,
+    )
+    candidates = {
+        row.id: row
+        for row in (
+            await session.scalars(
+                select(RelationshipCandidate).where(RelationshipCandidate.id.in_(subject_ids))
+            )
+        ).all()
+    }
+    new_status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    now = datetime.now(UTC)
+    results: list[RelationshipCandidateBulkDecisionItemRead] = []
+    succeeded = 0
+    for candidate_id in subject_ids:
+        candidate = candidates.get(candidate_id)
+        if candidate is None:
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason="relationship candidate not found",
+                )
+            )
+            continue
+        try:
+            enforce_organization(context, candidate.organization_id)
+        except HTTPException:
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason="cross-organization access denied",
+                )
+            )
+            continue
+        if candidate.created_by == context.principal_id:
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason="maker cannot review their own candidate",
+                )
+            )
+            continue
+        if candidate.status != "PENDING":
+            results.append(
+                RelationshipCandidateBulkDecisionItemRead(
+                    candidate_id=str(candidate_id),
+                    status="FAILED",
+                    reason=f"relationship candidate is already {candidate.status.lower()}",
+                )
+            )
+            continue
+        candidate.status = new_status
+        candidate.reviewed_by = context.principal_id
+        candidate.review_reason = body.reason
+        candidate.reviewed_at = now
+        record_outbox(
+            session,
+            organization_id=candidate.organization_id,
+            aggregate_type="relationship_candidate",
+            aggregate_id=str(candidate.id),
+            event_type=_relationship_candidate_decision_event_type(candidate.status),
+            payload=_relationship_candidate_decision_payload(candidate),
+        )
+        results.append(
+            RelationshipCandidateBulkDecisionItemRead(
+                candidate_id=str(candidate_id), status="SUCCEEDED", reason=None
+            )
+        )
+        succeeded += 1
+    failed = len(results) - succeeded
+    outcome = "SUCCESS" if not failed else "PARTIAL_SUCCESS" if succeeded else "FAILURE"
+    record_audit(
+        session,
+        context,
+        action="relationship_candidate.bulk_decide",
+        resource_type="relationship_candidate",
+        resource_id=None,
+        outcome=outcome,
+        correlation_id=get_correlation_id(),
+        details={
+            "decision": body.decision,
+            "selection_mode": selection_mode,
+            "requested_count": len(results),
+            "succeeded_count": succeeded,
+            "failed_count": failed,
+            "truncated": truncated,
+        },
+    )
+    await session.commit()
+    return RelationshipCandidateBulkDecisionResultRead(
+        decision=body.decision,
+        selection_mode=selection_mode,
+        requested_count=len(results),
+        succeeded_count=succeeded,
+        failed_count=failed,
+        truncated=truncated,
+        results=results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# RL-7: confidence calibration against real decision history
+# ---------------------------------------------------------------------------
+
+_CALIBRATION_METHODOLOGY_NOTE = (
+    "Buckets are the observed steward approval rate from THIS organization's own "
+    "decision history (or a RelationshipCandidateGroundTruthLabel override where one "
+    "exists), not a published calibration curve against a labelled banking corpus -- "
+    "no such corpus exists in this environment (module 06 RL-7). A steward's "
+    "APPROVE/REJECT is legitimate first-form ground truth, but it is this deployment's "
+    "own history, generated by this deployment's own detection rules; treat the rates "
+    "below as a diagnostic on whether confidence tracks reviewer agreement here, not as "
+    "an externally-validated accuracy claim."
+)
+
+
+@router.get(
+    "/relationship-candidates/confidence-calibration",
+    response_model=RelationshipCandidateCalibrationRead,
+)
+async def get_relationship_candidate_confidence_calibration(
+    datasource_id: UUID | None = Query(default=None),
+    bucket_width: float = Query(default=0.1, gt=0.0, le=1.0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> RelationshipCandidateCalibrationRead:
+    """RL-7: bucket DECIDED relationship candidates by confidence and report the
+    observed approval rate per bucket, from this organization's real
+    maker-checker decision history.
+
+    This is explicitly NOT a published calibration curve against a labelled
+    banking corpus -- see `_CALIBRATION_METHODOLOGY_NOTE`, echoed verbatim in
+    the response so a caller cannot mistake this for one. Where a
+    `RelationshipCandidateGroundTruthLabel` exists for a decided candidate
+    (RL-7's optional additive extra -- a later, stronger signal than the
+    original steward call, e.g. a labelled corpus or a usage confirmation),
+    that label supersedes the candidate's own `status` for this calculation
+    only; `RelationshipCandidate.status` itself, and the steward decision it
+    records, is never touched.
+    """
+    if datasource_id is not None:
+        datasource = await session.get(DataSource, datasource_id)
+        if datasource is None:
+            raise HTTPException(status_code=404, detail="datasource not found")
+        enforce_organization(context, datasource.organization_id)
+        base_filters: list[ColumnElement[bool]] = [
+            RelationshipCandidate.organization_id == context.organization_id,
+            RelationshipCandidate.datasource_id == datasource_id,
+        ]
+    else:
+        base_filters = [RelationshipCandidate.organization_id == context.organization_id]
+
+    decided = (
+        await session.scalars(
+            select(RelationshipCandidate).where(
+                *base_filters,
+                RelationshipCandidate.status.in_(("APPROVED", "REJECTED")),
+            )
+        )
+    ).all()
+
+    ground_truth_by_candidate: dict[UUID, str] = {}
+    if decided:
+        candidate_ids = [candidate.id for candidate in decided]
+        ground_truth_rows = (
+            await session.scalars(
+                select(RelationshipCandidateGroundTruthLabel).where(
+                    RelationshipCandidateGroundTruthLabel.candidate_id.in_(candidate_ids)
+                )
+            )
+        ).all()
+        ground_truth_by_candidate = {
+            row.candidate_id: row.label for row in ground_truth_rows
+        }
+
+    bucket_count = max(1, math.ceil(1.0 / bucket_width))
+    bucket_totals = [0] * bucket_count
+    bucket_approved = [0] * bucket_count
+
+    def _bucket_index(confidence: float) -> int:
+        clamped = min(max(confidence, 0.0), 1.0)
+        index = int(clamped / bucket_width)
+        return min(index, bucket_count - 1)
+
+    for candidate in decided:
+        effective_label = ground_truth_by_candidate.get(candidate.id, candidate.status)
+        index = _bucket_index(candidate.confidence)
+        bucket_totals[index] += 1
+        if effective_label == "APPROVED":
+            bucket_approved[index] += 1
+
+    buckets = [
+        RelationshipCandidateCalibrationBucketRead(
+            confidence_low=round(index * bucket_width, 10),
+            confidence_high=round(min((index + 1) * bucket_width, 1.0), 10),
+            decided_count=bucket_totals[index],
+            approved_count=bucket_approved[index],
+            rejected_count=bucket_totals[index] - bucket_approved[index],
+            observed_approval_rate=(
+                bucket_approved[index] / bucket_totals[index]
+                if bucket_totals[index]
+                else None
+            ),
+        )
+        for index in range(bucket_count)
+    ]
+    return RelationshipCandidateCalibrationRead(
+        datasource_id=datasource_id,
+        bucket_width=bucket_width,
+        total_decided=len(decided),
+        ground_truth_overrides_applied=sum(
+            1
+            for candidate in decided
+            if candidate.id in ground_truth_by_candidate
+            and ground_truth_by_candidate[candidate.id] != candidate.status
+        ),
+        buckets=buckets,
+        methodology_note=_CALIBRATION_METHODOLOGY_NOTE,
+    )

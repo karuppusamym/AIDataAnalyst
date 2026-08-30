@@ -48,7 +48,9 @@ Build the container before moving anything into it.
 
 ## 4. Phase 1 — Extract `platform/`
 
-Move infrastructure with no domain knowledge: `db.py`, `config.py`, `logging.py`, `context.py`, `events.py` (outbox mechanics), `main.py` (app assembly), plus pagination, idempotency, error taxonomy, and telemetry scaffolding.
+Move infrastructure with no domain knowledge: `db.py`, `config.py`, `logging.py`, `context.py`, plus pagination, idempotency, error taxonomy, and telemetry scaffolding (the latter four are not yet built as separate files, and are new code, not a file move). `main.py` (app assembly) moves later, in Phase 5, once it no longer has to import nearly every domain router directly.
+
+**Correction, 2026-08-29 (ST-04 verification):** `events.py` was listed here in an earlier revision of this plan. It doesn't belong in Phase 1 — it directly constructs and writes `AuditEvent`/`OutboxEvent` (`aida.models`), which are module 20's owned tables per `04-module-decomposition.md` §4 and §9, not domain-free infrastructure. Moving it to `platform/` as-is would fail the `platform-purity` contract on day one. §9 already has the right target: `events.py` and `projectors/outbox_publisher.py` move to module 20 (observability-audit) in Phase 3/4. What genuinely belongs in `platform/`'s `outbox` package (§8) is a generic transactional-write primitive every module calls — that doesn't exist yet; it's new code to design, not this file moved verbatim.
 
 **Exit:** `platform-purity` contract passes — `platform/` imports no domain module.
 

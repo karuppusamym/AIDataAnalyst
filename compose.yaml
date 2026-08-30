@@ -8,6 +8,9 @@ x-app-environment: &app-environment
   AIDA_TEMPORAL_NAMESPACE: default
   AIDA_TEMPORAL_TASK_QUEUE: aida-metadata
   AIDA_REDIS_URL: redis://redis:6379/0
+  AIDA_LINEAGE_CACHE_ENABLED: "true"
+  AIDA_LINEAGE_NEO4J_READ_ENABLED: "true"
+  AIDA_MCP_BUDGET_ENABLED: "true"
   AIDA_NEO4J_URI: bolt://neo4j:7687
   AIDA_NEO4J_USER: neo4j
   AIDA_NEO4J_PASSWORD: aida-local-only
@@ -193,7 +196,6 @@ services:
       - "15210:1521"
     volumes:
       - sample-oracle-source-data:/opt/oracle/oradata
-      - ./infra/sample-oracle-source/init.sql:/container-entrypoint-initdb.d/00-init.sql:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
@@ -201,6 +203,29 @@ services:
       retries: 30
       start_period: 60s
     restart: unless-stopped
+
+  sample-oracle-source-init:
+    image: gvenzl/oracle-free:23-slim
+    depends_on:
+      sample-oracle-source:
+        condition: service_started
+    volumes:
+      - ./infra/sample-oracle-source/init.sql:/init.sql:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        for attempt in $(seq 1 60); do
+          if sqlplus -s sys/Sys-Local-Only1@//sample-oracle-source:1521/FREEPDB1 as sysdba <<< "SELECT 1 FROM DUAL;" > /tmp/probe.log 2>&1; then
+            if ! grep -q "ORA-" /tmp/probe.log; then
+              break
+            fi
+          fi
+          echo "waiting for sample-oracle-source to accept connections (attempt $$attempt/60)..."
+          sleep 5
+        done
+        sqlplus -s sys/Sys-Local-Only1@//sample-oracle-source:1521/FREEPDB1 as sysdba @/init.sql
+    restart: "no"
 
   sample-mssql-source:
     image: mcr.microsoft.com/mssql/server:2022-latest
