@@ -371,6 +371,21 @@ def _context_product_role_eligible(roles: frozenset[str], allowed_roles: Sequenc
     return _tool_role_eligible(roles, allowed_roles)
 
 
+# Roles allowed to read catalog resources via MCP.  PlatformAdmin is always
+# exempt (handled by _tool_role_eligible).
+CATALOG_RESOURCE_READER_ROLES: frozenset[str] = frozenset({
+    "PlatformAdmin",
+    "OrganizationAdmin",
+    "ProjectAdmin",
+    "MetadataAdmin",
+    "DataAdmin",
+    "SemanticAdmin",
+    "DataSteward",
+    "Analyst",
+    "Viewer",
+})
+
+
 def _parse_context_product_uri(uri: str) -> tuple[str, int] | None:
     prefix = "atlas://context-products/"
     if not uri.startswith(prefix):
