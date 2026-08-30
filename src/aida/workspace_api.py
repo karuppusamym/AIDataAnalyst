@@ -13,7 +13,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.business_graph import assign, build_hierarchy, descendants_count, rollup, tree
+from aida.business_graph import (
+    assign,
+    build_hierarchy,
+    descendants_count,
+    extend_closure_for_new_node,
+    rollup,
+    rollup_freshness,
+    tree,
+)
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -384,6 +392,10 @@ async def create_business_node(
         owner_principal=body.owner_principal,
     )
     session.add(node)
+    await session.flush()
+    # Keep the closure projection correct as the tree grows. Bounded by depth, not by
+    # tree size, so this stays cheap however large the taxonomy becomes.
+    await extend_closure_for_new_node(session, node)
     record_audit(
         session,
         context,
@@ -471,14 +483,18 @@ async def get_rollup(
         raise HTTPException(status_code=404, detail="business node not found")
     enforce_organization(context, node.organization_id)
     moment = as_of or datetime.now(UTC)
-    counts = await rollup(session, node.organization_id, node_id, as_of=moment)
+    counts = await rollup(session, node.organization_id, node_id, as_of=as_of)
     return BusinessNodeRollupRead(
         business_node_id=node_id,
         descendant_node_count=await descendants_count(
-            session, node.organization_id, node_id, moment
+            session, node.organization_id, node_id, as_of
         ),
         assigned_by_target_type=counts,
         as_of=moment,
+        # Surfaced, not hidden: a coverage number that silently drifts is worse than one
+        # labelled three hours old. None means the projection has never been built and
+        # the counts above were computed live.
+        computed_at=await rollup_freshness(session, node.organization_id, node_id),
     )
 
 

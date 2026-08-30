@@ -12,6 +12,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -214,6 +215,14 @@ class Workspace(Base, TimestampMixin):
     purpose: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     monthly_cost_ceiling: Mapped[int | None] = mapped_column(BigInteger)
+    # SHADOW | ENFORCE. New and migrated workspaces start in SHADOW, where the
+    # attribute-based decision is computed and recorded but never denies. Introducing an
+    # authorization system in enforcing mode is how you find out, in production, that it
+    # denies something it should not. Flip per workspace once the shadow record shows a
+    # week of agreement with what actually happened.
+    authorization_mode: Mapped[str] = mapped_column(
+        String(20), default="SHADOW", nullable=False
+    )
 
 
 class WorkspaceMembership(Base, TimestampMixin):
@@ -240,6 +249,91 @@ class WorkspaceMembership(Base, TimestampMixin):
     granted_by: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+
+
+class WorkspaceAccessRule(Base, TimestampMixin):
+    """Derives workspace membership from the identity provider's roles.
+
+    Exists because of a problem the ADR-0018 migration created and the rehearsal did not
+    catch: it backfills one workspace per project and **zero memberships**, because there
+    is nothing to backfill them *from*. There is no persisted principal table anywhere in
+    this codebase -- identity and roles arrive as OIDC claims per request and are never
+    stored -- so no record exists of who used which project. Wiring `authorize` into a
+    read path against 24 memberless workspaces would deny every request in the platform.
+
+    Seeding 24 synthetic owners would be worse: it invents an access grant nobody made.
+    Instead a rule maps an IdP role onto a workspace role, which is the same principle the
+    design already states for personas -- derived from group claims, never chosen in a UI.
+    One rule can cover every migrated workspace, and revoking it revokes the access.
+
+    Scope, narrowest wins: a rule bound to `workspace_id` applies to that workspace; one
+    bound to `business_node_id` applies to every workspace whose classification sits at or
+    below that node; one bound to neither applies org-wide and should be rare.
+
+    Rules grant. They never deny -- a DENY policy still outranks anything derived here,
+    and an explicit `workspace_membership` row is evaluated alongside, not instead.
+    """
+
+    __tablename__ = "workspace_access_rule"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "code"),
+        Index("ix_workspace_access_rule_workspace", "workspace_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=True
+    )
+    business_node_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), nullable=True
+    )
+    # The role as it arrives from the identity provider, after oidc_role_mappings.
+    subject_role: Mapped[str] = mapped_column(String(80), nullable=False)
+    workspace_role: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthorizationShadowRecord(Base):
+    """What the attribute-based decision *would* have been, while it is not enforcing.
+
+    The evidence that makes flipping a workspace to ENFORCE a measurement rather than a
+    leap. One row per divergence -- agreements are counted, not stored, because storing
+    every allowed read would be a second access log at request volume for no information.
+
+    Value-free (INV-6): reason codes, identifiers and counts. No resource values, no
+    question text, and no policy expression.
+    """
+
+    __tablename__ = "authorization_shadow_record"
+    __table_args__ = (
+        Index("ix_auth_shadow_workspace_time", "workspace_id", "observed_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        ForeignKey("workspace.id", ondelete="CASCADE"), nullable=False
+    )
+    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    principal_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(120))
+    # The decision the new engine reached, and the reason it gave.
+    shadow_allowed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(60), nullable=False)
+    matched_policy_code: Mapped[str | None] = mapped_column(String(80))
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class SourceBinding(Base, TimestampMixin):
@@ -406,6 +500,135 @@ class BusinessAssignmentRule(Base, TimestampMixin):
     auto_confirm: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class Embedding(Base, TimestampMixin):
+    """A stored embedding, in ordinary PostgreSQL columns (ADR-0019).
+
+    `vector` is `bytea` holding packed float32s, not a `pgvector` column, because a
+    regulated PostgreSQL estate frequently forbids extensions and the platform must not
+    require one to have semantic search at all. Exact cosine over a policy-narrowed
+    candidate set is the default; an external in-network vector service and a future
+    `pgvector` adapter sit behind the same port.
+
+    `vector_norm` is stored rather than recomputed per comparison -- the single cheapest
+    optimisation available to an exact scorer, halving the inner loop.
+
+    `index_signature` pins (embedding model, model version, dimensions, chunking
+    version). Vectors from different signatures are not comparable, and mixing them
+    fails as quietly poor search rather than as an error, so the signature is matched on
+    every read and a change is a rebuild trigger.
+
+    **What may be embedded:** object names and paths, business names, descriptions,
+    synonyms, glossary terms, compiled knowledge blocks, and sections of the customer's
+    own uploaded documentation. **Never** source business values (INV-6). This matters
+    more than it looks: embedding-inversion research recovers substantial portions of
+    source text from vectors alone, so this table inherits the classification of what
+    was embedded and is in scope for the same retention and deletion obligations as the
+    rest of the control plane. `text_hash` exists so a re-embed can be skipped when
+    nothing changed, without keeping a second copy of the text.
+    """
+
+    __tablename__ = "embedding"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "owner_type", "owner_id", "chunk_index"),
+        Index("ix_embedding_owner", "organization_id", "owner_type", "owner_id"),
+        Index("ix_embedding_signature", "organization_id", "index_signature"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    owner_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    owner_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    index_signature: Mapped[str] = mapped_column(String(400), nullable=False)
+    dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
+    vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    vector_norm: Mapped[float] = mapped_column(Float, nullable=False)
+    text_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class BusinessNodeClosure(Base):
+    """Precomputed ancestor/descendant pairs for the classification tree (ADR-0018).
+
+    Measured, not assumed. Against 13,548 nodes and 5M assignments on PostgreSQL 16,
+    recursive-CTE descendant traversal ran ~3.3 ms and the closure join ~1.5 ms; the
+    bigger win is on aggregation, where a subtree roll-up went from ~3.1 s to ~0.9 s.
+    Neither number is the reason roll-up is fast now -- see `BusinessNodeRollup` --
+    but the closure is what makes that materialisation a single grouped join instead
+    of one recursive query per node.
+
+    **This table reflects the tree as it stands now.** It carries no effective dates,
+    because a closure that encoded history would need a row per (ancestor, descendant,
+    interval) and would grow without bound on a tree that is re-parented. Historical
+    `as_of` queries therefore fall back to the recursive CTE, which is correct and
+    slower -- the right trade, because history queries are rare and traversal is hot.
+
+    52,044 rows for 13,548 nodes at depth 4: roughly 4x the node count, which is what
+    a shallow taxonomy costs. A deep tree would cost more, and the depth cap is the
+    thing to watch if the taxonomy ever grows past a handful of levels.
+    """
+
+    __tablename__ = "business_node_closure"
+    __table_args__ = (
+        Index("ix_business_node_closure_descendant", "descendant_id"),
+        Index("ix_business_node_closure_ancestor", "ancestor_id"),
+    )
+
+    ancestor_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    descendant_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    depth: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class BusinessNodeRollup(Base):
+    """Materialised "how much sits under this node", refreshed rather than computed.
+
+    Roll-up is the one query in the classification axis that does not scale as a read.
+    Measured on PostgreSQL 16 with 13,548 nodes and 5,000,000 assignments:
+
+    | Approach                              | p50      |
+    |---------------------------------------|----------|
+    | recursive CTE + count(DISTINCT)       | 3,147 ms |
+    | closure join + count(DISTINCT)        |   915 ms |
+    | **read this table**                   | **0.4 ms** |
+
+    A full recompute of every node takes ~47 s as one grouped statement, which is a
+    batch job, not a request. So roll-up is computed on write-ish cadence and read as
+    a lookup.
+
+    `computed_at` is part of the contract, not bookkeeping: a coverage number that
+    silently drifts is worse than one labelled three hours old. The API returns it so
+    staleness is visible rather than hidden -- the same rule the knowledge layer uses
+    for compiled pages.
+
+    Exact counts, not approximate: `count(DISTINCT)` is preserved because an asset
+    assigned to two sibling domains must not be double-counted, and the obvious
+    approximation (HyperLogLog) needs a PostgreSQL extension that a bank will not
+    always grant.
+    """
+
+    __tablename__ = "business_node_rollup"
+
+    business_node_id: Mapped[UUID] = mapped_column(
+        ForeignKey("business_node.id", ondelete="CASCADE"), primary_key=True
+    )
+    target_type: Mapped[str] = mapped_column(String(40), primary_key=True)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    distinct_targets: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class AccessPolicy(Base, TimestampMixin):

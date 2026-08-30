@@ -57,6 +57,8 @@ The observable condition under which this should be reconsidered.
 | [0016](ADR-0016-quality-freshness-fails-closed.md) | Quality baselines are value-free; source freshness fails closed | Accepted | An approved connector watermark and retention contract exists |
 | [0017](ADR-0017-domain-complete-tenancy-and-cross-source-graph.md) | Domain-complete tenancy and boundary-aware cross-source graph traversal | **Superseded by 0018** | — |
 | [0018](ADR-0018-three-axis-tenancy-and-classification.md) | Access, classification and technical hierarchies are modelled separately; only access grants | Accepted | The permission boundary itself must be the line of business, provable from containment without evaluating policy |
+| [0019](ADR-0019-vector-index-without-pgvector.md) | Nearest-neighbour search is a port; the default adapter needs no PostgreSQL extension | Accepted | Post-filter candidate sets are routinely above a few thousand, or the estate's database standard adopts `pgvector` |
+| [0020](ADR-0020-graph-store-decision.md) | The classification tree and the lineage graph both live in PostgreSQL; no separate graph store | Accepted | Measured p95 lineage traversal exceeds ~200 ms at real depth, or all-paths enumeration / graph algorithms become requirements |
 
 ## Superseded decision history
 

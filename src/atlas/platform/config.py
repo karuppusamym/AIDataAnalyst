@@ -93,6 +93,42 @@ class Settings(BaseSettings):
     mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
     mcp_tool_calls_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
     mcp_context_reads_per_day: int = Field(default=5_000, ge=1, le=1_000_000)
+    # --- Vector index (ADR-0019) -------------------------------------------
+    #
+    # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids
+    # extensions outright, so the default backend is the one that needs none.
+    #   postgres_bruteforce -- exact cosine over a policy-narrowed candidate set,
+    #                          no extension, no second system
+    #   external           -- the bank's own in-network vector service over HTTP
+    #   pgvector           -- only selectable where the extension is actually
+    #                          installed; refused at startup otherwise (INV-4, INV-9)
+    #   disabled           -- semantic retrieval off; lexical only, honestly reported
+    vector_index_backend: Literal[
+        "disabled", "postgres_bruteforce", "external", "pgvector"
+    ] = "postgres_bruteforce"
+    vector_index_url: str | None = None
+    vector_index_credential_reference: str | None = Field(default=None, max_length=500)
+    vector_index_collection: str = Field(default="atlas-metadata", max_length=200)
+    vector_index_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    # Exact cosine is linear in candidates. Measured end to end on PostgreSQL 16 with
+    # 200,000 stored 768-dimension embeddings -- fetch, unpack and score, to top-25:
+    #     200 candidates ->    45 ms
+    #   1,000 candidates ->   100 ms
+    #   5,000 candidates ->   427 ms
+    #  20,000 candidates -> 1,697 ms
+    # So the workable envelope is a lexical/policy pre-filter down to order 1,000, then
+    # exact re-ranking. The default cap is set where the curve is still interactive; the
+    # cap is a refusal with a reason code, not a truncation, because scoring an
+    # arbitrary slice of a larger set returns plausible answers that are wrong.
+    vector_bruteforce_candidate_cap: int = Field(default=5_000, ge=100, le=1_000_000)
+    # An embedding is only comparable to embeddings made by the same model. These are
+    # pinned so that changing the model invalidates the index rather than silently
+    # mixing incomparable vectors -- the failure mode of which is quietly bad search.
+    embedding_model_id: str = Field(default="unset", max_length=200)
+    embedding_model_version: str = Field(default="unset", max_length=100)
+    embedding_dimensions: int = Field(default=768, ge=8, le=8192)
+    embedding_chunking_version: int = Field(default=1, ge=1)
+
     entitlement_provider: Literal["outbox", "webhook"] = "outbox"
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None

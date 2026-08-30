@@ -20,6 +20,7 @@ Three behaviours in here carry most of the design weight:
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -29,6 +30,12 @@ from aida.business_graph import classification_scope, load_policies
 from aida.models import SourceBinding, Workspace, WorkspaceMembership
 from aida.policy_engine import PolicyDecision, Resource, Subject, evaluate
 from aida.security_types import SecurityContext
+from aida.timeutil import is_expired
+from aida.workspace_access import (
+    apply_enforcement_mode,
+    record_divergence,
+    rule_derived_roles,
+)
 
 # Workspace roles, weakest first. Roles are additive across memberships; a DENY from
 # policy always wins over a grant from a role, and maker != checker (INV-8) holds
@@ -73,7 +80,11 @@ class AuthorizationResult:
 
 
 def _expired(expires_at: datetime | None, now: datetime) -> bool:
-    return expires_at is not None and expires_at <= now
+    # Delegates rather than comparing directly: a stored timestamp reads back naive from
+    # SQLite and aware from PostgreSQL, so the obvious comparison is wrong on one backend
+    # only. This is an expiry check on an access grant, which is the worst place for a
+    # backend-dependent answer.
+    return is_expired(expires_at, now)
 
 
 async def membership_roles(
@@ -164,12 +175,29 @@ async def authorize(
     workspace = await session.get(Workspace, workspace_id)
     if workspace is None or workspace.status != "ACTIVE":
         return AuthorizationResult(allowed=False, reason_code="WORKSPACE_UNAVAILABLE")
-    if context.organization_id is not None and workspace.organization_id != context.organization_id:
+    if context.organization_id is None:
+        # Fail closed (INV-4/INV-5). Written first as
+        # `if context.organization_id is not None and <mismatch>`, which skipped tenant
+        # isolation entirely for a caller that simply omitted the organization -- and
+        # development identity makes `X-Organization-Id` optional, so None is reachable
+        # from outside. An absent tenant claim is a denial, never a waiver.
+        return AuthorizationResult(allowed=False, reason_code="NO_ORGANIZATION_CONTEXT")
+    if workspace.organization_id != context.organization_id:
         # 403 rather than 404 everywhere, so "exists elsewhere" and "does not exist"
         # are indistinguishable from outside (30-contracts/02-api-conventions.md).
+        # Note there is deliberately no PlatformAdmin bypass here, unlike
+        # `enforce_organization`: a workspace is a tenancy boundary, and INV-5 says
+        # isolation is total.
         return AuthorizationResult(allowed=False, reason_code="CROSS_ORGANIZATION_DENIED")
 
+    # Explicit membership rows, plus anything the identity provider's roles grant through
+    # a workspace access rule. The rule path is what makes the ADR-0018 migration's
+    # memberless workspaces usable at all: there is no persisted principal table to
+    # backfill memberships from, so membership is derived rather than invented.
     roles = await membership_roles(session, workspace_id, context.principal_id, now=moment)
+    roles = roles | await rule_derived_roles(
+        session, workspace, frozenset(context.roles), now=moment
+    )
     if not roles:
         return AuthorizationResult(
             allowed=False, reason_code="NO_WORKSPACE_MEMBERSHIP", workspace_id=workspace_id
@@ -240,6 +268,57 @@ async def authorize(
         workspace_id=workspace_id,
         binding_id=binding_id,
         decision=decision,
+    )
+
+
+async def authorize_enforced(
+    session: AsyncSession,
+    context: SecurityContext,
+    **kwargs: Any,
+) -> AuthorizationResult:
+    """`authorize`, then honour the workspace's enforcement mode. Call this from surfaces.
+
+    The distinction matters and is the whole reason this function exists separately:
+    `authorize` answers *what is the correct decision*, and this answers *what should
+    happen right now*. In a `SHADOW` workspace those differ -- the correct decision may be
+    a denial while the right action is to proceed and write down that it would have been
+    denied.
+
+    Wiring surfaces to `authorize` directly would enforce attribute-based access the
+    moment it was introduced, against workspaces the ADR-0018 migration created with no
+    memberships at all. That is a platform-wide outage dressed as a security improvement.
+    Every caller should use this; `authorize` stays public because the authorization-probe
+    endpoint deliberately wants the unmodulated answer.
+    """
+    result = await authorize(session, context, **kwargs)
+    workspace = await session.get(Workspace, kwargs["workspace_id"])
+    if workspace is None:
+        # No workspace, no mode to honour, and no safe reading other than refusal.
+        return result
+
+    outcome = apply_enforcement_mode(
+        workspace, allowed=result.allowed, reason_code=result.reason_code
+    )
+    if outcome.shadow_would_have_denied:
+        record_divergence(
+            session,
+            workspace,
+            principal_id=context.principal_id,
+            principal_kind=str(kwargs.get("principal_kind", "HUMAN")),
+            action=str(kwargs.get("action", "")),
+            resource_type=str(kwargs.get("resource_type", "")),
+            resource_id=kwargs.get("resource_id"),
+            reason_code=result.reason_code,
+            matched_policy_code=(
+                result.decision.matched_policy_code if result.decision else None
+            ),
+        )
+    return AuthorizationResult(
+        allowed=outcome.allowed,
+        reason_code=outcome.reason_code,
+        workspace_id=result.workspace_id,
+        binding_id=result.binding_id,
+        decision=result.decision,
     )
 
 

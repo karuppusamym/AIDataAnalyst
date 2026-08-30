@@ -13,6 +13,283 @@
 
 ---
 
+## 2026-08-30 (fifth entry)
+
+### A devil's-advocate check before building found that the next planned change was an outage
+
+The plan stated at the end of the previous entry was "wire `authorize` into the read and
+execution paths". Challenging that plan before implementing it, rather than after, produced
+the most valuable finding of the day.
+
+#### The plan would have denied every request in the platform
+
+The ADR-0018 migration backfills one workspace per project and **zero memberships**. It
+backfills zero because there is nothing to backfill *from*: this codebase has **no persisted
+principal table at all** -- identity and roles arrive as OIDC claims per request and are
+never stored. (Module 01's spec claims a principal registry; it does not exist. Third
+doc-versus-code gap of the day.)
+
+Verified on the populated rehearsal database: 24 workspaces, 48 active source bindings,
+**0 memberships**. Wiring `authorize` in would have returned `NO_WORKSPACE_MEMBERSHIP` for
+every request. The 14-assertion migration rehearsal missed it because not one assertion
+asked "can anyone actually get in".
+
+#### What was built instead
+
+Seeding 24 synthetic owners would have invented an access grant nobody made. Two mechanisms
+instead, migration `c9d1a83e6b47`:
+
+* **`workspace_access_rule`** derives workspace membership from an IdP role, scoped to a
+  workspace, to everything under a business node, or org-wide. Seven rules per organization
+  cover every migrated workspace; revoking a rule revokes the access; rules only grant, and
+  a DENY policy still outranks them.
+* **Shadow mode.** `workspace.authorization_mode` defaults to `SHADOW`, where the full
+  decision is computed, divergences are recorded in `authorization_shadow_record`, and
+  nothing is denied. `authorize_enforced` is what surfaces call; `authorize` stays public
+  for the probe endpoint, which wants the unmodulated answer. `enforcement_readiness`
+  summarises the shadow record so flipping a workspace to `ENFORCE` is a measurement.
+
+Re-verified on the populated PostgreSQL rehearsal: 7 rules seeded, 0 workspaces enforcing,
+0 memberships invented, ADR-0018 backfill intact, upgrade/downgrade round trip clean.
+**Lockout risk: none.**
+
+#### A bug class, not a bug
+
+The timezone-naive/aware comparison defect found in the previous entry appeared **twice
+more** while building this -- in `workspace_access._live` and latently in
+`workspace_service._expired`. Three occurrences in one day makes it a class, so it now has
+one implementation: `aida/timeutil.py`, with `as_utc`, `is_expired`, `is_live` and
+`same_instant`, and a test pinning the behaviour. Both of the new sites were **expiry checks
+on access grants**, which is the worst possible place for a backend-dependent answer.
+
+#### The CI gate caught its first real defect
+
+Applying the new migration produced `Multiple head revisions are present` -- the parallel
+session had authored a migration from the same parent. That is a merge accident which
+normally surfaces at deploy time, and the single-head gate added in Phase 0 caught it.
+
+Resolving it produced a second, sharper failure: both authors rebased onto the other
+simultaneously, creating a revision **cycle** -- which `alembic heads` cannot even report,
+because it raises instead of returning a count. Resolution rule recorded in the migration:
+whoever moved last yields. Chain is linear again.
+
+#### Hub-shaped lineage measured, and it reframed the ADR-0020 caveat
+
+ADR-0020 listed hub fan-out as unmeasured and as the likeliest weakness in choosing
+PostgreSQL over Neo4j. Measured downstream through a single hub column on the 880,000-edge
+DAG: 50,000 fan-out at depth 12 costs **3,402 ms** and reaches 480,000 nodes.
+
+But cost tracks **nodes reached, not depth** -- and that is not a graph-database problem,
+because Neo4j must also materialise 480,000 nodes. Bounding the traversal, which ADR-0010
+already mandates, takes the same worst case to **1.5 ms** at a 1,000-node cap. A degree
+pre-check ("is this a hub?") costs 8.8 ms.
+
+The mitigation was already the design; it had simply never been shown to be load-bearing.
+ADR-0020 now carries three binding requirements: node caps with explicit truncation, a hub
+degree pre-check before traversal, and precomputed impact summaries for high-degree nodes.
+
+#### Also produced
+
+`gap/05-embedding-model-decision-brief.md` -- deliberately a decision *input*, not a
+decision. Which embedding model runs and where is a model-risk and procurement question,
+and the irreversible part is that `index_signature` pins model, version, dimensions and
+chunking, so changing the model means re-embedding the estate.
+
+#### Known limitations
+
+- Surfaces still call neither `authorize` nor `authorize_enforced`; the safe wiring now
+  exists but no endpoint uses it. That is the next change and it is now genuinely safe.
+- Hub measurement is synthetic. The real estate's degree distribution is still unknown, and
+  what matters is how many columns exceed a 1,000 fan-out.
+- No embedding model chosen, so retrieval remains lexical-only.
+
+---
+
+## 2026-08-30 (fourth entry)
+
+### Adversarial self-review: five defects in work that had already shipped green
+
+Prompted by a direct challenge — "how can I trust your analysis, and are you making a
+big mistake?" — the ADR-0018/0019 work was attacked rather than re-read. All five
+findings below were in code that had passed review, passed `mypy --strict`, and shipped
+inside a suite of 575 passing tests.
+
+The method mattered more than the findings: tests were written to *fail first*, and each
+was watched failing before anything was changed. Three are now permanent regressions in
+`tests/test_regressions_from_adversarial_review.py`.
+
+#### 1. Fail-open tenant isolation (INV-5) — the serious one
+
+`workspace_service.authorize` read
+`if context.organization_id is not None and <organization mismatch>`, so a caller
+claiming **no** organization skipped the cross-organization check entirely. Development
+identity makes `X-Organization-Id` optional, so `None` is reachable from outside.
+
+This was in the function whose whole purpose is INV-5, and the suite already contained
+two cross-tenant tests — both of which supplied an organization and therefore never
+reached the branch. Fixed: an absent tenant claim is now `NO_ORGANIZATION_CONTEXT`, a
+denial. Deliberately no `PlatformAdmin` bypass, unlike the older `enforce_organization`:
+a workspace is a tenancy boundary and INV-5 says isolation is total.
+
+#### 2. An allowlist matching on the wrong key
+
+`PostgresBruteForceIndex.search` filtered candidates by `owner_id`, which is unique only
+*within* an `owner_type`. An allowlist authorising `("TABLE", "x")` also admitted
+`("COLUMN", "x")` — an object the policy filter had not authorised. Fixed by matching the
+full pair, narrowing in SQL on the indexed column and completing the match in Python
+because a tuple `IN` is not portable across the dialects in play.
+
+#### 3. A constraint violation visible on only one backend
+
+Re-asserting an assignment at the same instant set `effective_to == effective_from` and
+then inserted a row colliding on the unique key. **The first fix did not work**, and the
+reason is the finding: timestamps read back aware from PostgreSQL and naive from SQLite,
+so `stored == supplied` was silently False on the test backend and would have been True
+in production. Backend-dependent comparison is the worst failure shape there is, because
+no single environment reveals it. Fixed with explicit UTC normalisation (`_as_utc`).
+
+#### 4. A test that asserted nothing
+
+`assert "tbl_1" not in rendered or decision.matched_policy_id is not None` — the
+right-hand side is always true, so the assertion always passed. It was the INV-6 test,
+meaning the one control claimed as verified was the one not verified at all. Rewritten to
+assert both halves; the original kept in a comment as a standing reminder that a green
+test is not evidence until it has been watched failing.
+
+#### 5. A performance bug behind a correct-looking fallback
+
+`rollup` fell through to the expensive recompute whenever the materialised result was
+empty — but empty is ambiguous between "nothing assigned here" and "projection not built",
+and the first is the common case early in an estate's life. The ~3 s query would have run
+constantly on precisely the nodes the materialisation exists to make fast. Fixed with an
+existence probe.
+
+### Also produced
+
+`Docs/review-2026-08/gap/04-how-to-verify-this-work.md` — every claim in the review
+paired with the command that checks it, every performance number with the dataset shape
+that produced it, and an explicit list of what has *not* been verified. It includes the
+instruction to break the INV-2 import contract deliberately and watch it fail, because a
+contract that has only ever passed is not evidence of anything.
+
+### Known limitations — unchanged and still open
+
+- Nothing is wired into the read and execution paths; ABAC and the vector index decide
+  nothing in production traffic.
+- Hub-shaped lineage remains unmeasured and is the likeliest weakness in ADR-0020.
+- No embedding model is configured.
+- CI has never run on a remote.
+
+---
+
+## 2026-08-30 (third entry)
+
+### Three assumptions challenged, measured, and two of them corrected
+
+Prompted by three questions from the product owner. Each was answered with a benchmark
+against real PostgreSQL 16 rather than an opinion, because two of the three concerned
+claims this project had asserted without evidence.
+
+#### 1. `pgvector` is not available in the target estate — ADR-0019 accepted
+
+The retrieval design named `pgvector` as a fact. It is not one: the bank's PostgreSQL has
+no `vector` extension, and `CREATE EXTENSION` needs a privilege a DBA will not grant a new
+platform. An architecture that requires an extension the operator cannot install is a
+design defect, not a deployment detail.
+
+Nearest-neighbour search is now a **port** (`aida/vector_store.py`) with four adapters:
+exact cosine over `bytea` in plain PostgreSQL (default, needs nothing), the bank's
+in-network vector service over HTTP, `pgvector` where it genuinely exists (probed via
+`pg_available_extensions`, never trusted from configuration — INV-9), and disabled.
+Embeddings live in a new `embedding` table with a stored norm and an `index_signature`
+pinning model, version, dimensions and chunking; vectors from different signatures are not
+comparable, and mixing them fails as quietly poor search rather than as an error.
+
+*Measured* end to end against 200,000 stored 768-dimension embeddings — fetch, unpack,
+score, top-25: **200 candidates 45 ms, 1,000 → 100 ms, 5,000 → 427 ms, 20,000 → 1,697 ms.**
+That is the honest envelope, and it moved the default candidate cap from a guessed 20,000
+to a measured 5,000. The cap is a refusal with a reason code, not a truncation: scoring an
+arbitrary slice of a larger set returns plausible answers that are wrong.
+
+Recorded and not glossed: **embeddings are not anonymous.** Embedding-inversion research
+recovers substantial portions of source text from vectors alone, so the embedding store
+inherits the classification of what was embedded, an external index must be inside the
+bank's network, and there is no hosted-vector-API mode.
+
+#### 2. "Will recursive SQL scale?" — the tree was fine, the aggregation was not
+
+The distinction that matters and was easy to miss: the recursive CTE walks the *taxonomy*,
+never tables or columns. Measured against a bank-scale taxonomy (13,548 nodes, depth 4) and
+5,000,000 assignments:
+
+| Operation | Before | After |
+|---|---:|---:|
+| Descendants of an LOB | 3.3 ms | 1.5 ms (closure) |
+| Authorization scope for one table | 26 ms (two round trips) | 0.8 ms (one query) |
+| Roll-up over a subtree | **3,147 ms** | **0.4 ms** (materialised) |
+
+So: a closure table (`business_node_closure`) for traversal, a materialised
+`business_node_rollup` for aggregation — full recompute of every node takes ~47 s as one
+grouped statement, which is a batch job, not a request — and `classification_scope`
+collapsed from two round trips into one because it sits inside a 50 ms authorization
+budget. `computed_at` is returned to callers so roll-up staleness is visible rather than
+hidden. Migration `a7c3e91d4f28`.
+
+#### 3. "Wouldn't Neo4j be better for lineage?" — measured; the answer held, the argument did not
+
+The original recommendation to drop Neo4j was a cost argument and was too glib about
+capability. A graph database genuinely is better at deep, variable-length paths, and
+lineage is where depth is real, so the honest question was how deep this product's
+traversal actually goes.
+
+A bank-shaped column-level DAG — 12 layers, 40,000 columns per layer, real fan-in,
+**880,000 column-level edges** — traversed upstream from one report column on PostgreSQL:
+depth 4 → 0.7 ms, depth 8 → 1.6 ms, **depth 12 → 10.8 ms reaching 3,637 nodes.** The
+join-per-hop cost does not bite at this depth and edge count, and the 1–4 hop cap in
+ADR-0010 turns out to be a product decision about what to render rather than a performance
+ceiling.
+
+ADR-0020 records the decision *and what was not measured*: hub-shaped fan-out (a shared key
+column feeding tens of thousands of downstream columns), all-paths enumeration, and graph
+algorithms. Each is a named reversal condition with a threshold, not a hand-wave.
+
+Worth noting the first attempt at this benchmark measured nothing — the synthetic graph
+collapsed to a linear chain with no branching. It was rebuilt before any conclusion was
+drawn from it.
+
+#### The migration rehearsal gap is closed
+
+The previous entry listed "the migration has not been run against a populated PostgreSQL
+database" as a real gap. It has now been run, on PostgreSQL 16:
+
+- Full 37-migration chain from base to head on an empty database — clean.
+- Then the real rehearsal: populated the pre-ADR-0018 tables with 6 LOBs, 24 domains
+  (including a sub-domain layer), 24 projects and 48 datasources, and ran the chain over
+  it. **14 of 14 backfill assertions passed** — workspace count, node count, parent chains
+  for both DOMAIN→LOB and SUB_DOMAIN→DOMAIN, assignment count, grandfathered ACTIVE
+  bindings, code uniqueness under namespacing, 4 ACTIVE + 1 DRAFT seeded policies, closure
+  and roll-up populated, and the pre-ADR-0018 tables untouched.
+- Full round trip: upgrade → downgrade → upgrade. New tables removed cleanly, original data
+  intact, backfill reproduced identically.
+
+#### Known limitations — still open
+
+- **Nothing is wired into the read and execution paths yet.** ABAC and the vector index
+  both exist, are tested, and decide nothing in production traffic. Unchanged from the
+  previous entry and still the next thing to do.
+- **Hub-shaped lineage is unmeasured** and is the likeliest place the PostgreSQL graph
+  decision hurts. It should be measured on the real estate once view and procedure parsing
+  land and the graph has a realistic degree distribution.
+- **No embedding model is configured.** `embedding_model_id` defaults to `unset`; nothing
+  produces vectors yet, and which model runs where is a model-route governance question
+  (ADR-0009) that has not been answered.
+- Scoring runs in Python. `numpy` would cut the scoring half of the cost substantially and
+  was deliberately not added, because a dependency should be paid for by a measurement.
+- The `pgvector` adapter is declared and refuses with `PGVECTOR_ADAPTER_NOT_IMPLEMENTED`
+  rather than existing untested (INV-9).
+
+---
+
 ## 2026-08-30 (second entry)
 
 ### ADR-0018 three-axis tenancy -- schema, engine, API and tests

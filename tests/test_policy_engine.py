@@ -276,8 +276,14 @@ def test_a_decision_never_carries_a_resource_value() -> None:
     decision = evaluate(
         policies, _subject(), _resource(classifications=frozenset({"PII"})), "READ_DATA", now=_NOW
     )
+    # This assertion was originally written as
+    #     assert "tbl_1" not in rendered or decision.matched_policy_id is not None
+    # whose right-hand side is always true, so the whole test asserted nothing and
+    # passed regardless. Kept in the history as a reminder that a green test is not
+    # evidence until you have watched it fail.
     rendered = repr(decision)
-    assert "tbl_1" not in rendered or decision.matched_policy_id is not None
+    assert "tbl_1" not in rendered, "a decision must not echo the resource identifier"
+    assert "PII" not in rendered, "a decision must not echo the resource classification"
     assert decision.reason_code == "DENIED_BY_POLICY"
     # The decision exposes no transform expression or policy body, only its identity.
     assert not hasattr(decision, "subject_match")
