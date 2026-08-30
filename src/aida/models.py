@@ -1053,6 +1053,112 @@ class ColumnProfile(Base):
     )
 
 
+class ProfilingExceptionPolicy(Base, TimestampMixin):
+    """PR-2: the maker-checker gate for value-bearing profiling (ADR-0014 exception).
+
+    Module 05 §8: ranges and top values are never computed by default -- only
+    a policy-approved, classification-specific exception with its own
+    retention contract may unlock it, scoped to exactly one
+    ``(organization_id, classification, datasource_id)`` triple. Mirrors
+    ``GovernanceReview``'s maker-checker shape (a different principal must
+    decide than the one who requested) but keeps its own denormalized
+    ``status``/``requested_by``/``decided_by`` fields rather than filing into
+    the shared ``governance_review`` queue: that queue's decision endpoint is
+    already a large per-object-type dispatcher (semantic models, tool
+    versions, model routes, ...), and this policy's shape -- scoped to a
+    classification tuple, carrying its own retention contract, gating a
+    connector capability rather than flipping one row's status -- does not
+    fit its existing branches without either distorting them or growing that
+    dispatcher further. A single active (``PENDING`` or ``APPROVED``) policy
+    per scope is enforced at request time in ``api.py``, not by a DB
+    constraint, so a ``REJECTED``/``REVOKED`` policy never blocks a fresh
+    request for the same scope.
+    """
+
+    __tablename__ = "profiling_exception_policy"
+    __table_args__ = (
+        Index(
+            "ix_profiling_exception_policy_scope",
+            "organization_id",
+            "datasource_id",
+            "classification",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    # Pinned onto every `ColumnValueProfileArtifact` this policy authorizes at
+    # the moment each one is captured -- changing this column on an existing
+    # policy only affects artifacts captured after the change, never rewrites
+    # the retention already committed to an earlier artifact.
+    retention_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(255))
+    decision_reason: Mapped[str | None] = mapped_column(String(2000))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revocation_reason: Mapped[str | None] = mapped_column(String(2000))
+
+
+class ColumnValueProfileArtifact(Base):
+    """PR-2: the value-bearing artifact a `ProfilingExceptionPolicy` unlocks.
+
+    Deliberately a *separate* table from the value-free `ColumnProfile` (never
+    joined into it by default): everything here is real source data (an
+    actual min/max and top-N actual values), it exists only for columns whose
+    classification had an APPROVED, unrevoked policy at capture time, and it
+    carries its own pinned `expires_at` so the background purge sweep
+    (`profiling_exceptions.purge_expired_value_profile_artifacts`) can enforce
+    the retention contract without touching the value-free profile at all.
+    """
+
+    __tablename__ = "column_value_profile_artifact"
+    __table_args__ = (
+        UniqueConstraint("column_profile_id"),
+        Index("ix_column_value_profile_artifact_org_expires", "organization_id", "expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("column_profile.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    policy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("profiling_exception_policy.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    min_value: Mapped[str | None] = mapped_column(Text)
+    max_value: Mapped[str | None] = mapped_column(Text)
+    top_values: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class DataQualityPolicy(Base, TimestampMixin):
     """Version-light operational thresholds scoped to a source or one catalog table."""
 

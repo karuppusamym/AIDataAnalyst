@@ -13,6 +13,7 @@ from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.logging import configure_logging
 from aida.models import AnalysisRun, QueryExecution, ScanPolicy
+from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
@@ -239,6 +240,10 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await reconcile_cancellation_requests(client, settings)
     now = datetime.now(UTC)
     await rebalance_usage_weighted_priorities(settings, now=now)
+    # PR-2's retention contract: expired value-bearing profiling artifacts are
+    # purged every iteration, bounded by profiling_exception_purge_batch_size,
+    # the same "bounded pass every iteration" shape as the two calls above.
+    await purge_expired_value_profile_artifacts(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0
