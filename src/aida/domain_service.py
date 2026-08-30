@@ -46,6 +46,12 @@ async def resolve_domain(
     if data_domain_id is None:
         return await ensure_default_domain(session, lob)
     domain = await session.get(DataDomain, data_domain_id)
+    if domain is None:
+        # INV-4 (fail closed): an unresolvable domain reference is a denial, never a
+        # silent `None` that downstream code dereferences into a 500. The caller is
+        # expected to have validated the id; if it did not, refuse here rather than
+        # proceed with no domain scope.
+        raise ValueError(f"unknown data domain: {data_domain_id}")
     return domain
 
 

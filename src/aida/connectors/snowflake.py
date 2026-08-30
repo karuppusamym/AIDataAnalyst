@@ -11,15 +11,19 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
+    DiscoveredGrant,
+    DiscoveredRoutine,
+    DiscoveredRoutineParameter,
+    DiscoveredViewDefinition,
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
@@ -29,7 +33,9 @@ from aida.connectors.discovery import (
     append_grouped_key_rows,
     assemble_catalog,
     build_table_map_from_column_rows,
+    normalize_object_type,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 _COMPLEX_SCALAR_TYPES = frozenset({"VARIANT", "OBJECT", "ARRAY", "GEOGRAPHY", "GEOMETRY"})
 _EXCLUDED_SCHEMAS = frozenset({"INFORMATION_SCHEMA", "ACCOUNT_USAGE", "READER_ACCOUNT_USAGE"})
@@ -215,7 +221,520 @@ def _rows_to_dicts(cursor: Any, rows: list[Any] | tuple[Any, ...]) -> list[dict[
     return [dict(zip(col_names, row, strict=False)) for row in rows]
 
 
-class SnowflakeConnector(Connector):
+# --- Envelope 1.1 (gap/02 N1) ------------------------------------------------
+#
+# Snowflake exposes three of the four envelope axes through INFORMATION_SCHEMA and
+# the fourth only through a metadata command. Each quirk that could make a refusal
+# look like an absence is handled explicitly, and the helpers below are pure so the
+# refusal paths are unit tested rather than argued about.
+
+# A definition longer than this is stored as a prefix with `truncated=True`. Snowflake
+# will hand back up to a 16 MB VARCHAR; view-DDL lineage (N2) has to be able to tell a
+# short view from a clipped one.
+_MAX_DEFINITION_CHARACTERS = 1_000_000
+
+_VIEW_OBJECT_TYPES = frozenset({"VIEW", "MATERIALIZED_VIEW"})
+
+
+def _quote_literal(value: str) -> str:
+    """Single-quote a value for a Snowflake string literal."""
+    return "'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
+
+
+def _unqualified_name(value: object) -> str:
+    """Take the object name out of a fully-qualified SHOW GRANTS `name` column."""
+    text = str(value or "")
+    return text.split(".")[-1].strip('"')
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _is_true(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "yes", "y", "1"}
+
+
+def _split_top_level(signature: str) -> list[str]:
+    """Split an argument signature on commas that are not inside parentheses.
+
+    `NUMBER(38,0)` must not be split at its own comma.
+    """
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for character in signature:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+        if character == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(character)
+    parts.append("".join(current))
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _parse_argument_signature(signature: object) -> tuple[DiscoveredRoutineParameter, ...]:
+    """Parse Snowflake's `ARGUMENT_SIGNATURE` text into parameters.
+
+    Snowflake has no `INFORMATION_SCHEMA.PARAMETERS`: `INFORMATION_SCHEMA.FUNCTIONS`
+    and `.PROCEDURES` carry the whole argument list as one text column shaped like
+    `(A NUMBER, B VARCHAR DEFAULT NULL)`. Parsing it is therefore the only way to
+    reach a parameter list, and an unparseable fragment becomes a parameter with an
+    empty `physical_type` rather than a silently dropped argument.
+
+    Every Snowflake UDF and stored-procedure argument is an input argument, so `mode`
+    is always `IN`.
+    """
+    text = _optional_text(signature)
+    if text is None:
+        return ()
+    inner = text.strip()
+    if inner.startswith("("):
+        inner = inner[1:]
+    if inner.endswith(")"):
+        inner = inner[:-1]
+    parameters: list[DiscoveredRoutineParameter] = []
+    for position, part in enumerate(_split_top_level(inner), start=1):
+        remainder = part
+        default_expression: str | None = None
+        upper = remainder.upper()
+        marker = upper.find(" DEFAULT ")
+        if marker >= 0:
+            default_expression = remainder[marker + len(" DEFAULT ") :].strip() or None
+            remainder = remainder[:marker].strip()
+        pieces = remainder.split(None, 1)
+        if len(pieces) == 2:
+            name, physical_type = pieces[0], pieces[1].strip()
+        else:
+            name, physical_type = None, remainder
+        parameters.append(
+            DiscoveredRoutineParameter(
+                name=name,
+                ordinal_position=position,
+                mode="IN",
+                physical_type=physical_type,
+                default_expression=default_expression,
+            )
+        )
+    return tuple(parameters)
+
+
+def _build_view_definition(
+    definition_text: object,
+    *,
+    object_label: str,
+    is_materialized: bool = False,
+    is_secure: object = None,
+    is_updatable: object = None,
+    check_option: object = None,
+    fallback_reason: str | None = None,
+    max_characters: int = _MAX_DEFINITION_CHARACTERS,
+) -> DiscoveredViewDefinition:
+    """Turn one view row into an honest definition.
+
+    Snowflake returns NULL for `VIEW_DEFINITION` on a **secure** view unless the
+    session holds the owning role. That NULL is the single most likely way a view's
+    text goes missing on Snowflake, and it must never arrive as an empty definition.
+    """
+    check = _optional_text(check_option)
+    definition = DiscoveredViewDefinition(
+        definition_sql=None,
+        is_materialized=is_materialized,
+        is_updatable=None if is_updatable is None else _is_true(is_updatable),
+        check_option=None if check is None or check.upper() == "NONE" else check,
+    )
+    if definition_text is None:
+        if _is_true(is_secure):
+            reason = (
+                f"{object_label} is a secure view; Snowflake withholds VIEW_DEFINITION "
+                "from a session whose role does not own it"
+            )
+        elif fallback_reason is not None:
+            reason = fallback_reason
+        else:
+            reason = (
+                f"Snowflake returned no definition text for {object_label} and GET_DDL "
+                "was not able to supply one"
+            )
+        return replace(definition, unavailable_reason=reason)
+    text = str(definition_text)
+    if len(text) > max_characters:
+        return replace(definition, definition_sql=text[:max_characters], truncated=True)
+    return replace(definition, definition_sql=text)
+
+
+def _build_routine(
+    row: Mapping[str, Any], *, max_characters: int = _MAX_DEFINITION_CHARACTERS
+) -> DiscoveredRoutine:
+    """Turn one INFORMATION_SCHEMA.FUNCTIONS / .PROCEDURES row into a routine.
+
+    Snowflake nulls `FUNCTION_DEFINITION` / `PROCEDURE_DEFINITION` for a secure
+    routine the session's role does not own, and for routines whose body it does not
+    keep (built-ins, external functions). Those arrive as an `unavailable_reason`.
+
+    `security_mode` stays `None`: a procedure's `EXECUTE AS OWNER | CALLER` is not an
+    INFORMATION_SCHEMA column, it is only reachable through `SHOW PROCEDURES` /
+    `DESCRIBE PROCEDURE`. `is_deterministic` stays `None` for the same reason.
+    """
+    routine_type = str(row.get("routine_type") or "FUNCTION")
+    name = str(row["routine_name"])
+    schema_name = str(row.get("routine_schema") or "")
+    label = f"{schema_name}.{name}" if schema_name else name
+    body = row.get("routine_definition")
+    attributes: dict[str, Any] = {}
+    signature = _optional_text(row.get("argument_signature"))
+    if signature is not None:
+        attributes["argument_signature"] = signature
+    if _is_true(row.get("is_secure")):
+        attributes["is_secure"] = True
+    truncated = False
+    unavailable_reason: str | None = None
+    if body is None:
+        if _is_true(row.get("is_secure")):
+            unavailable_reason = (
+                f"{label} is a secure {routine_type.lower()}; Snowflake withholds its "
+                "definition from a session whose role does not own it"
+            )
+        else:
+            unavailable_reason = (
+                f"Snowflake returned no definition text for {label}; it keeps no body "
+                "for built-in and external routines"
+            )
+        body_sql: str | None = None
+    else:
+        body_sql = str(body)
+        if len(body_sql) > max_characters:
+            body_sql = body_sql[:max_characters]
+            truncated = True
+    return DiscoveredRoutine(
+        name=name,
+        routine_type=routine_type,
+        language=_optional_text(row.get("routine_language")),
+        body_sql=body_sql,
+        parameters=_parse_argument_signature(row.get("argument_signature")),
+        return_type=_optional_text(row.get("data_type")),
+        is_deterministic=None,
+        security_mode=None,
+        source_description=_optional_text(row.get("comment")),
+        truncated=truncated,
+        unavailable_reason=unavailable_reason,
+        attributes=attributes,
+    )
+
+
+def _build_grant(row: Mapping[str, Any]) -> DiscoveredGrant:
+    """Turn one `SHOW GRANTS` result row into a grant.
+
+    `SHOW GRANTS` is a metadata command, not a view over INFORMATION_SCHEMA: it
+    cannot be joined, filtered or aggregated, and it has to be issued one object at a
+    time. The only set-returning grant surface Snowflake offers is
+    `SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES`, which needs access to the shared
+    SNOWFLAKE database and lags reality by up to two hours.
+    """
+    return DiscoveredGrant(
+        grantee=str(row.get("grantee_name") or ""),
+        grantee_type=str(row.get("granted_to") or "ROLE"),
+        privilege=str(row.get("privilege") or ""),
+        object_type=str(row.get("granted_on") or "SCHEMA"),
+        object_name=_unqualified_name(row.get("name")),
+        schema_name=_optional_text(row.get("schema_name")),
+        is_grantable=_is_true(row.get("grant_option")),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SnowflakeEnvelopeRows:
+    """Row sets behind envelope 1.1, plus why an axis is missing when it is."""
+
+    views: tuple[dict[str, Any], ...] = ()
+    view_ddl: tuple[dict[str, Any], ...] = ()
+    routines: tuple[dict[str, Any], ...] = ()
+    schemata: tuple[dict[str, Any], ...] = ()
+    databases: tuple[dict[str, Any], ...] = ()
+    grants: tuple[dict[str, Any], ...] = ()
+    unavailable: tuple[tuple[str, str], ...] = ()
+
+    def reason(self, axis: str) -> str | None:
+        for name, message in self.unavailable:
+            if name == axis:
+                return message
+        return None
+
+
+def _fetch_optional_rows(cursor: Any, sql: str) -> tuple[tuple[dict[str, Any], ...], str | None]:
+    """Run one supplementary metadata query, turning a refusal into a reason."""
+    try:
+        cursor.execute(sql)
+        return tuple(_rows_to_dicts(cursor, cursor.fetchall())), None
+    except Exception as exc:
+        return (), f"{type(exc).__name__}: {exc}"
+
+
+def _fetch_envelope_rows(
+    cursor: Any, *, database: str, schema_names: Sequence[str], view_keys: Sequence[tuple[str, str]]
+) -> _SnowflakeEnvelopeRows:
+    """Read every envelope 1.1 axis Snowflake exposes, recording each refusal.
+
+    `view_keys` are the (schema, name) pairs of view-shaped objects discovered from
+    INFORMATION_SCHEMA.TABLES. They drive the `GET_DDL` second pass, which is the
+    only path to a materialized view's text -- Snowflake's INFORMATION_SCHEMA.VIEWS
+    contains no row for a materialized view at all.
+    """
+    unavailable: list[tuple[str, str]] = []
+
+    def _collect(axis: str, sql: str) -> tuple[dict[str, Any], ...]:
+        rows, reason = _fetch_optional_rows(cursor, sql)
+        if reason is not None:
+            unavailable.append((axis, reason))
+        return rows
+
+    databases = _collect(
+        "catalog_comment",
+        "SELECT database_name, comment FROM information_schema.databases "
+        "WHERE database_name = CURRENT_DATABASE()",
+    )
+    schemata = _collect(
+        "schema_comments",
+        "SELECT schema_name, comment FROM information_schema.schemata "
+        "WHERE schema_name NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')",
+    )
+    views = _collect(
+        "views",
+        """
+        SELECT
+            table_schema,
+            table_name,
+            view_definition,
+            is_secure,
+            is_updatable,
+            check_option
+        FROM information_schema.views
+        WHERE table_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
+        """,
+    )
+    functions = _collect(
+        "functions",
+        """
+        SELECT
+            function_schema AS routine_schema,
+            function_name AS routine_name,
+            'FUNCTION' AS routine_type,
+            function_language AS routine_language,
+            function_definition AS routine_definition,
+            argument_signature,
+            data_type,
+            is_secure,
+            comment
+        FROM information_schema.functions
+        WHERE function_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
+        """,
+    )
+    procedures = _collect(
+        "procedures",
+        """
+        SELECT
+            procedure_schema AS routine_schema,
+            procedure_name AS routine_name,
+            'PROCEDURE' AS routine_type,
+            procedure_language AS routine_language,
+            procedure_definition AS routine_definition,
+            argument_signature,
+            data_type,
+            is_secure,
+            comment
+        FROM information_schema.procedures
+        WHERE procedure_schema NOT IN ('INFORMATION_SCHEMA', 'ACCOUNT_USAGE')
+        """,
+    )
+
+    definitions = {
+        (str(row.get("table_schema")), str(row.get("table_name")))
+        for row in views
+        if row.get("view_definition") is not None
+    }
+    view_ddl: list[dict[str, Any]] = []
+    for schema_name, view_name in view_keys:
+        if (schema_name, view_name) in definitions:
+            continue
+        qualified = (
+            f"{database}.{schema_name}.{view_name}" if database else f"{schema_name}.{view_name}"
+        )
+        rows, reason = _fetch_optional_rows(
+            cursor,
+            f"SELECT GET_DDL('VIEW', {_quote_literal(qualified)}, TRUE) AS view_definition",  # noqa: S608 -- the identifier is quoted as a string literal, not interpolated as SQL
+        )
+        definition = rows[0].get("view_definition") if rows else None
+        view_ddl.append(
+            {
+                "table_schema": schema_name,
+                "table_name": view_name,
+                "view_definition": definition,
+                "unavailable_reason": (
+                    None
+                    if definition is not None
+                    else reason
+                    or (
+                        f"GET_DDL returned no text for {qualified}; Snowflake exposes no "
+                        "definition for this object to the session's role"
+                    )
+                ),
+            }
+        )
+
+    grants: list[dict[str, Any]] = []
+    for schema_name in schema_names:
+        qualified = (
+            f"{_quote_identifier(database)}.{_quote_identifier(schema_name)}"
+            if database
+            else _quote_identifier(schema_name)
+        )
+        rows, reason = _fetch_optional_rows(cursor, f"SHOW GRANTS ON SCHEMA {qualified}")
+        if reason is not None:
+            unavailable.append((f"grants:{schema_name}", reason))
+            continue
+        for row in rows:
+            grants.append({**row, "schema_name": schema_name})
+
+    return _SnowflakeEnvelopeRows(
+        views=views,
+        view_ddl=tuple(view_ddl),
+        routines=functions + procedures,
+        schemata=schemata,
+        databases=databases,
+        grants=tuple(grants),
+        unavailable=tuple(unavailable),
+    )
+
+
+def _assemble_snowflake_catalog(
+    catalog_name: str,
+    column_rows: list[dict[str, Any]],
+    pk_rows: list[dict[str, Any]],
+    fk_rows: list[dict[str, Any]],
+    *,
+    envelope: _SnowflakeEnvelopeRows | None = None,
+) -> tuple[DiscoveredCatalog, ...]:
+    """Assemble the v1.0 catalog, then fold the envelope 1.1 axes onto it.
+
+    A rebuild rather than a change to `aida.connectors.discovery`, whose shared
+    helpers are on the v1.0 contract and are used by connectors this workstream does
+    not own.
+    """
+    table_map = build_table_map_from_column_rows(column_rows)
+    append_grouped_key_rows(table_map, pk_rows, constraint_type_map=_CONSTRAINT_TYPE_MAP)
+    append_grouped_foreign_key_rows(table_map, fk_rows)
+    catalogs = assemble_catalog(catalog_name, table_map)
+    if envelope is None:
+        return catalogs
+
+    table_comments = {
+        (str(row["table_schema"]), str(row["table_name"])): _optional_text(row.get("table_comment"))
+        for row in column_rows
+    }
+    column_comments = {
+        (str(row["table_schema"]), str(row["table_name"]), str(row["column_name"])): _optional_text(
+            row.get("column_comment")
+        )
+        for row in column_rows
+    }
+    schema_comments = {
+        str(row["schema_name"]): _optional_text(row.get("comment")) for row in envelope.schemata
+    }
+    catalog_comment = next(
+        (_optional_text(row.get("comment")) for row in envelope.databases), None
+    )
+    view_rows = {
+        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.views
+    }
+    ddl_rows = {
+        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.view_ddl
+    }
+    routines: dict[str, list[DiscoveredRoutine]] = {}
+    for row in envelope.routines:
+        routines.setdefault(str(row["routine_schema"]), []).append(_build_routine(row))
+    grants: dict[str, list[DiscoveredGrant]] = {}
+    for row in envelope.grants:
+        grants.setdefault(str(row["schema_name"]), []).append(_build_grant(row))
+    views_reason = envelope.reason("views")
+
+    rebuilt: list[DiscoveredCatalog] = []
+    for catalog in catalogs:
+        schemas = []
+        for schema in catalog.schemas:
+            tables = []
+            for table in schema.tables:
+                key = (schema.name, table.name)
+                definition: DiscoveredViewDefinition | None = None
+                if table.object_type in _VIEW_OBJECT_TYPES:
+                    view_row: dict[str, Any] = view_rows.get(key, {})
+                    ddl_row: dict[str, Any] = ddl_rows.get(key, {})
+                    # INFORMATION_SCHEMA first, GET_DDL second. A materialized view has
+                    # no INFORMATION_SCHEMA.VIEWS row at all, so it always arrives via
+                    # the GET_DDL pass -- or as that call's refusal.
+                    text = view_row.get("view_definition")
+                    fallback_reason = None
+                    if text is None:
+                        text = ddl_row.get("view_definition")
+                        fallback_reason = ddl_row.get("unavailable_reason") or views_reason
+                    definition = _build_view_definition(
+                        text,
+                        object_label=f"{schema.name}.{table.name}",
+                        is_materialized=table.object_type == "MATERIALIZED_VIEW",
+                        is_secure=view_row.get("is_secure"),
+                        is_updatable=view_row.get("is_updatable"),
+                        check_option=view_row.get("check_option"),
+                        fallback_reason=fallback_reason,
+                    )
+                columns = tuple(
+                    replace(
+                        column,
+                        source_description=column_comments.get(
+                            (schema.name, table.name, column.name)
+                        ),
+                    )
+                    for column in table.columns
+                )
+                tables.append(
+                    replace(
+                        table,
+                        columns=columns,
+                        source_description=table_comments.get(key),
+                        view_definition=definition,
+                    )
+                )
+            schemas.append(
+                replace(
+                    schema,
+                    tables=tuple(tables),
+                    routines=tuple(routines.get(schema.name, ())),
+                    grants=tuple(grants.get(schema.name, ())),
+                    source_description=schema_comments.get(schema.name),
+                )
+            )
+        attributes = dict(catalog.attributes)
+        if envelope.unavailable:
+            attributes["envelope_v11_unavailable"] = dict(envelope.unavailable)
+        rebuilt.append(
+            replace(
+                catalog,
+                schemas=tuple(schemas),
+                source_description=catalog_comment,
+                attributes=attributes,
+            )
+        )
+    return tuple(rebuilt)
+
+
+class SnowflakeConnector(SqlExecutor):
     """Snowflake native connector conforming to the Atlas Connector protocol."""
 
     connector_type = "snowflake"
@@ -230,6 +749,13 @@ class SnowflakeConnector(Connector):
         query_history=True,
         delegated_identity=True,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag is set because `discover()` reads the
+        # named surface and lands the result on the envelope, with every refusal
+        # arriving as an `unavailable_reason` rather than as an empty value.
+        views=True,  # INFORMATION_SCHEMA.VIEWS.VIEW_DEFINITION, GET_DDL fallback
+        routines=True,  # INFORMATION_SCHEMA.FUNCTIONS and .PROCEDURES
+        object_comments=True,  # COMMENT on DATABASES/SCHEMATA/TABLES/COLUMNS/routines
+        grants=True,  # SHOW GRANTS ON SCHEMA (schema-level; see gap/08 for the bound)
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 60.0) -> None:
@@ -314,7 +840,9 @@ class SnowflakeConnector(Connector):
                             c.ordinal_position,
                             c.data_type,
                             c.is_nullable,
-                            c.column_default
+                            c.column_default,
+                            t.comment AS table_comment,
+                            c.comment AS column_comment
                         FROM information_schema.columns c
                         JOIN information_schema.tables t
                           ON t.table_catalog = c.table_catalog
@@ -382,16 +910,33 @@ class SnowflakeConnector(Connector):
                     )
                     fk_rows = _rows_to_dicts(cur, cur.fetchall())
 
+                    # Envelope 1.1 (gap/02 N1): view text, routines with bodies,
+                    # object comments and source grants.
+                    schema_names = sorted({str(row["table_schema"]) for row in column_rows})
+                    view_keys = sorted(
+                        {
+                            (str(row["table_schema"]), str(row["table_name"]))
+                            for row in column_rows
+                            if normalize_object_type(str(row.get("table_type") or ""))
+                            in _VIEW_OBJECT_TYPES
+                        }
+                    )
+                    envelope = _fetch_envelope_rows(
+                        cur,
+                        database=self._params.database or catalog_name,
+                        schema_names=schema_names,
+                        view_keys=view_keys,
+                    )
+
                 finally:
                     cur.close()
             finally:
                 conn.close()
 
             # Assemble into Atlas Catalog Graph
-            table_map = build_table_map_from_column_rows(column_rows)
-            append_grouped_key_rows(table_map, pk_rows, constraint_type_map=_CONSTRAINT_TYPE_MAP)
-            append_grouped_foreign_key_rows(table_map, fk_rows)
-            return assemble_catalog(catalog_name, table_map)
+            return _assemble_snowflake_catalog(
+                catalog_name, column_rows, pk_rows, fk_rows, envelope=envelope
+            )
 
         return await asyncio.to_thread(_sync_discover)
 

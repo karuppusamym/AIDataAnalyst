@@ -2,7 +2,7 @@
 
 > Status: Authoritative. Owner: Product. Baseline: 2026-08-28.
 > Legend: `●` strong / mature · `◐` partial or preview · `○` weak or absent · `—` not applicable to that product's model.
-> Atlas column reflects **current implemented state** (see `60-delivery/04-status-matrix.md`), not roadmap.
+> Atlas column reflects **current implemented state** (see `60-delivery/00-status.md`), not roadmap.
 
 ## 1. How to read this
 
@@ -144,7 +144,7 @@ Every one of these follows from the same architectural commitment: *deterministi
 ## Related documents
 
 - Market landscape: `00-product/03-market-landscape.md`
-- Per-vendor deep dives with UI-surface detail: `competitors/01-atlan-analysis.md`, `competitors/02-collibra-analysis.md`, `competitors/03-alation-analysis.md`, `competitors/04-cloud-catalogs-purview-databricks.md`
+- Per-vendor deep dives with UI-surface detail: `review-2026-08/research/02-atlan.md`, `review-2026-08/research/01-collibra.md`, `review-2026-08/research/03-alation-purview-unity-ainative.md`, `review-2026-08/research/03-alation-purview-unity-ainative.md`
 - Differentiation and whitespace: `00-product/05-differentiation-and-whitespace.md`
 - Roadmap: `60-delivery/01-roadmap.md`
-- Status matrix: `60-delivery/04-status-matrix.md`
+- Status matrix: `60-delivery/00-status.md`

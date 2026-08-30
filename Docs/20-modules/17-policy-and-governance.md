@@ -15,7 +15,7 @@ R1–R4 (all reviewer jobs), S2, U3 (approval chains), P5, and the authorization
 ## 3. Responsibilities
 
 - Policy definition, versioning, and evaluation.
-- RBAC today; ABAC and purpose-based access as the target.
+- RBAC and ABAC together as of 2026-08-30 (ADR-0018). RBAC still gates the API surface via `require_roles`; attribute-based policy decides resource access underneath it, seeded so that migration day changed no outcome. Residency attributes and an external-PDP adapter remain target.
 - Entitlements (edition and licence gating).
 - The **unified review queue** across all object types.
 - Proposal, assignment, decision, and rationale capture.
@@ -113,8 +113,9 @@ Emits `policy.version_published`, `proposal.submitted`, `proposal.assigned`, `de
 | Aspect | Now | Target |
 |---|---|---|
 | RBAC | Implemented — role gates, organization enforcement | Retained |
-| ABAC | **Not implemented** | Entry-ticket gap — attributes: classification, purpose, residency, agent-vs-human |
-| Purpose-based access | Not implemented | Required for regulated purposes |
+| ABAC | **Implemented 2026-08-30** | `policy_engine.py` (pure evaluation) + `access_policy` table. Attributes: classification, business node closure, certification, datasource, schema pattern, resource type; subject attributes: roles, principal kind, purpose, workspace. DENY is a hard ceiling; default is deny (INV-4). Residency is **not** an attribute yet |
+| Purpose-based access | **Implemented 2026-08-30** | `subject_match.purposes` matched against the declared `X-Business-Purpose`. Not yet mandatory per session — declaring a purpose is still optional at the API edge |
+| Agent-vs-human context attribute | **Implemented 2026-08-30** | `principal_kind` ∈ HUMAN \| AGENT \| SERVICE is a first-class subject attribute. "Humans may see full account numbers, agents never do" is one policy; the ADR-0018 migration seeds exactly that policy as DRAFT so it is reviewable but inert |
 | Unified review queue | Implemented — cross-object, filters, rationale, independent decisions | Bulk assignment, richer evidence schemas |
 | Maker ≠ checker | Implemented | Unchanged |
 | Bulk decisions | Not implemented | Entry-ticket gap |
@@ -128,7 +129,7 @@ Emits `policy.version_published`, `proposal.submitted`, `proposal.assigned`, `de
 
 | ID | Item | Priority |
 |---|---|---|
-| PG-1 | ABAC with classification, purpose, residency attributes | P0 |
+| ~~PG-1~~ | ~~ABAC with classification and purpose attributes~~ — **DONE 2026-08-30**. Residency attribute still open | — |
 | PG-2 | Agent-vs-human context attribute | P0 |
 | PG-3 | Bulk decisions with per-item rationale | P0 |
 | PG-4 | Delegation and reassignment | P1 |

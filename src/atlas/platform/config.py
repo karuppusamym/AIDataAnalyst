@@ -93,6 +93,68 @@ class Settings(BaseSettings):
     mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
     mcp_tool_calls_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
     mcp_context_reads_per_day: int = Field(default=5_000, ge=1, le=1_000_000)
+    # Per-consumer rate limits (CX-6): narrower throttle for individual consumers
+    mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
+    mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
+    mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # --- Vector index (ADR-0019) -------------------------------------------
+    #
+    # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids
+    # extensions outright, so the default backend is the one that needs none.
+    #   postgres_bruteforce -- exact cosine over a policy-narrowed candidate set,
+    #                          no extension, no second system
+    #   external           -- the bank's own in-network vector service over HTTP
+    #   pgvector           -- only selectable where the extension is actually
+    #                          installed; refused at startup otherwise (INV-4, INV-9)
+    #   disabled           -- semantic retrieval off; lexical only, honestly reported
+    vector_index_backend: Literal[
+        "disabled", "postgres_bruteforce", "external", "pgvector"
+    ] = "postgres_bruteforce"
+    vector_index_url: str | None = None
+    vector_index_credential_reference: str | None = Field(default=None, max_length=500)
+    vector_index_collection: str = Field(default="atlas-metadata", max_length=200)
+    vector_index_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    # Exact cosine is linear in candidates. Measured end to end on PostgreSQL 16 with
+    # 200,000 stored 768-dimension embeddings -- fetch, unpack and score, to top-25:
+    #     200 candidates ->    45 ms
+    #   1,000 candidates ->   100 ms
+    #   5,000 candidates ->   427 ms
+    #  20,000 candidates -> 1,697 ms
+    # So the workable envelope is a lexical/policy pre-filter down to order 1,000, then
+    # exact re-ranking. The default cap is set where the curve is still interactive; the
+    # cap is a refusal with a reason code, not a truncation, because scoring an
+    # arbitrary slice of a larger set returns plausible answers that are wrong.
+    vector_bruteforce_candidate_cap: int = Field(default=5_000, ge=100, le=1_000_000)
+    # Which service produces embeddings (N5, decided 2026-08-30: OpenAI or Gemini, the
+    # same two providers the generation path already supports). `unset` is not a disabled
+    # feature but an unmade decision, and it fails closed: `resolve_embedding_provider`
+    # refuses rather than falling back to the deterministic hash double, because a
+    # "vector similarity" score computed from a SHA-256 digest is noise wearing the name
+    # of a signal (INV-4, INV-9).
+    embedding_provider: Literal["unset", "openai", "gemini"] = "unset"
+    # Resolved through the same path as every other model credential, so an embedding key
+    # inherits the same rotation, the same registry and the same production refusal of
+    # `env://`. Empty means unconfigured, which is a refusal.
+    embedding_credential_reference: str = Field(default="", max_length=500)
+    # An embedding is only comparable to embeddings made by the same model. These are
+    # pinned so that changing the model invalidates the index rather than silently
+    # mixing incomparable vectors -- the failure mode of which is quietly bad search.
+    # Left at `unset`, the provider's documented default is used.
+    embedding_model_id: str = Field(default="unset", max_length=200)
+    embedding_model_version: str = Field(default="unset", max_length=100)
+    embedding_dimensions: int = Field(default=768, ge=8, le=8192)
+    embedding_chunking_version: int = Field(default=1, ge=1)
+
+    # What to do with a request whose workspace cannot be resolved (ADR-0018 rollout).
+    # SHADOW proceeds and logs; DENY refuses. It defaults to SHADOW because the API
+    # contracts predate ADR-0018 and almost no caller names a workspace yet -- defaulting
+    # to DENY would take the platform down on the day the gate was wired, which is how an
+    # authorization rollout gets reverted instead of finished. The
+    # `authorization.workspace_unresolved` log line counts the callers still to migrate;
+    # when it reaches zero for an environment, this flips there. That flip is the actual
+    # completion of the rollout, and until it happens the platform should say so (INV-9).
+    unresolved_workspace_posture: Literal["SHADOW", "DENY"] = "SHADOW"
+
     entitlement_provider: Literal["outbox", "webhook"] = "outbox"
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None

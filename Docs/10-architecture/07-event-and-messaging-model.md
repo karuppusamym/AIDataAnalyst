@@ -112,9 +112,18 @@ Every event carries the same envelope. Payload shape varies; envelope never does
 | Rename field | No | Add new, deprecate old |
 | Add event type | Yes | New topic or type; consumers opt in |
 
-Backward compatibility is enforced by a schema registry compatibility policy (`BACKWARD` minimum), checked in CI against the published catalog.
+Backward compatibility is intended to be enforced by a schema registry compatibility policy (`BACKWARD` minimum), checked in CI against the published catalog. **Planned, not built (2026-08-30):** there is no schema registry in `compose.yaml` or in the dependency list, and `.github/workflows/ci.yml` has no event-schema step — its gates are `ruff`, `mypy`, `lint-imports`, a single-Alembic-head check, and `pytest`.
 
 ## 6. Topic design
+
+> **Implementation status (2026-08-30). Target.** There is **one** topic, not eight.
+> `src/aida/projectors/outbox_publisher.py` publishes every outbox row to the single topic
+> `aida.platform.events.v1`, keyed by `aggregate_id`, with the event type carried as a Kafka
+> header rather than encoded in the topic name. None of the `atlas.*.v1` topic names below
+> appears anywhere in `src/`. The per-topic partition keys and the broker-ACL isolation model
+> that depends on them are therefore also target. The outbox itself — the part that is hard to
+> get right — is real: transactional write, `FOR UPDATE SKIP LOCKED` claim, retry with
+> backoff, dead-lettering.
 
 | Topic | Partition key | Ordering guarantee |
 |---|---|---|
@@ -141,6 +150,18 @@ Every consumer, internal or external, must:
 6. **Respect tenancy.** A consumer processing an event for a tenant it has no entitlement to must reject, not process.
 
 ## 8. Temporal workflow model
+
+> **Implementation status (2026-08-30). 2 of the 8 workflows below exist.** Verified by
+> grepping `@workflow.defn` across `src/`: `DatasourceDiscoveryWorkflow`
+> (`src/aida/workflows/discovery.py`) and `MetadataBatchIngestionWorkflow`
+> (`src/aida/workflows/ingestion.py`). `SourceOnboarding`, `AnalysisRun`, `QualityEvaluation`,
+> `LineageExtraction`, `SemanticInference` and `ProjectionRebuild` are **not defined as
+> Temporal workflows**. Some of the work they describe exists as activities on the two real
+> workflows (`discover_datasource`, `profile_datasource`, `plan_profile_tasks`,
+> `profile_table_task`, `finalize_profile_tasks` in `workflows/activities.py`) or as
+> synchronous service code; none of it has the durable, resumable execution this table
+> attributes to it. `ProjectionRebuild` in particular does not exist, which is the same gap as
+> INV-1's missing `test_projection_rebuild` and the never-run rebuild drill.
 
 | Workflow | Trigger | Activities | Durability need |
 |---|---|---|---|

@@ -73,7 +73,7 @@ flowchart LR
 
 | Contract | Test |
 |---|---|
-| REST API | OpenAPI schema diff in CI; breaking change fails the build |
+| REST API | OpenAPI schema diff in CI; breaking change fails the build — **planned, not wired (2026-08-30)**: no OpenAPI-diff step exists in `.github/workflows/ci.yml`, and no released spec is committed to diff against |
 | Events | Schema-registry compatibility check (`BACKWARD` minimum) |
 | Module interfaces | Import-linter contracts; type checks on public signatures |
 | Envelope | Golden-payload fixtures across supported versions |

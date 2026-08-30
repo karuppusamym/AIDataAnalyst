@@ -5,6 +5,19 @@
 
 ## 1. Store roles
 
+> **Implementation status (2026-08-30).** Three of the seven stores below are wired and three
+> are not. Verified against `compose.yaml`, `pyproject.toml` dependencies and `src/`:
+>
+> | Store | Today |
+> |---|---|
+> | PostgreSQL | **Built.** Authoritative, 34 Alembic revisions, single schema |
+> | Neo4j | **Built.** `neo4j==5.28.2` dependency, service in `compose.yaml`, `src/aida/lineage_graph_store.py` and `projectors/graph_projector.py`. Note `gap/02` row C7/D1 proposes dropping it |
+> | Kafka | **Built** (Redpanda locally). `aiokafka==0.14.0`, `projectors/outbox_publisher.py`. One topic, not eight — see `07-event-and-messaging-model.md` §6. `gap/02` row C8/D2 proposes deferring it |
+> | Redis | **Built.** `redis==6.4.0`; MCP budgets and locks |
+> | pgvector | **Extension only.** `infra/postgres/init.sql` runs `CREATE EXTENSION IF NOT EXISTS vector` and the image is `pgvector/pgvector:pg17`, but **no embedding column exists** in any model or migration and nothing writes or reads a vector. `src/aida/retrieval.py` is BM25-style lexical scoring, and its own comment says pgvector arrives "in Phase 2 when the embedding column is added". Tracked as `N5` |
+> | Search index | **Does not exist.** No search-engine dependency, no service, no client code. Lexical search is SQL inside PostgreSQL |
+> | Object storage | **Not wired.** MinIO runs in `compose.yaml`, but there is **no object-storage client** in the dependency list (no `boto3`, no `minio`) and nothing in `src/` reads or writes it. Profiling artifacts, evidence packs and the WORM archive are all target behaviour |
+
 | Store | Role | Authority | Rebuild source | Growth driver |
 |---|---|---|---|---|
 | PostgreSQL | All governed state, outbox, audit ledger | **Authoritative** | Backup/restore only | Catalog objects, executions, audit |
@@ -24,11 +37,21 @@ Grouped by owning module. Names are logical; physical names live in migrations.
 ### Tenancy (module 01)
 
 ```text
-organization → legal_entity → line_of_business → data_domain → project → datasource
+organization → line_of_business → data_domain → project → datasource
 principal, principal_role, secret_reference
 ```
 
-Every governed table below carries `organization_id`, plus `lob_id` / `project_id` where applicable (INV-5).
+> **Implementation status (2026-08-30).** `legal_entity` was in this path and **does not
+> exist**: no match anywhere in `src/` or `migrations/`. It has been removed from the line
+> above rather than left to mislead; `gap/02` rows C2/D3 are to not build it. The path shown
+> is the *pre-ADR-0018* shape, and it is itself being replaced: `Workspace`,
+> `WorkspaceMembership`, `SourceBinding`, `BusinessNode`, `BusinessAssignment` and
+> `AccessPolicy` are in `src/aida/models.py` and in
+> `migrations/versions/f1a2b3c4d5e6_adr_0018_three_axis_tenancy.py`. **This section is not the
+> authority on tenancy** — ADR-0018 and `20-modules/01-identity-and-tenancy.md` are, and this
+> section should be restated once that work settles.
+
+Every governed table below carries `organization_id`, plus the scope columns ADR-0018 defines where applicable (INV-5).
 
 ### Source and ingestion (02, 03)
 

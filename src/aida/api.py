@@ -18,13 +18,14 @@ from aida.agent_orchestrator import (
     GovernedAgentOrchestrator,
     ModelRouteUnavailable,
 )
+from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
-from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
@@ -50,7 +51,12 @@ from aida.models import (
     TableProfile,
 )
 from aida.prompt_risk import DeterministicPromptRiskClassifier
-from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
+from aida.query_gateway import (
+    AuthorizationRejected,
+    GatewayResult,
+    QueryExecutionGateway,
+    QueryRejected,
+)
 from aida.schemas import (
     AgentAnalysisRequest,
     AgentAnalysisResponse,
@@ -177,6 +183,17 @@ async def preview_agent_retrieval(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        # Not READ_METADATA: this returns the assembled retrieval evidence an agent
+        # would be handed, which is the context product, not the catalog.
+        action="CONSUME_CONTEXT",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     prompt_risk = DeterministicPromptRiskClassifier().assess(body.question)
     hits = (
         []
@@ -631,7 +648,9 @@ async def create_line_of_business(
 async def create_data_domain(
     lob_id: UUID,
     body: DataDomainCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> DataDomain:
     lob = await session.get(LineOfBusiness, lob_id)
@@ -644,7 +663,10 @@ async def create_data_domain(
         if parent is None or parent.line_of_business_id != lob.id:
             raise HTTPException(
                 status_code=422,
-                detail="parent_domain_id must reference an existing domain in the same line of business",
+                detail=(
+                    "parent_domain_id must reference an existing domain "
+                    "in the same line of business"
+                ),
             )
     domain = DataDomain(
         organization_id=lob.organization_id,
@@ -1321,6 +1343,42 @@ async def resume_analysis_run(
     return resumed
 
 
+async def gate_read(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    datasource_id: UUID,
+) -> None:
+    """Authorize a catalog read, or answer 403 with a reason code.
+
+    A helper rather than a dependency because the resource is not known until the
+    handler has loaded it: `list_columns` is authorized against the *table*, whose
+    datasource it does not learn until after the row is fetched. A dependency would
+    have to re-fetch it, and the version that avoids re-fetching is the version that
+    authorizes against the path parameter instead of the object -- which is how a
+    check ends up describing something other than what the handler returns.
+
+    403 with the bare reason code: enough for a caller to know whether to ask for a
+    grant or stop asking, and nothing about the resource or the policy (INV-6).
+    """
+    try:
+        await gate(
+            session,
+            context,
+            settings=settings,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            datasource_id=datasource_id,
+        )
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc
+
+
 @router.get("/datasources/{datasource_id}/tables", response_model=Page)
 async def list_tables(
     datasource_id: UUID,
@@ -1330,11 +1388,21 @@ async def list_tables(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Page:
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        datasource_id=datasource.id,
+    )
     filters = (
         MetadataTable.organization_id == datasource.organization_id,
         MetadataTable.datasource_id == datasource.id,
@@ -1367,11 +1435,21 @@ async def list_columns(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Page:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     filters = (
         MetadataColumn.organization_id == table.organization_id,
         MetadataColumn.table_id == table.id,
@@ -1404,11 +1482,21 @@ async def list_constraints(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Page:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     filters = (
         MetadataConstraint.organization_id == table.organization_id,
         MetadataConstraint.table_id == table.id,
@@ -1441,11 +1529,21 @@ async def get_latest_table_profile(
         require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> TableProfileRead:
     table = await session.get(MetadataTable, table_id)
     if table is None:
         raise HTTPException(status_code=404, detail="table not found")
     enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
     profile = await session.scalar(
         select(TableProfile)
         .where(
@@ -1684,7 +1782,13 @@ async def execute_query(
             sql=body.sql,
             requested_limit=body.max_rows,
             semantic_version=body.semantic_version,
+            workspace_id=body.workspace_id,
         )
+    except AuthorizationRejected as exc:
+        # Before `QueryRejected`, which it subclasses. 403 rather than 422 because the
+        # statement was never the problem -- resubmitting a corrected one changes
+        # nothing, and 422 would send the caller off to fix their SQL.
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc
     except QueryRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:

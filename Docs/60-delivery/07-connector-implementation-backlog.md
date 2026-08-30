@@ -77,7 +77,8 @@ Blocking policy stays deterministic **in the gateway**. A connector does not cla
 | Bounded profiling | **Done** — type-aware per-column expressions; LOB-like types (`BLOB`, `CLOB`, `NCLOB`, `LONG`, `LONG RAW`, `BFILE`, `XMLTYPE`), which reject `COUNT(DISTINCT …)` and `TO_CHAR(…)`, fall back to **honest static placeholders** rather than failing the batch or fabricating a value |
 | Governed execution | **Done** — real session identifier via `SYS_CONTEXT('USERENV','SID')`, recorded as `oracle-sid:<sid>`, matching the SQL Server and PostgreSQL convention of a real backend-scoped identifier |
 | Estimate / explain | **Deliberately disabled** — `EXPLAIN PLAN … / plan_table` lookup is implemented, but `capabilities.explain=False` ships because a least-privilege `PLAN_TABLE` write path is uncertified against a real bank-scoped role. The gateway fails closed with `QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR` |
-| Unit tests | **Done** — 14 tests covering credential parsing, identifier quoting, capability declaration, discovery assembly, LOB-aware profiling |
+| Envelope v1.1 (gap item N1) | **Done** — views (`ALL_VIEWS.TEXT` + `TEXT_LENGTH`, `ALL_MVIEWS.QUERY` + `QUERY_LEN`), routines with bodies (`ALL_OBJECTS`+`ALL_PROCEDURES`, `ALL_SOURCE`, `ALL_ARGUMENTS`), table and column comments (`ALL_TAB_COMMENTS`, `ALL_COL_COMMENTS`), grants (`ALL_TAB_PRIVS`+`ALL_USERS`). `views`/`routines`/`object_comments`/`grants` all `True`. Oracle has no schema, catalog or routine comment (`COMMENT ON` does not accept them) and no updatability or check-option column, so those stay `None`. LONG quirks, wrapped PL/SQL and refused dictionary views all surface as `unavailable_reason`, never as an empty definition — see `Docs/review-2026-08/gap/08-envelope-v11-connectors.md` |
+| Unit tests | **Done** — 42 tests covering credential parsing, identifier quoting, capability declaration, discovery assembly, LOB-aware profiling, and every envelope v1.1 axis including its unavailable and truncated paths |
 | Compose fixture | **Written, unverified** — `gvenzl/oracle-free:23-slim` with least-privilege `retail`/`risk` owners and a read-only `source` user, mirroring the PostgreSQL and SQL Server fixture schema including the cross-schema FK requiring an explicit `GRANT REFERENCES` |
 | **Live container verification** | **OUTSTANDING** — `docker compose up` and live connection/discovery/profiling against the fixture have not been run |
 
@@ -100,7 +101,8 @@ Blocking policy stays deterministic **in the gateway**. A connector does not cla
 | 5 | Gateway extension | **Done** — `query_gateway.gate_query_estimate()` is a new connector-agnostic, unit-tested pure function. It selects the byte-budget branch (`Settings.max_bigquery_dry_run_bytes`, independent of `max_postgres_plan_cost`) structurally via `QueryEstimate.estimated_bytes is not None`, so PostgreSQL/SQL Server/Oracle's cost-plan gating is untouched and no gateway change is needed for the next byte-billed connector |
 | 6 | Governed execution | **Done** — read-only query submission, `.result(timeout=...)`, BigQuery job ID captured as `bigquery-job:<job_id>` in the same style as `oracle-sid:`/`sqlserver-spid:`. Cancel handling is **not** implemented — no connector implements it yet (tracked as QG-4) |
 | 7 | Bounded profiling | **Done** — explicit row bound (`LIMIT`), explicit byte bound (`maximum_bytes_billed` on the job config, enforced by BigQuery before the query runs), and the caller's timeout on every profiling query. REPEATED (array) columns get fully static placeholders (BigQuery rejects `COUNT`/`SUM` on ARRAY-typed arguments); non-repeated RECORD/STRUCT/BYTES/GEOGRAPHY/JSON get a placeholder distinct-count and length only |
-| 8 | Tests | **Done** — 29 tests: credential parsing (valid and 11 invalid/ambiguous forms), hierarchy mapping, capability declaration, identifier quoting, region-dataset mapping, discovery assembly (including the foreign-key omission), profiling-expression fallback for REPEATED and complex scalar types, and `gate_query_estimate` (byte budget allow/reject, cost-budget fallback for non-byte estimates, non-finite-score rejection) |
+| 8 | Envelope v1.1 (gap item N1) | **Done** — views (`INFORMATION_SCHEMA.VIEWS`, plus `TABLES.DDL` for materialized views, which have no `VIEWS` row), routines with bodies and parameters (`ROUTINES`/`PARAMETERS`/`ROUTINE_OPTIONS`), descriptions at schema/table/column/routine level (`SCHEMATA_OPTIONS`, `TABLE_OPTIONS`, `COLUMN_FIELD_PATHS`, `ROUTINE_OPTIONS`, unwrapped from GoogleSQL literal text). **`grants=False` and that is the answer, not a gap:** BigQuery has no SQL `GRANT` — access is Cloud IAM policy, and `OBJECT_PRIVILEGES.privilege_type` is an IAM role bundle, not a SQL privilege, so mapping it into `DiscoveredGrant` would misrepresent it. Also fixed here: `discover()` previously hardcoded `'BASE TABLE'` for every object, so views and materialized views were reported as base tables |
+| 9 | Tests | **Done** — 49 tests: credential parsing (valid and 11 invalid/ambiguous forms), hierarchy mapping, capability declaration, identifier quoting, region-dataset mapping, discovery assembly (including the foreign-key omission), profiling-expression fallback for REPEATED and complex scalar types, `gate_query_estimate` (byte budget allow/reject, cost-budget fallback for non-byte estimates, non-finite-score rejection), and every envelope v1.1 axis including refused-query, remote-function and truncation paths |
 | **Live GCP verification** | **OUTSTANDING** — no live GCP project or credentials were available in this session; `test_connection`/discovery/dry-run estimate/execution/profiling have not been run against a real BigQuery project |
 
 **Acceptance.** Listed in `connector_registry.supported_types`; represented in the matrix and certification path; the gateway **blocks oversized dry-run estimates deterministically before execution**; Atlas and API surfaces describe capabilities honestly.
@@ -127,7 +129,8 @@ Blocking policy stays deterministic **in the gateway**. A connector does not cla
 | 4 | Estimate via EXPLAIN | **Done** — `EXPLAIN USING JSON` parsed for a partition-pruned cost/row/byte estimate with a pruning-ratio evidence field (`_extract_snowflake_explain_estimate`); registered with `capabilities.explain=True` |
 | 5 | Governed execution | **Done** — read-only execution capturing the real Snowflake query ID via `cur.sfqid` as `warehouse_query_id="snowflake-query:<sfqid>"`, matching the `oracle-sid:`/`sqlserver-spid:`/`bigquery-job:` convention |
 | 6 | Bounded profiling | **Done** — `APPROX_COUNT_DISTINCT`-based approximate-statistics profiling |
-| 7 | Tests | **Done** — 7 tests in `tests/test_connectors_snowflake.py` (identifier quoting, both DSN formats, EXPLAIN-JSON extraction, registry definition, discovery assembly, query execution), all passing |
+| 7 | Envelope v1.1 (gap item N1) | **Done** — views (`INFORMATION_SCHEMA.VIEWS.VIEW_DEFINITION` with a `GET_DDL` second pass, which is the only route to a materialized view's text), routines with bodies (`INFORMATION_SCHEMA.FUNCTIONS`/`.PROCEDURES`; parameters parsed from `ARGUMENT_SIGNATURE` because Snowflake has **no** `INFORMATION_SCHEMA.PARAMETERS`), comments at all five levels, and grants. Grants are **schema level only**: `SHOW GRANTS` is a metadata command rather than a view over `INFORMATION_SCHEMA`, so it costs one statement per named object; one per schema is bounded, one per table is not. A secure view or secure routine returns a NULL definition, recorded as `unavailable_reason` |
+| 8 | Tests | **Done** — 27 tests in `tests/test_connectors_snowflake.py` (identifier quoting, both DSN formats, EXPLAIN-JSON extraction, registry definition, discovery assembly, query execution, argument-signature parsing, and every envelope v1.1 axis including the secure-view, refused-query and truncation paths), all passing |
 | **Live Snowflake account verification** | **OUTSTANDING** — no live Snowflake account, warehouse, or credentials were available in any session; `test_connection`/discovery/EXPLAIN estimate/execution/profiling have never been run against a real Snowflake instance |
 
 **Acceptance.** Listed in `connector_registry.supported_types`; represented in the matrix and certification path. **Remaining acceptance.** Live account run with exact discovery counts; certification; version fixtures; a Docker or hosted-trial fixture (Snowflake has no self-hostable container image, so this likely means a hosted trial account rather than a `compose.yaml` service).
@@ -153,17 +156,39 @@ Blocking policy stays deterministic **in the gateway**. A connector does not cla
 | 3 | BigQuery: implement, unit-test, extend the gateway for dry-run byte budgets |
 | 4 | Integration fixtures and end-to-end certification evidence; update Atlas onboarding and capability messaging; close documentation and verifier gaps |
 
-## 7. Definition of done for this increment
+## 7. Metadata Ingestion Envelope v1.1 (gap item N1)
+
+**Scope.** Four new axes on the discovery envelope — view definitions, routines with bodies, object comments, and source grants — gated by four new `ConnectorCapabilities` flags (`views`, `routines`, `object_comments`, `grants`), all defaulting to `False` so a connector that has implemented nothing keeps reporting honestly (INV-9) with no edit.
+
+**Delivered for Oracle, Snowflake and BigQuery.** Full per-connector matrix, the exact source object behind each axis, and the truncation and permission behaviours a reader would be surprised by: **`Docs/review-2026-08/gap/08-envelope-v11-connectors.md`**.
+
+| Connector | `views` | `routines` | `object_comments` | `grants` |
+|---|---|---|---|---|
+| Oracle | ✅ | ✅ | ✅ table + column only (Oracle has no schema/catalog/routine comment) | ✅ |
+| Snowflake | ✅ | ✅ | ✅ all five levels | ✅ schema level only |
+| BigQuery | ✅ | ✅ | ✅ no catalog level (a GCP project has no description) | ❌ BigQuery has no SQL grants — IAM instead |
+| PostgreSQL | ✅ | ✅ | ✅ | ✅ |
+| SQL Server | ✅ | ✅ | ✅ | ✅ |
+
+PostgreSQL and SQL Server were taken to v1.1 in parallel by the framework workstream (`pg_get_viewdef` / `pg_proc` / `obj_description` / `information_schema.role_table_grants`; `sys.sql_modules` / `sys.parameters` / `sys.extended_properties` / `sys.database_permissions`) using shared helpers in `aida.connectors.discovery`. The three connectors above carry an equivalent, separately tested rebuild inside each connector file; folding them onto the shared helpers is a known follow-up.
+
+**The load-bearing rule.** `definition_sql is None` with a populated `unavailable_reason` means the source would not give it to us; an empty string means the definition is empty; `truncated=True` means we got a prefix. A permission error, an Oracle LONG-column quirk or a character cap must never look like an empty definition — view-DDL lineage (N2) would read a silent empty as a lineage gap **in the estate** rather than a gap in our extraction. Every supplementary query is refusable without failing discovery: the refusal becomes a reason string on `DiscoveredCatalog.attributes["envelope_v11_unavailable"]`, and for per-object axes also on the object itself.
+
+**Remaining acceptance.** Live verification of the new dictionary-view and `INFORMATION_SCHEMA` shapes against a real Oracle database, Snowflake account and GCP project, alongside the live verification already outstanding for each connector above; and the ingestion-side persistence of the new axes.
+
+## 8. Definition of done for this increment
 
 - Oracle and BigQuery are both honest native pull adapters with live evidence.
 - **No connector requires fake instantiation for capability reporting.**
 - Query estimation is connector-agnostic and still deterministic.
 - Both pass unit, contract, and integration coverage comparable to PostgreSQL and SQL Server.
 - Atlas and API surfaces describe implemented versus planned support **without overstating breadth** (INV-9).
+- Envelope v1.1 capability flags equal what each connector actually reads, with every source refusal carried as an explicit reason rather than as an empty value.
 
 ## Related documents
 
 - Connectivity module: `20-modules/02-connectivity.md`
 - Query gateway: `20-modules/16-query-gateway.md`
+- Envelope v1.1 per-connector matrix: `Docs/review-2026-08/gap/08-envelope-v11-connectors.md`
 - Tracker: `60-delivery/03-tracker.md` §B
 - Accomplishment log: `60-delivery/06-accomplishment-log.md`

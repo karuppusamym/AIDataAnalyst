@@ -34,6 +34,25 @@ flowchart TD
 
 ## 2. Worker classes
 
+> **Implementation status (2026-08-30).** Of the nine worker classes below, **four have
+> running code** and five are target. Verified against `src/aida/workflows/`,
+> `src/aida/projectors/` and `compose.yaml`:
+>
+> | Class | Today |
+> |---|---|
+> | Discovery | **Built** — `discover_datasource` activity, `DatasourceDiscoveryWorkflow` |
+> | Profiling | **Built** — `plan_profile_tasks` / `profile_table_task` / `finalize_profile_tasks`; the fan-out DAG in §1 is real for this class |
+> | Batch ingestion | **Built** — `MetadataBatchIngestionWorkflow`, `src/aida/batch_ingestion.py` |
+> | Projection | **Built** — `projectors/graph_projector.py` and `projectors/outbox_publisher.py`, run as their own compose services |
+> | Classification | **Not a worker.** Deterministic rules run inline (`classify_column_name` in `workflows/activities.py`) |
+> | Relationship | **Not a worker.** Candidate handling is request-path code in `src/aida/intelligence_api.py` |
+> | Lineage | **Not a worker.** Ingestion is request-path (`openlineage.py`, `dbt_artifacts.py`). Query-log, view-DDL and procedure parsing do not exist at all — see `20-modules/09-lineage.md` |
+> | Quality | **Not a worker.** Evaluation is request-path (`quality_service.py`) |
+> | Semantic | **Not a worker.** Inference is request-path (`semantic_inference.py`). "Embedding generation" does not exist — there is no embedding column |
+>
+> The bounds in §3 and the DAG in §1 are accurate for the four built classes. Read them as
+> target for the other five.
+
 Split by failure and scaling characteristics, not by domain.
 
 | Class | Work | Scaling axis | Isolation unit | Bounds |

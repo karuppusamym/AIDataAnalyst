@@ -3,7 +3,7 @@
 > **Document Status**: Authoritative Feature-Requirement Source
 > **Target Pages**: [Data Marketplace](https://www.collibra.com/products/data-marketplace), [Data Catalog](https://www.collibra.com/products/data-catalog), [Integrations & APIs](https://www.collibra.com/products/integrations-apis), [MCP Server](https://www.collibra.com/products/mcp-server), [Data Governance](https://www.collibra.com/products/data-governance)
 > **Reviewed**: 2026-08-29
-> **Feeds**: `20-modules/19-context-products-and-mcp.md` (§15.2 CP-*, MCP-2/MCP-3), `60-delivery/02-epic-backlog.md` (EE.10), `60-delivery/05-gap-register.md`
+> **Feeds**: `20-modules/19-context-products-and-mcp.md` (§15.2 CP-*, MCP-2/MCP-3), `60-delivery/02-epic-backlog.md` (EE.10), `60-delivery/00-status.md`
 
 Second review pass at the user's request, going deeper than `08-collibra-lineage-and-platform-analysis-2026-08.md`. Most of what these five pages show was **already anticipated** by the CP-1 through CP-14 requirements in `20-modules/19-context-products-and-mcp.md` §15.2 (written from an earlier pass over Collibra's platform material). This document records what's genuinely new, and updates status for the one area built further this session: MCP lineage tools.
 
@@ -19,7 +19,7 @@ Search/filter by domain, owner, system, classification, custom attributes; **Col
 
 100+ native integrations; automated discovery, classification (including PII/PHI), and description generation; profiling and sampling statistics; embedded semantic layer tying technical assets to glossary/policy; quality metrics surfaced from Data Quality & Observability; certification; **data contracts** (technical spec + quality guarantees) and **data sharing agreements** (usage/access/compliance terms — distinct from a contract); data product creation and publishing to the Marketplace; AI Copilot for NL search; interactive lineage-style diagrams; Data Notebook again.
 
-**Mapping**: automated classification is already implemented in our platform (`MetadataColumn.classification`, semantic inference); 100+ integrations is the pre-existing connector-fleet gap (`05-gap-register.md`); data contracts map to CP-3. **Data sharing agreements are a new, narrower concept** — usage/access/compliance terms bound to a specific consumer grant, not a schema contract — folded into CP-3's acceptance criteria as a sub-type rather than a new ID, since it composes the same registry.
+**Mapping**: automated classification is already implemented in our platform (`MetadataColumn.classification`, semantic inference); 100+ integrations is the pre-existing connector-fleet gap (`00-status.md`); data contracts map to CP-3. **Data sharing agreements are a new, narrower concept** — usage/access/compliance terms bound to a specific consumer grant, not a schema contract — folded into CP-3's acceptance criteria as a sub-type rather than a new ID, since it composes the same registry.
 
 ## 3. Integrations & APIs — concrete capabilities
 
@@ -61,11 +61,11 @@ Automated real-time policy validation with violation flagging; approval workflow
 
 ## 6. Net new work opened by this review
 
-Only two genuinely new items came out of five pages, because the earlier CP-1..14 pass already anticipated the rest: **MCP-2** (write operations through MCP) and **MCP-3** (fuzzy entity resolution). Both are recorded in `20-modules/19-context-products-and-mcp.md` §14 open work and referenced from `60-delivery/05-gap-register.md`.
+Only two genuinely new items came out of five pages, because the earlier CP-1..14 pass already anticipated the rest: **MCP-2** (write operations through MCP) and **MCP-3** (fuzzy entity resolution). Both are recorded in `20-modules/19-context-products-and-mcp.md` §14 open work and referenced from `60-delivery/00-status.md`.
 
 ## Related documents
 
-- `competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` — the prior review this extends
+- `review-2026-08/research/05-collibra-lineage-and-platform.md` — the prior review this extends
 - `20-modules/19-context-products-and-mcp.md` — CP-6, MCP-2, MCP-3
 - `60-delivery/02-epic-backlog.md` — EE.10 acceptance detail
 - `90-reference/03-sources.md` — source URLs

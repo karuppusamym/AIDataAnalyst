@@ -306,6 +306,17 @@ async def create_ai_asset_version(
     )
     session.add(version)
     try:
+        await session.flush()
+        record_audit(
+            session,
+            replace(context, organization_id=asset.organization_id),
+            action="ai_registry.version.create",
+            resource_type="ai_asset_version",
+            resource_id=str(version.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"asset_key": asset.asset_key, "version": version.version},
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -379,6 +390,17 @@ async def submit_ai_asset_version(
     )
     version.status = "REVIEW_REQUIRED"
     session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="ai_registry.version.submit",
+        resource_type="ai_asset_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"review_id": str(review.id), "requested_action": review.requested_action},
+    )
     await session.commit()
     return review
 
@@ -467,6 +489,16 @@ async def create_ai_remediation(
     )
     session.add(remediation)
     await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="ai_registry.remediation.create",
+        resource_type="ai_remediation",
+        resource_id=str(remediation.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"ai_asset_version_id": str(version.id), "finding_key": body.finding_key},
+    )
     record_outbox(
         session,
         organization_id=version.organization_id,
@@ -516,6 +548,17 @@ async def update_ai_remediation(
     if body.status == "ACCEPTED_RISK" and context.roles.isdisjoint(
         {"PlatformAdmin", "Reviewer", "ModelRiskManager"}
     ):
+        record_audit(
+            session,
+            replace(context, organization_id=remediation.organization_id),
+            action="ai_registry.remediation.risk_acceptance_denied",
+            resource_type="ai_remediation",
+            resource_id=str(remediation.id),
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details={"requested_status": body.status, "reason": "independent_risk_acceptance"},
+        )
+        await session.commit()
         raise HTTPException(status_code=403, detail="independent risk acceptance is required")
     remediation.status = body.status
     remediation.resolution_evidence = body.resolution_evidence
@@ -525,6 +568,19 @@ async def update_ai_remediation(
     else:
         remediation.resolved_by = None
         remediation.resolved_at = None
+    record_audit(
+        session,
+        replace(context, organization_id=remediation.organization_id),
+        action="ai_registry.remediation.update",
+        resource_type="ai_remediation",
+        resource_id=str(remediation.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "status": remediation.status,
+            "ai_asset_version_id": str(remediation.ai_asset_version_id),
+        },
+    )
     record_outbox(
         session,
         organization_id=remediation.organization_id,
@@ -561,6 +617,17 @@ async def request_ai_asset_retirement(
         requested_by=context.principal_id,
     )
     session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=asset.organization_id),
+        action="ai_registry.asset.retirement_request",
+        resource_type="ai_asset",
+        resource_id=str(asset.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"review_id": str(review.id), "asset_key": asset.asset_key},
+    )
     await session.commit()
     return review
 
@@ -598,6 +665,20 @@ async def sync_ai_provider_evidence(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="ai_registry.version.provider_sync",
+        resource_type="ai_asset_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "provider_type": body.provider_type,
+            "external_reference": body.external_reference,
+            "fingerprint": version.fingerprint,
+        },
+    )
     record_outbox(
         session,
         organization_id=version.organization_id,
