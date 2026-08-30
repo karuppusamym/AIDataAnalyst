@@ -866,3 +866,52 @@ features in this list were subsequently closed by R35 below; shared-history clea
   to decide unilaterally.
 - Phase 2 (models/schemas split) and the leaf-module extraction it unblocks remain untouched;
   still gated on the concurrent session's ADR-0017 work landing.
+
+## 2026-08-30 — Status matrix correction: verified test count and static-quality claims
+
+### Completed
+
+- A user-supplied summary of `Docs/60-delivery/04-status-matrix.md` cited figures that do not
+  appear anywhere in this repository — "1,199 tests passing," "9/9 invariants automated," "42"
+  capability rows with "19" implemented, and a claim that the tracker "marks several Studio items
+  done" while the status matrix lists Studio as pending. Checked each against the actual repo
+  rather than the docs alone.
+- Built an isolated Python 3.13 venv (`uv venv` + `uv pip install -e ".[dev]"`, the checked-in
+  `.venv` not being runnable from this session) and ran the full suite: `pytest -q` → **386
+  passed, 0 failed** — not 1,199, and not the "121" the status matrix's Retest register still
+  named (a stale snapshot carried over from the 2026-08-28 entry above; this repo's own
+  accomplishment-log convention is a running total, and 386 is 198 tests ahead of the last logged
+  total of 188).
+- Ran `ruff check .` and `mypy src` (strict), which the Retest register's "Static quality" row
+  claimed were clean. They are not: `ruff` reports 6 errors (import-sort in `api.py` and
+  `context_product_api.py`; 4 line-length violations in `api.py`, `scheduler.py`, and one
+  migration file); `mypy` reports 2 errors (`domain_service.py:49`'s `resolve_domain` returns
+  `session.get(DataDomain, ...)`, typed `DataDomain | None`, from a function signature promising
+  `DataDomain`; a missing `types-PyYAML` stub for `context_compiler.py`).
+- Corrected `04-status-matrix.md`'s Retest register (`Static quality`, `Unit / contract suite`
+  rows) and its `Last reviewed` date to match this evidence.
+- Checked the Studio claim specifically: `03-tracker.md` §G lists `ST-A1`–`ST-A7` (all of module
+  18) as `TODO`, matching `04-status-matrix.md`'s "Studio | 18 | **Pending**" row — the two
+  documents already agree; the "tracker marks several Studio items done" claim does not match
+  this repo's tracker as written. Confirmed the tracker's own ST-03 note ("4 of 9" invariants
+  formalized) is accurate and does not support "9/9 automated."
+- Did not find a `Docs/60-delivery/00-status.md` in this repository; the living status document at
+  this path is `04-status-matrix.md`.
+
+### Verification evidence
+
+- `pytest -q`: 386 passed in 4.80s (fresh venv, 2026-08-30).
+- `ruff check .`: 6 errors (2 `I001`, 4 `E501`).
+- `mypy src` (strict): 2 errors, 104 source files checked.
+
+### Current limitations
+
+- Did not fix the 6 ruff / 2 mypy findings — out of scope for a docs-only correction, and
+  `domain_service.py:49` in particular touches a file a concurrent session was mid-editing for
+  ADR-0017 tenancy work as of the prior entry; whether `resolve_domain` should raise, assert, or
+  widen its return type to `DataDomain | None` is an owner decision, not one to make unilaterally
+  here.
+- Did not attempt to reconcile the "42 capabilities / 19 implemented" figures against this repo's
+  matrix (41 rows: 18 Implemented, 17 Partial, 3 Pending, 2 Bank decision, 1 Retest required) —
+  the count discrepancy traces to the source of that external summary, not to a bug in this
+  repo's docs, so there was nothing here to correct on that point.

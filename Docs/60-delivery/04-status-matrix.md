@@ -3,7 +3,7 @@
 > Status: **Living document.** Owner: Engineering lead.
 > The single source for what is implemented, partial, pending, needs retesting, or blocked on a bank decision. Design lives in `10-architecture/` and `20-modules/`; material completion evidence is append-only in `06-accomplishment-log.md`.
 
-**Last reviewed:** 2026-08-29
+**Last reviewed:** 2026-08-30
 
 ## Status definitions
 
@@ -65,8 +65,8 @@
 
 | Test area | Local result | Required next run |
 |---|---|---|
-| Static quality | Ruff and strict mypy clean | CI on every change |
-| Unit / contract suite | 121 tests passing — SQL Server and canonical/chunk contract validation, stable checksums, sequence/duplicate rejection, scope counting, quality, prompt-risk, graph, business inference, model, dbt, OIDC, secret, lineage, tool-first, evaluation controls | Add database concurrency/race tests, forced mid-batch restart, incident concurrency, JWKS outage, indirect prompt attacks, bank-domain benchmarks |
+| Static quality | **Not clean, corrected 2026-08-30** — `ruff check .`: 6 errors (import-sort in `api.py` and `context_product_api.py`; 4 line-length violations). `mypy src` (strict): 2 errors (`domain_service.py:49` returns `DataDomain \| None` where the signature promises `DataDomain`; missing `types-PyYAML` stub) | Resolve the 6 ruff and 2 mypy findings; wire CI so regressions fail the build |
+| Unit / contract suite | **386 tests passing** (corrected 2026-08-30; prior "121" was a stale snapshot from 2026-08-28) — connectors (PostgreSQL, SQL Server, Oracle, BigQuery, Snowflake), canonical/chunk contract, stable checksums, sequence/duplicate rejection, scope counting, glossary/stewardship, MCP server, tier-0 invariants, dbt artifacts/quality bridge, unified lineage, agent orchestration, quality, prompt-risk, graph, business inference, model gateway, OIDC, secrets, tool-first, evaluation controls | Add database concurrency/race tests, forced mid-batch restart, incident concurrency, JWKS outage, indirect prompt attacks, bank-domain benchmarks |
 | Database migrations | Alembic head `9e4c7a12b5f8`, single head, applied locally | Upgrade/rollback rehearsal on production-like data |
 | End-to-end banking fixture | R20/R21/R22 real API/Temporal/PostgreSQL runs proved manifest/chunk replay, conflicting-content denial, cross-chunk FK resolution, exact scope counts, physical payload cleanup, live SQL Server discovery/profiling/SHOWPLAN/masking | FULL retirement/recovery and concurrent forced-restart fixtures; Kafka intake; maximum-scale load; remaining connectors; approved-provider certification; interactive visual/accessibility certification |
 | Security | Fail-closed controls and cross-tenant denial pass locally | Threat-led penetration testing; ABAC/row-policy certification |
