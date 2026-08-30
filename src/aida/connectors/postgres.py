@@ -5,7 +5,6 @@ import asyncpg
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -17,13 +16,14 @@ from aida.connectors.discovery import (
     assemble_catalog,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-class PostgresConnector(Connector):
+class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(

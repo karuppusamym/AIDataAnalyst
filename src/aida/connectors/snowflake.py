@@ -17,7 +17,6 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -30,6 +29,7 @@ from aida.connectors.discovery import (
     assemble_catalog,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 _COMPLEX_SCALAR_TYPES = frozenset({"VARIANT", "OBJECT", "ARRAY", "GEOGRAPHY", "GEOMETRY"})
 _EXCLUDED_SCHEMAS = frozenset({"INFORMATION_SCHEMA", "ACCOUNT_USAGE", "READER_ACCOUNT_USAGE"})
@@ -215,7 +215,7 @@ def _rows_to_dicts(cursor: Any, rows: list[Any] | tuple[Any, ...]) -> list[dict[
     return [dict(zip(col_names, row, strict=False)) for row in rows]
 
 
-class SnowflakeConnector(Connector):
+class SnowflakeConnector(SqlExecutor):
     """Snowflake native connector conforming to the Atlas Connector protocol."""
 
     connector_type = "snowflake"

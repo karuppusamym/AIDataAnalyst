@@ -20,6 +20,7 @@ dependencies = [
   "opentelemetry-sdk==1.37.0",
   "oracledb==4.0.2",
   "PyJWT[crypto]==2.10.1",
+  "PyYAML==6.0.3",
   "prometheus-client==0.22.1",
   "pydantic-settings==2.15.0",
   "python-tds==1.17.1",
@@ -40,6 +41,7 @@ dev = [
   "pytest-asyncio==1.1.0",
   "pytest-cov==6.2.1",
   "ruff==0.12.11",
+  "types-PyYAML==6.0.12.20250915",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -113,6 +115,32 @@ allowed_importers = [
   "atlas.modules.identity_tenancy.workers",
   "atlas.modules.identity_tenancy.tests",
 ]
+
+[[tool.importlinter.contracts]]
+# INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
+# ADR-0004 both name as the enforcement mechanism for the execution choke point.
+# Until now it did not exist, so the platform's most-marketed property was a
+# convention rather than a proof.
+#
+# It does not depend on the flat package being decomposed first, because it protects
+# a single purpose-built module rather than asserting a shape over all of `aida`.
+#
+# `aida.connectors.execution_access` is the only module that returns a `SqlExecutor`,
+# the only type carrying `estimate_read_query` / `execute_read_query`. Everything else
+# in the platform is handed a `Connector`, which has no SQL-accepting member at all, so
+# a second execution path cannot be written without either importing this module
+# (blocked here) or defeating `mypy --strict` (blocked in CI).
+#
+# `tests/test_tier0_invariants.py::test_no_connector_execution_outside_gateway` is the
+# third layer: it statically scans every module for a call to either method, catching a
+# dynamic bypass that neither the import graph nor the type checker can see.
+#
+# Adding an importer below is a change to the platform's central invariant. It needs an
+# ADR, not a pull request.
+name = "INV-2 connector SQL execution is reachable only from the query gateway"
+type = "protected"
+protected_modules = ["aida.connectors.execution_access"]
+allowed_importers = ["aida.query_gateway"]
 
 [[tool.importlinter.contracts]]
 name = "security_types never depends on api (leaf-module ratchet)"

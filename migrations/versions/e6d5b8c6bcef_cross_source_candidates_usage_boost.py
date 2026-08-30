@@ -84,7 +84,8 @@ def upgrade() -> None:
         sa.Column("computed_usage_boost", sa.Integer(), nullable=False, server_default="0"),
     )
     op.add_column(
-        "scan_policy", sa.Column("usage_boost_updated_at", sa.DateTime(timezone=True), nullable=True)
+        "scan_policy",
+        sa.Column("usage_boost_updated_at", sa.DateTime(timezone=True), nullable=True),
     )
 
 

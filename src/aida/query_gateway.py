@@ -11,7 +11,7 @@ from sqlglot import exp, parse_one
 
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
-from aida.connectors.registry import connector_registry
+from aida.connectors.execution_access import open_execution_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
     DataSource,
@@ -285,7 +285,7 @@ class QueryExecutionGateway:
                 raise QueryRejected(f"UNKNOWN_OR_UNAUTHORIZED_TABLES: {', '.join(unauthorized)}")
 
             dsn = SecretResolver(self.settings).resolve(datasource.credential_reference)
-            connector = connector_registry.create(datasource.connector_type, dsn)
+            connector = open_execution_session(datasource.connector_type, dsn)
             if not connector.capabilities.explain:
                 raise QueryRejected("QUERY_ESTIMATE_UNAVAILABLE_FOR_CONNECTOR")
             estimate = await connector.estimate_read_query(

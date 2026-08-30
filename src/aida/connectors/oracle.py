@@ -7,7 +7,6 @@ import oracledb
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -20,6 +19,7 @@ from aida.connectors.discovery import (
     assemble_catalog,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 _EXCLUDED_SCHEMAS = (
     "SYS", "SYSTEM", "OUTLN", "XDB", "ORDS_METADATA", "ORDS_PUBLIC_USER",
@@ -110,7 +110,7 @@ def _schema_exclusion_clause(alias: str) -> str:
     return f"{alias} NOT IN ({quoted})"
 
 
-class OracleConnector(Connector):
+class OracleConnector(SqlExecutor):
     connector_type = "oracle"
     dialect = "oracle"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(

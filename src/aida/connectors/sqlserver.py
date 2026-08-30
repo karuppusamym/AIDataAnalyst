@@ -8,7 +8,6 @@ import pytds
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -21,6 +20,7 @@ from aida.connectors.discovery import (
     assemble_catalog,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 _SHOWPLAN_NS = "{http://schemas.microsoft.com/sqlserver/2004/07/showplan}"
 _EXCLUDED_SCHEMAS = ("sys", "INFORMATION_SCHEMA")
@@ -109,7 +109,7 @@ def _extract_showplan_estimate(raw_xml: str) -> QueryEstimate:
     )
 
 
-class SqlServerConnector(Connector):
+class SqlServerConnector(SqlExecutor):
     connector_type = "sqlserver"
     dialect = "tsql"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(

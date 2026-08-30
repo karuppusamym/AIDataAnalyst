@@ -80,7 +80,9 @@ def stale_usage_boost_policies_statement(settings: Settings, now: datetime) -> S
     )
 
 
-async def rebalance_usage_weighted_priorities(settings: Settings, *, now: datetime | None = None) -> int:
+async def rebalance_usage_weighted_priorities(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
     """Recompute computed_usage_boost for a bounded batch of stale, opted-in
     scan policies from recent query volume on their datasource, then set
     `priority = base_priority + computed_usage_boost` (clamped to 0-100).

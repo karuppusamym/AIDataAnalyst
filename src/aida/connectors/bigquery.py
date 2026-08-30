@@ -17,7 +17,6 @@ from typing import Any
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -29,6 +28,7 @@ from aida.connectors.discovery import (
     assemble_catalog,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 _COMPLEX_SCALAR_TYPES = frozenset({"JSON", "STRUCT", "RECORD", "GEOGRAPHY", "BYTES"})
 _VALID_AUTH_METHODS = frozenset({"service_account", "workload_identity"})
@@ -168,7 +168,7 @@ def _assemble_catalog(
     return assemble_catalog(project_id, tables)
 
 
-class BigQueryConnector(Connector):
+class BigQueryConnector(SqlExecutor):
     """Governed Google BigQuery connector with dry-run byte estimation and bounded profiling."""
 
     connector_type = "bigquery"

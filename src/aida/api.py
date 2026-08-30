@@ -22,9 +22,9 @@ from aida.config import Settings, get_settings
 from aida.connectors.registry import connector_registry
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
-from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
@@ -631,7 +631,9 @@ async def create_line_of_business(
 async def create_data_domain(
     lob_id: UUID,
     body: DataDomainCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "DataAdmin")
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> DataDomain:
     lob = await session.get(LineOfBusiness, lob_id)
@@ -644,7 +646,10 @@ async def create_data_domain(
         if parent is None or parent.line_of_business_id != lob.id:
             raise HTTPException(
                 status_code=422,
-                detail="parent_domain_id must reference an existing domain in the same line of business",
+                detail=(
+                    "parent_domain_id must reference an existing domain "
+                    "in the same line of business"
+                ),
             )
     domain = DataDomain(
         organization_id=lob.organization_id,

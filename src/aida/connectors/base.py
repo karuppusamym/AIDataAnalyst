@@ -93,6 +93,14 @@ class TableProfileSnapshot:
 
 
 class Connector(ABC):
+    """Source access with structured arguments only.
+
+    Deliberately has no SQL-accepting member: the `estimate_read_query` /
+    `execute_read_query` pair lives on `aida.connectors.sql_execution.SqlExecutor`
+    so that INV-2 (one execution choke point) is enforced by the type system and
+    the import graph rather than by convention. See that module for the argument.
+    """
+
     connector_type: str
     dialect: str
 
@@ -107,14 +115,6 @@ class Connector(ABC):
 
     @abstractmethod
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
-        raise NotImplementedError
-
-    @abstractmethod
-    async def execute_read_query(self, sql: str, *, timeout_seconds: int) -> QueryResult:
         raise NotImplementedError
 
     @abstractmethod

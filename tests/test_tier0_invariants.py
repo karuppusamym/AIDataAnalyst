@@ -45,7 +45,10 @@ from aida.semantic_inference import SemanticEnrichmentBatchOutput
 # --- INV-2: one execution choke point ----------------------------------
 
 _SRC_ROOT = Path(__file__).resolve().parents[1] / "src" / "aida"
-_CONNECTOR_EXECUTION_METHOD = "execute_read_query"
+# Both members of the SQL-accepting surface (`aida.connectors.sql_execution.SqlExecutor`).
+# `estimate_read_query` takes a caller-supplied statement just as `execute_read_query`
+# does, so a bypass through it reaches the source exactly the same way.
+_CONNECTOR_EXECUTION_METHODS = frozenset({"execute_read_query", "estimate_read_query"})
 _GATEWAY_MODULE = "query_gateway.py"
 
 
@@ -57,27 +60,58 @@ def _files_calling_connector_execution_outside_the_gateway() -> list[str]:
         if parts == (_GATEWAY_MODULE,):
             continue
         if parts[0] == "connectors":
-            # The connectors package defines execute_read_query; that's not a call.
+            # The connectors package defines these methods; that's not a call.
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and node.attr == _CONNECTOR_EXECUTION_METHOD:
+            if isinstance(node, ast.Attribute) and node.attr in _CONNECTOR_EXECUTION_METHODS:
                 offenders.append(str(relative))
                 break
     return offenders
 
 
 def test_no_connector_execution_outside_gateway() -> None:
-    """INV-2: no code path reaches a data source except through the Query
-    Execution Gateway. Statically scans every module under `src/aida` for a
-    call to the connectors' read-execution method; the only permitted caller
-    is `query_gateway.py` itself.
+    """INV-2: no SQL statement reaches a data source except through the Query
+    Execution Gateway. Statically scans every module under `src/aida` for a call
+    to either member of the connectors' SQL-accepting surface; the only permitted
+    caller is `query_gateway.py` itself.
+
+    This is the third of three layers enforcing INV-2, and the only one that can
+    see a dynamic bypass. The other two are structural: `ConnectorRegistry.create`
+    returns `Connector`, which has no SQL-accepting member (so `mypy --strict`
+    rejects the call), and the import-linter contract "INV-2 connector SQL
+    execution is reachable only from the query gateway" forbids any module but the
+    gateway from importing `aida.connectors.execution_access`, the sole source of a
+    `SqlExecutor`.
     """
     offenders = _files_calling_connector_execution_outside_the_gateway()
     assert offenders == [], (
-        f"{_CONNECTOR_EXECUTION_METHOD} must only be called from {_GATEWAY_MODULE}, "
-        f"found callers in: {offenders}"
+        f"{sorted(_CONNECTOR_EXECUTION_METHODS)} must only be called from "
+        f"{_GATEWAY_MODULE}, found callers in: {offenders}"
     )
+
+
+def test_the_connector_handed_to_the_platform_has_no_sql_surface() -> None:
+    """INV-2, structurally: the type `ConnectorRegistry.create` is annotated to
+    return must not expose a SQL-accepting method, because that annotation is what
+    makes a bypass a type error everywhere else in the codebase.
+
+    If someone moves `execute_read_query` back onto `Connector`, the import contract
+    and the AST scan above both still pass while the type-level guarantee silently
+    disappears. This test is what notices.
+    """
+    from aida.connectors.registry import ConnectorRegistry
+    from aida.connectors.sql_execution import SqlExecutor
+
+    returned = inspect.signature(ConnectorRegistry.create).return_annotation
+    assert returned is Connector, (
+        f"ConnectorRegistry.create must stay annotated as returning Connector, got {returned!r}"
+    )
+    for method in _CONNECTOR_EXECUTION_METHODS:
+        assert not hasattr(Connector, method), (
+            f"Connector must not expose {method}; it belongs on SqlExecutor"
+        )
+        assert hasattr(SqlExecutor, method), f"SqlExecutor must expose {method}"
 
 
 # --- INV-3: model output is never authority -----------------------------

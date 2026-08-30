@@ -15,8 +15,8 @@ from aida.context_product_policy import (
     evaluate_context_product_quality_from_db,
 )
 from aida.db import get_session
-from aida.events import record_audit, record_outbox
 from aida.domain_service import check_cross_boundary_grant
+from aida.events import record_audit, record_outbox
 from aida.models import (
     BusinessDomain,
     ContextProduct,
