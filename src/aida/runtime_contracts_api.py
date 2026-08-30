@@ -198,7 +198,7 @@ async def evaluate_data_contract(
 
 @router.get(
     "/data-contracts/{contract_id}/violations",
-    response_model=Page[ViolationRead],
+    response_model=Page,
 )
 async def list_contract_violations(
     contract_id: UUID,
@@ -208,7 +208,7 @@ async def list_contract_violations(
         require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page[ViolationRead]:
+) -> Page:
     """List violations for a contract."""
     org_id = context.require_organization()
 

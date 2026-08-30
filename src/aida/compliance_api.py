@@ -122,7 +122,7 @@ async def generate_compliance_pack(
 
 @router.get(
     "/compliance/packs",
-    response_model=Page[CompliancePackRead],
+    response_model=Page,
 )
 async def list_compliance_packs(
     framework: str | None = Query(default=None),
@@ -132,7 +132,7 @@ async def list_compliance_packs(
         require_roles("PlatformAdmin", "ComplianceOfficer", "DataSteward", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page[CompliancePackRead]:
+) -> Page:
     """List generated compliance packs."""
     org_id = context.require_organization()
 

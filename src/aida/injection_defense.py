@@ -324,7 +324,14 @@ def screen_metadata(
 
     # Normalize for pattern matching
     normalized = _normalize_text(text)
-    normalized_lower = normalized.lower()
+
+    # Also prepare a version without homoglyph replacement for multilingual
+    # patterns (replacing Cyrillic->Latin would break Cyrillic regex).
+    normalized_no_homoglyph = re.sub(
+        r"\s+",
+        " ",
+        _strip_zero_width(unicodedata.normalize("NFKC", text)),
+    ).strip()
 
     # Pattern matching on normalized text
     max_confidence = 0.0
@@ -332,7 +339,9 @@ def screen_metadata(
     pattern_evidence: list[str] = []
 
     for pat in ALL_PATTERNS:
-        if pat.pattern.search(normalized):
+        # Multilingual patterns run on text without homoglyph replacement
+        search_text = normalized_no_homoglyph if pat.threat_type == "MULTILINGUAL_INJECTION" else normalized
+        if pat.pattern.search(search_text):
             if pat.confidence > max_confidence:
                 max_confidence = pat.confidence
                 threat_type = pat.threat_type

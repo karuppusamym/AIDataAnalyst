@@ -61,7 +61,7 @@ class LiftSuppressionRequest(ApiModel):
 
 @router.get(
     "/negative-knowledge/{subject_id}",
-    response_model=Page[NegativeAssertionRead],
+    response_model=Page,
 )
 async def get_subject_assertions(
     subject_id: str,
@@ -71,7 +71,7 @@ async def get_subject_assertions(
         require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page[NegativeAssertionRead]:
+) -> Page:
     """Get negative assertions for a specific subject."""
     org_id = context.require_organization()
 
@@ -85,7 +85,7 @@ async def get_subject_assertions(
 
 @router.get(
     "/negative-knowledge/search",
-    response_model=Page[NegativeAssertionRead],
+    response_model=Page,
 )
 async def search_negative_assertions(
     assertion_type: str | None = Query(default=None),
@@ -96,7 +96,7 @@ async def search_negative_assertions(
         require_roles("PlatformAdmin", "DataSteward", "DataEngineer", "Viewer")
     ),
     session: AsyncSession = Depends(get_session),
-) -> Page[NegativeAssertionRead]:
+) -> Page:
     """Search negative assertions with optional filters."""
     org_id = context.require_organization()
 
