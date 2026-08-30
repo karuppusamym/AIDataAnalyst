@@ -15,6 +15,7 @@ from aida.dbt_artifacts import (
     parse_dbt_manifest,
     parse_dbt_run_results,
 )
+from aida.dbt_column_lineage import DependencyResource, extract_column_lineage
 from aida.dbt_quality_bridge import reconcile_dbt_test_quality
 from aida.events import record_audit, record_outbox
 from aida.integration_catalog import transformation_metadata_integration_enabled
@@ -341,8 +342,50 @@ async def import_dbt_manifest(
                 artifact_import_id=artifact.id,
                 source_resource_id=resource_by_unique_id[source_unique_id].id,
                 target_resource_id=resource_by_unique_id[target_unique_id].id,
+                edge_type="DEPENDS_ON",
+                # Table-level edges have no column granularity -- "" (never
+                # NULL) so the widened unique constraint stays meaningful.
+                source_column="",
+                target_column="",
             )
         )
+    column_lineage_edge_count = 0
+    for parsed_resource, _table_id in resources:
+        if parsed_resource.sql_parse_status != "PARSED":
+            continue
+        target_resource = resource_by_unique_id[parsed_resource.unique_id]
+        dependencies = [
+            DependencyResource(
+                unique_id=dependency.unique_id,
+                relation_name=dependency.relation_name,
+                database_name=dependency.database_name,
+                schema_name=dependency.schema_name,
+                name=dependency.name,
+            )
+            for dependency_id in parsed_resource.depends_on_unique_ids
+            if (dependency := resource_by_unique_id.get(dependency_id)) is not None
+        ]
+        if not dependencies:
+            continue
+        column_edges = extract_column_lineage(parsed_resource, dependencies, datasource.dialect)
+        for column_edge in column_edges:
+            source_resource = resource_by_unique_id.get(column_edge.source_unique_id)
+            if source_resource is None:
+                continue
+            session.add(
+                DbtLineageEdge(
+                    organization_id=dbt_project.organization_id,
+                    artifact_import_id=artifact.id,
+                    source_resource_id=source_resource.id,
+                    target_resource_id=target_resource.id,
+                    edge_type="COLUMN_DEPENDS_ON",
+                    source_column=column_edge.source_column,
+                    target_column=column_edge.target_column,
+                    transformation_type=column_edge.transformation_type,
+                    confidence=column_edge.confidence,
+                )
+            )
+            column_lineage_edge_count += 1
     if test_results:
         await reconcile_dbt_test_quality(
             session,
@@ -363,6 +406,7 @@ async def import_dbt_manifest(
             "dbt_project_id": str(dbt_project.id),
             "resource_count": artifact.resource_count,
             "lineage_edge_count": artifact.lineage_edge_count,
+            "column_lineage_edge_count": column_lineage_edge_count,
             "matched_resource_count": artifact.matched_resource_count,
             "raw_artifact_persisted": False,
         },
@@ -378,6 +422,7 @@ async def import_dbt_manifest(
             "dbt_project_id": str(dbt_project.id),
             "resource_count": artifact.resource_count,
             "lineage_edge_count": artifact.lineage_edge_count,
+            "column_lineage_edge_count": column_lineage_edge_count,
         },
     )
     await session.commit()

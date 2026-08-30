@@ -214,7 +214,7 @@ Create the target structure, the module template, and the import-linter ratchet.
 Merges declared foreign keys, approved/candidate relationship edges, dbt manifest
 dependencies, and OpenLineage table edges into one graph, and replaces direct-reference
 counting with bounded transitive upstream/downstream traversal. Opened by
-`competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` against Collibra's
+`review-2026-08/research/05-collibra-lineage-and-platform.md` against Collibra's
 Catalog Lineage / Impact Analysis views.
 
 **Acceptance**
@@ -465,7 +465,7 @@ and custom YAML, delivered via REST, MCP, and file export.
 Delivers CP-6, using EA.14's unified graph as the data source: expose upstream, downstream,
 impact, fuzzy entity resolution, and transformation-detail as MCP tools alongside the existing
 catalog resources and governed tools in `mcp_server.py`. Opened further by
-`competitors/09-collibra-marketplace-catalog-integrations-mcp-governance-2026-08.md` against
+`review-2026-08/research/06-collibra-marketplace-and-mcp.md` against
 Collibra's MCP Server page (25+ tools, read + write, fuzzy resolution).
 
 **Acceptance**

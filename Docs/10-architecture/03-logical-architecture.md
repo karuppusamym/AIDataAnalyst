@@ -185,6 +185,15 @@ The critical ordering property: **SCREENED precedes retrieval**, and **VALIDATED
 
 ## 5. State topology
 
+> **Implementation status (2026-08-30).** PostgreSQL, Neo4j, Redis and Kafka are wired.
+> **pgvector is an enabled extension with no embedding column and no reader or writer**, the
+> **search index does not exist** (lexical search is SQL in PostgreSQL, `src/aida/retrieval.py`),
+> and **object storage is not wired** — MinIO runs in `compose.yaml` but there is no
+> object-storage client in the dependency list and no code touches it. See
+> `06-data-architecture.md` §1 for the per-store evidence. The rebuild claims in the fourth
+> column are untested for every projection: the rebuild drill has never been run and
+> `test_projection_rebuild` does not exist.
+
 | Store | Role | Authoritative? | Rebuildable? | Loss impact |
 |---|---|---|---|---|
 | PostgreSQL | All governed state, outbox, audit | **Yes** | No — backup/restore only | Catastrophic; RPO 15 min |
@@ -212,7 +221,11 @@ For the interactive path, excluding source execution and model time.
 | EXPLAINED (evidence assembly) | 50 ms |
 | **Total Atlas overhead** | **≤ 300 ms** |
 
-This is the number in G4 of `00-product/01-vision-and-goals.md` and it is a regression gate in CI, not an aspiration.
+This is the number in G4 of `00-product/01-vision-and-goals.md`. **It is an aspiration, not a
+gate (2026-08-30).** There is no performance job in `.github/workflows/ci.yml`, no
+`tests/performance/` suite, and no measurement of any stage in this table has ever been taken.
+The budget is a design target that has not been validated — see
+`10-performance-and-scale-model.md` §9 and tracker `E10`.
 
 ## Related documents
 

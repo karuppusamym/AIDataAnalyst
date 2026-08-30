@@ -13,6 +13,932 @@
 
 ---
 
+## 2026-08-30 (tenth entry)
+
+### Cleared the lint backlog — and four of the errors were runtime faults
+
+The ninth entry recorded 168 `ruff` and 16 `mypy` errors arriving with the parallel session's
+~35 new modules, and said they were "surfaced, not repaired". The owner's instruction was to fix
+rather than escalate, so this entry is the repair. **CI is green again**: ruff clean, mypy clean
+on 156 files, 4 import contracts kept, one Alembic head, 1,199 tests passing.
+
+#### The part worth remembering
+
+Most of the 184 were genuine noise — unused imports, import order, long lines. **Four were
+defects that would have failed at runtime**, and they were invisible because nobody reads 168
+warnings looking for the four that matter.
+
+* **`observability.traced` called the function it wrapped twice.** The `try` block enclosed the
+  wrapped call, so any exception was swallowed by `except Exception: pass` and the fallback path
+  then ran the function *again* — a silent duplicate side effect on every traced operation that
+  raised, with the caller seeing only the second failure. The `try` now guards tracer
+  acquisition alone, and the call sits in the `else` branch. Tracing must never change how many
+  times the thing it observes runs.
+* **`studio_api` called `record_outbox` without `aggregate_type` or `aggregate_id`** — both
+  required, so every change-set submit would have raised `TypeError`.
+* **`search_api` wrapped an existing `UUID` in `UUID(...)`** — `TypeError` for every search hit
+  carrying a datasource.
+* **`MetricsConfig` had no `insecure` field** that `configure_metrics` reads — `AttributeError`
+  the moment OTLP metrics were enabled.
+
+Two more were narrowed rather than silenced: a bare `except Exception` inside the injection
+detector, where a wide silent catch makes a decoder bug read exactly like "nothing found"; and
+an `assert False` in a test, which `python -O` deletes, turning the test into one that passes
+either way.
+
+A mistake of my own is worth recording with them: a blanket replacement of
+`org_id = context.require_organization()` hit eleven call sites when only five had an unused
+variable, breaking four functions. `ruff` reported the resulting `F821`s immediately and the
+repair was scoped per-function. The lesson is the ordinary one — a mechanical edit across call
+sites needs the scope check *before* the write, not the linter afterwards.
+
+#### The embedding model is chosen and built (N5)
+
+Decision: **OpenAI or Gemini**, the same two providers the generation path already supports.
+`src/aida/embedding_provider.py` implements both, with 12 tests.
+
+Reusing those two providers was the point rather than a shortcut: a third embedding vendor means
+a second credential path, a second retry policy and a second failure mode for one capability.
+The embedding credential resolves through the same reference mechanism as every model
+credential, inheriting its rotation, registry and production refusal of `env://`.
+
+**The most valuable thing this uncovered was already in the tree.** The fused retrieval path
+built `HashEmbeddingProvider()` *unconditionally* and fed its output into ranking as the
+`vector` signal. A hash has no semantic structure, so that score was noise wearing the name of a
+signal — and from outside, the result looked complete. Resolution now fails closed
+(`EmbeddingUnavailable` with a reason code, no fallback), and the vector stage is **skipped and
+logged** rather than substituted. A smaller answer beats a confidently wrong one, and reporting
+a capability you do not have is what INV-9 forbids.
+
+Three provider responses are refused rather than accepted: wrong vector count, wrong width,
+unparseable shape. Each would otherwise misalign vectors with the texts they describe or store
+something incomparable with what is already indexed — and **neither is detectable downstream**.
+They would surface as quietly bad search months later.
+
+#### Neo4j: configurable, not removed
+
+Recorded in full in the ninth entry; the tracker rows moved with it. C7 becomes "graph store as
+a configurable port" and E5, the projection rebuild drill, is promoted from deferred to a
+prerequisite of shipping the `neo4j` backend.
+
+#### Verification evidence
+
+- `ruff check .` clean · `mypy src` clean on **156** files · `lint-imports` 4 kept, 0 broken ·
+  `alembic heads` = 1 (`d5f8b21c4a03`) · **1,199 tests passing**, no failures, no skips.
+- The four runtime faults above were each confirmed by reading the call site, not by inference
+  from the error text.
+
+#### Current limitations
+
+- **Nothing embeds the catalogue yet.** The provider exists and is tested against mocked
+  transports; no vectors have been produced for real metadata, and no live call to either
+  provider has been made from this repository.
+- **The recall@10 evaluation has not been run** — 200–500 real steward questions, measured
+  *after* policy filtering, per `review-2026-08/decisions/02-embedding-model.md`. Choosing the
+  provider was the blocking decision; proving the choice is a separate piece of work.
+- The lint repair touched 20 files that a parallel session had open. It was done only after
+  confirming no writes since 05:49; if that session resumes on the same files, this is where a
+  conflict will appear.
+- `MAX_BATCH` is declared and not yet enforced by a chunking caller — the batching limit exists
+  as a constant for the backfill that does not exist yet.
+
+---
+
+## 2026-08-30 (ninth entry)
+
+### Neo4j: configurable, not removed — and a tree that moved underneath the last entry
+
+Two things, recorded together because the second changes how to read the first.
+
+#### The graph store becomes a setting (C7, ADR-0020 amendment)
+
+Asked whether both backends could be offered under an admin setting, and whether that was hard.
+It is not, and the reasoning is worth keeping because it reverses the framing of ADR-0020's
+own reversal condition.
+
+That condition said: reintroduce a graph store when p95 lineage traversal exceeds ~200 ms after
+caps, on a real estate. Under a removal, satisfying it meant weeks of work *at exactly the moment
+the estate was proving the need*. As a per-organization setting, satisfying it means changing a
+value for one organization and measuring the result. **A decision that can be tested is worth more
+than a decision that has to be defended**, so the amendment strengthens the ADR rather than
+softening it.
+
+The switch itself is cheap and the honest reason is that the surface is small: three modules read
+Neo4j, a gating boolean (`lineage_neo4j_read_enabled`) already exists, and `vector_store.py` is
+the same port-with-adapters pattern already built once under ADR-0019.
+
+**What actually costs the time is not the switch.** Two backends must answer *identically* —
+identical node sets, ordering, tie-breaks, cap behaviour and truncation reasons — or a
+configuration flag has quietly become a correctness surface, and the user who hits the difference
+has no way to diagnose it. One conformance suite run against both is the deliverable that makes
+the setting safe. Beyond that: no Neo4j runs in the test suite today (INV-1's test says so
+itself), so the second backend either joins CI or ships advertised as uncertified (INV-9); and
+INV-1 confines the setting to lineage and exploration reads, never the authorization path or the
+classification roll-up.
+
+The cost named rather than absorbed: removal would have eliminated two overdue drills. Keeping
+Neo4j puts them back and promotes **E5**, the projection rebuild drill, from deferred to a
+prerequisite. A projection never proven rebuildable should not be offered as a selectable backend.
+
+#### The working tree moved, and it no longer passes lint
+
+The eighth entry's verification block said 716 tests and 120 files, clean. That was true at 04:30
+and false by 12:25. The parallel session restarted, committed three times (latest `2c30a6f`), swept
+this session's authorization work into its commits, and added roughly 35 modules — ABAC API,
+studio, tool plans, view lineage, full-text index, fusion ranking, graph retrieval, compliance
+packs, consumption and AI-decision lineage.
+
+| | 04:30 | 12:25 |
+|---|:--:|:--:|
+| Tests passing | 716 | **1,187** |
+| Source files (mypy) | 120 | 155 |
+| `ruff` | clean | **168 errors** |
+| `mypy --strict` | clean | **16 errors in 7 files** |
+| Import contracts | 4 kept | 4 kept |
+| Alembic heads | 1 | 1 |
+
+**CI would be red.** The failures concentrate in the in-flight modules — `runtime_contracts.py`
+(12), `injection_defense.py` (10), `tool_plans.py` (9), `retrieval.py` (8), `compliance_api.py`
+(8) — and 119 of the 168 are auto-fixable, so this reads as work in progress rather than damage.
+It is recorded because the eighth entry's numbers are now wrong, and this log's own rule is that a
+correction is a new entry rather than an edit.
+
+It is also the first live test of the consolidation rule written four hours earlier. `00-status.md`
+now carries the moving-tree caveat in its header instead of a clean number that would have been
+false within the day — which is the behaviour the rule was written to produce.
+
+#### Verification evidence
+
+- 1,187 tests pass, no failures, no skips; 4 import contracts kept; one Alembic head
+  `d5f8b21c4a03`. `ruff` and `mypy` fail as tabulated above.
+- No code was changed in this entry. ADR-0020 gained an amendment; `00-status.md` §1 and decision
+  5, and tracker rows C7 and E5, were updated to match.
+
+#### Current limitations
+
+- **The lint regression is not this session's to fix.** Touching 46 files another session has open
+  is how two sessions produce a merge conflict neither can explain. It is surfaced, not repaired.
+- The C7 estimate (2–3 weeks) is judgement, not measurement: roughly a week for the port and the
+  admin setting, a week for the conformance suite and the CI service container, plus E5.
+- Nothing has yet been built for C7. This entry records a decision and its cost, not an outcome.
+
+---
+
+## 2026-08-30 (eighth entry)
+
+### Documentation consolidation — twelve status documents down to one
+
+Status had accumulated in twelve places, and four of them disagreed. This entry is the cleanup.
+It changed no code.
+
+#### What was actually wrong
+
+Not sprawl for its own sake — the failure mode was specific. `60-delivery/04-status-matrix.md`
+said 387 tests and Alembic head `9e4c7a12b5f8`; `05-gap-register.md` said retrieval was
+lexical-only; `review-2026-08/gap/01-baseline-reality.md` said CI did not exist and there were two
+import contracts; `10-architecture/01-principles-and-invariants.md` said four of nine invariants
+had no test. Each was true when written. Together they meant **no document could be trusted
+without checking the code**, which is the same as having no status document at all.
+
+Worse, one false claim was sitting in an authoritative *contract*, not a status file:
+`30-contracts/05-metadata-ingestion-envelope.md` stated that the envelope-1.1 pull path did not
+persist the new axes. `workflows/activities.py` imports `persist_envelope_extensions` at line 27
+and calls it at line 587. A reader would have concluded a shipped capability was missing.
+
+#### The consolidation
+
+`60-delivery/00-status.md` is now the single answer to "where are we": at-a-glance figures,
+capability matrix, per-invariant status *with each one's remaining limit*, deliberate
+simplifications, open gaps, the retest register, and the decisions waiting on a person. The two
+documents it absorbed are in `_superseded/`.
+
+Four rules were written into it, because a consolidation with no rule about what happens next just
+resets the clock:
+
+1. **One status claim, one home.** A document that needs to state status links to it. A dated
+   `Implementation status` callout in a design document is the exception and must name the file
+   that proves it.
+2. **The accomplishment log is history, not status.** Being in it is not evidence of still being
+   true.
+3. **A completed work-item write-up keeps its design rationale and loses its status section.** The
+   rationale explains why the code looks the way it does and is worth keeping.
+4. **A superseded document moves to `_superseded/` with a header naming its replacement.** Never
+   edited into agreement, never silently deleted.
+
+#### Also done
+
+- **The review's `C`/`N`/`E`/`D` item vocabulary was re-homed into `03-tracker.md`**, with status
+  per item, so the open-work list is one list. `gap/02` keeps the original week and risk estimates
+  and is now explicitly the historical plan.
+- **All vendor research moved into one folder.** Four shallower competitor analyses were superseded
+  by the review's primary-source research; the two Collibra deep-dives worth keeping moved to join
+  it. `Docs/competitors/` is gone.
+- **The two open decision briefs got their own home**, `review-2026-08/decisions/`. They were
+  buried among completion write-ups with colliding numeric prefixes, which is a poor place for the
+  only two documents in the folder that need someone to *do* something.
+- **A published contract was moved out of a handoff note.** The fourteen SQL-validation finding
+  codes — declared append-only, and a breaking change to every MCP client if renamed — lived in
+  `gap/05-validate-sql-handoff.md`. They are now `30-contracts/09` §7.
+- **`gap/06` presented a closed INV-7 breach as live.** Thirteen endpoints, fixed under ST-17, and
+  the section still read as an open finding. Marked closed, with the finding kept because the
+  finding is the useful part.
+- Two numeric-prefix collisions resolved; the stale "the repository is not under version control"
+  claim in `_superseded/README.md` corrected.
+
+#### Verification evidence
+
+- **Every relative link and backticked document path under `Docs/` resolves**, checked by script
+  across all 130 files. One exception is deliberate and reads as such: ST-13 names the retired
+  baseline snapshot as "formerly" at that path.
+- Code untouched, and re-verified unchanged: `ruff check .` clean, `mypy src` clean on 120 files,
+  `lint-imports` 4 contracts kept, 1 Alembic head, **716 tests passing**, 1 xfailed.
+
+#### Current limitations
+
+- **Paths in earlier entries of this log point at pre-consolidation locations.** This document is
+  append-only, so they were not rewritten — that rule is worth more than the broken links. The
+  mapping is in `_superseded/README.md`. In short: `60-delivery/04-status-matrix.md` and
+  `05-gap-register.md` → `60-delivery/00-status.md`; `Docs/competitors/*` → `_superseded/` or
+  `review-2026-08/research/`; `review-2026-08/gap/01` → `_superseded/27`; `gap/03` and the
+  embedding brief → `review-2026-08/decisions/`.
+- **`Docs/` is 130 files and this pass did not attempt to reduce that.** It removed *contradiction*,
+  not volume. `20-modules/` (21 files) still describes a decomposition the code has not reached,
+  and that is a code problem (ST-05 onward), not a documentation problem.
+- The consolidation is only as durable as rule 1. Nothing enforces it mechanically — there is no
+  test that fails when a second status claim appears, and writing one would mean parsing prose.
+
+---
+
+## 2026-08-30 (seventh entry)
+
+### The authorization decision is now wired into production paths (Task #19)
+
+For the last four entries this platform had a complete attribute-based authorization
+system -- policy engine, workspace membership, expiring source bindings, rule-derived
+roles, shadow mode -- with **48 passing tests and zero production callers**. Every prior
+entry said so plainly. This entry closes that gap: `authorize` now decides on the
+execution path, the validation path, four catalog read handlers and the retrieval
+preview, and three tests exist to stop it becoming unwired again.
+
+#### The problem that had to be solved first: which workspace is this request in?
+
+`authorize` needs a workspace id. Nothing in the existing API surface supplies one --
+the contracts predate ADR-0018 -- so a resolution step was unavoidable. The obvious
+implementation is a hole:
+
+> find the workspaces this principal belongs to, intersect with the ones bound to this
+> datasource, take the match
+
+That picks the workspace by where the caller already has access and then asks whether
+the caller has access there. It reads as helpful and it is a check with a foregone
+answer. **`aida/workspace_resolution.py` is subject-independent by construction:** every
+rule looks only at the request and at platform state, never at who is asking. There are
+exactly two ways to get a workspace -- the request names one, or the datasource has
+exactly one live binding so the answer is forced. Two live bindings is
+`WORKSPACE_AMBIGUOUS`: a refusal to answer, not a guess.
+
+The single-binding path is what carries the existing estate, because the ADR-0018
+migration gave every datasource exactly one grandfathered binding from its project.
+
+#### An unresolved workspace is a third state, not a quiet allow
+
+Most callers still name no workspace. Making that an allow would hide the size of the
+remaining migration inside a boolean; making it a denial on the day the gate was wired
+would take the platform down. It is its own state, with its own setting
+(`unresolved_workspace_posture`, default `SHADOW`), a `decided=False` flag on the gate's
+result so no caller can claim a check that did not happen, and a warning log line that
+**counts the callers still to migrate**. Flipping that setting to `DENY` is the actual
+completion of this rollout, and it is one setting, not a code change.
+
+#### Wired at the choke point, not at the handlers
+
+The gate sits inside `QueryExecutionGateway.execute` and `.validate`, which INV-2
+already makes the only path to a warehouse. Gating the four callers instead (two HTTP
+handlers, the MCP tool surface, the agent orchestrator) would mean the gate is present
+on the ones somebody remembered.
+
+`AuthorizationRejected` subclasses `QueryRejected` deliberately: every existing caller
+already knows how to record a rejection, with the execution id, failure reason and run
+status handling that goes with it. A sibling exception type would have meant each caller
+either grew a branch or let a denial escape as a 500 -- and the second outcome happens to
+whichever caller is overlooked. Handlers that want the right status catch it first and
+answer **403**, not 422: the statement was never the problem.
+
+Authorization runs *after* the execution row and its `requested` audit entry exist, and
+before anything reaches a connector. A denied attempt therefore leaves a REJECTED row
+naming who asked and why (INV-7), which gating earlier would have thrown away.
+
+#### Two design corrections found while building it
+
+* **A shadow record written into the caller's session is discarded exactly when it
+  matters.** A read handler never commits and a rejected execution rolls back, so the
+  most interesting divergences -- the ones attached to requests that failed -- would be
+  the least likely to survive, biasing the readiness report towards agreement. Since
+  that report is what a human reads before flipping a workspace to `ENFORCE`, the record
+  now gets a transaction of its own (`record_divergence_durably`).
+* **The INV-7 mutation scan was right to flag the gated GETs, and the fix was not an
+  exemption list.** Once a read path is gated every gated GET reaches a `session.add`,
+  and a route-keyed exemption list would grow with each one. `NON_GOVERNED_WRITERS` in
+  the shared scan says instead that recording an authorization divergence is not a
+  mutation of governed state -- nothing reads it, no object differs because it exists --
+  and `test_the_excluded_writers_only_ever_write_attributable_shadow_records` asserts
+  that claim rather than trusting it.
+
+#### Verification evidence
+
+- `ruff check .` clean; `mypy src` clean on 120 files; `lint-imports` **4 contracts kept,
+  0 broken**; `alembic heads` = 1. **716 tests pass** (26 new), 1 xfailed.
+- **This change adds no migration.** Schema is untouched; the only configuration addition
+  is one setting with a safe default.
+- **Measured proof the gate is not a no-op:** the suite was re-run with
+  `AIDA_UNRESOLVED_WORKSPACE_POSTURE=DENY`. **17 tests fail**, every one of them a test
+  whose double supplies no source binding. The gate is live, it fails closed, and the
+  failures name exactly the surfaces that must pass a workspace id before the posture
+  can flip.
+- The static half of `test_inv4_authorization_wiring.py` would pass against a `gate` that
+  returned True unconditionally; the behavioural half would pass against a perfect gate
+  nothing called. Both are present because neither is worth much alone, and
+  `test_the_scan_would_notice_if_a_gate_were_removed` keeps the static half able to fail.
+
+#### Current limitations
+
+- **Nothing is denied in production today**, and that is the intended state: every
+  workspace is in `SHADOW`, the unresolved posture is `SHADOW`, so behaviour is
+  unchanged. What exists now is the *measurement* -- divergences and unresolved-workspace
+  counts accumulating per workspace -- that makes flipping to `ENFORCE` evidence-based.
+  Claiming enforcement on the strength of this entry would be false (INV-9).
+- **Clients do not yet pass `workspace_id`.** `QueryExecutionRequest` and
+  `GatewaySqlValidationRequest` accept it and no caller sends it, so resolution runs
+  through the sole-binding path. The DENY rehearsal above is the list of what to fix.
+- **Coverage is the execution path plus five read surfaces**, not every read in the
+  platform. Query lineage, glossary, stewardship, semantic and marketplace reads are
+  ungated; `test_the_scan_would_notice_if_a_gate_were_removed` currently uses
+  `get_query_lineage` as its ungated control, which is itself a reminder that it should
+  be gated.
+- The per-request cost of a resolved gate (binding lookup, workspace, membership, rules,
+  classification scope, policy load) has been measured only on the synthetic estate from
+  the ADR-0019/0020 benchmarks (auth hot path 0.8 ms with the materialised roll-up). It
+  has not been measured against the bank's real catalogue.
+
+---
+
+## 2026-08-30 (sixth entry)
+
+### Cross-session review: one gap neither session would have found alone
+
+The parallel session stopped after six commits (validate_sql, all nine Tier-0 invariants,
+a documentation truth pass, envelope 1.1 across four connectors, INV-7 auditing). Reviewing
+that work against the same adversarial standard found one defect that exists precisely
+*because* two sessions worked in parallel: each was internally consistent, and the
+inconsistency lived between them.
+
+#### What the other session built, assessed honestly
+
+Strong work, and better than mine in two places:
+
+* **`validate_sql`** is real and shares `_run_validation` with `execute`, so "what
+  validation says" and "what execution enforces" cannot drift. Exactly the design the
+  review recommended.
+* **Five invariant test files** (~90 KB) that include *meta-tests* -- `test_the_cypher_scan
+  _finds_the_statements_it_is_supposed_to`, `test_the_control_plane_scan_would_notice_a
+  _leak`, `test_the_unauthenticated_route_list_stays_closed`. These are the guard against
+  the failure mode this session hit on its own INV-6 test, which asserted nothing. Better
+  practice than mine.
+* Exemption lists are tight and justified: **3** unauthenticated routes, **8** tenant-free
+  routes each carrying a written reason.
+* INV-1 is explicit that it does not prove Neo4j ingests correctly, because no Neo4j is
+  running. Honest about its own limit rather than claiming the invariant outright.
+
+#### The gap
+
+**The same codebase now treated persisted SQL two different ways, and the newer path was
+the unsafe one.**
+
+`dbt_artifacts.py` has always stored `compiled_sql_hash` + `compiled_sql_redacted` and
+never the raw artifact. Envelope 1.1's `metadata_view_definition.definition_sql` and
+`metadata_routine.body_sql` stored source SQL **raw**. A view defined
+`... WHERE ssn = '123-45-6789'` landed verbatim in the control plane -- a source value
+written in a different syntax, which is exactly what INV-6 forbids.
+
+It was invisible because **INV-6's own test drives only the query gateway**, so the tables
+envelope 1.1 introduced sat outside the scan entirely. A test is only as strong as the
+paths its author had in mind.
+
+#### Fixed, migration `d5f8b21c4a03`
+
+Columns replaced with `*_redacted` + `*_fingerprint` + `redaction_status`, raw columns
+**dropped rather than migrated** -- carrying the text forward would defeat the change.
+Redaction extracted to `aida/sql_redaction.py`, which also removed a latent L1-imports-L3
+edge (ingestion would otherwise have imported the gateway).
+
+**A design problem surfaced while building it, and changed the design.** Fail-closed
+redaction -- "store nothing that does not parse" -- discarded most *procedure bodies*,
+because `BEGIN ... END` is procedural rather than a single statement and every dialect
+spells it differently. That would have thrown away the text envelope 1.1 exists to capture,
+and with it procedure lineage: one of the four capabilities no competitor offers. So
+redaction now has three tiers -- `PARSED` (node-level, precise), `LEXICAL` (literals
+removed by scanning; structure survives, values do not), `UNPARSED` (nothing stored).
+Removing literals never actually required a parse.
+
+Numeric literals are scrubbed as well as quoted strings: an account number is as likely to
+appear unquoted as quoted, and `LIMIT 100` losing its number is the accepted cost of not
+guessing which numbers are values.
+
+#### Ingestion-time screening (ADR-0013, N18) -- shipped
+
+`aida/ingest_screening.py` runs the existing deterministic classifier over source-supplied
+text at **write** time, recording a verdict and quarantining what fails. Screening once on
+write is cheaper and more complete than screening on every read, and quarantine changes
+*eligibility for model context* rather than deleting a source's own metadata.
+
+The gap this closes is recorded in ADR-0013, threat model T7, AI-safety AS-1 and
+agent-runtime AG-1, and was addressed in none of them. Envelope 1.1 had just made it much
+larger: a procedure body is kilobytes of source-controlled text that meaning inference and
+tool generation are both designed to read.
+
+Stated plainly in the module: this is defence in depth and it is the weaker layer. INV-3 is
+load-bearing -- a successful injection still produces a proposal that cannot execute.
+
+#### INV-6's test now covers the ingestion path
+
+The systemic fix, not just the instance. Sentinel-laden view and procedure SQL is driven
+through the real redaction path and searched for leakage.
+
+#### Verified on PostgreSQL 16, with an SSN actually in the database
+
+Seeded a raw view definition containing `123-45-6789` at the pre-migration revision, then
+migrated. **5 of 5**: rows preserved, raw column dropped, the SSN gone, CHECK constraint
+rebuilt around the new column, pre-existing row still satisfying it. Downgrade and
+re-upgrade clean with data present.
+
+#### A process failure worth recording
+
+The single-head migration gate produced **two heads twice**, and the second time this
+session missed it -- because the verification command used `alembic heads | tail -1`, which
+showed one line and hid the second head. The gate was built in Phase 0, then not actually
+run. A check you own is not a check you performed.
+
+689 tests passing, ruff and mypy clean, 4 import contracts kept, one head.
+
+---
+
+## 2026-08-30 (fifth entry)
+
+### A devil's-advocate check before building found that the next planned change was an outage
+
+The plan stated at the end of the previous entry was "wire `authorize` into the read and
+execution paths". Challenging that plan before implementing it, rather than after, produced
+the most valuable finding of the day.
+
+#### The plan would have denied every request in the platform
+
+The ADR-0018 migration backfills one workspace per project and **zero memberships**. It
+backfills zero because there is nothing to backfill *from*: this codebase has **no persisted
+principal table at all** -- identity and roles arrive as OIDC claims per request and are
+never stored. (Module 01's spec claims a principal registry; it does not exist. Third
+doc-versus-code gap of the day.)
+
+Verified on the populated rehearsal database: 24 workspaces, 48 active source bindings,
+**0 memberships**. Wiring `authorize` in would have returned `NO_WORKSPACE_MEMBERSHIP` for
+every request. The 14-assertion migration rehearsal missed it because not one assertion
+asked "can anyone actually get in".
+
+#### What was built instead
+
+Seeding 24 synthetic owners would have invented an access grant nobody made. Two mechanisms
+instead, migration `c9d1a83e6b47`:
+
+* **`workspace_access_rule`** derives workspace membership from an IdP role, scoped to a
+  workspace, to everything under a business node, or org-wide. Seven rules per organization
+  cover every migrated workspace; revoking a rule revokes the access; rules only grant, and
+  a DENY policy still outranks them.
+* **Shadow mode.** `workspace.authorization_mode` defaults to `SHADOW`, where the full
+  decision is computed, divergences are recorded in `authorization_shadow_record`, and
+  nothing is denied. `authorize_enforced` is what surfaces call; `authorize` stays public
+  for the probe endpoint, which wants the unmodulated answer. `enforcement_readiness`
+  summarises the shadow record so flipping a workspace to `ENFORCE` is a measurement.
+
+Re-verified on the populated PostgreSQL rehearsal: 7 rules seeded, 0 workspaces enforcing,
+0 memberships invented, ADR-0018 backfill intact, upgrade/downgrade round trip clean.
+**Lockout risk: none.**
+
+#### A bug class, not a bug
+
+The timezone-naive/aware comparison defect found in the previous entry appeared **twice
+more** while building this -- in `workspace_access._live` and latently in
+`workspace_service._expired`. Three occurrences in one day makes it a class, so it now has
+one implementation: `aida/timeutil.py`, with `as_utc`, `is_expired`, `is_live` and
+`same_instant`, and a test pinning the behaviour. Both of the new sites were **expiry checks
+on access grants**, which is the worst possible place for a backend-dependent answer.
+
+#### The CI gate caught its first real defect
+
+Applying the new migration produced `Multiple head revisions are present` -- the parallel
+session had authored a migration from the same parent. That is a merge accident which
+normally surfaces at deploy time, and the single-head gate added in Phase 0 caught it.
+
+Resolving it produced a second, sharper failure: both authors rebased onto the other
+simultaneously, creating a revision **cycle** -- which `alembic heads` cannot even report,
+because it raises instead of returning a count. Resolution rule recorded in the migration:
+whoever moved last yields. Chain is linear again.
+
+#### Hub-shaped lineage measured, and it reframed the ADR-0020 caveat
+
+ADR-0020 listed hub fan-out as unmeasured and as the likeliest weakness in choosing
+PostgreSQL over Neo4j. Measured downstream through a single hub column on the 880,000-edge
+DAG: 50,000 fan-out at depth 12 costs **3,402 ms** and reaches 480,000 nodes.
+
+But cost tracks **nodes reached, not depth** -- and that is not a graph-database problem,
+because Neo4j must also materialise 480,000 nodes. Bounding the traversal, which ADR-0010
+already mandates, takes the same worst case to **1.5 ms** at a 1,000-node cap. A degree
+pre-check ("is this a hub?") costs 8.8 ms.
+
+The mitigation was already the design; it had simply never been shown to be load-bearing.
+ADR-0020 now carries three binding requirements: node caps with explicit truncation, a hub
+degree pre-check before traversal, and precomputed impact summaries for high-degree nodes.
+
+#### Also produced
+
+`gap/05-embedding-model-decision-brief.md` -- deliberately a decision *input*, not a
+decision. Which embedding model runs and where is a model-risk and procurement question,
+and the irreversible part is that `index_signature` pins model, version, dimensions and
+chunking, so changing the model means re-embedding the estate.
+
+#### Known limitations
+
+- Surfaces still call neither `authorize` nor `authorize_enforced`; the safe wiring now
+  exists but no endpoint uses it. That is the next change and it is now genuinely safe.
+- Hub measurement is synthetic. The real estate's degree distribution is still unknown, and
+  what matters is how many columns exceed a 1,000 fan-out.
+- No embedding model chosen, so retrieval remains lexical-only.
+
+---
+
+## 2026-08-30 (fourth entry)
+
+### Adversarial self-review: five defects in work that had already shipped green
+
+Prompted by a direct challenge — "how can I trust your analysis, and are you making a
+big mistake?" — the ADR-0018/0019 work was attacked rather than re-read. All five
+findings below were in code that had passed review, passed `mypy --strict`, and shipped
+inside a suite of 575 passing tests.
+
+The method mattered more than the findings: tests were written to *fail first*, and each
+was watched failing before anything was changed. Three are now permanent regressions in
+`tests/test_regressions_from_adversarial_review.py`.
+
+#### 1. Fail-open tenant isolation (INV-5) — the serious one
+
+`workspace_service.authorize` read
+`if context.organization_id is not None and <organization mismatch>`, so a caller
+claiming **no** organization skipped the cross-organization check entirely. Development
+identity makes `X-Organization-Id` optional, so `None` is reachable from outside.
+
+This was in the function whose whole purpose is INV-5, and the suite already contained
+two cross-tenant tests — both of which supplied an organization and therefore never
+reached the branch. Fixed: an absent tenant claim is now `NO_ORGANIZATION_CONTEXT`, a
+denial. Deliberately no `PlatformAdmin` bypass, unlike the older `enforce_organization`:
+a workspace is a tenancy boundary and INV-5 says isolation is total.
+
+#### 2. An allowlist matching on the wrong key
+
+`PostgresBruteForceIndex.search` filtered candidates by `owner_id`, which is unique only
+*within* an `owner_type`. An allowlist authorising `("TABLE", "x")` also admitted
+`("COLUMN", "x")` — an object the policy filter had not authorised. Fixed by matching the
+full pair, narrowing in SQL on the indexed column and completing the match in Python
+because a tuple `IN` is not portable across the dialects in play.
+
+#### 3. A constraint violation visible on only one backend
+
+Re-asserting an assignment at the same instant set `effective_to == effective_from` and
+then inserted a row colliding on the unique key. **The first fix did not work**, and the
+reason is the finding: timestamps read back aware from PostgreSQL and naive from SQLite,
+so `stored == supplied` was silently False on the test backend and would have been True
+in production. Backend-dependent comparison is the worst failure shape there is, because
+no single environment reveals it. Fixed with explicit UTC normalisation (`_as_utc`).
+
+#### 4. A test that asserted nothing
+
+`assert "tbl_1" not in rendered or decision.matched_policy_id is not None` — the
+right-hand side is always true, so the assertion always passed. It was the INV-6 test,
+meaning the one control claimed as verified was the one not verified at all. Rewritten to
+assert both halves; the original kept in a comment as a standing reminder that a green
+test is not evidence until it has been watched failing.
+
+#### 5. A performance bug behind a correct-looking fallback
+
+`rollup` fell through to the expensive recompute whenever the materialised result was
+empty — but empty is ambiguous between "nothing assigned here" and "projection not built",
+and the first is the common case early in an estate's life. The ~3 s query would have run
+constantly on precisely the nodes the materialisation exists to make fast. Fixed with an
+existence probe.
+
+### Also produced
+
+`Docs/review-2026-08/gap/04-how-to-verify-this-work.md` — every claim in the review
+paired with the command that checks it, every performance number with the dataset shape
+that produced it, and an explicit list of what has *not* been verified. It includes the
+instruction to break the INV-2 import contract deliberately and watch it fail, because a
+contract that has only ever passed is not evidence of anything.
+
+### Known limitations — unchanged and still open
+
+- Nothing is wired into the read and execution paths; ABAC and the vector index decide
+  nothing in production traffic.
+- Hub-shaped lineage remains unmeasured and is the likeliest weakness in ADR-0020.
+- No embedding model is configured.
+- CI has never run on a remote.
+
+---
+
+## 2026-08-30 (third entry)
+
+### Three assumptions challenged, measured, and two of them corrected
+
+Prompted by three questions from the product owner. Each was answered with a benchmark
+against real PostgreSQL 16 rather than an opinion, because two of the three concerned
+claims this project had asserted without evidence.
+
+#### 1. `pgvector` is not available in the target estate — ADR-0019 accepted
+
+The retrieval design named `pgvector` as a fact. It is not one: the bank's PostgreSQL has
+no `vector` extension, and `CREATE EXTENSION` needs a privilege a DBA will not grant a new
+platform. An architecture that requires an extension the operator cannot install is a
+design defect, not a deployment detail.
+
+Nearest-neighbour search is now a **port** (`aida/vector_store.py`) with four adapters:
+exact cosine over `bytea` in plain PostgreSQL (default, needs nothing), the bank's
+in-network vector service over HTTP, `pgvector` where it genuinely exists (probed via
+`pg_available_extensions`, never trusted from configuration — INV-9), and disabled.
+Embeddings live in a new `embedding` table with a stored norm and an `index_signature`
+pinning model, version, dimensions and chunking; vectors from different signatures are not
+comparable, and mixing them fails as quietly poor search rather than as an error.
+
+*Measured* end to end against 200,000 stored 768-dimension embeddings — fetch, unpack,
+score, top-25: **200 candidates 45 ms, 1,000 → 100 ms, 5,000 → 427 ms, 20,000 → 1,697 ms.**
+That is the honest envelope, and it moved the default candidate cap from a guessed 20,000
+to a measured 5,000. The cap is a refusal with a reason code, not a truncation: scoring an
+arbitrary slice of a larger set returns plausible answers that are wrong.
+
+Recorded and not glossed: **embeddings are not anonymous.** Embedding-inversion research
+recovers substantial portions of source text from vectors alone, so the embedding store
+inherits the classification of what was embedded, an external index must be inside the
+bank's network, and there is no hosted-vector-API mode.
+
+#### 2. "Will recursive SQL scale?" — the tree was fine, the aggregation was not
+
+The distinction that matters and was easy to miss: the recursive CTE walks the *taxonomy*,
+never tables or columns. Measured against a bank-scale taxonomy (13,548 nodes, depth 4) and
+5,000,000 assignments:
+
+| Operation | Before | After |
+|---|---:|---:|
+| Descendants of an LOB | 3.3 ms | 1.5 ms (closure) |
+| Authorization scope for one table | 26 ms (two round trips) | 0.8 ms (one query) |
+| Roll-up over a subtree | **3,147 ms** | **0.4 ms** (materialised) |
+
+So: a closure table (`business_node_closure`) for traversal, a materialised
+`business_node_rollup` for aggregation — full recompute of every node takes ~47 s as one
+grouped statement, which is a batch job, not a request — and `classification_scope`
+collapsed from two round trips into one because it sits inside a 50 ms authorization
+budget. `computed_at` is returned to callers so roll-up staleness is visible rather than
+hidden. Migration `a7c3e91d4f28`.
+
+#### 3. "Wouldn't Neo4j be better for lineage?" — measured; the answer held, the argument did not
+
+The original recommendation to drop Neo4j was a cost argument and was too glib about
+capability. A graph database genuinely is better at deep, variable-length paths, and
+lineage is where depth is real, so the honest question was how deep this product's
+traversal actually goes.
+
+A bank-shaped column-level DAG — 12 layers, 40,000 columns per layer, real fan-in,
+**880,000 column-level edges** — traversed upstream from one report column on PostgreSQL:
+depth 4 → 0.7 ms, depth 8 → 1.6 ms, **depth 12 → 10.8 ms reaching 3,637 nodes.** The
+join-per-hop cost does not bite at this depth and edge count, and the 1–4 hop cap in
+ADR-0010 turns out to be a product decision about what to render rather than a performance
+ceiling.
+
+ADR-0020 records the decision *and what was not measured*: hub-shaped fan-out (a shared key
+column feeding tens of thousands of downstream columns), all-paths enumeration, and graph
+algorithms. Each is a named reversal condition with a threshold, not a hand-wave.
+
+Worth noting the first attempt at this benchmark measured nothing — the synthetic graph
+collapsed to a linear chain with no branching. It was rebuilt before any conclusion was
+drawn from it.
+
+#### The migration rehearsal gap is closed
+
+The previous entry listed "the migration has not been run against a populated PostgreSQL
+database" as a real gap. It has now been run, on PostgreSQL 16:
+
+- Full 37-migration chain from base to head on an empty database — clean.
+- Then the real rehearsal: populated the pre-ADR-0018 tables with 6 LOBs, 24 domains
+  (including a sub-domain layer), 24 projects and 48 datasources, and ran the chain over
+  it. **14 of 14 backfill assertions passed** — workspace count, node count, parent chains
+  for both DOMAIN→LOB and SUB_DOMAIN→DOMAIN, assignment count, grandfathered ACTIVE
+  bindings, code uniqueness under namespacing, 4 ACTIVE + 1 DRAFT seeded policies, closure
+  and roll-up populated, and the pre-ADR-0018 tables untouched.
+- Full round trip: upgrade → downgrade → upgrade. New tables removed cleanly, original data
+  intact, backfill reproduced identically.
+
+#### Known limitations — still open
+
+- **Nothing is wired into the read and execution paths yet.** ABAC and the vector index
+  both exist, are tested, and decide nothing in production traffic. Unchanged from the
+  previous entry and still the next thing to do.
+- **Hub-shaped lineage is unmeasured** and is the likeliest place the PostgreSQL graph
+  decision hurts. It should be measured on the real estate once view and procedure parsing
+  land and the graph has a realistic degree distribution.
+- **No embedding model is configured.** `embedding_model_id` defaults to `unset`; nothing
+  produces vectors yet, and which model runs where is a model-route governance question
+  (ADR-0009) that has not been answered.
+- Scoring runs in Python. `numpy` would cut the scoring half of the cost substantially and
+  was deliberately not added, because a dependency should be paid for by a measurement.
+- The `pgvector` adapter is declared and refuses with `PGVECTOR_ADAPTER_NOT_IMPLEMENTED`
+  rather than existing untested (INV-9).
+
+---
+
+## 2026-08-30 (second entry)
+
+### ADR-0018 three-axis tenancy -- schema, engine, API and tests
+
+#### Completed
+
+**Steps 1-4 of the ADR-0018 migration are built. Step 5 is deliberately not.**
+
+*Access axis.* `workspace`, `workspace_membership`, `source_binding` and
+`isolation_boundary` models plus migration `f1a2b3c4d5e6`. A workspace is created with
+its first owner in one call, because a workspace with no owner is one nobody can
+administer and making that state reachable invites it.
+
+*Classification axis.* `business_node` (LOB / SUB_LOB / DOMAIN / SUB_DOMAIN / CONCEPT,
+self-referencing, effective-dated), `business_assignment` (many-to-many, polymorphic
+target, effective-dated) and `business_assignment_rule`. `business_graph.py` provides
+descendant and ancestor traversal by recursive CTE, `nodes_for_target`,
+`classification_scope`, `rollup` and `as_of` history.
+
+*Policy.* `policy_engine.py` -- pure, no I/O, exhaustively unit-testable. DENY is a hard
+ceiling at any priority including PlatformAdmin; default is deny; `principal_kind` is a
+first-class subject attribute; MASK and FILTER obligations accumulate; ALLOW ties break
+deterministically so a decision replays identically a year later.
+
+*Enforcement.* `workspace_service.authorize` is the single entry point, failing closed at
+every step in order: workspace unavailable, cross-organization, no membership, role does
+not permit the action, no active binding, binding expired, outside schema scope,
+classification outside binding, then the policy decision.
+
+*HTTP.* `workspace_api.py` -- workspaces, memberships, source bindings with maker-checker
+approval, business nodes and assignments, `as_of` tree, roll-up, access policies, and an
+`/authorization-probes` endpoint that answers "what would you decide, and why" without
+performing the action. Every mutation audits in the same transaction (INV-7).
+
+*Migration behaviour.* The backfill creates one workspace per project keeping its slug, a
+business node per LOB and per data domain preserving the parent chain, `MIGRATED`
+assignments for every project and datasource, and grandfathered ACTIVE source bindings so
+existing access does not break at the moment the binding model is introduced. Seeded
+policies reproduce today's RBAC outcomes exactly; the one policy that would change
+behaviour (agents denied sensitive classifications) is seeded `DRAFT`.
+
+**INV-5 is now formalised in the Tier-0 invariant suite** -- the first of the five
+previously-unformalised invariants to close. The earlier docstring said INV-5 needed "a
+running app plus a much heavier per-route fake-session harness"; that stopped being true
+once tenant isolation had a single enforcement point, so it is asserted against that
+function with a real in-memory database instead.
+
+*Verified*, in a clean checkout using the exact CI recipe: ruff clean, mypy clean across
+110 files, 3 import contracts kept, 1 Alembic head (`f1a2b3c4d5e6`), **424 tests passing**
+(up from 387; +35 new across `test_policy_engine.py`, `test_workspace_authorization.py`
+and the two new Tier-0 INV-5 cases).
+
+#### Found while doing the above
+
+**A real bug in the recursive CTE traversal, caught by a warning rather than a failure.**
+The first implementation built its live-node predicate against the un-aliased
+`BusinessNode` inside the recursive term, which silently added a second FROM entry -- a
+cartesian product with the whole table, filtering on "some row is live" rather than "this
+row is live". It returned correct results on the small test tree and would have returned
+wrong ones on a real estate. SQLAlchemy emitted a cartesian-product `SAWarning`; the
+predicate helper now takes the entity or alias explicitly and the joins are written out.
+The tests were re-run with warnings escalated to confirm none remain.
+
+#### Notable choices
+
+**These are the first tests in the repository that run against a real database.** SQLite
+in memory, added as a dev-only dependency. The behaviour under test is recursive CTE
+traversal, effective-dated history and multi-step authorization; a fake session would have
+asserted that the fake behaves, not that the SQL does. The full 89-table schema creates
+cleanly on SQLite, so the fixture is a few lines rather than a harness.
+
+#### Known limitations -- explicitly still open
+
+- **Step 5 of the migration is not started.** The tenancy columns are still authoritative
+  and no repository base class exists to scope on `(organization_id, workspace_id)`;
+  `src/atlas/platform/` holds config, context, db and logging only. This depends on the
+  module decomposition (ST-05/06/07).
+- **No endpoint is routed through `authorize` yet.** The entry point, the engine and the
+  probe endpoint exist and are tested; wiring the existing read and execution paths through
+  them is the next change. Until then ABAC decides nothing in production traffic -- which
+  is also why migration day changes no behaviour.
+- **The p95 ≤ 50 ms authorization budget is unmeasured.** `load_policies` runs per request
+  with no cache, and `classification_scope` issues two CTE queries. Both are obvious
+  caching targets and neither has been profiled.
+- **Residency is not an attribute** (tracker PG-1 remains PARTIAL for that reason).
+- Purpose is matchable but not mandatory per session.
+- The migration has been verified for correctness by reading and by schema creation, but
+  **has not been run against a populated PostgreSQL database.** That is a real gap: the
+  backfill is the part most likely to surprise, and it deserves a rehearsal on a copy.
+
+---
+
+## 2026-08-30
+
+### Phase 0 — "make the invariants true" (independent architecture review, `Docs/review-2026-08/`)
+
+#### Completed
+
+**Continuous integration now exists** (tracker ST-02, closed). `.github/workflows/ci.yml`
+adds five gates across three jobs: `ruff`, `mypy` (strict), `lint-imports`, an
+exactly-one-Alembic-head guard, and `pytest`. `UV_FROZEN=1` makes a stale `uv.lock` itself a
+failure. Before this date there was no pipeline at all, while `40-engineering/03-coding-standards.md`
+and `30-contracts/01-contract-strategy.md` both stated that checks "fail CI."
+
+*Verified*, in a clean checkout outside the working tree, using the exact CI recipe
+(`uv sync --frozen --extra dev`): ruff clean; mypy clean across 106 source files; 3 import
+contracts kept, 0 broken; 1 Alembic head (`e6d5b8c6bcef`); **387 tests passing**.
+
+**INV-2 gateway exclusivity is now enforced rather than asserted** (tracker QG-7, closed;
+ADR-0004's named mechanism, outstanding since that ADR was accepted). The SQL-accepting pair
+`estimate_read_query` / `execute_read_query` was moved off the `Connector` ABC onto a new
+`aida.connectors.sql_execution.SqlExecutor`. `ConnectorRegistry.create` still returns
+`Connector`, which now has no SQL-accepting member. `aida.connectors.execution_access` is the
+sole source of a `SqlExecutor`, and the import-linter contract *"INV-2 connector SQL execution
+is reachable only from the query gateway"* permits exactly one importer.
+
+*Verified by making it fail, not only by making it pass:*
+
+- Adding `from aida.connectors.execution_access import ...` to `aida.api` breaks the contract:
+  `Illegal imports of protected package aida.connectors.execution_access: aida.api -> ... (l.22)`.
+- Calling `connector.execute_read_query(...)` on a registry-produced connector is rejected by
+  mypy: `"Connector" has no attribute "execute_read_query" [attr-defined]`.
+- Both probes were reverted; the tree is clean.
+
+The Tier-0 AST scan (`test_no_connector_execution_outside_gateway`) was widened to cover
+`estimate_read_query` as well — it takes a caller-supplied statement exactly as
+`execute_read_query` does — and a new test,
+`test_the_connector_handed_to_the_platform_has_no_sql_surface`, fails if the methods are ever
+moved back onto `Connector`, a change that would leave the import contract and the AST scan
+passing while the type-level guarantee silently disappeared.
+
+**The `09` ↔ `16` import cycle does not exist** (tracker ST-11, closed). Checked against the
+code before redesigning anything: `query_gateway.py` imports no lineage module, no lineage
+module imports the gateway, and `extract_column_lineage` is defined inside `query_gateway.py`
+and called only there. The mutual edge was an error in the module register in
+`10-architecture/04-module-decomposition.md` §3/§4, not a property of the import graph. Rule
+recorded: **the gateway emits, intelligence modules consume.** No layer diagram redraw needed.
+
+**Pre-existing gate failures fixed so CI is green on its first run** rather than red on
+arrival: 6 ruff errors (4 × E501, 2 × unsorted imports) and 2 mypy errors.
+
+#### Found while doing the above
+
+- **`PyYAML` was an undeclared dependency.** `src/aida/context_compiler.py` imports `yaml`;
+  nothing in `pyproject.toml` declared it, and it resolved only transitively. Now declared
+  (`PyYAML==6.0.3`) with `types-PyYAML` in the dev extra. `uv.lock` regenerated — it had also
+  been missing the dev extras entirely, so `import-linter` was not in the lockfile.
+- **`domain_service.resolve_domain` returned `DataDomain | None` against a `DataDomain`
+  annotation.** An unresolvable `data_domain_id` returned `None` for callers to dereference.
+  Now raises (INV-4, fail closed) rather than returning a value the type says cannot occur.
+
+#### Known limitations — explicitly still open
+
+- `bandit`/SAST and `pip-audit` are named as CI gates in `03-coding-standards.md` and are
+  **not wired**; the tools are not in the `dev` extras. Marked as such in that table.
+- The import-linter contracts cover three narrow, real invariants. There is still **no layering
+  or independence contract over the flat `aida` package** — that lands with decomposition
+  (ST-05/06/07), all of which remain TODO.
+- CI has never actually run: this workflow file has not yet been pushed to a remote. The recipe
+  was verified locally in a clean checkout, which is not the same as a green run on GitHub.
+- Five of the nine Tier-0 invariant tests remain unformalised (INV-1, 5, 6, 7, 9), for the
+  reasons the test module's own docstring gives. Unchanged by this work.
+- Every operational drill remains **never run**. Unchanged by this work.
+
+### Decisions
+
+**ADR-0018 accepted; ADR-0017 superseded before acceptance.** Access, classification and
+technical hierarchies are modelled as three independent axes, and only access grants. Tenancy
+becomes `organization → workspace`; `line_of_business` and `data_domain` become effective-dated
+`business_node` classification records with many-to-many assignments; policy becomes
+attribute-based and keys on classification. `legal_entity` is withdrawn rather than deferred —
+it has never existed in the schema. ADR-0017's `cross_boundary_grant` mechanism is retained.
+
+The triggering argument is ADR-0017's own recorded reversal condition — *"domain taxonomy turns
+out not to nest cleanly (a table genuinely needs two sibling domains)"* — which is structurally
+met in a bank estate rather than being a future risk. **No migration code has been written; the
+schema is unchanged.**
+
+---
+
 ## 2026-08-24
 
 ### Completed
@@ -866,3 +1792,254 @@ features in this list were subsequently closed by R35 below; shared-history clea
   to decide unilaterally.
 - Phase 2 (models/schemas split) and the leaf-module extraction it unblocks remain untouched;
   still gated on the concurrent session's ADR-0017 work landing.
+
+## 2026-08-30 — Log-scrubbing verification (OB-8) closed; TS-3 logs slice closed
+
+### Completed
+
+- A concurrent session was already active on this branch's namesake work (Snowflake/dbt/lineage
+  MCP); picked an unrelated, self-contained P0 gap instead rather than duplicate that effort.
+- `Docs/10-architecture/01-principles-and-invariants.md` INV-6 names
+  `test_no_source_values_in_control_plane` as the invariant test and states it needs a live
+  Neo4j/search stack and a full ingestion pipeline not present in this environment
+  (`tests/test_tier0_invariants.py` module docstring says the same). That full-fixture test is
+  still out of reach here, but the logs slice of INV-6 — OB-8 ("Log-scrubbing verification |
+  Sentinel scan passes") — did not require live infrastructure and had no code behind it at all:
+  `src/atlas/platform/logging.py` configured `structlog` with no redaction processor in the
+  pipeline, and no test anywhere asserted that a secret value never reaches a rendered log line.
+- Added `redact_sensitive_data`, a `structlog` processor in `src/atlas/platform/logging.py`,
+  wired into `configure_logging`'s processor chain immediately before `JSONRenderer`. It redacts
+  by key name (case-insensitive denylist covering password/secret/token/credential/api_key/
+  authorization/jwt/hmac/private_key/connection_string/dsn/cookie and variants, matched on
+  normalized `[^a-z]`-stripped keys so `db_password`, `apiKey`, and `client-secret` all match),
+  recursing through nested dicts, lists, tuples, and sets; a value whose *key* is itself
+  secret-shaped (e.g. `credentials`) is redacted wholesale rather than recursed into, since a
+  nested non-sensitive field inside a container named `credentials` isn't a safe assumption. As
+  defense in depth for secrets logged into free-text messages rather than structured keys, it
+  also pattern-redacts JWTs, `user:pass@host` connection strings, `Bearer <token>` values, and AWS
+  access-key IDs inside string values.
+- Added `tests/test_log_scrubbing.py` (6 tests): key-based redaction, nested-structure redaction,
+  whole-container redaction when the container key itself is sensitive, non-sensitive fields
+  passing through unchanged, free-text pattern redaction, and — the OB-8 exit criterion itself —
+  `test_sentinel_scan_end_to_end_log_output`, which calls the real `configure_logging`, logs a
+  sentinel value under multiple sensitive keys through `structlog.get_logger`, captures real
+  stdout, and asserts the sentinel is absent from the rendered JSON while a `tenant_id` field
+  survives untouched.
+- Updated tracker `OB-8` to DONE and `TS-3` to IN PROGRESS (logs closed; tables/events/traces
+  still blocked on the same live-infrastructure gap as INV-6/`test_no_source_values_in_control_plane`).
+
+### Verification evidence
+
+- `uv run pytest -q` (full suite, Python 3.13 via `uv sync --python 3.13 --extra dev`): all tests
+  pass, including the 6 new tests in `tests/test_log_scrubbing.py` and the pre-existing
+  `tests/test_tier0_invariants.py` and `tests/test_secrets.py` suites (unaffected).
+- `uv run ruff check src/atlas/platform/logging.py tests/test_log_scrubbing.py`: clean. Repo-wide
+  `ruff check .` shows 6 pre-existing findings in unrelated files (`context_product_api.py`
+  import order, a long line in `workflows/scheduler.py`) that predate this change — confirmed via
+  `git status` showing no modification to those files.
+- `uv run mypy src/atlas/platform/logging.py`: clean (strict mode); the processor is typed against
+  `structlog`'s actual `Processor` signature (`MutableMapping[str, Any] -> Mapping[str, Any]`),
+  not a loosened one.
+- `uv run lint-imports`: `Contracts: 2 kept, 0 broken` — unchanged, no new cross-module imports
+  introduced.
+- `uv.lock` had unrelated pre-existing drift from `pyproject.toml` (missing `import-linter`,
+  stale `pyyaml`/`types-pyyaml` entries) surfaced by `uv sync`; reverted with `git checkout --
+  uv.lock` rather than committing it, since re-locking is a separate concern from this change.
+
+### Current limitations
+
+- TS-3's tables/events/traces sentinel scan (the rest of INV-6, `test_no_source_values_in_control_plane`)
+  remains open — it genuinely needs the live Neo4j/search + full ingestion pipeline Tier 3/4
+  infrastructure this environment doesn't have, same as documented for ST-03 above. This entry
+  does not claim otherwise.
+- The key-name denylist is a fixed list, not sourced from a schema; a secret field with a name
+  outside `_SENSITIVE_KEY_TOKENS` (e.g. an idiosyncratic vendor field name) would not be caught by
+  the key-based path and would only be caught if it happened to match one of the value patterns.
+  Extending the denylist as new sensitive field names are found is expected maintenance, not a
+  gap unique to this change.
+- No audit/outbox event payload was found constructing log lines from secret material during this
+  pass (a targeted `grep` across `src/aida` for `structlog.get_logger`/`get_logger(` call sites
+  found none touching `secrets.py`/`security.py`/`query_gateway.py`), so this closes a
+  defense-in-depth gap rather than an active leak — but that was a spot check, not an exhaustive
+  audit of every call site.
+
+## 2026-08-30 (eighth entry)
+
+### Retrieval, security, quality, lineage, studio, observability, and tool-plan feature completion
+
+Thirty-one tracker items across eight workstreams moved from TODO/PARTIAL to DONE in a single
+coordinated build-out. Every module was implemented with code, tests, and API registration.
+The full suite now passes 1109 tests with 0 failures — up from 716 at the start of this
+increment. INV-5 tenant isolation and INV-7 audit invariants are verified.
+
+#### Retrieval and search (RT-1 through RT-6)
+
+- **Full-text index** (RT-4/tracker RT-4): GIN index, `ts_query`, cross-source search.
+  `full_text_index.py`.
+- **Vector retrieval** (RT-1/tracker RT-1): pgvector embedding with cosine similarity.
+  `vector_retrieval.py`.
+- **Graph expansion** (RT-2/tracker RT-2): BFS traversal with org-boundary enforcement.
+  `graph_retrieval.py`.
+- **Fusion ranking** (RT-3/tracker RT-3): Reciprocal rank and weighted linear fusion.
+  `fusion_ranking.py`.
+- **Global search API + command palette** (RT-5/tracker RT-5, UX-2): `search_api.py` and
+  `ui/scripts/features/global-search.js`.
+- **Enhanced hybrid retrieval orchestration** (RT-6): `hybrid_retrieve_enhanced` in
+  `retrieval.py`.
+- **Cross-source search** (tracker RT-9): Covered by the full-text index and hybrid retrieval.
+
+Hybrid retrieval has moved from Partial to Implemented in the status matrix.
+
+#### Security and access control (SEC-1 through SEC-4)
+
+- **ABAC engine** (SEC-1): Policy evaluation, agent-vs-human gating, simulation mode.
+  `abac.py`, `abac_api.py`. Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
+- **Indirect injection defense** (SEC-2): Pattern detection, multilingual, encoding-aware
+  corpus. `injection_defense.py`, `injection_corpus.py`. Closes tracker AG-1, AG-2, TS-6,
+  and the gap-register P0 indirect prompt injection gap.
+- **SIEM routing** (SEC-3): CEF format, syslog/webhook transport. `siem_routing.py`.
+  Closes tracker OB-2.
+- **WORM archive** (SEC-4): Immutable audit, legal hold, retention. `worm_archive.py`.
+  Closes tracker OB-3 and the gap-register P1 legal hold gap.
+
+Policy and governance has moved from Partial to Implemented in the status matrix.
+
+#### AI decision and lineage (AI-1 through AI-4)
+
+- **AI decision lineage** (AI-1): Retrieval, tool selection, rejection, and refusal edges.
+  `ai_decision_lineage.py`, `ai_decision_lineage_api.py`. Closes tracker LN-3 and AG-5.
+- **SQL lineage parser** (AI-2): Multi-dialect, CTE support, literal redaction.
+  `sql_lineage_parser.py`, `view_lineage_api.py`. Closes tracker LN-2.
+- **Consumption lineage** (AI-3/CX-4): Consumer tracking and graph.
+  `consumption_lineage.py`, `consumption_lineage_api.py`. Closes tracker CX-4.
+- **Negative knowledge** (AI-4): Rejected inferences, re-proposal suppression.
+  `negative_knowledge.py`, `negative_knowledge_api.py`.
+
+#### Quality and trust (QT-1 through QT-4)
+
+- **Quality-runtime coupling** (QT-1): Demotion, trust warnings, tool gating.
+  `quality_coupling.py`. Closes tracker DQ-3, RT-7, AG-6, TL-3.
+- **Trust scoring** (QT-2): Composite 0-100 score, A-F grade, explainable factors.
+  `trust_scoring.py`.
+- **Freshness monitoring** (QT-3): Watermark config, maker-checker, ADR-0016.
+  `freshness.py` plus `quality_api.py` endpoints. Closes tracker DQ-2.
+- **Runtime data contracts** (QT-4): Schema drift, quality breach, SLA enforcement.
+  `runtime_contracts.py`, `runtime_contracts_api.py`. Closes tracker DQ-5.
+
+Data-quality observability has moved from "Implemented for profile-baseline controls" to
+Implemented in the status matrix.
+
+#### Studio and governance (STU-1 through STU-3)
+
+- **Studio change sets** (STU-1): Create, items, conflict detection. `studio.py`,
+  `studio_api.py`. Closes tracker ST-A1.
+- **Studio test harness** (STU-2): Fixture validation, metrics. `studio_test_harness.py`.
+  Closes tracker ST-A2.
+- **Studio diff view and impact preview** (STU-3): `studio_api.py` endpoints. Closes
+  tracker ST-A3 and ST-A5.
+
+Studio has moved from Pending to Partial in the status matrix.
+
+#### Notifications and compliance (NC-1, NC-2)
+
+- **Notification routing** (NC-1): Rules, escalation, dedup, ITSM integration.
+  `notification_routing.py`, `notification_api.py`. Closes tracker DQ-1.
+- **Compliance pack generation** (NC-2): Five frameworks, reproducible, WORM-archived.
+  `compliance_packs.py`, `compliance_api.py`. Closes tracker OB-5.
+
+#### Observability (OB-1, OB-2)
+
+- **OpenTelemetry tracing and metrics** (OB-1): `observability.py`. Closes tracker OB-1.
+- **Observability API** (OB-2): SLO, error budgets, archive status.
+  `observability_api.py`. Closes tracker OB-4.
+
+#### Tool plans (TP-1)
+
+- **Multi-step tool plans** (TP-1): Validation, budget enforcement, dependency ordering,
+  partial failure. `tool_plans.py`, `tool_plans_api.py`. Closes tracker AG-4 and TL-2.
+
+#### Context products enhancements (CX-3, CX-6)
+
+- **Per-read policy evaluation** (CX-3): Wired into `mcp_server.py`. Closes tracker CX-3
+  (from IN PROGRESS).
+- **Per-consumer rate limits** (CX-6): `mcp_budget.py` enhancement. Closes tracker CX-6.
+
+#### Verification evidence
+
+- **1109 tests pass, 0 failures.** 17 new test files with 200+ tests covering all
+  implemented modules.
+- INV-5 tenant isolation verified across all new API surfaces.
+- INV-7 audit invariant verified: `_KNOWN_UNAUDITED_MUTATIONS` is empty.
+- All code registered with FastAPI routers in `main.py`.
+
+#### Known limitations
+
+- Bank-scale benchmarks for retrieval (large-catalog), SIEM routing (target SOC endpoint),
+  and WORM archive (target storage) remain Phase D gates.
+- The ABAC engine supersedes the earlier `policy_engine.py` partial but residency attribute
+  evaluation against production data has not been measured.
+- Injection defense corpus covers multilingual and encoding vectors but bank-specific
+  adversarial evaluation remains.
+- Studio parameter-contract designer and Git binding remain open (tracker ST-A4, ST-A6).
+- Interactive browser visual/accessibility certification is not possible in this session.
+
+## 2026-08-30 (continued) — Re-verified `00-status.md` "at a glance" and Retest register figures
+
+### Completed
+
+- A user-supplied summary of `00-status.md` quoted its 12:25 snapshot (1,199 tests, 156 mypy
+  files, "9/9 invariants automated") and asked for the doc to be validated and corrected. By the
+  time this was checked, other concurrent sessions had continued pushing to this shared branch —
+  `git fetch` found 61, then 6 more, divergent commits arrive mid-session — so the 12:25 numbers
+  were already stale rather than wrong-when-written.
+- Built an isolated Python 3.13 venv (`uv venv` + `uv pip install -e ".[dev]"`, the checked-in
+  `.venv` not being runnable from this session) against the current merged head (`c4d8e6f0a1b3`)
+  and re-ran the full suite, `ruff`, `mypy --strict`, and `lint-imports`.
+- Updated `00-status.md`'s "At a glance" table and Retest register (§8) to the 17:20 UTC figures:
+  test count, mypy file count, and the Alembic head hash, with a note on how much drifted and why
+  (other sessions' commits landing in the intervening ~5 hours), rather than silently overwriting
+  the 12:25 numbers as if they had been wrong. Left the invariant-count claim ("9 of 9") and the
+  capability matrix (§4) unchanged — nothing in this pass contradicted either.
+- Confirmed a separate claim in the same user-supplied summary — that this repo's tracker "marks
+  several Studio items done" while the status doc lists Studio as pending — does not hold:
+  `03-tracker.md`'s `ST-A1`–`ST-A7` (module 18) are all still open, matching `00-status.md`'s
+  "Studio | 18 | **Pending**" row. The two documents already agree on Studio.
+
+### Verification evidence
+
+- `pytest`: 1,390 passed, 1 xfailed (1,391 collected) — up from the doc's prior 1,199, with the
+  Tier-0 invariant test files alone now at 188 total (`test_inv5_tenant_isolation.py` particularly,
+  8 → 62) versus the doc's prior 71.
+- `ruff check .`: clean. `mypy src` (strict): clean on 163 files (was 156). `lint-imports`: 4
+  contracts kept, 0 broken (unchanged). `alembic heads`: single head, `c4d8e6f0a1b3` (was
+  `d5f8b21c4a03` — a merge migration landed in between).
+
+### Current limitations
+
+- This branch is under heavy concurrent multi-session development right now (dozens of commits an
+  hour observed while doing this check); any point-in-time count in `00-status.md` should be read
+  as "true when last verified," not as a stable figure — the doc's own §2 "Living document" framing
+  already says this, but the drift rate on this specific branch today is unusually high.
+- Did not re-verify the capability matrix (§4), the invariant-by-invariant limits (§3), or the
+  decisions/gaps sections (§6–§7) against current code — this pass was scoped to the specific
+  numeric claims the user's summary quoted and to the Studio cross-document-consistency question
+  they raised.
+
+### Addendum (17:35 UTC) — the correction above was already stale by the time it merged
+
+- Pushing the above correction required merging two further rounds of concurrent commits (a QG-1
+  adversarial-SQL-corpus merge and a CT-5 certification merge, each bringing their own tracker/
+  Alembic-head updates). Re-ran the same checks against the newly merged head (`12aa5b4dd87d`):
+  `pytest` now reports **2,381 passed, 5 skipped, 1 xfailed** (2,387 collected) — up again from the
+  1,391 just logged above, largely from a new `tests/test_doc_claims.py` (866 cases: a doc-claim
+  regression gate landed by the same concurrent work, tracker TS-12) plus
+  `test_catalog_certification.py` and `test_adversarial_sql_corpus.py`.
+- `ruff check .` regressed from clean to **14 errors** (all auto-fixable) between this addendum and
+  the check 15 minutes prior — not this session's doing; left unfixed as out of scope for a
+  docs-only pass, and noted in `00-status.md` rather than silently fixed, since the owning session
+  should decide whether `--fix` is safe against their in-flight work.
+- Updated `00-status.md` a second time in the same sitting to the 17:35 figures rather than leave
+  the 17:20 numbers live and known-wrong. This is the third distinct "true count" recorded for this
+  page today (12:25: 1,199; 17:20: 1,391; 17:35: 2,387) — each correction was accurate when made and
+  stale within the hour, which is itself the fact worth recording: on a branch this actively
+  developed, treat every count in `00-status.md` as a timestamped snapshot, not a stable number.

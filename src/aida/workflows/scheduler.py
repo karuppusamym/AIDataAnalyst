@@ -1,9 +1,11 @@
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
 from sqlalchemy import Select, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
@@ -11,9 +13,25 @@ from aida.config import Settings, get_settings
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
+from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
 from aida.logging import configure_logging
-from aida.models import AnalysisRun, QueryExecution, ScanPolicy
+from aida.models import (
+    AnalysisRun,
+    MetadataTable,
+    NotificationRuleRecord,
+    OwnershipRule,
+    QueryExecution,
+    ScanPolicy,
+    UnownedAssetEscalation,
+)
+from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
+from aida.stewardship_api import (
+    UNOWNED_BACKLOG_ROUTE_LIMIT,
+    _owned_table_ids,
+    _scope_table_ids,
+    _unowned_asset_table_facts,
+)
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
 
 logger = structlog.get_logger(__name__)
@@ -80,7 +98,9 @@ def stale_usage_boost_policies_statement(settings: Settings, now: datetime) -> S
     )
 
 
-async def rebalance_usage_weighted_priorities(settings: Settings, *, now: datetime | None = None) -> int:
+async def rebalance_usage_weighted_priorities(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
     """Recompute computed_usage_boost for a bounded batch of stale, opted-in
     scan policies from recent query volume on their datasource, then set
     `priority = base_priority + computed_usage_boost` (clamped to 0-100).
@@ -118,6 +138,285 @@ async def rebalance_usage_weighted_priorities(settings: Settings, *, now: dateti
         if updated:
             await session.commit()
     return updated
+
+
+# --- GL-6: unowned-asset backlog owner routing -----------------------------
+#
+# glossary_owner_routing.sync_unowned_asset_backlog is a pure reconciliation
+# step (route aged-unowned entries, escalate stale-routed ones, resolve
+# now-owned ones) that until now nothing called except the on-demand
+# `POST .../unowned-backlog/route` endpoint -- so routing was inert unless an
+# org or a cron outside this codebase called it. This closes that gap by
+# giving it the same periodic home scan policies already have here, on an
+# aged-backlog cadence (owner_routing_interval_minutes, default daily) rather
+# than the scheduler's own short poll cadence: the backlog's own thresholds
+# (DEFAULT_ROUTE_AFTER/DEFAULT_ESCALATE_AFTER = 7/14 days) mean nothing about
+# a given table's routing state can change between two sub-daily sweeps, so a
+# tighter cadence would only add per-tick, per-organization DB scans for no
+# earlier routing or escalation.
+#
+# Unlike ScanPolicy (one row per datasource, carrying its own next_run_at),
+# there is no existing per-organization row to persist a next-due-at on
+# without a new model/migration column -- out of scope here (see the
+# collision-avoidance note against touching models.py). So due-ness is
+# tracked in this process's memory instead, keyed by organization_id. A
+# scheduler restart just forgets it swept recently and re-sweeps once more
+# than strictly necessary; sync_unowned_asset_backlog is idempotent/safe to
+# re-run (it reconciles from the current unowned set every time), so that
+# costs one redundant bounded pass, never a correctness problem.
+_owner_routing_last_run_at: dict[UUID, datetime] = {}
+
+DEFAULT_UNOWNED_BACKLOG_RULE_NAME = "Unowned asset backlog (default)"
+
+
+def owner_routing_due(last_run_at: datetime | None, now: datetime, interval: timedelta) -> bool:
+    """Whether an owner-routing sweep is due for an organization.
+
+    ``None`` (never swept) is always due; otherwise due once ``interval`` has
+    elapsed since the last successful sweep.
+    """
+    if last_run_at is None:
+        return True
+    return now - last_run_at >= interval
+
+
+async def ensure_default_unowned_backlog_notification_rule(
+    session: AsyncSession, organization_id: UUID
+) -> NotificationRuleRecord:
+    """Return the organization's catch-all unowned-backlog routing rule,
+    creating it if missing.
+
+    Mirrors ``aida.domain_service.ensure_default_domain``'s lazily-created
+    default row rather than a migration seed: an organization is created long
+    before it has any unowned-asset backlog worth routing, so there is
+    nothing to seed a migration-time row *for* at organization-creation time,
+    and this codebase already has a "lazy default on first use" convention
+    for exactly that situation.
+
+    Without *some* enabled rule, sync_unowned_asset_backlog still tracks and
+    ages backlog entries but never routes them anywhere -- the tracker's
+    "no default catch-all notification rule ships" gap. The shape of this
+    rule is deliberate, not a guess:
+
+    - ``conditions={}``: ``notification_routing._matches_conditions`` only
+      narrows on keys actually *present* in ``conditions`` (severity,
+      source_id, domain, owner) -- an empty dict matches every incident it is
+      asked to match. Matching narrower than that would risk silently
+      matching nothing: unowned-asset incidents' ``domain`` is ``None``
+      whenever the table carries no business-domain annotation (the common
+      case for a freshly-discovered, unowned table -- domain assignment is
+      itself often a stewardship task blocked on having an owner), so a rule
+      keyed on ``domain`` would miss the very backlog entries most in need of
+      routing.
+    - ``channel="EMAIL"``: the one channel among this engine's
+      EMAIL/WEBHOOK/ITSM that needs no external delivery infrastructure
+      (a webhook endpoint, an ITSM integration) configured to exist as a
+      sane default.
+    - ``recipients=[]``: this codebase has no stored "organization admin" or
+      steward-lead roster to look up a default recipient from --
+      ``SecurityContext`` carries a per-request bearer principal, not a
+      queryable roster -- so fabricating one would be inventing a lookup
+      that does not exist. An empty-recipient rule is inert as far as actual
+      delivery goes, but it is *present and enabled*, which is what unblocks
+      routing/escalation status transitions (and their audit/outbox events)
+      from sitting inert in PENDING forever; an org fills in real recipients
+      (or a channel) once it has somewhere to send to.
+    - ``escalation_after_minutes`` mirrors ``DEFAULT_ESCALATE_AFTER`` so a
+      ROUTED entry escalates on the same 14-day horizon this rule's absence
+      would otherwise fall back to (see sync_unowned_asset_backlog's
+      internal fallback rule for the no-rule-matched case) -- this rule
+      matching should not tighten or loosen that horizon by default.
+    """
+    existing = await session.scalar(
+        select(NotificationRuleRecord).where(
+            NotificationRuleRecord.organization_id == organization_id,
+            NotificationRuleRecord.name == DEFAULT_UNOWNED_BACKLOG_RULE_NAME,
+        )
+    )
+    if existing is not None:
+        return existing
+    rule = NotificationRuleRecord(
+        organization_id=organization_id,
+        name=DEFAULT_UNOWNED_BACKLOG_RULE_NAME,
+        conditions={},
+        channel="EMAIL",
+        recipients=[],
+        escalation_after_minutes=int(DEFAULT_ESCALATE_AFTER.total_seconds() // 60),
+        enabled=True,
+        created_by="fleet-scheduler",
+    )
+    session.add(rule)
+    await session.flush()
+    return rule
+
+
+async def _sync_owner_routing_for_organization(organization_id: UUID, *, now: datetime) -> None:
+    """One backlog reconciliation pass for a single organization, mirroring
+    ``stewardship_api.route_unowned_asset_backlog``'s full-organization-scope
+    call (no datasource/domain/line-of-business narrowing) and its
+    persistence of the result -- this is that same endpoint run automatically
+    instead of only on demand.
+    """
+    async with session_factory() as session:
+        table_ids = await _scope_table_ids(
+            session,
+            organization_id=organization_id,
+            datasource_id=None,
+            domain_id=None,
+            line_of_business_id=None,
+        )
+        owned = await _owned_table_ids(
+            session, organization_id=organization_id, table_ids=table_ids
+        )
+        unowned_table_ids = table_ids - owned
+
+        existing_rows = (
+            await session.scalars(
+                select(UnownedAssetEscalation).where(
+                    UnownedAssetEscalation.organization_id == organization_id,
+                    UnownedAssetEscalation.status != "RESOLVED",
+                )
+            )
+        ).all()
+        existing_entries = {row.table_id: row for row in existing_rows}
+
+        ownership_rules = list(
+            await session.scalars(
+                select(OwnershipRule).where(
+                    OwnershipRule.organization_id == organization_id,
+                    OwnershipRule.status == "ACTIVE",
+                )
+            )
+        )
+        await ensure_default_unowned_backlog_notification_rule(session, organization_id)
+        notification_rules = list(
+            await session.scalars(
+                select(NotificationRuleRecord).where(
+                    NotificationRuleRecord.organization_id == organization_id,
+                    NotificationRuleRecord.enabled.is_(True),
+                )
+            )
+        )
+
+        route_candidates = sorted(unowned_table_ids, key=str)[:UNOWNED_BACKLOG_ROUTE_LIMIT]
+        table_facts = await _unowned_asset_table_facts(
+            session, organization_id=organization_id, table_ids=route_candidates
+        )
+
+        result = sync_unowned_asset_backlog(
+            organization_id=organization_id,
+            unowned_table_ids=unowned_table_ids,
+            existing_entries=existing_entries,
+            table_facts=table_facts,
+            ownership_rules=ownership_rules,
+            notification_rules=notification_rules,
+            now=now,
+            route_limit=UNOWNED_BACKLOG_ROUTE_LIMIT,
+        )
+        for entry in result.created:
+            session.add(entry)
+        await session.flush()
+
+        worker_context = SecurityContext(
+            principal_id="fleet-scheduler",
+            principal_type="WORKER",
+            organization_id=organization_id,
+            roles=frozenset({"SchedulerWorker"}),
+        )
+        for entry in result.routed:
+            record_audit(
+                session,
+                worker_context,
+                action="stewardship.unowned_asset.routed",
+                resource_type="unowned_asset_escalation",
+                resource_id=str(entry.id),
+                outcome="SUCCESS",
+                correlation_id=str(entry.id),
+                details={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+            )
+            record_outbox(
+                session,
+                organization_id=organization_id,
+                aggregate_type="unowned_asset_escalation",
+                aggregate_id=str(entry.id),
+                event_type="stewardship.unowned_asset_routed.v1",
+                payload={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+            )
+        for entry in result.escalated:
+            record_audit(
+                session,
+                worker_context,
+                action="stewardship.unowned_asset.escalated",
+                resource_type="unowned_asset_escalation",
+                resource_id=str(entry.id),
+                outcome="SUCCESS",
+                correlation_id=str(entry.id),
+                details={"table_id": str(entry.table_id)},
+            )
+            record_outbox(
+                session,
+                organization_id=organization_id,
+                aggregate_type="unowned_asset_escalation",
+                aggregate_id=str(entry.id),
+                event_type="stewardship.unowned_asset_escalated.v1",
+                payload={"table_id": str(entry.table_id)},
+            )
+        for entry in result.resolved:
+            record_outbox(
+                session,
+                organization_id=organization_id,
+                aggregate_type="unowned_asset_escalation",
+                aggregate_id=str(entry.id),
+                event_type="stewardship.unowned_asset_resolved.v1",
+                payload={"table_id": str(entry.table_id)},
+            )
+        await session.commit()
+
+
+async def run_owner_routing_pass(
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    organization_ids: Sequence[UUID] | None = None,
+) -> int:
+    """Sweep every organization due for a GL-6 owner-routing pass (see
+    ``owner_routing_due``), returning how many were actually swept.
+
+    One organization's failure (a bad rule, a transient DB error) is logged
+    and skipped -- exactly the fault-isolation style ``run_scheduler_iteration``
+    already uses around ``process_scan_policy`` -- so it never aborts every
+    other organization's sweep in the same iteration. A failed organization's
+    last-run time is deliberately left unchanged, so it is retried on the very
+    next scheduler iteration rather than waiting a full interval.
+
+    ``organization_ids`` overrides the DB-derived candidate list (every
+    organization with at least one active table); production call sites leave
+    it unset. It exists so tests can drive the due-check and fault-isolation
+    behavior above without a live Postgres/Docker, matching this codebase's
+    fake-session/pure-function test convention (see test_glossary_owner_routing.py) --
+    it is not a scoping/filtering knob for real callers.
+    """
+    effective_now = now or datetime.now(UTC)
+    interval = timedelta(minutes=settings.owner_routing_interval_minutes)
+    if organization_ids is None:
+        async with session_factory() as session:
+            organization_ids = (
+                await session.scalars(select(MetadataTable.organization_id).distinct())
+            ).all()
+    swept = 0
+    for organization_id in organization_ids:
+        if not owner_routing_due(
+            _owner_routing_last_run_at.get(organization_id), effective_now, interval
+        ):
+            continue
+        try:
+            await _sync_owner_routing_for_organization(organization_id, now=effective_now)
+        except Exception:
+            logger.exception("owner_routing_pass_failed", organization_id=str(organization_id))
+            continue
+        _owner_routing_last_run_at[organization_id] = effective_now
+        swept += 1
+    return swept
 
 
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
@@ -237,6 +536,11 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await reconcile_cancellation_requests(client, settings)
     now = datetime.now(UTC)
     await rebalance_usage_weighted_priorities(settings, now=now)
+    await run_owner_routing_pass(settings, now=now)
+    # PR-2's retention contract: expired value-bearing profiling artifacts are
+    # purged every iteration, bounded by profiling_exception_purge_batch_size,
+    # the same "bounded pass every iteration" shape as the two calls above.
+    await purge_expired_value_profile_artifacts(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

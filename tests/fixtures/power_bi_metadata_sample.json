@@ -1,0 +1,82 @@
+{
+  "generatedAt": "2026-08-29T09:00:00Z",
+  "workspaces": [
+    {
+      "id": "ws-sales-analytics",
+      "name": "Sales Analytics",
+      "datasets": [
+        {
+          "id": "ds-sales",
+          "name": "Sales Dataset",
+          "tables": [
+            {
+              "name": "Orders",
+              "schema": "public",
+              "database": { "name": "warehouse" },
+              "columns": [
+                { "name": "OrderId" },
+                { "name": "Profit" },
+                { "name": "Sales" }
+              ],
+              "measures": [
+                {
+                  "name": "Profit Ratio",
+                  "expression": "DIVIDE(SUM(Orders[Profit]), SUM(Orders[Sales]))"
+                }
+              ]
+            },
+            {
+              "name": "Customer",
+              "schema": "raw",
+              "database": { "name": "bank" },
+              "columns": [
+                { "name": "Region" }
+              ],
+              "measures": []
+            }
+          ]
+        }
+      ],
+      "reports": [
+        {
+          "id": "rpt-executive-summary",
+          "name": "Executive Summary",
+          "datasetId": "ds-sales",
+          "pages": [
+            {
+              "name": "ReportSection1",
+              "displayName": "Overview",
+              "visuals": [
+                {
+                  "name": "visual-profit-ratio-card",
+                  "fields": [
+                    { "table": "Orders", "measure": "Profit Ratio" }
+                  ]
+                },
+                {
+                  "name": "visual-region-breakdown",
+                  "fields": [
+                    { "table": "Orders", "measure": "Profit Ratio" },
+                    { "table": "Customer", "column": "Region" }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "ReportSection2",
+              "displayName": "Details",
+              "visuals": [
+                {
+                  "name": "visual-region-table",
+                  "fields": [
+                    { "table": "Customer", "column": "Region" }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

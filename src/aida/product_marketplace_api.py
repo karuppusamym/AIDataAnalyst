@@ -611,6 +611,16 @@ async def create_data_product_version(
     try:
         await session.flush()
         await _replace_product_children(session, version, body.ports)
+        record_audit(
+            session,
+            replace(context, organization_id=product.organization_id),
+            action="data_product.version.create",
+            resource_type="data_product_version",
+            resource_id=str(version.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"product_key": product.product_key, "version": version.version},
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -632,6 +642,16 @@ async def update_data_product_version(
     await _validate_product_references(session, version.organization_id, body)
     _apply_product_definition(version, body)
     await _replace_product_children(session, version, body.ports)
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="data_product.version.update",
+        resource_type="data_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"product_key": product.product_key, "version": version.version},
+    )
     await session.commit()
     ports = (await _ports_by_version(session, [version.id]))[version.id]
     return _version_read(product, version, ports)
@@ -717,6 +737,16 @@ async def submit_data_product_version(
     version.status = "REVIEW_REQUIRED"
     session.add(review)
     await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="data_product.version.submit",
+        resource_type="data_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"review_id": str(review.id), "requested_action": review.requested_action},
+    )
     record_outbox(
         session,
         organization_id=version.organization_id,
@@ -750,6 +780,17 @@ async def request_data_product_retirement(
         requested_by=context.principal_id,
     )
     session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="data_product.version.retirement_request",
+        resource_type="data_product_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"review_id": str(review.id), "version": version.version},
+    )
     await session.commit()
     return review
 
@@ -803,6 +844,21 @@ async def create_data_contract(
     )
     session.add(contract)
     try:
+        await session.flush()
+        record_audit(
+            session,
+            replace(context, organization_id=product.organization_id),
+            action="data_contract.create",
+            resource_type="data_contract_version",
+            resource_id=str(contract.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "product_key": product.product_key,
+                "version": contract.version,
+                "compatibility_status": contract.compatibility_status,
+            },
+        )
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -870,6 +926,21 @@ async def submit_data_contract(
     )
     contract.status = "REVIEW_REQUIRED"
     session.add(review)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=contract.organization_id),
+        action="data_contract.submit",
+        resource_type="data_contract_version",
+        resource_id=str(contract.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "review_id": str(review.id),
+            "requested_action": review.requested_action,
+            "compatibility_status": contract.compatibility_status,
+        },
+    )
     await session.commit()
     return review
 
@@ -1605,6 +1676,20 @@ async def revoke_marketplace_access(
     access_request.revoked_at = datetime.now(UTC)
     if access_request.fulfillment_status == "PROVISIONED":
         access_request.fulfillment_status = "PENDING"
+    record_audit(
+        session,
+        replace(context, organization_id=access_request.organization_id),
+        action="marketplace.access.revoke",
+        resource_type="data_product_access_request",
+        resource_id=str(access_request.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "data_product_version_id": str(access_request.data_product_version_id),
+            "requested_by": access_request.requested_by,
+            "fulfillment_status": access_request.fulfillment_status,
+        },
+    )
     record_outbox(
         session,
         organization_id=access_request.organization_id,

@@ -1,8 +1,14 @@
-from uuid import UUID
+from collections import defaultdict
+from typing import Any
+from uuid import UUID, uuid4
+
+import pytest
 
 from aida.main import app
+from aida.models import DataSource, DbtArtifactImport, DbtLineageEdge, DbtProject, DbtResource
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.unified_lineage import UnifiedLink, expand_frontier, traverse
+from aida.unified_lineage_api import build_unified_lineage_graph_payload
 
 
 def uid(value: int) -> str:
@@ -182,3 +188,187 @@ def test_unified_lineage_impact_contract_carries_transitive_depth() -> None:
         "DBT_DEPENDENCY",
         "FOREIGN_KEY",
     ]
+
+
+# ---------------------------------------------------------------------------
+# LN-5 regression: column-level dbt edges must not duplicate the unified
+# graph's table/resource-level dbt dependency links.
+# ---------------------------------------------------------------------------
+
+
+def _equality_filters(whereclause: Any) -> list[tuple[str, str, Any]]:
+    """Recursively pull (table_name, column_name, value) equalities out of a
+    whereclause. Trimmed copy of the helper in
+    `tests/test_dbt_run_results_integration.py` -- see that module for the
+    full rationale behind this style of AsyncSession double."""
+    if whereclause is None:
+        return []
+    clauses = getattr(whereclause, "clauses", None)
+    if clauses is not None:
+        filters: list[tuple[str, str, Any]] = []
+        for clause in clauses:
+            filters.extend(_equality_filters(clause))
+        return filters
+    left = getattr(whereclause, "left", None)
+    right = getattr(whereclause, "right", None)
+    table = getattr(left, "table", None)
+    col_name = getattr(left, "key", None) or getattr(left, "name", None)
+    if left is None or right is None or table is None or col_name is None:
+        return []
+    value = getattr(right, "value", right)
+    return [(table.name, col_name, value)]
+
+
+class _FakeScalarsResult:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return self._rows
+
+    def first(self) -> Any | None:
+        return self._rows[0] if self._rows else None
+
+
+class _FakeExecResult:
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[Any]:
+        return self._rows
+
+
+class _FakeUnifiedLineageSession:
+    """Minimal in-memory AsyncSession double covering only the read-only
+    queries `_build_unified_graph` issues. No FK constraints, suggested
+    relationship candidates, catalog tables, or OpenLineage edges are seeded
+    in this test, so every multi-entity join (the MetadataTable/Schema/Catalog
+    join, and the OpenLineageTableEdge/RunEvent join) is guaranteed empty and
+    is answered as such without reimplementing either join.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[type, dict[Any, Any]] = defaultdict(dict)
+
+    def seed(self, obj: Any) -> Any:
+        if getattr(obj, "id", None) is None:
+            obj.id = uuid4()
+        self._store[type(obj)][obj.id] = obj
+        return obj
+
+    def _rows_for(self, stmt: Any) -> list[Any]:
+        model = stmt.column_descriptions[0]["type"]
+        filters = _equality_filters(stmt.whereclause)
+        candidates = list(self._store.get(model, {}).values())
+        table_name = model.__table__.name
+        for filter_table, col, value in filters:
+            if filter_table != table_name:
+                continue
+            candidates = [obj for obj in candidates if getattr(obj, col) == value]
+        return candidates
+
+    async def scalars(self, stmt: Any) -> _FakeScalarsResult:
+        return _FakeScalarsResult(self._rows_for(stmt))
+
+    async def execute(self, stmt: Any) -> _FakeExecResult:
+        entities = [d["type"] for d in stmt.column_descriptions]
+        if len(entities) == 1:
+            return _FakeExecResult([(row,) for row in self._rows_for(stmt)])
+        return _FakeExecResult([])
+
+
+@pytest.mark.asyncio
+async def test_unified_graph_ignores_column_level_dbt_edges() -> None:
+    """Column-level (LN-5) `COLUMN_DEPENDS_ON` rows must not render as extra
+    parallel links in the unified graph alongside the table-level
+    `DEPENDS_ON` edge between the same two dbt resources."""
+    session = _FakeUnifiedLineageSession()
+    organization_id = uuid4()
+
+    datasource = session.seed(
+        DataSource(
+            organization_id=organization_id,
+            line_of_business_id=uuid4(),
+            project_id=uuid4(),
+            name="bank-warehouse",
+            connector_type="POSTGRES",
+            dialect="postgres",
+            environment="PROD",
+            credential_reference="secret://bank-warehouse",
+        )
+    )
+    dbt_project = session.seed(
+        DbtProject(
+            organization_id=organization_id,
+            project_id=uuid4(),
+            datasource_id=datasource.id,
+            project_key="bank-dbt",
+            display_name="Bank dbt project",
+            target_name="prod",
+            status="ACTIVE",
+            created_by="dbt-bot@bank.internal",
+        )
+    )
+    artifact = session.seed(
+        DbtArtifactImport(
+            organization_id=organization_id,
+            dbt_project_id=dbt_project.id,
+            status="IMPORTED",
+        )
+    )
+    upstream = session.seed(
+        DbtResource(
+            organization_id=organization_id,
+            artifact_import_id=artifact.id,
+            unique_id="model.bank.stg_orders",
+            resource_type="MODEL",
+            name="stg_orders",
+            relation_name="analytics.staging.stg_orders",
+        )
+    )
+    downstream = session.seed(
+        DbtResource(
+            organization_id=organization_id,
+            artifact_import_id=artifact.id,
+            unique_id="model.bank.fct_orders",
+            resource_type="MODEL",
+            name="fct_orders",
+            relation_name="analytics.marts.fct_orders",
+        )
+    )
+    session.seed(
+        DbtLineageEdge(
+            organization_id=organization_id,
+            artifact_import_id=artifact.id,
+            source_resource_id=upstream.id,
+            target_resource_id=downstream.id,
+            edge_type="DEPENDS_ON",
+            source_column="",
+            target_column="",
+        )
+    )
+    # Two column-level edges between the exact same resource pair -- without
+    # the `edge_type == "DEPENDS_ON"` filter these would render as two more
+    # parallel links on top of the one above.
+    for source_col, target_col in (("id", "order_id"), ("amount", "order_amount")):
+        session.seed(
+            DbtLineageEdge(
+                organization_id=organization_id,
+                artifact_import_id=artifact.id,
+                source_resource_id=upstream.id,
+                target_resource_id=downstream.id,
+                edge_type="COLUMN_DEPENDS_ON",
+                source_column=source_col,
+                target_column=target_col,
+                transformation_type="DIRECT",
+                confidence="FULL",
+            )
+        )
+
+    graph = await build_unified_lineage_graph_payload(session, datasource, settings=None)  # type: ignore[arg-type]
+
+    assert graph.counts_by_source["DBT_DEPENDENCY"] == 1
+    dbt_edges = [edge for edge in graph.edges if edge.edge_source == "DBT_DEPENDENCY"]
+    assert len(dbt_edges) == 1
+    assert dbt_edges[0].source_node_id == f"dbt:{upstream.id}"
+    assert dbt_edges[0].target_node_id == f"dbt:{downstream.id}"

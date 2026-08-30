@@ -9,14 +9,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
 )
 from aida.db import get_session
-from aida.events import record_audit, record_outbox
 from aida.domain_service import check_cross_boundary_grant
+from aida.events import record_audit, record_outbox
 from aida.models import (
     BusinessDomain,
     ContextProduct,
@@ -106,6 +107,7 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
             "name": version.name,
             "description": version.description,
             "purpose": version.purpose,
+            "owner_type": version.owner_type,
             "owner_principal": version.owner_principal,
             "table_ids": version.table_ids,
             "semantic_model_version_ids": version.semantic_model_version_ids,
@@ -126,6 +128,7 @@ def _apply_definition(
     version.name = body.name
     version.description = body.description
     version.purpose = body.purpose
+    version.owner_type = body.owner_type
     version.owner_principal = body.owner_principal
     version.table_ids = payload["table_ids"]
     version.semantic_model_version_ids = payload["semantic_model_version_ids"]
@@ -549,6 +552,26 @@ async def get_context_product_version(
                 "principal_id": context.principal_id,
                 "channel": "REST",
             },
+        )
+        # CX-4: Record consumption lineage
+        await record_consumption(
+            session,
+            organization_id=version.organization_id,
+            edge=ConsumptionEdge(
+                consumer_id=context.principal_id,
+                consumer_type=context.principal_type,
+                resource_type="context_product_version",
+                resource_id=str(version.id),
+                channel="REST",
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+                business_purpose=context.business_purpose,
+                details={
+                    "product_key": product.product_key,
+                    "version": version.version,
+                    "fingerprint": version.fingerprint,
+                },
+            ),
         )
         await session.commit()
     return _version_read(product, version)

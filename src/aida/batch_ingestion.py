@@ -10,7 +10,12 @@ from temporalio.exceptions import ApplicationError
 from aida.config import get_settings
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
-from aida.ingestion import catalogs_to_discovery
+from aida.ingestion import (
+    EnvelopeScope,
+    catalogs_to_discovery,
+    deprecate_missing_envelope_extensions,
+    persist_envelope_extensions,
+)
 from aida.models import (
     AnalysisRun,
     DataSource,
@@ -22,6 +27,7 @@ from aida.security import SecurityContext
 from aida.workflows.activities import (
     SnapshotScope,
     deprecate_missing_snapshot,
+    detect_rename_candidates,
     persist_discovery_snapshot,
 )
 
@@ -127,6 +133,7 @@ async def _process_chunk(
     batch_id: UUID,
     chunk_id: UUID,
     scope: SnapshotScope,
+    envelope_scope: EnvelopeScope,
     *,
     record_changes: bool,
 ) -> None:
@@ -143,11 +150,12 @@ async def _process_chunk(
             raise BatchContractError("batch datasource or analysis run is unavailable")
         body = MetadataIngestionChunkCreate.model_validate(chunk.payload)
         prior_status = chunk.status
+        discovery = catalogs_to_discovery(body.catalogs)
         counts = await persist_discovery_snapshot(
             session,
             run,
             datasource,
-            catalogs_to_discovery(body.catalogs),
+            discovery,
             deprecate_missing=False,
             connector_capabilities={
                 **(datasource.capabilities or {}),
@@ -156,9 +164,22 @@ async def _process_chunk(
             },
             scope=scope,
         )
+        # `deprecate_missing=False` here is the INV-11 rule, not an oversight: the
+        # 1.1 axes accumulate identities into `envelope_scope` across every chunk
+        # and are reconciled once, in `_complete_batch`, after all chunks have
+        # succeeded. A chunk-local reconciliation would retire every view
+        # definition that happened to live in a later chunk.
+        extension_counts = await persist_envelope_extensions(
+            session,
+            datasource,
+            discovery,
+            scope=envelope_scope,
+            deprecate_missing=False,
+        )
         if record_changes and prior_status != "PROCESSED":
             chunk.change_counts = {
-                key: counts[key] for key in ("created_objects", "changed_objects")
+                key: counts[key] + extension_counts[key]
+                for key in ("created_objects", "changed_objects")
             }
             chunk.status = "PROCESSED"
             chunk.processed_at = datetime.now(UTC)
@@ -166,7 +187,9 @@ async def _process_chunk(
         await session.commit()
 
 
-async def _complete_batch(batch_id: UUID, scope: SnapshotScope) -> dict[str, Any]:
+async def _complete_batch(
+    batch_id: UUID, scope: SnapshotScope, envelope_scope: EnvelopeScope
+) -> dict[str, Any]:
     async with session_factory() as session:
         batch = await session.scalar(
             select(MetadataIngestionBatch)
@@ -190,8 +213,29 @@ async def _complete_batch(batch_id: UUID, scope: SnapshotScope) -> dict[str, Any
         changed = sum(int(chunk.change_counts.get("changed_objects", 0)) for chunk in chunks)
         deprecated = 0
         if batch.snapshot_type == "FULL":
-            deprecated = await deprecate_missing_snapshot(session, datasource, scope)
-        object_counts = scope.object_counts()
+            deprecation_result = await deprecate_missing_snapshot(session, datasource, scope)
+            deprecated = deprecation_result.total
+            # Gated on the declared version as well as on FULL: a 1.0 batch is
+            # authoritative for the 1.0 inventory only and says nothing about the
+            # 1.1 axes, so reconciling its silence would retire them.
+            if batch.envelope_version != "1.0":
+                deprecated += await deprecate_missing_envelope_extensions(
+                    session, datasource, envelope_scope
+                )
+            # CT-4: same-run tombstone-plus-create pairing, exactly as in the
+            # unchunked pull path (`persist_discovery_snapshot`) -- `scope` here
+            # is the same SnapshotScope accumulated across every chunk via
+            # `_process_chunk`, so `scope.created_table_ids` is every table this
+            # batch actually created and `deprecation_result.deprecated_table_ids`
+            # is exactly what this call just tombstoned.
+            await detect_rename_candidates(
+                session,
+                run=run,
+                datasource=datasource,
+                created_table_ids=scope.created_table_ids,
+                deprecated_table_ids=deprecation_result.deprecated_table_ids,
+            )
+        object_counts = {**scope.object_counts(), **envelope_scope.object_counts()}
         change_counts = {
             "created_objects": created,
             "changed_objects": changed,
@@ -202,6 +246,8 @@ async def _complete_batch(batch_id: UUID, scope: SnapshotScope) -> dict[str, Any
         run.discovered_tables = object_counts["tables"]
         run.discovered_columns = object_counts["columns"]
         run.discovered_constraints = object_counts["constraints"]
+        run.discovered_indexes = object_counts["indexes"]
+        run.discovered_partitions = object_counts["partitions"]
         run.created_objects = created
         run.changed_objects = changed
         run.deprecated_objects = deprecated
@@ -288,8 +334,11 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
 
         chunk_ids = await _preflight_batch(batch_uuid)
         scope = SnapshotScope()
+        envelope_scope = EnvelopeScope()
         for index, chunk_id in enumerate(chunk_ids, start=1):
-            await _process_chunk(batch_uuid, chunk_id, scope, record_changes=True)
+            await _process_chunk(
+                batch_uuid, chunk_id, scope, envelope_scope, record_changes=True
+            )
             if activity.in_activity():
                 activity.heartbeat(
                     {
@@ -301,8 +350,10 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
         # Reapply metadata without recording changes so cross-chunk foreign keys resolve
         # regardless of chunk order. Fingerprints make this pass idempotent.
         for chunk_id in chunk_ids:
-            await _process_chunk(batch_uuid, chunk_id, scope, record_changes=False)
-        return await _complete_batch(batch_uuid, scope)
+            await _process_chunk(
+                batch_uuid, chunk_id, scope, envelope_scope, record_changes=False
+            )
+        return await _complete_batch(batch_uuid, scope, envelope_scope)
     except BatchContractError as exc:
         await _mark_batch_failed(batch_uuid, exc)
         raise ApplicationError(str(exc), type="BatchContractError", non_retryable=True) from exc

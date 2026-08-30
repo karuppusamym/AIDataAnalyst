@@ -30,7 +30,7 @@ Atlas's structural bet: *deterministic services hold all authority; models only 
 | G1 | Match category minimum on breadth | 12+ certified connectors, cross-source search, glossary lifecycle, ETL/OpenLineage ingestion, quality rules. No buyer rejects Atlas on "too narrow." |
 | G2 | Be the strongest governed-AI-execution story in the market | Every source-touching action passes one gateway; 100% of agent runs produce replayable, value-free evidence; documented kill switch drill. |
 | G3 | Turn analysis into durable capability | ≥40% of analyst requests in a mature tenant served by an approved governed tool rather than fresh SQL generation. |
-| G4 | Prove scale rather than assert it | Published benchmarks: 1M+ catalog objects, 1000+ sources, p95 control-plane API < 300 ms, authz decision p95 < 50 ms. |
+| G4 | Prove scale rather than assert it | Published benchmarks: 1M+ catalog objects, 1000+ sources, p95 control-plane API < 300 ms, authz decision p95 < 50 ms. **Unmeasured as of 2026-08-30** — no benchmark has been run, no load or soak test exists, and there is no performance job in CI. These are design targets, and G4 is by its own wording the one goal currently not met. See `10-architecture/10-performance-and-scale-model.md` §9 and tracker `E10`. |
 | G5 | Be the context supplier to other AI surfaces | Governed context products consumable over MCP by third-party agents, with the same policy enforcement as the native analyst. |
 | G6 | Be operable by a platform team, not by its authors | Runbooks, SLOs, DR drills, and a connector SDK an external team can build against without core changes. |
 

@@ -55,8 +55,13 @@ The observable condition under which this should be reconsidered.
 | [0014](ADR-0014-value-free-control-plane.md) | Source values are not platform memory | Accepted | Classification-specific retention approval |
 | [0015](ADR-0015-schema-per-module.md) | One PostgreSQL schema per module, no cross-schema FKs | Accepted | Never — this is the extraction insurance |
 | [0016](ADR-0016-quality-freshness-fails-closed.md) | Quality baselines are value-free; source freshness fails closed | Accepted | An approved connector watermark and retention contract exists |
-| [0017](ADR-0017-domain-complete-tenancy-and-cross-source-graph.md) | Domain-complete tenancy and boundary-aware cross-source graph traversal | Proposed | Domain taxonomy turns out not to nest cleanly (a table genuinely needs two sibling domains) |
+| [0017](ADR-0017-domain-complete-tenancy-and-cross-source-graph.md) | Domain-complete tenancy and boundary-aware cross-source graph traversal | **Superseded by 0018** | — |
+| [0018](ADR-0018-three-axis-tenancy-and-classification.md) | Access, classification and technical hierarchies are modelled separately; only access grants | Accepted | The permission boundary itself must be the line of business, provable from containment without evaluating policy |
+| [0019](ADR-0019-vector-index-without-pgvector.md) | Nearest-neighbour search is a port; the default adapter needs no PostgreSQL extension | Accepted | Post-filter candidate sets are routinely above a few thousand, or the estate's database standard adopts `pgvector` |
+| [0020](ADR-0020-graph-store-decision.md) | The classification tree and the lineage graph both live in PostgreSQL; no separate graph store | Accepted | Measured p95 lineage traversal exceeds ~200 ms at real depth, or all-paths enumeration / graph algorithms become requirements |
 
 ## Superseded decision history
 
-None yet. When an ADR is superseded, it stays in the register with its status updated and a link to its successor.
+| Superseded | By | Date | Why |
+|---|---|---|---|
+| [0017](ADR-0017-domain-complete-tenancy-and-cross-source-graph.md) — Domain-complete tenancy | [0018](ADR-0018-three-axis-tenancy-and-classification.md) | 2026-08-30 | Superseded before acceptance. Its own reversal condition (a table needing two sibling domains) is structurally met in a bank estate. ADR-0018 keeps its goals and its `cross_boundary_grant` mechanism, but separates classification from tenancy instead of deepening the tenancy path |

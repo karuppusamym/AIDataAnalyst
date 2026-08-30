@@ -170,7 +170,7 @@ expected enterprise surfaces, not a design to copy. The relevant public referenc
 - `https://www.collibra.com/products/ai-command-center`
 - `https://www.collibra.com/products/data-quality-and-observability`
 
-**Wired to the epic backlog 2026-08-29**: CP-2/CP-3 -> `60-delivery/02-epic-backlog.md` EE.8, CP-5 -> EE.9, CP-6 -> EE.10, CP-7/CP-8 -> EE.11. See also `competitors/08-collibra-lineage-and-platform-analysis-2026-08.md`.
+**Wired to the epic backlog 2026-08-29**: CP-2/CP-3 -> `60-delivery/02-epic-backlog.md` EE.8, CP-5 -> EE.9, CP-6 -> EE.10, CP-7/CP-8 -> EE.11. See also `review-2026-08/research/05-collibra-lineage-and-platform.md`.
 
 The reference set was reviewed on 2026-08-29. It establishes that buyers now expect a
 platform to govern data products, context, lineage, quality, policies, models, and agents as

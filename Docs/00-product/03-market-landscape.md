@@ -202,11 +202,11 @@ Three conclusions that directly set priority in `60-delivery/01-roadmap.md`:
 
 **Per-vendor deep dives** — module breakdowns, UI surfaces, architecture, and weakness assessments that complement the segment-level view above:
 
-- Master strategy and product plan: `competitors/00-application-planning-roadmap.md`
-- Atlan: `competitors/01-atlan-analysis.md`
-- Collibra: `competitors/02-collibra-analysis.md`
-- Alation: `competitors/03-alation-analysis.md`
-- Purview and Databricks: `competitors/04-cloud-catalogs-purview-databricks.md`
+- Master strategy and product plan: `60-delivery/01-roadmap.md`
+- Atlan: `review-2026-08/research/02-atlan.md`
+- Collibra: `review-2026-08/research/01-collibra.md`
+- Alation: `review-2026-08/research/03-alation-purview-unity-ainative.md`
+- Purview and Databricks: `review-2026-08/research/03-alation-purview-unity-ainative.md`
 
 Other documents:
 

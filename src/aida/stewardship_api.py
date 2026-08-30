@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.glossary_owner_routing import TableFacts, sync_unowned_asset_backlog
 from aida.models import (
     AssetCertification,
     AssetDocumentation,
@@ -31,9 +32,11 @@ from aida.models import (
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    NotificationRuleRecord,
     OwnershipAssignment,
     OwnershipRule,
     Project,
+    UnownedAssetEscalation,
 )
 from aida.schemas import (
     BulkStewardshipOperationCreate,
@@ -53,6 +56,9 @@ from aida.schemas import (
     OwnershipRuleRead,
     Page,
     StewardshipCoverageRead,
+    UnownedAssetBacklogRouteRequest,
+    UnownedAssetBacklogRouteResult,
+    UnownedAssetEscalationRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
@@ -71,6 +77,10 @@ READ_ROLES = (
     "Auditor",
 )
 WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "SemanticAdmin", "DataSteward")
+
+# GL-6: matches the 500-row bound coverage scoring already applies to the
+# unowned-table backlog it returns.
+UNOWNED_BACKLOG_ROUTE_LIMIT = 500
 
 
 def _audit_context(context: SecurityContext, organization_id: UUID) -> SecurityContext:
@@ -1022,14 +1032,15 @@ async def submit_glossary_link_proposal(
     return review
 
 
-async def _coverage(
+async def _scope_table_ids(
     session: AsyncSession,
     *,
     organization_id: UUID,
     datasource_id: UUID | None,
     domain_id: UUID | None,
     line_of_business_id: UUID | None,
-) -> StewardshipCoverageRead:
+) -> set[UUID]:
+    """Active table IDs within an organization/source/domain/LOB coverage scope."""
     filters = [
         MetadataTable.organization_id == organization_id,
         MetadataTable.status == "ACTIVE",
@@ -1053,30 +1064,16 @@ async def _coverage(
         )
         filters.append(MetadataTable.datasource_id.in_(lob_source_ids))
     tables = (await session.scalars(select(MetadataTable).where(*filters).limit(10_000))).all()
-    table_ids = {table.id for table in tables}
+    return {table.id for table in tables}
+
+
+async def _owned_table_ids(
+    session: AsyncSession, *, organization_id: UUID, table_ids: set[UUID]
+) -> set[UUID]:
+    """Table IDs within ``table_ids`` that have an active owner, by assignment or
+    approved documentation naming one -- the GL-4 "owned" coverage dimension."""
     if not table_ids:
-        return build_stewardship_coverage(
-            organization_id=organization_id,
-            datasource_id=datasource_id,
-            domain_id=domain_id,
-            line_of_business_id=line_of_business_id,
-            table_ids=set(),
-            evidence_sets={},
-            computed_at=datetime.now(UTC),
-        )
-    documented = set(
-        await session.scalars(
-            select(AssetDocumentation.table_id)
-            .join(
-                AssetDocumentationVersion,
-                AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
-            )
-            .where(
-                AssetDocumentation.table_id.in_(table_ids),
-                AssetDocumentationVersion.status == "APPROVED",
-            )
-        )
-    )
+        return set()
     owned = {
         UUID(value)
         for value in await session.scalars(
@@ -1102,6 +1099,48 @@ async def _coverage(
             )
         )
     )
+    return owned
+
+
+async def _coverage(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID | None,
+    domain_id: UUID | None,
+    line_of_business_id: UUID | None,
+) -> StewardshipCoverageRead:
+    table_ids = await _scope_table_ids(
+        session,
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        domain_id=domain_id,
+        line_of_business_id=line_of_business_id,
+    )
+    if not table_ids:
+        return build_stewardship_coverage(
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            domain_id=domain_id,
+            line_of_business_id=line_of_business_id,
+            table_ids=set(),
+            evidence_sets={},
+            computed_at=datetime.now(UTC),
+        )
+    documented = set(
+        await session.scalars(
+            select(AssetDocumentation.table_id)
+            .join(
+                AssetDocumentationVersion,
+                AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
+            )
+            .where(
+                AssetDocumentation.table_id.in_(table_ids),
+                AssetDocumentationVersion.status == "APPROVED",
+            )
+        )
+    )
+    owned = await _owned_table_ids(session, organization_id=organization_id, table_ids=table_ids)
     classified = set(
         await session.scalars(
             select(MetadataColumn.table_id)
@@ -1114,7 +1153,13 @@ async def _coverage(
     )
     certification_rows = (
         await session.scalars(
-            select(AssetCertification).where(AssetCertification.table_id.in_(table_ids))
+            select(AssetCertification).where(
+                AssetCertification.table_id.in_(table_ids),
+                # CT-5: certification is now also column-scoped; a column's
+                # certification denormalizes its parent table_id but must not
+                # count toward the table's own "certified" coverage dimension.
+                AssetCertification.asset_type != "COLUMN",
+            )
         )
     ).all()
     certified = active_certified_table_ids(list(certification_rows), now=datetime.now(UTC))
@@ -1132,7 +1177,19 @@ async def _coverage(
     ).all()
     quality_monitored = {policy.table_id for policy in policies if policy.table_id in table_ids}
     source_wide = {policy.datasource_id for policy in policies if policy.table_id is None}
-    quality_monitored.update(table.id for table in tables if table.datasource_id in source_wide)
+    if source_wide:
+        table_datasources = (
+            await session.execute(
+                select(MetadataTable.id, MetadataTable.datasource_id).where(
+                    MetadataTable.id.in_(table_ids)
+                )
+            )
+        ).all()
+        quality_monitored.update(
+            table_id
+            for table_id, datasource_id in table_datasources
+            if datasource_id in source_wide
+        )
     semantically_mapped = set(
         await session.scalars(
             select(MetadataBusinessAnnotation.table_id).where(
@@ -1312,4 +1369,225 @@ async def list_stewardship_coverage_snapshots(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# --- GL-6: unowned-asset backlog routing and escalation --------------------
+
+
+async def _unowned_asset_table_facts(
+    session: AsyncSession, *, organization_id: UUID, table_ids: list[UUID]
+) -> dict[UUID, TableFacts]:
+    if not table_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .outerjoin(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.table_id == MetadataTable.id,
+            )
+            .outerjoin(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.id.in_(table_ids),
+            )
+        )
+    ).all()
+    facts: dict[UUID, TableFacts] = {}
+    for table, schema, annotation, domain in rows:
+        facts[table.id] = TableFacts(
+            table_id=table.id,
+            datasource_id=table.datasource_id,
+            table_name=table.name,
+            schema_name=schema.name,
+            domain_key=domain.domain_key if domain is not None else None,
+            tags=tuple(annotation.tags) if annotation is not None else (),
+        )
+    return facts
+
+
+@router.get(
+    "/organizations/{organization_id}/stewardship/unowned-backlog",
+    response_model=Page,
+)
+async def list_unowned_asset_backlog(
+    organization_id: UUID,
+    backlog_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """The current unowned-asset backlog and where each entry stands in routing."""
+    enforce_organization(context, organization_id)
+    filters = [UnownedAssetEscalation.organization_id == organization_id]
+    if backlog_status:
+        filters.append(UnownedAssetEscalation.status == backlog_status.upper())
+    else:
+        filters.append(UnownedAssetEscalation.status != "RESOLVED")
+    total = await session.scalar(
+        select(func.count()).select_from(UnownedAssetEscalation).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(UnownedAssetEscalation)
+            .where(*filters)
+            .order_by(UnownedAssetEscalation.first_detected_unowned_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[UnownedAssetEscalationRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/stewardship/unowned-backlog/route",
+    response_model=UnownedAssetBacklogRouteResult,
+)
+async def route_unowned_asset_backlog(
+    organization_id: UUID,
+    body: UnownedAssetBacklogRouteRequest = UnownedAssetBacklogRouteRequest(),  # noqa: B008
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> UnownedAssetBacklogRouteResult:
+    """Reconcile the unowned-asset backlog: route aged entries to a candidate
+    owner or stewardship-lead contact, escalate ones still unaddressed, and
+    resolve entries whose table has since been owned.
+
+    Reuses DQ-1's notification-routing engine end to end (see
+    ``aida.glossary_owner_routing``) against this organization's own
+    ``notification-rules`` -- a rule scoped to unowned-asset routing (e.g.
+    ``{"domain": "unowned_asset_backlog"}`` in its conditions) is what makes
+    routing actually dispatch; without one, tables are still tracked and
+    escalation-aged but nothing is routed anywhere.
+    """
+    enforce_organization(context, organization_id)
+    await _validate_coverage_scope(
+        session,
+        organization_id=organization_id,
+        datasource_id=body.datasource_id,
+        domain_id=body.domain_id,
+        line_of_business_id=body.line_of_business_id,
+    )
+    table_ids = await _scope_table_ids(
+        session,
+        organization_id=organization_id,
+        datasource_id=body.datasource_id,
+        domain_id=body.domain_id,
+        line_of_business_id=body.line_of_business_id,
+    )
+    owned = await _owned_table_ids(session, organization_id=organization_id, table_ids=table_ids)
+    unowned_table_ids = table_ids - owned
+
+    existing_rows = (
+        await session.scalars(
+            select(UnownedAssetEscalation).where(
+                UnownedAssetEscalation.organization_id == organization_id,
+                UnownedAssetEscalation.status != "RESOLVED",
+            )
+        )
+    ).all()
+    existing_entries = {row.table_id: row for row in existing_rows}
+
+    ownership_rules = list(
+        await session.scalars(
+            select(OwnershipRule).where(
+                OwnershipRule.organization_id == organization_id,
+                OwnershipRule.status == "ACTIVE",
+            )
+        )
+    )
+    notification_rules = list(
+        await session.scalars(
+            select(NotificationRuleRecord).where(
+                NotificationRuleRecord.organization_id == organization_id,
+                NotificationRuleRecord.enabled.is_(True),
+            )
+        )
+    )
+
+    route_candidates = sorted(unowned_table_ids, key=str)[:UNOWNED_BACKLOG_ROUTE_LIMIT]
+    table_facts = await _unowned_asset_table_facts(
+        session, organization_id=organization_id, table_ids=route_candidates
+    )
+
+    result = sync_unowned_asset_backlog(
+        organization_id=organization_id,
+        unowned_table_ids=unowned_table_ids,
+        existing_entries=existing_entries,
+        table_facts=table_facts,
+        ownership_rules=ownership_rules,
+        notification_rules=notification_rules,
+        now=datetime.now(UTC),
+        route_limit=UNOWNED_BACKLOG_ROUTE_LIMIT,
+    )
+    for entry in result.created:
+        session.add(entry)
+    await session.flush()
+
+    audit_context = _audit_context(context, organization_id)
+    for entry in result.routed:
+        record_audit(
+            session,
+            audit_context,
+            action="stewardship.unowned_asset.routed",
+            resource_type="unowned_asset_escalation",
+            resource_id=str(entry.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_routed.v1",
+            payload={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+        )
+    for entry in result.escalated:
+        record_audit(
+            session,
+            audit_context,
+            action="stewardship.unowned_asset.escalated",
+            resource_type="unowned_asset_escalation",
+            resource_id=str(entry.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"table_id": str(entry.table_id)},
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_escalated.v1",
+            payload={"table_id": str(entry.table_id)},
+        )
+    for entry in result.resolved:
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_resolved.v1",
+            payload={"table_id": str(entry.table_id)},
+        )
+
+    await session.commit()
+
+    return UnownedAssetBacklogRouteResult(
+        organization_id=organization_id,
+        routed=[UnownedAssetEscalationRead.model_validate(entry) for entry in result.routed],
+        escalated=[
+            UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
+        ],
+        resolved_count=len(result.resolved),
     )

@@ -114,6 +114,14 @@ Assertions become claims only after these produce evidence:
 
 ## 9. Regression gates
 
+> **Implementation status (2026-08-30). Target — nothing here runs.** CI does not fail on
+> performance regression, because there is no performance job in `.github/workflows/ci.yml`,
+> no `tests/performance/` directory, and no baseline to regress against. **No p95 in this
+> document has ever been measured.** Every threshold below is the gate that should exist once
+> `E10` (load/soak at 1M objects) lands. Until then, the targets published here and in
+> `00-product/01-vision-and-goals.md` are unvalidated design intent, and the §8 test cadences
+> above are likewise not being met — none of those tests has been run.
+
 CI fails on regression beyond these thresholds. Performance is defended continuously, not measured once.
 
 | Gate | Threshold |

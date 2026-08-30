@@ -20,11 +20,12 @@ from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.db import get_session
+from aida.domain_service import check_cross_boundary_grant
 from aida.lineage_cache import get_lineage_cache
 from aida.lineage_graph_store import load_projected_lineage_impact
 from aida.models import (
@@ -313,7 +314,15 @@ async def _build_unified_graph(
         edges = (
             await session.scalars(
                 select(DbtLineageEdge)
-                .where(DbtLineageEdge.artifact_import_id == latest_import.id)
+                .where(
+                    DbtLineageEdge.artifact_import_id == latest_import.id,
+                    # Column-level (LN-5) edges are consumed via the dedicated
+                    # dbt lineage read surface, not folded into this
+                    # table/resource-level graph -- without this filter, one
+                    # column edge per column pair would render as a redundant
+                    # parallel link between the same two dbt-resource nodes.
+                    DbtLineageEdge.edge_type == "DEPENDS_ON",
+                )
                 .limit(edge_limit + 1)
             )
         ).all()
@@ -672,6 +681,163 @@ async def build_domain_unified_lineage_graph_payload(
         if len(cross_source_candidates) >= remaining_edge_budget:
             truncation_reasons.append("DOMAIN_CROSS_SOURCE_EDGE_LIMIT")
 
+    # --- Cross-boundary edges (ADR-0017 phase 4 enforcement) ---
+    # A RelationshipCandidate whose two datasources sit in DIFFERENT data_domains
+    # only ever renders as an edge here if an ACTIVE, unexpired CrossBoundaryGrant
+    # lets *this* domain see across into the other one (INV-5: deny-by-default,
+    # explicit audited grants, never inherited). A domain that has such a
+    # candidate but no covering grant is named in withheld_cross_boundary_domain_ids
+    # -- reported, never silently dropped, mirroring the withheld:"no_grant"
+    # transparency ADR-0017 SS4 requires. Only the specific tables that
+    # participate in a *permitted* cross-boundary edge are pulled in from the
+    # other domain -- never that domain's whole internal graph -- so a grant
+    # exposes exactly the boundary it names, nothing more (least privilege).
+    withheld_cross_boundary_domain_ids: set[UUID] = set()
+    remaining_edge_budget = edge_limit - len(merged_edges)
+    if contributing_datasource_ids and remaining_edge_budget > 0:
+        boundary_filters = [
+            or_(
+                and_(
+                    RelationshipCandidate.datasource_id.in_(contributing_datasource_ids),
+                    RelationshipCandidate.target_datasource_id.notin_(
+                        contributing_datasource_ids
+                    ),
+                ),
+                and_(
+                    RelationshipCandidate.target_datasource_id.in_(contributing_datasource_ids),
+                    RelationshipCandidate.datasource_id.notin_(contributing_datasource_ids),
+                ),
+            )
+        ]
+        if suggestion_status != "ALL":
+            boundary_filters.append(RelationshipCandidate.status == suggestion_status)
+        boundary_scan_limit = remaining_edge_budget * 4
+        boundary_candidates = (
+            await session.scalars(
+                select(RelationshipCandidate)
+                .where(*boundary_filters)
+                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
+                .limit(boundary_scan_limit)
+            )
+        ).all()
+        if boundary_candidates:
+            other_datasource_ids = {
+                candidate.target_datasource_id
+                if candidate.datasource_id in contributing_datasource_ids
+                else candidate.datasource_id
+                for candidate in boundary_candidates
+            }
+            other_datasources_by_id = {
+                other_datasource.id: other_datasource
+                for other_datasource in (
+                    await session.scalars(
+                        select(DataSource).where(DataSource.id.in_(other_datasource_ids))
+                    )
+                ).all()
+            }
+            grant_cache: dict[UUID, bool] = {}
+            allowed_candidates: list[RelationshipCandidate] = []
+            allowed_table_ids: set[UUID] = set()
+            for candidate in boundary_candidates:
+                if len(allowed_candidates) >= remaining_edge_budget:
+                    break
+                this_side_in = candidate.datasource_id in contributing_datasource_ids
+                other_datasource_id = (
+                    candidate.target_datasource_id if this_side_in else candidate.datasource_id
+                )
+                other_datasource = other_datasources_by_id.get(other_datasource_id)
+                if other_datasource is None:
+                    continue
+                other_domain_id = other_datasource.data_domain_id
+                if other_domain_id not in grant_cache:
+                    grant_cache[other_domain_id] = await check_cross_boundary_grant(
+                        session,
+                        domain.organization_id,
+                        other_domain_id,
+                        domain.id,
+                        edge_kind="SUGGESTED_RELATIONSHIP",
+                    )
+                if not grant_cache[other_domain_id]:
+                    withheld_cross_boundary_domain_ids.add(other_domain_id)
+                    continue
+                allowed_candidates.append(candidate)
+                allowed_table_ids.add(
+                    candidate.target_table_id if this_side_in else candidate.source_table_id
+                )
+
+            if allowed_candidates:
+                nodes_by_id = {node.id: node for node in merged_nodes}
+                external_table_rows = (
+                    await session.execute(
+                        select(MetadataTable, MetadataSchema, MetadataCatalog)
+                        .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+                        .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                        .where(MetadataTable.id.in_(allowed_table_ids))
+                    )
+                ).all()
+                for table, table_schema, catalog in external_table_rows:
+                    node_id = f"{table.datasource_id}:{table.id}"
+                    if node_id in nodes_by_id:
+                        continue
+                    external_node = UnifiedLineageNodeRead(
+                        id=node_id,
+                        node_kind="TABLE",
+                        label=table.name,
+                        qualified_name=f"{catalog.name}.{table_schema.name}.{table.name}",
+                        matched_table_id=table.id,
+                        resolved=True,
+                    )
+                    merged_nodes.append(external_node)
+                    nodes_by_id[node_id] = external_node
+
+                boundary_column_ids = set()
+                for candidate in allowed_candidates:
+                    boundary_column_ids.add(candidate.source_column_id)
+                    boundary_column_ids.add(candidate.target_column_id)
+                boundary_columns_by_id = (
+                    {
+                        column.id: column.name
+                        for column in (
+                            await session.scalars(
+                                select(MetadataColumn).where(
+                                    MetadataColumn.id.in_(boundary_column_ids)
+                                )
+                            )
+                        ).all()
+                    }
+                    if boundary_column_ids
+                    else {}
+                )
+                for candidate in allowed_candidates:
+                    source_node_id = f"{candidate.datasource_id}:{candidate.source_table_id}"
+                    target_node_id = f"{candidate.target_datasource_id}:{candidate.target_table_id}"
+                    source_node = nodes_by_id.get(source_node_id)
+                    target_node = nodes_by_id.get(target_node_id)
+                    if source_node is None or target_node is None:
+                        # Other endpoint wasn't a resolved table -- skip rather
+                        # than render a dangling edge (same policy as same-
+                        # domain cross-source candidates above).
+                        continue
+                    source_column = boundary_columns_by_id.get(candidate.source_column_id)
+                    target_column = boundary_columns_by_id.get(candidate.target_column_id)
+                    merged_edges.append(
+                        UnifiedLineageEdgeRead(
+                            id=f"cross-boundary-candidate:{candidate.id}",
+                            edge_source="SUGGESTED_RELATIONSHIP",
+                            source_node_id=source_node_id,
+                            target_node_id=target_node_id,
+                            source_label=source_node.label,
+                            target_label=target_node.label,
+                            status=candidate.status,
+                            confidence=candidate.confidence,
+                            source_columns=[source_column] if source_column else [],
+                            target_columns=[target_column] if target_column else [],
+                            evidence=dict(candidate.evidence),
+                        )
+                    )
+            if len(boundary_candidates) >= boundary_scan_limit:
+                truncation_reasons.append("CROSS_BOUNDARY_EDGE_LIMIT")
+
     merged_nodes.sort(key=lambda node: node.qualified_name)
 
     return DomainLineageGraphRead(
@@ -686,6 +852,9 @@ async def build_domain_unified_lineage_graph_payload(
         edge_limit=edge_limit,
         truncated=bool(truncation_reasons),
         truncation_reasons=truncation_reasons,
+        withheld_cross_boundary_domain_ids=sorted(
+            withheld_cross_boundary_domain_ids, key=str
+        ),
     )
 
 

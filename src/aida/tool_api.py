@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -21,6 +22,8 @@ from aida.models import (
     GovernedToolVersion,
     Project,
     SemanticModelVersion,
+    ToolCertificationCase,
+    ToolCertificationRun,
     ToolExecution,
 )
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
@@ -30,15 +33,40 @@ from aida.schemas import (
     GovernedToolVersionRead,
     Page,
     QueryExecutionResponse,
+    ToolCertificationCaseCreate,
+    ToolCertificationCaseRead,
+    ToolCertificationDecisionRequest,
+    ToolCertificationRunCreate,
+    ToolCertificationRunRead,
+    ToolCertificationStatusRead,
     ToolExecutionRequest,
     ToolExecutionResponse,
     ToolParameterDefinition,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
+from aida.tool_certification import (
+    CERTIFICATION_SUITE_VERSION,
+    certification_is_active,
+    corpus_fingerprint,
+    run_certification_corpus,
+)
 from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
 
 router = APIRouter(prefix="/v1", tags=["governed-tools"])
+
+CERTIFICATION_MAKER_ROLES = ("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
+CERTIFICATION_CHECKER_ROLES = ("PlatformAdmin", "Reviewer", "SemanticAdmin")
+CERTIFICATION_READ_ROLES = (
+    "PlatformAdmin",
+    "ToolDeveloper",
+    "SemanticAdmin",
+    "Analyst",
+    "AgentDeveloper",
+    "Reviewer",
+    "Viewer",
+    "Auditor",
+)
 
 
 def _tool_read(tool: GovernedTool, version: GovernedToolVersion) -> GovernedToolVersionRead:
@@ -530,4 +558,369 @@ async def execute_tool(
         tool_slug=tool.slug,
         tool_version=version.version,
         execution=_query_response(result),
+    )
+
+
+# ---------------------------------------------------------------------------
+# TL-1: tool certification corpus and workflow.
+#
+# A maker executes the tool's certification corpus against a published
+# version's real parameter-binding path (deterministic, DB-free evidence);
+# an independent checker then countersigns it into an active certification
+# with an expiry. Expired certifications stop counting as certified without
+# their evidence row ever being mutated, and recertification is simply a new
+# run -- prior runs are never deleted, so certification history is complete.
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/tools/{tool_id}/certification-cases",
+    response_model=ToolCertificationCaseRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tool_certification_case(
+    tool_id: UUID,
+    body: ToolCertificationCaseCreate,
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_MAKER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ToolCertificationCase:
+    tool = await session.get(GovernedTool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail="tool not found")
+    enforce_organization(context, tool.organization_id)
+    case = ToolCertificationCase(
+        organization_id=tool.organization_id,
+        tool_id=tool.id,
+        case_key=body.case_key,
+        description=body.description,
+        parameters=body.parameters,
+        expectation=body.expectation.model_dump(mode="json"),
+        created_by=context.principal_id,
+    )
+    session.add(case)
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=tool.organization_id),
+        action="tool.certification_case.create",
+        resource_type="tool_certification_case",
+        resource_id=str(case.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"tool_id": str(tool.id), "case_key": case.case_key},
+    )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="certification case key already exists for this tool"
+        ) from exc
+    return case
+
+
+@router.get("/tools/{tool_id}/certification-cases", response_model=Page)
+async def list_tool_certification_cases(
+    tool_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    tool = await session.get(GovernedTool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail="tool not found")
+    enforce_organization(context, tool.organization_id)
+    filters = (ToolCertificationCase.tool_id == tool.id,)
+    total = await session.scalar(
+        select(func.count()).select_from(ToolCertificationCase).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(ToolCertificationCase)
+            .where(*filters)
+            .order_by(ToolCertificationCase.case_key)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[ToolCertificationCaseRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/tool-versions/{version_id}/certification-runs",
+    response_model=ToolCertificationRunRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def execute_tool_certification(
+    version_id: UUID,
+    body: ToolCertificationRunCreate,
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_MAKER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ToolCertificationRun:
+    version = await session.get(GovernedToolVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="tool version not found")
+    enforce_organization(context, version.organization_id)
+    if version.status != "PUBLISHED":
+        raise HTTPException(
+            status_code=409, detail="only a published tool version can be certified"
+        )
+    if body.expires_at <= datetime.now(UTC):
+        raise HTTPException(status_code=422, detail="certification expiry must be in the future")
+    datasource = await session.get(DataSource, version.datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=409, detail="tool datasource is unavailable")
+    cases = (
+        await session.scalars(
+            select(ToolCertificationCase).where(
+                ToolCertificationCase.tool_id == version.tool_id,
+                ToolCertificationCase.status == "ACTIVE",
+            )
+        )
+    ).all()
+    if not cases:
+        raise HTTPException(
+            status_code=422,
+            detail="tool has no active certification corpus cases defined",
+        )
+    definitions = [
+        ToolParameterDefinition.model_validate(value) for value in version.parameter_schema
+    ]
+    run_status, score, passed, total, results = run_certification_corpus(
+        list(cases),
+        sql_template=version.sql_template,
+        dialect=datasource.dialect,
+        definitions=definitions,
+    )
+    run = ToolCertificationRun(
+        organization_id=version.organization_id,
+        tool_id=version.tool_id,
+        tool_version_id=version.id,
+        suite_version=CERTIFICATION_SUITE_VERSION,
+        corpus_fingerprint=corpus_fingerprint(list(cases)),
+        status=run_status,
+        total_cases=total,
+        passed_cases=passed,
+        score=score,
+        results=results,
+        rationale=body.rationale,
+        executed_by=context.principal_id,
+        expires_at=body.expires_at if run_status == "PENDING_REVIEW" else None,
+    )
+    session.add(run)
+    await session.flush()
+    if run_status == "PENDING_REVIEW":
+        session.add(
+            GovernanceReview(
+                organization_id=version.organization_id,
+                object_type="TOOL_CERTIFICATION_RUN",
+                object_id=str(run.id),
+                requested_action="CERTIFY",
+                requested_by=context.principal_id,
+            )
+        )
+    record_audit(
+        session,
+        replace(context, organization_id=version.organization_id),
+        action="tool.certification_run.execute",
+        resource_type="tool_certification_run",
+        resource_id=str(run.id),
+        outcome=run_status,
+        correlation_id=get_correlation_id(),
+        details={
+            "tool_version_id": str(version.id),
+            "score": score,
+            "passed_cases": passed,
+            "total_cases": total,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=version.organization_id,
+        aggregate_type="tool_certification_run",
+        aggregate_id=str(run.id),
+        event_type="tool.certification_run.executed.v1",
+        payload={
+            "certification_run_id": str(run.id),
+            "tool_id": str(version.tool_id),
+            "tool_version_id": str(version.id),
+            "status": run_status,
+            "score": score,
+        },
+    )
+    await session.commit()
+    return run
+
+
+@router.post(
+    "/tool-certification-runs/{run_id}/decision",
+    response_model=ToolCertificationRunRead,
+)
+async def decide_tool_certification(
+    run_id: UUID,
+    body: ToolCertificationDecisionRequest,
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_CHECKER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ToolCertificationRun:
+    run = await session.get(ToolCertificationRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="certification run not found")
+    enforce_organization(context, run.organization_id)
+    if run.status != "PENDING_REVIEW":
+        raise HTTPException(status_code=409, detail="certification run is not pending review")
+    if run.executed_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker-checker separation is required")
+    review = await session.scalar(
+        select(GovernanceReview).where(
+            GovernanceReview.object_type == "TOOL_CERTIFICATION_RUN",
+            GovernanceReview.object_id == str(run.id),
+            GovernanceReview.status == "PENDING",
+        )
+    )
+    now = datetime.now(UTC)
+    run.certified_by = context.principal_id
+    run.decision_reason = body.reason
+    if body.decision == "APPROVE":
+        run.status = "CERTIFIED"
+        run.issued_at = now
+        event_type = "tool.certification_completed.v1"
+    else:
+        run.status = "REJECTED"
+        run.expires_at = None
+        event_type = "tool.certification_rejected.v1"
+    if review is not None:
+        review.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+        review.decided_by = context.principal_id
+        review.decision_reason = body.reason
+        review.decided_at = now
+    record_audit(
+        session,
+        replace(context, organization_id=run.organization_id),
+        action="tool.certification_run.decision",
+        resource_type="tool_certification_run",
+        resource_id=str(run.id),
+        outcome=run.status,
+        correlation_id=get_correlation_id(),
+        details={"tool_version_id": str(run.tool_version_id), "decision": body.decision},
+    )
+    record_outbox(
+        session,
+        organization_id=run.organization_id,
+        aggregate_type="tool_certification_run",
+        aggregate_id=str(run.id),
+        event_type=event_type,
+        payload={
+            "certification_run_id": str(run.id),
+            "tool_id": str(run.tool_id),
+            "tool_version_id": str(run.tool_version_id),
+            "status": run.status,
+            "expires_at": run.expires_at.isoformat() if run.expires_at else None,
+        },
+    )
+    await session.commit()
+    return run
+
+
+@router.get("/tools/{tool_id}/certification-runs", response_model=Page)
+async def list_tool_certification_runs(
+    tool_id: UUID,
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    tool = await session.get(GovernedTool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail="tool not found")
+    enforce_organization(context, tool.organization_id)
+    filters = (ToolCertificationRun.tool_id == tool.id,)
+    total = await session.scalar(
+        select(func.count()).select_from(ToolCertificationRun).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(ToolCertificationRun)
+            .where(*filters)
+            .order_by(ToolCertificationRun.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[ToolCertificationRunRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.get(
+    "/tools/{tool_id}/certification-status",
+    response_model=ToolCertificationStatusRead,
+)
+async def get_tool_certification_status(
+    tool_id: UUID,
+    tool_version_id: UUID | None = Query(default=None),
+    context: SecurityContext = Depends(require_roles(*CERTIFICATION_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ToolCertificationStatusRead:
+    tool = await session.get(GovernedTool, tool_id)
+    if tool is None:
+        raise HTTPException(status_code=404, detail="tool not found")
+    enforce_organization(context, tool.organization_id)
+    filters = [
+        ToolCertificationRun.tool_id == tool.id,
+        ToolCertificationRun.status == "CERTIFIED",
+    ]
+    if tool_version_id is not None:
+        filters.append(ToolCertificationRun.tool_version_id == tool_version_id)
+    # The most recently issued CERTIFIED run is authoritative for "current"
+    # certification, whether it is still active or has since expired -- a
+    # recertification always supersedes an older run without touching it.
+    run = await session.scalar(
+        select(ToolCertificationRun)
+        .where(*filters)
+        .order_by(ToolCertificationRun.issued_at.desc())
+        .limit(1)
+    )
+    if run is not None and certification_is_active(run):
+        return ToolCertificationStatusRead(
+            tool_id=tool.id,
+            tool_version_id=run.tool_version_id,
+            certified=True,
+            run_id=run.id,
+            certified_by=run.certified_by,
+            issued_at=run.issued_at,
+            expires_at=run.expires_at,
+            expired_run_id=None,
+            expired_at=None,
+        )
+    if run is not None:
+        return ToolCertificationStatusRead(
+            tool_id=tool.id,
+            tool_version_id=run.tool_version_id,
+            certified=False,
+            run_id=None,
+            certified_by=None,
+            issued_at=None,
+            expires_at=None,
+            expired_run_id=run.id,
+            expired_at=run.expires_at,
+        )
+    return ToolCertificationStatusRead(
+        tool_id=tool.id,
+        tool_version_id=tool_version_id,
+        certified=False,
+        run_id=None,
+        certified_by=None,
+        issued_at=None,
+        expires_at=None,
+        expired_run_id=None,
+        expired_at=None,
     )

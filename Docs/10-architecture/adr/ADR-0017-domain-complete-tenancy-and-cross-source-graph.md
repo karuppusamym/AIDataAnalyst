@@ -1,6 +1,14 @@
 # ADR-0017 — Domain-Complete Tenancy and Boundary-Aware Cross-Source Graph Traversal
 
-**Status:** Proposed | **Date:** 2026-08-29 | **Owner:** Architecture
+**Status:** Superseded by [ADR-0018](ADR-0018-three-axis-tenancy-and-classification.md) | **Date:** 2026-08-29 | **Superseded:** 2026-08-30 | **Owner:** Architecture
+
+> **Superseded before acceptance.** This ADR's own reversal condition — *"domain taxonomy turns
+> out not to nest cleanly (a table genuinely needs two sibling domains)"* — is structurally met
+> in a bank estate: a `customer` table belongs to both Retail Banking and Financial Crime. ADR-0018
+> keeps this ADR's two real goals (cross-source traversal, cross-source relationship inference, and
+> the `cross_boundary_grant` mechanism, which it retains) but reaches them by separating
+> classification from tenancy rather than by deepening the tenancy path. The context and problem
+> statement below remain accurate and worth reading; the proposed solution does not.
 
 ## Context
 
@@ -241,6 +249,6 @@ single parent, which is a bigger change than this ADR should absorb speculativel
 - `10-architecture/adr/ADR-0005-tenancy-hierarchy.md` — hierarchy this ADR completes
 - `10-architecture/adr/ADR-0010-bounded-value-free-graph.md` — traversal contract this ADR extends
 - `20-modules/10-knowledge-graph.md` — KG-2, closed by this decision
-- `20-modules/06-relationships.md` — RL-5, closed by this decision
+- `20-modules/06-relationship-intelligence.md` — RL-5, closed by this decision
 - `20-modules/09-lineage.md` — LN-9's per-source unified graph becomes the datasource-level view
   beneath domain-level traversal

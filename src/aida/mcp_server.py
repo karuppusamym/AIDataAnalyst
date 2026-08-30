@@ -68,6 +68,7 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.config import Settings, get_settings
+from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
     ContextProductQualityDecision,
@@ -76,7 +77,12 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.mcp_budget import McpBudgetDecision, consume_mcp_budget
+from aida.mcp_budget import (
+    McpBudgetDecision,
+    budget_headers,
+    consume_mcp_budget,
+    consume_mcp_consumer_budget,
+)
 from aida.models import (
     ContextProduct,
     ContextProductConsumptionEdge,
@@ -92,11 +98,14 @@ from aida.models import (
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    TableProfile,
 )
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
+from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
+from aida.sql_validation_api import SQL_VALIDATION_ROLES
 from aida.unified_lineage_api import (
     UNIFIED_LINEAGE_READER_ROLES,
     LineageNodeNotFoundError,
@@ -275,6 +284,59 @@ NATIVE_MARKETPLACE_TOOL_SLUGS = frozenset(
 )
 
 
+# N14 (`Docs/review-2026-08/target/03-context-tools-agents-mcp.md` §5, "validate_sql
+# is the one to build first for coding agents"): expose the gateway's deterministic
+# pipeline as a compiler an agent can iterate against, instead of letting it guess
+# and discover the rules one refusal at a time.
+#
+# Nothing is executed and no row is read: the tool returns findings only, and the
+# single source contact it makes is the dry-run estimate the gateway would have made
+# anyway before executing. The call goes through the same authorisation, role
+# eligibility and MCP budget path as every other native tool -- there is no agent
+# bypass.
+
+NATIVE_VALIDATION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "slug": "validate_sql",
+        "description": (
+            "Validate a SQL statement against one governed datasource WITHOUT executing "
+            "it, and return structured findings: AST parse, read-only and structural "
+            "rules, referenced table/column extraction, catalog resolution and "
+            "per-object authorisation, the row limit that would be applied, column "
+            "lineage, and a dry-run cost or byte estimate checked against policy. "
+            "This is the same pipeline a real execution runs, so a statement reported "
+            "valid here is a statement the gateway will accept. Findings are value-free "
+            "-- object names, machine codes, hints and numbers only -- and any SQL "
+            "echoed back has its literals redacted. Iterate against this before asking "
+            "for execution."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource_id": {"type": "string", "description": "Datasource UUID"},
+                "sql": {
+                    "type": "string",
+                    "description": "One read-only statement in the datasource's dialect",
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": (
+                        "Requested row limit, 1-1000000. The gateway clamps it to the "
+                        "configured hard limit and reports the applied bound as a "
+                        "ROW_LIMIT_APPLIED finding."
+                    ),
+                },
+            },
+            "required": ["datasource_id", "sql"],
+            "additionalProperties": False,
+        },
+    }
+]
+NATIVE_VALIDATION_TOOL_SLUGS = frozenset(
+    item["slug"] for item in NATIVE_VALIDATION_TOOL_DEFINITIONS
+)
+
+
 # ---------------------------------------------------------------------------
 # JSON-RPC helpers
 # ---------------------------------------------------------------------------
@@ -312,6 +374,21 @@ def _tool_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> 
 def _context_product_role_eligible(roles: frozenset[str], allowed_roles: Sequence[str]) -> bool:
     """Apply the same fail-closed role binding used by governed tools."""
     return _tool_role_eligible(roles, allowed_roles)
+
+
+# Roles allowed to read catalog resources via MCP.  PlatformAdmin is always
+# exempt (handled by _tool_role_eligible).
+CATALOG_RESOURCE_READER_ROLES: frozenset[str] = frozenset({
+    "PlatformAdmin",
+    "OrganizationAdmin",
+    "ProjectAdmin",
+    "MetadataAdmin",
+    "DataAdmin",
+    "SemanticAdmin",
+    "DataSteward",
+    "Analyst",
+    "Viewer",
+})
 
 
 def _parse_context_product_uri(uri: str) -> tuple[str, int] | None:
@@ -505,6 +582,23 @@ async def _handle_tools_list(
                 }
             )
 
+    if eligible_version_ids is None and _tool_role_eligible(
+        context.roles, SQL_VALIDATION_ROLES
+    ):
+        for native in NATIVE_VALIDATION_TOOL_DEFINITIONS:
+            tools.append(
+                {
+                    "name": f"atlas__{native['slug']}",
+                    "description": native["description"],
+                    "inputSchema": native["inputSchema"],
+                    "_atlas_meta": {
+                        "kind": "NATIVE_PLATFORM_TOOL",
+                        "executes": False,
+                        "returnsRows": False,
+                    },
+                }
+            )
+
     if eligible_version_ids is None and context.roles & set(MARKETPLACE_USERS):
         for native in NATIVE_MARKETPLACE_TOOL_DEFINITIONS:
             tools.append(
@@ -568,6 +662,118 @@ async def _handle_native_marketplace_tool_call(
                     indent=2,
                 ),
             }
+        ]
+    }
+
+
+async def _handle_native_validation_tool_call(
+    slug: str,
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    correlation_id: str,
+) -> dict[str, Any]:
+    """Run `validate_sql` (N14) through the gateway's validation path.
+
+    Role eligibility is re-checked here rather than trusted from a preceding
+    `tools/list`, and an ineligible caller gets the same wording as an
+    unresolvable datasource -- the anti-enumeration shape the governed-tool and
+    lineage paths already use, so "not allowed" is never distinguishable from
+    "does not exist".
+
+    Nothing is executed: `QueryExecutionGateway.validate` reaches
+    `estimate_read_query` at most, never the execution surface (INV-2).
+    """
+    if slug not in NATIVE_VALIDATION_TOOL_SLUGS or not _tool_role_eligible(
+        context.roles, SQL_VALIDATION_ROLES
+    ):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
+    try:
+        datasource_id = UUID(str(arguments.get("datasource_id")))
+    except (TypeError, ValueError):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "datasource_id must be a UUID."}],
+        }
+
+    sql = str(arguments.get("sql") or "")
+    if not sql.strip() or len(sql) > 200_000:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "sql must contain 1-200000 characters."}],
+        }
+
+    requested_limit: int | None = None
+    if arguments.get("max_rows") is not None:
+        try:
+            requested_limit = int(arguments["max_rows"])
+        except (TypeError, ValueError):
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "max_rows must be an integer."}],
+            }
+        if not 1 <= requested_limit <= 1_000_000:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "max_rows must be between 1 and 1000000."}],
+            }
+
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None or datasource.organization_id != context.organization_id:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Datasource not accessible."}],
+        }
+
+    gateway = QueryExecutionGateway(settings)
+    try:
+        report = await gateway.validate(
+            session,
+            datasource=datasource,
+            context=context,
+            correlation_id=correlation_id,
+            sql=sql,
+            requested_limit=requested_limit,
+        )
+    except AuthorizationRejected as exc:
+        # Named separately from the blanket handler so the agent is told it was refused
+        # rather than that validation broke. The reason code is safe to return: it names
+        # a policy outcome, never a resource or a policy expression (INV-6).
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Not authorized: {exc.reason_code}"}],
+        }
+    except Exception:
+        logger.exception("mcp_validate_sql_failed", datasource_id=str(datasource_id))
+        return {
+            "isError": True,
+            "content": [
+                {"type": "text", "text": "Validation could not be completed for this datasource."}
+            ],
+        }
+
+    body = report.as_dict()
+    body["rejection_reason"] = report.rejection_reason()
+    verdict = "\u2705 VALID" if report.valid else "\u26d4 INVALID"
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"{verdict} - deterministic validation only, nothing was executed and "
+                    "no rows were read.\n"
+                    f"- Tool: `atlas__{slug}`\n"
+                    f"- Datasource: `{datasource.id}` ({datasource.dialect})\n"
+                    f"- Findings: {', '.join(report.codes()) or 'none'}\n"
+                    f"- Applied row limit: {report.applied_row_limit}"
+                ),
+            },
+            {"type": "text", "text": f"```json\n{json.dumps(body, indent=2, default=str)}\n```"},
         ]
     }
 
@@ -950,6 +1156,15 @@ async def _handle_tools_call(
                 "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
             }
         return await _handle_native_marketplace_tool_call(slug, arguments, session, context)
+    if slug in NATIVE_VALIDATION_TOOL_SLUGS:
+        if scoped_product is not None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+            }
+        return await _handle_native_validation_tool_call(
+            slug, arguments, session, context, settings, correlation_id
+        )
 
     # Resolve tool version
     row = (
@@ -1215,6 +1430,27 @@ async def _handle_resources_read(
     if not uri.startswith("atlas://catalog/"):
         return {"contents": [{"uri": uri, "text": "Unknown resource URI scheme."}]}
 
+    inaccessible = {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
+
+    # ---- CX-3: Per-read policy evaluation for catalog resources ----
+    if not _tool_role_eligible(context.roles, list(CATALOG_RESOURCE_READER_ROLES)):
+        record_audit(
+            session,
+            context,
+            action="mcp.catalog_resource.role_denied",
+            resource_type="catalog_resource",
+            resource_id=uri,
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "uri": uri,
+                "allowed_roles": sorted(CATALOG_RESOURCE_READER_ROLES),
+                "principal_roles": sorted(context.roles),
+            },
+        )
+        await session.commit()
+        return inaccessible
+
     # Parse: atlas://catalog/{datasource_id}/{schema}/{table}
     parts = uri.removeprefix("atlas://catalog/").split("/")
     if len(parts) != 3:
@@ -1240,7 +1476,7 @@ async def _handle_resources_read(
     ).first()
 
     if row is None:
-        return {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
+        return inaccessible
 
     table, schema, catalog = row
 
@@ -1255,12 +1491,25 @@ async def _handle_resources_read(
         )
     ).all()
 
+    # MetadataTable itself carries no row count — row_count_estimate lives on
+    # TableProfile (one per completed scan), linked back via table_id.
+    latest_profile = await session.scalar(
+        select(TableProfile)
+        .where(
+            TableProfile.organization_id == context.organization_id,
+            TableProfile.table_id == table.id,
+            TableProfile.status == "COMPLETED",
+        )
+        .order_by(TableProfile.created_at.desc())
+        .limit(1)
+    )
+
     metadata_payload = {
         "catalog": catalog.name,
         "schema": schema.name,
         "table": table.name,
         "object_type": table.object_type,
-        "row_count_estimate": table.row_count_estimate,
+        "row_count_estimate": latest_profile.row_count_estimate if latest_profile else None,
         "columns": [
             {
                 "name": col.name,
@@ -1279,6 +1528,36 @@ async def _handle_resources_read(
             )
         },
     }
+
+    # ---- CX-3: Audit successful catalog read ----
+    record_audit(
+        session,
+        context,
+        action="mcp.catalog_resource.read",
+        resource_type="catalog_resource",
+        resource_id=str(table.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={"uri": uri, "table_name": table.name, "schema_name": schema.name},
+    )
+
+    # ---- CX-4: Record consumption lineage ----
+    if context.organization_id is not None:
+        await record_consumption(
+            session,
+            organization_id=context.organization_id,
+            edge=ConsumptionEdge(
+                consumer_id=context.principal_id,
+                consumer_type=context.principal_type,
+                resource_type="metadata_table",
+                resource_id=str(table.id),
+                channel="MCP",
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+                business_purpose=context.business_purpose,
+                details={"uri": uri},
+            ),
+        )
 
     return {
         "contents": [
@@ -1481,6 +1760,27 @@ async def _read_context_product_resource(
             quality_snapshot=quality_decision.snapshot(),
         )
     )
+    # CX-4: Record consumption lineage for context product reads
+    if context.organization_id is not None:
+        await record_consumption(
+            session,
+            organization_id=context.organization_id,
+            edge=ConsumptionEdge(
+                consumer_id=context.principal_id,
+                consumer_type=context.principal_type,
+                resource_type="context_product_version",
+                resource_id=str(product_version.id),
+                channel="MCP",
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+                business_purpose=context.business_purpose,
+                details={
+                    "product_key": product.product_key,
+                    "version": product_version.version,
+                    "fingerprint": product_version.fingerprint,
+                },
+            ),
+        )
     await session.commit()
     return {
         "contents": [
@@ -1676,7 +1976,9 @@ async def mcp_endpoint(
         budget_buckets.append("TOOL_DAY")
     elif method in {"resources/read", "prompts/get"}:
         budget_buckets.append("CONTEXT_DAY")
+    rate_limit_headers: dict[str, str] = {}
     for bucket in budget_buckets:
+        # Org-level budget check
         budget = await consume_mcp_budget(settings, context, bucket)
         if not budget.allowed:
             record_audit(
@@ -1698,8 +2000,40 @@ async def mcp_endpoint(
                     _budget_error_data(budget),
                 ),
                 status_code=429,
-                headers={"Retry-After": str(max(budget.retry_after_seconds, 1))},
+                headers={
+                    "Retry-After": str(max(budget.retry_after_seconds, 1)),
+                    **budget_headers(budget),
+                },
             )
+        rate_limit_headers.update(budget_headers(budget))
+        # CX-6: Per-consumer budget check
+        consumer_budget = await consume_mcp_consumer_budget(settings, context, bucket)
+        if not consumer_budget.allowed:
+            record_audit(
+                session,
+                context,
+                action="mcp.consumer_budget.per_consumer_denied",
+                resource_type="mcp_consumer",
+                resource_id=context.principal_id,
+                outcome="DENIED",
+                correlation_id=correlation_id,
+                details=_budget_error_data(consumer_budget),
+            )
+            await session.commit()
+            return JSONResponse(
+                content=_err(
+                    rpc_id,
+                    _ERR_ACCESS_DENIED,
+                    "MCP per-consumer rate limit exceeded.",
+                    _budget_error_data(consumer_budget),
+                ),
+                status_code=429,
+                headers={
+                    "Retry-After": str(max(consumer_budget.retry_after_seconds, 1)),
+                    **budget_headers(consumer_budget),
+                },
+            )
+        rate_limit_headers.update(budget_headers(consumer_budget))
 
     try:
         # Dispatch to the appropriate handler
@@ -1773,4 +2107,4 @@ async def mcp_endpoint(
             )
         )
         await session.commit()
-    return JSONResponse(content=_ok(rpc_id, result))
+    return JSONResponse(content=_ok(rpc_id, result), headers=rate_limit_headers)

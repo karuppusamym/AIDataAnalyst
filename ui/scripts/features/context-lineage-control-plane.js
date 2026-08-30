@@ -1,7 +1,7 @@
 /* Governed Context Products and unified lineage operator surfaces. */
 (function initializeContextLineageControlPlane() {
   const { state, $, setHtml, esc, human, badge, empty, api, selectOptions, preserveSelect } = window.AtlasUI;
-  const feature = { products: [], graph: null, impact: null, engine: null };
+  const feature = { products: [], graph: null, impact: null, engine: null, pendingGrantRequest: null };
 
   function message(target, text, kind="neutral") {
     setHtml(target, text ? `<div class="feature-message ${kind}">${esc(text)}</div>` : "");
@@ -63,6 +63,7 @@
       name: values.get("name"),
       description: values.get("description"),
       purpose: values.get("purpose"),
+      owner_type: values.get("owner_type"),
       owner_principal: values.get("owner_principal"),
       table_ids: split("table_ids"),
       semantic_model_version_ids: split("semantic_model_version_ids"),
@@ -173,6 +174,57 @@
       renderLineageGraph();
       const sourceNote = isDomainScope ? ` (${feature.graph.datasource_ids.length} sources)` : "";
       message("unified-lineage-message", feature.graph.truncated ? `Result bounded: ${feature.graph.truncation_reasons.join(", ")}.` : `Unified graph is within the requested budget${sourceNote}.`, feature.graph.truncated ? "warning" : "success");
+      renderCrossBoundaryNotice(isDomainScope ? scopeId : null);
+    } catch (error) {
+      message("unified-lineage-message", error.message, "error");
+      renderCrossBoundaryNotice(null);
+    }
+  }
+
+  function renderCrossBoundaryNotice(domainId) {
+    const withheldIds = (domainId && feature.graph?.withheld_cross_boundary_domain_ids) || [];
+    if (!withheldIds.length) return setHtml("unified-lineage-boundary-notice", "");
+    const rows = withheldIds.map(id => {
+      const domain = state.domains.find(item => item.id === id);
+      const label = domain ? `${domain.name} / ${domain.lobName || "no LOB"}` : id;
+      return `<span class="boundary-notice-row">${esc(label)}<button type="button" class="button small secondary" data-request-cross-boundary="${id}" data-cross-boundary-target="${domainId}">Request access</button></span>`;
+    }).join("");
+    setHtml(
+      "unified-lineage-boundary-notice",
+      `<div class="feature-message warning boundary-notice"><strong>${withheldIds.length} related domain${withheldIds.length === 1 ? "" : "s"} withheld</strong><p>Related data exists in another data domain but stays out of this graph without an ACTIVE cross_boundary_grant (ADR-0017 SS4, deny-by-default).</p><div class="boundary-notice-actions">${rows}</div></div>`
+    );
+  }
+
+  function openCrossBoundaryGrantDialog(sourceDomainId, targetDomainId) {
+    feature.pendingGrantRequest = { sourceDomainId, targetDomainId };
+    const sourceDomain = state.domains.find(item => item.id === sourceDomainId);
+    const targetDomain = state.domains.find(item => item.id === targetDomainId);
+    setHtml(
+      "cross-boundary-grant-context",
+      `<strong>${esc(targetDomain ? targetDomain.name : targetDomainId)}</strong> requesting to see into <strong>${esc(sourceDomain ? sourceDomain.name : sourceDomainId)}</strong>`
+    );
+    const form = $("#cross-boundary-grant-form");
+    if (form) form.reset();
+    $("#cross-boundary-grant-dialog")?.showModal();
+  }
+
+  async function submitCrossBoundaryGrantRequest(form) {
+    const pending = feature.pendingGrantRequest;
+    if (!pending) return;
+    const values = new FormData(form);
+    const reason = String(values.get("reason") || "").trim();
+    const expiresAtRaw = String(values.get("expires_at") || "").trim();
+    try {
+      await api(`/v1/data-domains/${pending.sourceDomainId}/cross-boundary-grants`, {
+        method: "POST",
+        body: JSON.stringify({
+          target_data_domain_id: pending.targetDomainId,
+          edge_kinds: [],
+          reason,
+          expires_at: expiresAtRaw ? new Date(expiresAtRaw).toISOString() : null,
+        }),
+      });
+      message("unified-lineage-message", "Cross-boundary access requested — filed into the Review Center, pending a different principal's approval.", "success");
     } catch (error) {
       message("unified-lineage-message", error.message, "error");
     }
@@ -206,17 +258,17 @@
   }
 
   document.addEventListener("submit", event => {
-    if (event.target.id !== "context-product-form") return;
-    event.preventDefault();
-    createContextProduct(event.target);
+    if (event.target.id === "context-product-form") { event.preventDefault(); return createContextProduct(event.target); }
+    if (event.target.id === "cross-boundary-grant-form") { event.preventDefault(); return submitCrossBoundaryGrantRequest(event.target); }
   });
   document.addEventListener("click", event => {
-    const target = event.target.closest("[data-context-submit], [data-context-deprecate], [data-context-compile], [data-lineage-node], #refresh-context-products, #load-unified-lineage");
+    const target = event.target.closest("[data-context-submit], [data-context-deprecate], [data-context-compile], [data-lineage-node], [data-request-cross-boundary], #refresh-context-products, #load-unified-lineage");
     if (!target) return;
     if (target.dataset.contextSubmit) return transitionVersion(target.dataset.contextSubmit, "submit");
     if (target.dataset.contextDeprecate) return transitionVersion(target.dataset.contextDeprecate, "deprecate");
     if (target.dataset.contextCompile) return compileVersion(target.dataset.contextCompile);
     if (target.dataset.lineageNode) return inspectImpact(target.dataset.lineageNode);
+    if (target.dataset.requestCrossBoundary) return openCrossBoundaryGrantDialog(target.dataset.requestCrossBoundary, target.dataset.crossBoundaryTarget);
     if (target.id === "refresh-context-products") return loadContextProducts();
     if (target.id === "load-unified-lineage") return loadUnifiedLineage();
   });

@@ -36,7 +36,8 @@ S1 (curate rather than author), S4 (know what breaks), R1 (approve with context)
 ```text
 relationship_candidate, relationship_evidence, relationship_decision
 negative_knowledge
-table_family, table_family_member, canonical_table_mapping
+relationship_candidate_group, relationship_candidate_group_member
+table_family_candidate, canonical_table_mapping
 ```
 
 ## 6. Candidate generation
@@ -94,9 +95,21 @@ def get_table_family(scope, table_id) -> TableFamilyDTO | None
 def resolve_canonical(scope, entity_ref) -> TableRef | None
 ```
 
+Implemented today in `aida.intelligence_api` (not the `relationships/api.py` path above — this platform has not yet decomposed into per-module packages; see `Docs/40-engineering/06-refactor-plan.md`):
+
+```python
+# aida/intelligence_api.py
+async def discover_relationship_candidates(datasource_id, body, ...) -> Page
+async def discover_cross_source_relationship_candidates(domain_id, body, ...) -> Page
+async def list_relationship_candidates(datasource_id, ...) -> Page
+async def decide_relationship_candidate(candidate_id, body, ...) -> RelationshipCandidateRead
+async def bulk_decide_relationship_candidates(body, ...) -> RelationshipCandidateBulkDecisionResultRead  # RL-6
+async def get_relationship_candidate_confidence_calibration(datasource_id, bucket_width, ...) -> RelationshipCandidateCalibrationRead  # RL-7
+```
+
 ## 11. Events
 
-Emits `relationship.candidate_generated`, `relationship.approved`, `relationship.rejected`, `table_family.detected`, `canonical_table.resolved`.
+Target vocabulary: `relationship.candidate_generated`, `relationship.approved`, `relationship.rejected`, `table_family.detected`, `canonical_table.resolved` (see `Docs/30-contracts/04-event-catalog.md` for the platform-wide caveat that most catalog rows predate a `.v1` rename). What `intelligence_api.decide_relationship_candidate` and the new bulk-decision endpoint actually emit today is `relationship_candidate.approved.v1` / `relationship_candidate.rejected.v1` (2026-08-30, RL-4) — the approve/reject siblings of the two rows above. `graph_projector.run_projector` consumes exactly these two names to trigger unified-lineage projection; keep the emitter and the projector's `UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` in lockstep if either changes.
 
 ## 12. Dependencies
 
@@ -107,18 +120,18 @@ Emits `relationship.candidate_generated`, `relationship.approved`, `relationship
 | Aspect | Now | Target |
 |---|---|---|
 | Declared PK/FK | Implemented — constraint inventory and graph edges | Projection performance at millions of nodes |
-| Inferred candidates | Implemented — bounded metadata-only, enriched edges, confidence/evidence, durable review, negative knowledge | Composite candidates, statistical evidence policy, projection of approvals to Neo4j |
-| Table families | **Pending** — architecture and evidence model documented only | History/snapshot/delta/SCD inference and canonical-table review |
-| Cross-source relationships | Not implemented | Required for a heterogeneous estate |
+| Inferred candidates | Implemented — bounded metadata-only, enriched edges, confidence/evidence, durable review, negative knowledge, bulk maker-checker review (RL-6), same-source projection of approvals to Neo4j (RL-4) | Composite candidates (RL-3, in progress elsewhere), statistical evidence policy, cross-source projection of approvals to Neo4j (see RL-4 note below) |
+| Table families | **Pending** — architecture and evidence model documented only | History/snapshot/delta/SCD inference and canonical-table review (RL-1/RL-2, in progress elsewhere) |
+| Cross-source relationships | Implemented — bounded datasource-pair discovery within a domain and, with an ACTIVE `cross_boundary_grant`, across one (ADR-0017 SS4/SS8); matches by canonical name and physical-type family, not raw string equality (RL-5, 2026-08-30) | Federated cross-source graph projected to Neo4j (today only the single-datasource unified-lineage graph is projected; the domain-wide federated graph that includes cross-source edges has no Neo4j projection path) |
 
 ## 14. Open work
 
-| ID | Item | Priority |
-|---|---|---|
-| RL-1 | Table family and temporal intelligence | P1 |
-| RL-2 | Canonical table resolution with steward override | P1 |
-| RL-3 | Composite relationship candidates | P1 |
-| RL-4 | Project approved relationships to Neo4j | P1 |
-| RL-5 | Cross-source relationship inference | P1 |
-| RL-6 | Bulk review for large candidate sets | P1 |
-| RL-7 | Confidence calibration against a labelled banking corpus | P1 |
+| ID | Item | Priority | Status |
+|---|---|---|---|
+| RL-1 | Table family and temporal intelligence | P1 | Open (separate concurrent work) |
+| RL-2 | Canonical table resolution with steward override | P1 | Open (separate concurrent work) |
+| RL-3 | Composite relationship candidates | P1 | Open (separate concurrent work) |
+| RL-4 | Project approved relationships to Neo4j | P1 | Done for same-datasource candidates (2026-08-30) — the emitted event name/payload now matches what `graph_projector` listens for. Cross-source candidates still are not projected to Neo4j (see §13); that is federation work, not a name/payload fix, and is unscheduled. |
+| RL-5 | Cross-source relationship inference | P1 | Done (2026-08-30) — naming/type matching now survives snake_case/camelCase/PascalCase/SCREAMING_CASE and cross-dialect type spelling (`aida.relationship_naming`), with the match strength recorded in each candidate's evidence. |
+| RL-6 | Bulk review for large candidate sets | P1 | Done (2026-08-30) — `POST /v1/relationship-candidates/bulk-decision`, explicit ids or a PENDING-only filter, capped at 500, per-candidate partial-success reporting. |
+| RL-7 | Confidence calibration against a labelled banking corpus | P1 | Partially done (2026-08-30) — `GET /v1/relationship-candidates/confidence-calibration` reports the *observed* approval rate per confidence bucket from this deployment's own real decision history, with an optional `RelationshipCandidateGroundTruthLabel` override. This is explicitly **not** a published calibration curve against an external labelled banking corpus: no such corpus exists in this environment, and the endpoint says so in its own response rather than implying one. |
