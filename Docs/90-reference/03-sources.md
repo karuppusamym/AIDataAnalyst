@@ -50,6 +50,14 @@
 
 - [Alation Agentic Data Intelligence Platform — Gartner Peer Insights](https://www.gartner.com/reviews/market/metadata-management-solutions/vendor/alation/product/alation-agentic-data-intelligence-platform)
 
+### Independent practitioner reviews
+
+Added 2026-08-30. Unlike the vendor pages above, these are hands-on accounts from people who ran the tools in production — they surface UX friction and real-world capability gaps that vendor marketing does not admit to. Treated as corroborating color, not re-scored into the matrix on their own (single-author accounts are not a statistically reliable sample) — see `competitors/02-collibra-analysis.md` §3a for how this was used.
+
+- [Atlan 101 | Chapter 1: What, Why, and How of Atlan — A Comparative Look: Atlan vs Collibra vs Alation vs Informatica — Shubham Shardul, Medium](https://medium.com/@shubham.shardul2019/atlan-101-chapter-1-what-why-and-how-of-atlan-a-comparative-look-atlan-vs-collibra-vs-a2fb05dc21a1) — practitioner account; central claims: Atlan positions as a data-team *collaboration hub* (Slack-native notifications, in-context AI suggestions) rather than a standalone catalog portal, and Collibra's lineage is comparatively incomplete with a more complex interface. (medium.com is blocked by this environment's egress proxy; read via search-result summaries and corroborated against the two sources below, not fetched directly — reconfirm firsthand at the next refresh.)
+- [Data Catalog Tool Comparison: Collibra vs. Atlan — CastorDoc](https://www.castordoc.com/tool-comparison/data-catalog-tool-comparison-collibra-vs-atlan) — notes Collibra's Lineage Harvester has user-reported performance/accuracy issues despite Collibra edging Atlan on G2 lineage-visualization scores (8.0 vs 7.3).
+- [Atlan vs Collibra Platform comparison — PeerSpot](https://www.peerspot.com/products/comparisons/atlan_vs_collibra-platform)
+
 ## How to refresh this research
 
 The competitive picture in this segment moves on roughly a quarterly cadence, driven by vendor conferences.
