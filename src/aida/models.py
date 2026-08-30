@@ -1283,6 +1283,47 @@ class CoverageSnapshot(Base, TimestampMixin):
     computed_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+class UnownedAssetEscalation(Base, TimestampMixin):
+    """GL-6: tracks a table's unowned-asset backlog entry through routing/escalation.
+
+    One row per table currently or previously flagged by the stewardship-coverage
+    "owned" dimension as unowned. Routing/escalation reuses DQ-1's generic
+    notification engine (``aida.notification_routing``) against the same
+    ``notification_rule`` table quality incidents route through -- this record
+    persists the outcome of that reuse (candidate owner, matched rule, dedup key,
+    delivery status) since ``notification_event`` is FK-scoped to
+    ``data_quality_incident`` and cannot carry a non-incident subject.
+    """
+
+    __tablename__ = "unowned_asset_escalation"
+    __table_args__ = (
+        UniqueConstraint("table_id"),
+        Index("ix_unowned_asset_escalation_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    first_detected_unowned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    candidate_owner: Mapped[str | None] = mapped_column(String(255))
+    notification_rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("notification_rule.id", ondelete="SET NULL"), index=True
+    )
+    channel: Mapped[str | None] = mapped_column(String(30))
+    recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    dedup_key: Mapped[str | None] = mapped_column(String(64))
+    routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class OpenLineageRunEvent(Base, TimestampMixin):
     __tablename__ = "openlineage_run_event"
     __table_args__ = (
