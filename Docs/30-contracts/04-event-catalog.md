@@ -103,6 +103,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `profile.failed` | Profiling failed | table_id, run_id, reason_code |
 | `classification.assigned` | Column classified | column_id, classification, confidence, rule_version |
 | `key.inferred` | Key inferred | table_id, columns, confidence |
+| `composite_key_candidate.decided.v1` | Checker approved or rejected a composite-key candidate | candidate_id, status |
 | `analysis_run.started` / `.completed` / `.cancelled` | Run lifecycle | run_id, scope, counts |
 
 ### Relationships — topic `atlas.catalog.v1`
