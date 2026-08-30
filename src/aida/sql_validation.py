@@ -49,6 +49,8 @@ FINDING_EXACTLY_ONE_STATEMENT_REQUIRED: Final = "EXACTLY_ONE_STATEMENT_REQUIRED"
 FINDING_CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN: Final = "CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN"
 FINDING_SELECT_WILDCARD_FORBIDDEN: Final = "SELECT_WILDCARD_FORBIDDEN"
 FINDING_FORBIDDEN_FUNCTION: Final = "FORBIDDEN_FUNCTION"
+FINDING_TABLE_VALUED_SOURCE_FORBIDDEN: Final = "TABLE_VALUED_SOURCE_FORBIDDEN"
+FINDING_LOCKING_READ_FORBIDDEN: Final = "LOCKING_READ_FORBIDDEN"
 FINDING_UNKNOWN_OR_UNAUTHORIZED_TABLE: Final = "UNKNOWN_OR_UNAUTHORIZED_TABLE"
 FINDING_UNKNOWN_COLUMN: Final = "UNKNOWN_COLUMN"
 FINDING_COST_CEILING_EXCEEDED: Final = "COST_CEILING_EXCEEDED"
@@ -84,6 +86,14 @@ _GUARD_HINTS: Final[dict[str, str]] = {
     ),
     FINDING_FORBIDDEN_FUNCTION: (
         "this function reaches outside the query engine and is not callable here"
+    ),
+    FINDING_TABLE_VALUED_SOURCE_FORBIDDEN: (
+        "a table-valued function, linked-server call, or remote rowset cannot be "
+        "resolved against the metadata catalog and is not a valid data source here"
+    ),
+    FINDING_LOCKING_READ_FORBIDDEN: (
+        "FOR UPDATE / FOR SHARE take locks against the source; the gateway only "
+        "runs stateless, non-locking reads"
     ),
 }
 
