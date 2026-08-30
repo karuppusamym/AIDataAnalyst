@@ -95,7 +95,7 @@ happens the row names both, rather than being listed twice.
 
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
-| CT-1 | Bulk actions (tag, classify, own, certify) | 04 | A | P1 | TODO | — | Filter or explicit selection; partial success reported |
+| CT-1 | Bulk actions (tag, classify, own, certify) | 04 | A | P1 | IN PROGRESS | — | Delivered 2026-08-30. Filter-or-explicit-selection with per-item partial-success reporting for tag/classify/own/certify (`catalog_bulk_actions.py`, 4 endpoints under `/v1/organizations/{organization_id}/tables/bulk-*`), 500-item batch cap enforced with a 422 over the limit; own/certify reuse GL-2/GL-5's ownership/certification plumbing. Not yet verified: this repo has no live/fake-DB endpoint-level test harness at all (a pre-existing, systemic gap — confirmed absent for every comparable endpoint, not specific to this item), so the SQL selection/filter paths are verified by code review and mypy/ruff, not by an executed request |
 | CT-2 | Million-object virtualization | 04/21 | A | P1 | TODO | — | 1M rows, no lockup |
 | CT-3 | Index/partition normalized models | 04 | A | P1 | TODO | — | Populated by ≥2 adapters |
 | CT-4 | Rename detection | 04 | C | P2 | TODO | — | Heuristic + steward confirmation |
@@ -130,13 +130,13 @@ happens the row names both, rather than being listed twice.
 | **GL-3** | **Conflict detection and resolution** | 08 | A | **P0** | DONE | — | Manual/automatic conflict records, independent resolution, and retained losing position verified |
 | **GL-4** | **Coverage scoring** | 08 | A | **P0** | DONE | — | Six dimensions computed per organization/source/domain/LOB with durable snapshots/history |
 | GL-5 | Bulk certification with expiry | 08 | A | P1 | DONE | — | Reviewed batch table certification persists rationale, certifier and expiry; expired records stop counting |
-| GL-6 | Unowned-asset backlog with routing | 08 | A | P1 | IN PROGRESS | — | Coverage returns and UI exposes a bounded backlog; automated owner routing/escalation remains |
+| GL-6 | Unowned-asset backlog with routing | 08 | A | P1 | IN PROGRESS | — | Coverage returns and UI exposes a bounded backlog. Automated owner routing/escalation delivered 2026-08-30 (`glossary_owner_routing.py`), reusing DQ-1's `notification_routing` engine directly (same `route_notification`/`escalate`/ITSM dispatch, not a fork) against aged unowned entries. Not yet DONE: nothing schedules the routing run automatically — a cron/worker/UI action must call `POST .../unowned-backlog/route`; no default catch-all notification rule ships, so routing is inert until an org creates one; escalation is single-tier (ROUTED → ESCALATED) |
 | GL-7 | Leaver reassignment | 08 | C | P2 | TODO | — | Whole portfolio in one action |
 | GL-8 | Term linkage inference | 08 | B | P1 | DONE | — | Approved annotation exact-label evidence generates bounded proposals; independent approval creates provenance links |
 | **LN-1** | **OpenLineage ingestion** | 09 | A | **P0** | IN PROGRESS | — | Parser, mounted ingest/list/get API (`POST /v1/lineage/openlineage`) and migration exist and produce table/column edges (`openlineage.py`, `openlineage_api.py`); 65 automated tests added 2026-08-30 (`tests/test_openlineage.py`, `tests/test_openlineage_api.py`), which also caught and fixed a `TypeError` that broke every ingest/list/get call; still missing: no Airflow-sourced event has been verified producing real edges |
 | **LN-2** | **View and procedure lineage** | 09 | A | **P0** | DONE | — | Delivered 2026-08-30. Multi-dialect SQL lineage parser with CTE support and literal redaction (`sql_lineage_parser.py`, `view_lineage_api.py`); column-level where dialect permits |
 | **LN-3** | **AI decision lineage as first-class edges** | 09/13 | E | **P0** | DONE | — | Delivered 2026-08-30. Retrieval, tool selection, rejection, and refusal edges as first-class lineage (`ai_decision_lineage.py`, `ai_decision_lineage_api.py`) |
-| LN-4 | BI lineage (Tableau, Power BI, Looker) | 09 | A | P1 | TODO | — | Report→metric→column edges |
+| LN-4 | BI lineage (Tableau, Power BI, Looker) | 09 | A | P1 | IN PROGRESS | — | Delivered 2026-08-30 for Tableau only. `bi_lineage.py`/`bi_api.py` parse Tableau Metadata API (GraphQL) artifacts into workbook→sheet/dashboard→metric→column edges, resolved down to `MetadataColumn` against the real catalog where possible; formula content is never persisted, only a hash. Power BI and Looker are named and pluggable (`SUPPORTED_BI_TOOLS`) but rejected as not-yet-implemented — minimum-credible-investment per the roadmap, not silently missing. Same systemic no-DB-test-harness gap as CT-1/TL-1 |
 | LN-5 | Column-level dbt manifest lineage | 09 | B | P1 | TODO | — | Where the manifest provides it |
 | LN-6 | dbt `run_results.json` operational evidence | 09 | B | P1 | DONE | — | Parsed and ingested (`dbt_artifacts.py::parse_dbt_run_results`), test status/failures/execution time persisted per resource and reconciled into data-quality incidents (`dbt_quality_bridge.py`); unit-tested; full-endpoint integration test added 2026-08-30 (`tests/test_dbt_run_results_integration.py`) exercising `import_dbt_manifest` end-to-end including idempotency |
 | LN-7 | Transitive cross-kind impact | 09 | B | P1 | TODO | — | Bounded traversal across all edge kinds |
@@ -153,7 +153,7 @@ happens the row names both, rather than being listed twice.
 
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
-| **DQ-1** | **Notification and escalation routing** | 11 | A | **P0** | DONE | — | Delivered 2026-08-30. Rules, escalation, dedup, and ITSM routing (`notification_routing.py`, `notification_api.py`) |
+| **DQ-1** | **Notification and escalation routing** | 11 | A | **P0** | DONE | — | Delivered 2026-08-30. Rules, escalation, dedup, and ITSM routing (`notification_routing.py`, `notification_api.py`). Reused directly by GL-6. Its `notification_rule`/`notification_event` tables shipped as ORM models with no migration creating them (found while integrating GL-6, which depends on `notification_rule`); fixed 2026-08-30 (`f3a8c62d9e17_notification_rule_and_event_tables.py`) |
 | **DQ-2** | **Approved watermark contracts → freshness** | 11 | A | **P0** | DONE | — | Delivered 2026-08-30. Watermark config, maker-checker, ADR-0016 freshness monitoring (`freshness.py`, `quality_api.py`) |
 | **DQ-3** | **Quality → runtime coupling** | 11/12/13/14 | E | **P1** | DONE | — | Delivered 2026-08-30. Demotion, trust warnings, and tool gating (`quality_coupling.py`); trust scoring with composite 0-100, A-F grade, explainable factors (`trust_scoring.py`) |
 | DQ-4 | Custom rule packs and scheduling | 11 | B | P1 | TODO | — | Rules run outside scans |
@@ -183,7 +183,7 @@ happens the row names both, rather than being listed twice.
 
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
-| TL-1 | Tool certification corpus and workflow | 14 | B | P0 | TODO | — | Certification with expiry and recertification |
+| TL-1 | Tool certification corpus and workflow | 14 | B | P0 | IN PROGRESS | — | Delivered 2026-08-30. Maker-checker certification (`tool_certification.py`, `tool_api.py`): a versioned corpus of deterministic cases runs against a governed tool version's real invocation path (`tool_rendering.render_tool_sql`); any case failure is terminal (`CERTIFICATION_FAILED`), a full pass requires an independent checker's approval before `CERTIFIED`; expiry is query-time filtering (mirrors `AssetCertification`); recertification is a new immutable run, full history preserved. Same systemic no-DB-test-harness gap as CT-1/LN-4 |
 | TL-2 | Multi-tool plans | 14 | E | P1 | DONE | — | Delivered 2026-08-30. Same as AG-4 (`tool_plans.py`, `tool_plans_api.py`) |
 | TL-3 | Quality gating of tool invocation | 14/11 | E | P1 | DONE | — | Delivered 2026-08-30 as part of DQ-3. Tool gating via quality-runtime coupling (`quality_coupling.py`) |
 | TL-4 | Usage-weighted tool ranking | 14/12 | C | P1 | TODO | — | Popular tools rank higher |
