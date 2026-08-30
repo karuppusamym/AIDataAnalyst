@@ -32,9 +32,11 @@ from aida.quality_api import router as quality_router
 from aida.schemas import HealthResponse
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
+from aida.sql_validation_api import router as sql_validation_router
 from aida.stewardship_api import router as stewardship_router
 from aida.tool_api import router as tool_router
 from aida.unified_lineage_api import router as unified_lineage_router
+from aida.workspace_api import router as workspace_router
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -77,6 +79,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(router)
+app.include_router(workspace_router)
 app.include_router(semantic_router)
 app.include_router(tool_router)
 app.include_router(operational_router)
@@ -86,6 +89,7 @@ app.include_router(ai_registry_router)
 app.include_router(dbt_router)
 app.include_router(openlineage_router)
 app.include_router(semantic_intelligence_router)
+app.include_router(sql_validation_router)
 app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)

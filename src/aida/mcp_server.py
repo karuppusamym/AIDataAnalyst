@@ -95,8 +95,10 @@ from aida.models import (
 )
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
+from aida.query_gateway import QueryExecutionGateway
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
+from aida.sql_validation_api import SQL_VALIDATION_ROLES
 from aida.unified_lineage_api import (
     UNIFIED_LINEAGE_READER_ROLES,
     LineageNodeNotFoundError,
@@ -272,6 +274,59 @@ NATIVE_MARKETPLACE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 NATIVE_MARKETPLACE_TOOL_SLUGS = frozenset(
     item["slug"] for item in NATIVE_MARKETPLACE_TOOL_DEFINITIONS
+)
+
+
+# N14 (`Docs/review-2026-08/target/03-context-tools-agents-mcp.md` §5, "validate_sql
+# is the one to build first for coding agents"): expose the gateway's deterministic
+# pipeline as a compiler an agent can iterate against, instead of letting it guess
+# and discover the rules one refusal at a time.
+#
+# Nothing is executed and no row is read: the tool returns findings only, and the
+# single source contact it makes is the dry-run estimate the gateway would have made
+# anyway before executing. The call goes through the same authorisation, role
+# eligibility and MCP budget path as every other native tool -- there is no agent
+# bypass.
+
+NATIVE_VALIDATION_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "slug": "validate_sql",
+        "description": (
+            "Validate a SQL statement against one governed datasource WITHOUT executing "
+            "it, and return structured findings: AST parse, read-only and structural "
+            "rules, referenced table/column extraction, catalog resolution and "
+            "per-object authorisation, the row limit that would be applied, column "
+            "lineage, and a dry-run cost or byte estimate checked against policy. "
+            "This is the same pipeline a real execution runs, so a statement reported "
+            "valid here is a statement the gateway will accept. Findings are value-free "
+            "-- object names, machine codes, hints and numbers only -- and any SQL "
+            "echoed back has its literals redacted. Iterate against this before asking "
+            "for execution."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "datasource_id": {"type": "string", "description": "Datasource UUID"},
+                "sql": {
+                    "type": "string",
+                    "description": "One read-only statement in the datasource's dialect",
+                },
+                "max_rows": {
+                    "type": "integer",
+                    "description": (
+                        "Requested row limit, 1-1000000. The gateway clamps it to the "
+                        "configured hard limit and reports the applied bound as a "
+                        "ROW_LIMIT_APPLIED finding."
+                    ),
+                },
+            },
+            "required": ["datasource_id", "sql"],
+            "additionalProperties": False,
+        },
+    }
+]
+NATIVE_VALIDATION_TOOL_SLUGS = frozenset(
+    item["slug"] for item in NATIVE_VALIDATION_TOOL_DEFINITIONS
 )
 
 
@@ -505,6 +560,23 @@ async def _handle_tools_list(
                 }
             )
 
+    if eligible_version_ids is None and _tool_role_eligible(
+        context.roles, SQL_VALIDATION_ROLES
+    ):
+        for native in NATIVE_VALIDATION_TOOL_DEFINITIONS:
+            tools.append(
+                {
+                    "name": f"atlas__{native['slug']}",
+                    "description": native["description"],
+                    "inputSchema": native["inputSchema"],
+                    "_atlas_meta": {
+                        "kind": "NATIVE_PLATFORM_TOOL",
+                        "executes": False,
+                        "returnsRows": False,
+                    },
+                }
+            )
+
     if eligible_version_ids is None and context.roles & set(MARKETPLACE_USERS):
         for native in NATIVE_MARKETPLACE_TOOL_DEFINITIONS:
             tools.append(
@@ -568,6 +640,110 @@ async def _handle_native_marketplace_tool_call(
                     indent=2,
                 ),
             }
+        ]
+    }
+
+
+async def _handle_native_validation_tool_call(
+    slug: str,
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    correlation_id: str,
+) -> dict[str, Any]:
+    """Run `validate_sql` (N14) through the gateway's validation path.
+
+    Role eligibility is re-checked here rather than trusted from a preceding
+    `tools/list`, and an ineligible caller gets the same wording as an
+    unresolvable datasource -- the anti-enumeration shape the governed-tool and
+    lineage paths already use, so "not allowed" is never distinguishable from
+    "does not exist".
+
+    Nothing is executed: `QueryExecutionGateway.validate` reaches
+    `estimate_read_query` at most, never the execution surface (INV-2).
+    """
+    if slug not in NATIVE_VALIDATION_TOOL_SLUGS or not _tool_role_eligible(
+        context.roles, SQL_VALIDATION_ROLES
+    ):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+        }
+
+    try:
+        datasource_id = UUID(str(arguments.get("datasource_id")))
+    except (TypeError, ValueError):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "datasource_id must be a UUID."}],
+        }
+
+    sql = str(arguments.get("sql") or "")
+    if not sql.strip() or len(sql) > 200_000:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "sql must contain 1-200000 characters."}],
+        }
+
+    requested_limit: int | None = None
+    if arguments.get("max_rows") is not None:
+        try:
+            requested_limit = int(arguments["max_rows"])
+        except (TypeError, ValueError):
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "max_rows must be an integer."}],
+            }
+        if not 1 <= requested_limit <= 1_000_000:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "max_rows must be between 1 and 1000000."}],
+            }
+
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None or datasource.organization_id != context.organization_id:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Datasource not accessible."}],
+        }
+
+    gateway = QueryExecutionGateway(settings)
+    try:
+        report = await gateway.validate(
+            session,
+            datasource=datasource,
+            context=context,
+            correlation_id=correlation_id,
+            sql=sql,
+            requested_limit=requested_limit,
+        )
+    except Exception:
+        logger.exception("mcp_validate_sql_failed", datasource_id=str(datasource_id))
+        return {
+            "isError": True,
+            "content": [
+                {"type": "text", "text": "Validation could not be completed for this datasource."}
+            ],
+        }
+
+    body = report.as_dict()
+    body["rejection_reason"] = report.rejection_reason()
+    verdict = "\u2705 VALID" if report.valid else "\u26d4 INVALID"
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    f"{verdict} - deterministic validation only, nothing was executed and "
+                    "no rows were read.\n"
+                    f"- Tool: `atlas__{slug}`\n"
+                    f"- Datasource: `{datasource.id}` ({datasource.dialect})\n"
+                    f"- Findings: {', '.join(report.codes()) or 'none'}\n"
+                    f"- Applied row limit: {report.applied_row_limit}"
+                ),
+            },
+            {"type": "text", "text": f"```json\n{json.dumps(body, indent=2, default=str)}\n```"},
         ]
     }
 
@@ -950,6 +1126,15 @@ async def _handle_tools_call(
                 "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
             }
         return await _handle_native_marketplace_tool_call(slug, arguments, session, context)
+    if slug in NATIVE_VALIDATION_TOOL_SLUGS:
+        if scoped_product is not None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
+            }
+        return await _handle_native_validation_tool_call(
+            slug, arguments, session, context, settings, correlation_id
+        )
 
     # Resolve tool version
     row = (
