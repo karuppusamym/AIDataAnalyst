@@ -1938,6 +1938,10 @@ class DbtLineageEdgeRead(ApiModel):
     source_resource_id: UUID
     target_resource_id: UUID
     edge_type: str
+    source_column: str = ""
+    target_column: str = ""
+    transformation_type: str | None = None
+    confidence: str | None = None
 
 
 class DbtLineageRead(ApiModel):

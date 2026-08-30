@@ -23,6 +23,7 @@ from fnmatch import fnmatchcase
 from typing import Any
 from uuid import UUID
 
+from aida.classification import SENSITIVE_CLASSES
 from aida.models import (
     AssetCertification,
     AssetTag,
@@ -30,7 +31,6 @@ from aida.models import (
     MetadataTable,
     OwnershipAssignment,
 )
-from aida.query_gateway import SENSITIVE_CLASSES
 
 # A single bulk request may touch at most this many subjects, whether the
 # caller supplied an explicit ID list (rejected outright above this size) or
