@@ -1856,8 +1856,6 @@ class CanonicalTableMapping(Base, TimestampMixin):
     is_steward_override: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
-
-
 class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
     """RL-7 (optional, additive): a stronger-than-steward-decision label for one
     `RelationshipCandidate`, for confidence-calibration purposes only.
@@ -1902,6 +1900,68 @@ class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(100), nullable=False)
     rationale: Mapped[str | None] = mapped_column(String(2000))
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# KG-5: saved Knowledge Graph / Graph Explorer perspectives
+# ---------------------------------------------------------------------------
+
+
+class GraphPerspective(Base, TimestampMixin):
+    """A named, reusable snapshot of a caller's Graph Explorer view state.
+
+    This is a thin persistence layer, not a governed object: there is no
+    maker-checker review (unlike ``RelationshipCandidate``/
+    ``CompositeKeyCandidate`` above) and no domain event is emitted for it --
+    it is a personal/shared productivity artifact, the same tier as a saved
+    search or a dashboard layout, not a lineage/quality/policy fact.
+
+    ``view_state`` is an opaque, caller-defined JSON object: whatever shape
+    the frontend Graph Explorer (``ui/scripts/graph-engine.js``) needs to
+    reconstruct a view -- centered node, expansion depth, edge-kind filters,
+    layout name, pan/zoom -- e.g.::
+
+        {
+          "centerNodeId": "b3f1...",
+          "depth": 2,
+          "edgeKinds": ["DECLARED_FOREIGN_KEY", "SUGGESTED_RELATIONSHIP"],
+          "layout": "dagre",
+          "zoom": 1.35,
+          "pan": {"x": -120.0, "y": 40.0}
+        }
+
+    The server never parses or interprets it beyond "valid JSON object,
+    bounded in size" (``schemas.GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES``) --
+    it only stores/retrieves/authorizes it.
+
+    Sharing reuses this codebase's one established sharing mechanism --
+    role-based visibility via a JSON list of role names, the same shape as
+    e.g. ``GovernedToolVersion.allowed_roles`` -- rather than inventing a
+    user-to-user ACL system: an empty/absent ``allowed_viewer_roles`` means
+    private to ``owner_principal`` only; a non-empty list additionally
+    grants read access to any caller whose roles intersect it. Only the
+    owner may update or delete a perspective; shared viewers are read-only.
+    ``datasource_id`` is nullable because a perspective may describe a
+    single datasource's subgraph or an org-wide cross-source view.
+    """
+
+    __tablename__ = "graph_perspective"
+    __table_args__ = (
+        Index("ix_graph_perspective_org_owner", "organization_id", "owner_principal"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(2000))
+    owner_principal: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    allowed_viewer_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    view_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class SemanticInferenceRun(Base, TimestampMixin):

@@ -1,8 +1,9 @@
+import json
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
 from aida.integration_catalog import normalized_transformation_metadata_integrations
@@ -1258,6 +1259,98 @@ class CrossSourceResolutionCandidateRead(ApiModel):
     updated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# KG-5: saved Knowledge Graph / Graph Explorer perspectives
+# ---------------------------------------------------------------------------
+
+#: Same order of magnitude as ``openlineage.MAX_OPENLINEAGE_EVENT_BYTES`` (1 MiB) for a single
+#: caller-supplied JSON blob, but a Graph Explorer view-state snapshot (a center node, a depth,
+#: a handful of edge-kind filters, layout/pan/zoom) is far smaller than an OpenLineage run event
+#: with its nested datasets/facets, so 256 KiB is a comfortably generous bound rather than a
+#: tight one.
+GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES = 256 * 1024
+
+
+def _validate_view_state_size(value: dict[str, Any]) -> dict[str, Any]:
+    encoded_length = len(json.dumps(value).encode("utf-8"))
+    if encoded_length > GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES:
+        raise ValueError(
+            "view_state exceeds the "
+            f"{GRAPH_PERSPECTIVE_MAX_VIEW_STATE_BYTES}-byte limit "
+            f"({encoded_length} bytes)"
+        )
+    return value
+
+
+class GraphPerspectiveCreate(ApiModel):
+    """Opaque frontend Graph Explorer state, plus queryable metadata.
+
+    ``view_state`` is never interpreted server-side -- only validated as a
+    JSON object bounded in size. See ``models.GraphPerspective`` for an
+    example shape and the sharing model.
+    """
+
+    datasource_id: UUID | None = None
+    name: str = Field(min_length=2, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    allowed_viewer_roles: list[str] = Field(default_factory=list, max_length=100)
+    view_state: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("view_state")
+    @classmethod
+    def validate_view_state_size(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_view_state_size(value)
+
+    @field_validator("allowed_viewer_roles")
+    @classmethod
+    def validate_allowed_viewer_roles(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("allowed_viewer_roles must be unique")
+        if any(not role or len(role) > 100 for role in value):
+            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
+        return value
+
+
+class GraphPerspectiveUpdate(ApiModel):
+    """All fields optional: only owner-supplied fields are applied (owner-only, see the API)."""
+
+    name: str | None = Field(default=None, min_length=2, max_length=200)
+    description: str | None = Field(default=None, max_length=2000)
+    allowed_viewer_roles: list[str] | None = Field(default=None, max_length=100)
+    view_state: dict[str, Any] | None = None
+
+    @field_validator("view_state")
+    @classmethod
+    def validate_view_state_size(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        return _validate_view_state_size(value)
+
+    @field_validator("allowed_viewer_roles")
+    @classmethod
+    def validate_allowed_viewer_roles(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if len(value) != len(set(value)):
+            raise ValueError("allowed_viewer_roles must be unique")
+        if any(not role or len(role) > 100 for role in value):
+            raise ValueError("allowed_viewer_roles entries must be non-empty and <= 100 chars")
+        return value
+
+
+class GraphPerspectiveRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID | None
+    name: str
+    description: str | None
+    owner_principal: str
+    allowed_viewer_roles: list[str]
+    view_state: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
 class CrossSourceResolutionCandidateDecision(ApiModel):
     decision: Literal["APPROVE", "REJECT"]
     reason: str | None = Field(default=None, max_length=2000)
@@ -1267,8 +1360,6 @@ class CrossSourceResolutionCandidateDecision(ApiModel):
         if self.decision == "REJECT" and not self.reason:
             raise ValueError("a reason is required when rejecting a cross-source resolution")
         return self
-
-
 
 
 # RL-6: a single bulk-decision request may touch at most this many candidates,

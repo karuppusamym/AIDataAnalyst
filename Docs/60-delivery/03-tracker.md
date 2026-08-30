@@ -145,7 +145,7 @@ happens the row names both, rather than being listed twice.
 | KG-2 | Cross-source traversal | 10 | B | P1 | TODO | — | Bounded, policy-filtered |
 | KG-3 | Level-of-detail rendering | 10/21 | C | P1 | TODO | — | API boundary unchanged |
 | KG-4 | Time-aware / version traversal | 10 | E | P2 | TODO | — | "What did this look like last quarter" |
-| KG-5 | Saved perspectives per persona | 10 | C | P2 | TODO | — | Persisted, shareable |
+| KG-5 | Saved perspectives per persona | 10 | C | P2 | DONE | — | Delivered 2026-08-30. Named, reusable Graph Explorer view-state snapshots persisted per owner, shared via a role-based `allowed_viewer_roles` list (owner-editable, shared-viewers-read-only), no maker-checker (a productivity artifact, not a governed object) (`graph_perspectives_api.py`) |
 | KG-6 | Rebuild timing drill + published SLO | 10 | D | P0 | TODO | — | 1M objects < 4 h, measured |
 | KG-7 | Scheduled reconciliation + alerting | 10 | B | P1 | TODO | — | Drift detected and alarmed |
 
