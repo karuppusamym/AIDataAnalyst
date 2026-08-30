@@ -119,7 +119,7 @@ happens the row names both, rather than being listed twice.
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
 | SM-1 | Governed dimension authoring | 07 | B | P1 | TODO | — | Versioned; maker-checker |
-| SM-2 | Glossary term binding to semantic objects | 07/08 | A | P0 | TODO | — | Terms resolve in retrieval |
+| SM-2 | Glossary term binding to semantic objects | 07/08 | A | P0 | DONE | — | Delivered 2026-08-30. `TermSemanticBinding` between `GlossaryTerm` and `SemanticMetric` (`models.py`/`schemas.py`), mirroring `CrossBoundaryGrant`'s maker-checker shape (PENDING_APPROVAL → ACTIVE/REJECTED via the shared governance review queue, self-approval blocked) rather than GL-8's evidence-inference shape, since a binding here is a direct steward assertion. Create/list (both directions)/delete endpoints in `semantic_api.py`. Wired into `retrieval.py::hybrid_retrieve`: an ACTIVE binding folds the bound term's definition/synonyms into the semantic metric's retrievable/rankable text, and a glossary-term hit surfaces its bound semantic objects; a binding that never activated does not participate — proven against a real hybrid_retrieve call over a real in-memory database, not just a DB row check |
 | SM-3 | Confidence calibration + bank-domain corpus | 07 | D | P1 | TODO | — | Published accuracy results |
 | SM-4 | Metric suggestions from approved annotations | 07 | C | P1 | TODO | — | Proposals enter the review queue |
 | SM-5 | Multi-table tool blueprints | 07/14 | B | P1 | TODO | — | Deterministically rendered |
