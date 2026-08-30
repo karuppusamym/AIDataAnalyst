@@ -1,4 +1,7 @@
 import json
+import re
+from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -7,11 +10,13 @@ from aida.connectors.base import QueryEstimate
 from aida.connectors.bigquery import (
     BigQueryConnector,
     _assemble_catalog,
+    _build_view_definition,
     _parse_credential_payload,
     _profile_expressions,
     _qualified_table,
     _quote_identifier,
     _region_dataset,
+    _unquote_option_value,
 )
 from aida.connectors.registry import connector_registry
 from aida.query_gateway import gate_query_estimate
@@ -312,3 +317,391 @@ def test_gate_query_estimate_rejects_non_finite_score() -> None:
 
     with pytest.raises(RuntimeError, match="invalid query estimate score"):
         gate_query_estimate(estimate, settings)
+
+
+# --- Envelope 1.1 (gap/02 N1) ------------------------------------------------
+#
+# BigQuery answers three axes from region-qualified INFORMATION_SCHEMA and cannot
+# answer the fourth. Grants are not a gap here: BigQuery has no SQL GRANT, so
+# `capabilities.grants` stays False and the catalog says why.
+
+_INFORMATION_SCHEMA_VIEW = re.compile(r"INFORMATION_SCHEMA\.([A-Z_]+)")
+
+
+class _FakeRow:
+    def __init__(self, data: dict[str, Any]) -> None:
+        self._data = data
+
+    def items(self) -> Any:
+        return self._data.items()
+
+
+class _FakeJob:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def result(self, timeout: int | None = None) -> list[_FakeRow]:
+        return [_FakeRow(row) for row in self._rows]
+
+
+class _FakeBigQueryClient:
+    """Answers each INFORMATION_SCHEMA view by name.
+
+    Dispatching on the view name rather than on call order means a query added to
+    `discover()` gets an empty result rather than silently consuming another view's
+    rows.
+    """
+
+    def __init__(self, responses: dict[str, Any]) -> None:
+        self._responses = responses
+        self.queried_views: list[str] = []
+
+    def query(self, sql: str, **kwargs: Any) -> _FakeJob:
+        match = _INFORMATION_SCHEMA_VIEW.search(sql)
+        view = match.group(1) if match else ""
+        self.queried_views.append(view)
+        response = self._responses.get(view, [])
+        if isinstance(response, Exception):
+            raise response
+        return _FakeJob(response)
+
+
+_BQ_COLUMNS = [
+    {
+        "table_schema": "retail",
+        "table_name": "customer",
+        "table_type": "BASE TABLE",
+        "column_name": "customer_id",
+        "ordinal_position": 1,
+        "data_type": "INT64",
+        "is_nullable": "NO",
+        "column_default": None,
+    },
+    {
+        "table_schema": "retail",
+        "table_name": "active_customer",
+        "table_type": "BASE TABLE",
+        "column_name": "customer_id",
+        "ordinal_position": 1,
+        "data_type": "INT64",
+        "is_nullable": "NO",
+        "column_default": None,
+    },
+    {
+        "table_schema": "retail",
+        "table_name": "customer_rollup",
+        "table_type": "BASE TABLE",
+        "column_name": "customer_id",
+        "ordinal_position": 1,
+        "data_type": "INT64",
+        "is_nullable": "NO",
+        "column_default": None,
+    },
+]
+
+_BQ_VIEW_SQL = "SELECT customer_id FROM `bank-warehouse.retail.customer` WHERE active"
+_BQ_MVIEW_DDL = (
+    "CREATE MATERIALIZED VIEW `bank-warehouse.retail.customer_rollup` AS "
+    "SELECT customer_id FROM `bank-warehouse.retail.customer`"
+)
+
+
+def _bigquery_responses(**overrides: Any) -> dict[str, Any]:
+    responses: dict[str, Any] = {
+        "COLUMNS": list(_BQ_COLUMNS),
+        "KEY_COLUMN_USAGE": [],
+        "TABLES": [
+            {
+                "table_schema": "retail",
+                "table_name": "customer",
+                "table_type": "BASE TABLE",
+                "ddl": "CREATE TABLE ...",
+            },
+            {
+                "table_schema": "retail",
+                "table_name": "active_customer",
+                "table_type": "VIEW",
+                "ddl": "CREATE VIEW ...",
+            },
+            {
+                "table_schema": "retail",
+                "table_name": "customer_rollup",
+                "table_type": "MATERIALIZED VIEW",
+                "ddl": _BQ_MVIEW_DDL,
+            },
+        ],
+        "VIEWS": [
+            {
+                "table_schema": "retail",
+                "table_name": "active_customer",
+                "view_definition": _BQ_VIEW_SQL,
+                "check_option": None,
+            }
+        ],
+        "ROUTINES": [
+            {
+                "routine_schema": "retail",
+                "routine_name": "risk_score",
+                "routine_type": "SCALAR_FUNCTION",
+                "data_type": "FLOAT64",
+                "routine_body": "SQL",
+                "routine_definition": "SELECT balance * 0.1",
+                "external_language": None,
+                "is_deterministic": None,
+                "security_type": None,
+            },
+            {
+                "routine_schema": "retail",
+                "routine_name": "enrich_remote",
+                "routine_type": "SCALAR_FUNCTION",
+                "data_type": "STRING",
+                "routine_body": "EXTERNAL",
+                "routine_definition": None,
+                "external_language": None,
+                "is_deterministic": None,
+                "security_type": None,
+            },
+        ],
+        "PARAMETERS": [
+            {
+                "specific_schema": "retail",
+                "specific_name": "risk_score",
+                "ordinal_position": 0,
+                "parameter_mode": None,
+                "is_result": "YES",
+                "parameter_name": None,
+                "data_type": "FLOAT64",
+                "parameter_default": None,
+            },
+            {
+                "specific_schema": "retail",
+                "specific_name": "risk_score",
+                "ordinal_position": 1,
+                "parameter_mode": "IN",
+                "is_result": "NO",
+                "parameter_name": "balance",
+                "data_type": "NUMERIC",
+                "parameter_default": None,
+            },
+        ],
+        "ROUTINE_OPTIONS": [
+            {
+                "routine_schema": "retail",
+                "routine_name": "risk_score",
+                "option_name": "description",
+                "option_value": '"Scores a balance"',
+            }
+        ],
+        "TABLE_OPTIONS": [
+            {
+                "table_schema": "retail",
+                "table_name": "customer",
+                "option_name": "description",
+                "option_value": '"Customer master"',
+            }
+        ],
+        "SCHEMATA_OPTIONS": [
+            {
+                "schema_name": "retail",
+                "option_name": "description",
+                "option_value": '"Retail domain"',
+            }
+        ],
+        "COLUMN_FIELD_PATHS": [
+            {
+                "table_schema": "retail",
+                "table_name": "customer",
+                "column_name": "customer_id",
+                "field_path": "customer_id",
+                "description": "Surrogate key",
+            }
+        ],
+    }
+    responses.update(overrides)
+    return responses
+
+
+async def _bigquery_discover(**overrides: Any) -> tuple[Any, ...]:
+    connector = BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN)
+    client = _FakeBigQueryClient(_bigquery_responses(**overrides))
+    with patch.object(connector, "_get_client", return_value=client):
+        return await connector.discover()
+
+
+def test_bigquery_capabilities_declare_only_the_axes_it_implements() -> None:
+    capabilities = BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN).capabilities
+    assert capabilities.views is True
+    assert capabilities.routines is True
+    assert capabilities.object_comments is True
+    # Not a gap: BigQuery has no SQL grant surface at all.
+    assert capabilities.grants is False
+    advertised = connector_registry.definition("bigquery").capabilities
+    assert advertised["views"] is True
+    assert advertised["grants"] is False
+
+
+async def test_bigquery_discover_round_trips_a_view_definition() -> None:
+    catalogs = await _bigquery_discover()
+
+    schema = catalogs[0].schemas[0]
+    view = next(t for t in schema.tables if t.name == "active_customer")
+    assert view.object_type == "VIEW"
+    assert view.view_definition is not None
+    assert view.view_definition.definition_sql == _BQ_VIEW_SQL
+    assert view.view_definition.is_materialized is False
+    assert view.view_definition.truncated is False
+    assert view.view_definition.unavailable_reason is None
+    # BigQuery exposes no updatability column and documents CHECK_OPTION as always
+    # NULL, so neither is asserted from nothing.
+    assert view.view_definition.is_updatable is None
+    assert view.view_definition.check_option is None
+
+
+async def test_a_materialized_view_definition_comes_from_tables_ddl() -> None:
+    """`INFORMATION_SCHEMA.VIEWS` has no row for a materialized view.
+
+    `TABLES.DDL` is the only place its statement appears, and it is the whole CREATE
+    statement rather than the bare query -- worth knowing downstream, and worth
+    pinning here.
+    """
+    catalogs = await _bigquery_discover()
+
+    schema = catalogs[0].schemas[0]
+    rollup = next(t for t in schema.tables if t.name == "customer_rollup")
+    assert rollup.object_type == "MATERIALIZED_VIEW"
+    assert rollup.view_definition is not None
+    assert rollup.view_definition.is_materialized is True
+    assert rollup.view_definition.definition_sql == _BQ_MVIEW_DDL
+
+
+async def test_a_base_table_carries_no_view_definition() -> None:
+    catalogs = await _bigquery_discover()
+    customer = next(t for t in catalogs[0].schemas[0].tables if t.name == "customer")
+    assert customer.object_type == "BASE_TABLE"
+    assert customer.view_definition is None
+
+
+async def test_a_refused_views_query_leaves_a_reason_on_the_view() -> None:
+    catalogs = await _bigquery_discover(VIEWS=RuntimeError("403 Access Denied: table VIEWS"))
+
+    schema = catalogs[0].schemas[0]
+    view = next(t for t in schema.tables if t.name == "active_customer")
+    assert view.view_definition is not None
+    assert view.view_definition.definition_sql is None
+    assert view.view_definition.unavailable_reason is not None
+    assert "403 Access Denied" in view.view_definition.unavailable_reason
+    assert "views" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+async def test_a_refused_tables_query_leaves_todays_object_type_default() -> None:
+    """`INFORMATION_SCHEMA.COLUMNS` carries no table type.
+
+    If TABLES is refused every object keeps the pre-envelope `BASE TABLE` default
+    rather than discovery failing, and the refusal is recorded on the catalog.
+    """
+    catalogs = await _bigquery_discover(TABLES=RuntimeError("403 Access Denied: table TABLES"))
+
+    schema = catalogs[0].schemas[0]
+    assert {table.object_type for table in schema.tables} == {"BASE_TABLE"}
+    assert "tables" in catalogs[0].attributes["envelope_v11_unavailable"]
+
+
+def test_a_view_definition_over_the_cap_is_a_flagged_prefix() -> None:
+    definition = _build_view_definition(
+        "SELECT " + "x" * 40, object_label="retail.v", max_characters=10
+    )
+    assert definition.definition_sql == "SELECT xxx"
+    assert definition.truncated is True
+    assert definition.unavailable_reason is None
+
+
+async def test_a_routine_round_trips_with_its_parameters_and_description() -> None:
+    catalogs = await _bigquery_discover()
+
+    schema = catalogs[0].schemas[0]
+    routine = next(r for r in schema.routines if r.name == "risk_score")
+    assert routine.routine_type == "SCALAR_FUNCTION"
+    assert routine.language == "SQL"
+    assert routine.body_sql == "SELECT balance * 0.1"
+    assert routine.return_type == "FLOAT64"
+    assert routine.source_description == "Scores a balance"
+    assert routine.unavailable_reason is None
+    assert [(p.name, p.physical_type, p.mode) for p in routine.parameters] == [
+        ("balance", "NUMERIC", "IN")
+    ]
+    # BigQuery documents both columns as always NULL; nothing is invented for them.
+    assert routine.is_deterministic is None
+    assert routine.security_mode is None
+
+
+async def test_a_remote_functions_body_is_unavailable_rather_than_empty() -> None:
+    catalogs = await _bigquery_discover()
+
+    routine = next(
+        r for r in catalogs[0].schemas[0].routines if r.name == "enrich_remote"
+    )
+    assert routine.body_sql is None
+    assert routine.unavailable_reason is not None
+    assert "ROUTINE_DEFINITION" in routine.unavailable_reason
+    assert routine.attributes["routine_body"] == "EXTERNAL"
+
+
+async def test_a_refused_routines_query_is_recorded_rather_than_read_as_no_routines() -> None:
+    catalogs = await _bigquery_discover(
+        ROUTINES=RuntimeError("403 Access Denied: bigquery.routines.list")
+    )
+
+    assert catalogs[0].schemas[0].routines == ()
+    recorded = catalogs[0].attributes["envelope_v11_unavailable"]
+    assert "bigquery.routines.list" in recorded["routines"]
+
+
+async def test_descriptions_land_at_every_level_bigquery_exposes() -> None:
+    catalogs = await _bigquery_discover()
+
+    catalog = catalogs[0]
+    # A GCP project has no description in INFORMATION_SCHEMA.
+    assert catalog.source_description is None
+    schema = catalog.schemas[0]
+    assert schema.source_description == "Retail domain"
+    customer = next(t for t in schema.tables if t.name == "customer")
+    assert customer.source_description == "Customer master"
+    assert customer.columns[0].source_description == "Surrogate key"
+
+
+@pytest.mark.parametrize(
+    ("option_value", "expected"),
+    [
+        ('"Customer master"', "Customer master"),
+        ("'Customer master'", "Customer master"),
+        (r'"Says \"hello\""', 'Says "hello"'),
+        (r'"line one\nline two"', "line one\nline two"),
+        ('""', None),
+        (None, None),
+    ],
+)
+def test_option_values_are_unwrapped_from_googlesql_source_text(
+    option_value: str | None, expected: str | None
+) -> None:
+    """`option_value` is GoogleSQL source, not the description.
+
+    Storing it verbatim would put a stray pair of quotes in front of every asset
+    description in the catalogue.
+    """
+    assert _unquote_option_value(option_value) == expected
+
+
+async def test_bigquery_declines_grants_and_records_why() -> None:
+    """The grants axis is answered, not skipped.
+
+    BigQuery access is Cloud IAM policy -- inherited down the resource hierarchy,
+    optionally conditional, and expressed as role bundles rather than SQL privileges.
+    `DiscoveredGrant` models one SQL privilege on one object, so writing IAM bindings
+    into it would make "who can already see this" mean something different here than
+    on Oracle or Snowflake while looking identical.
+    """
+    catalogs = await _bigquery_discover()
+
+    assert catalogs[0].schemas[0].grants == ()
+    assert "IAM" in catalogs[0].attributes["grants"]
+    assert BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN).capabilities.grants is False

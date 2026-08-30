@@ -45,7 +45,7 @@
 
 **Screened** — The explicit runtime state at which prompt-risk classification runs, **before** retrieval, model context construction, or tool selection.
 
-**Tenancy hierarchy** — organization → legal entity → line of business → data domain → project → datasource.
+**Tenancy hierarchy** — organization → line of business → data domain → project → datasource. *(Corrected 2026-08-30: `legal entity` was listed here and exists nowhere in `src/` or `migrations/` — it is an ADR-only concept that `Docs/review-2026-08/gap/02-gap-diff-and-plan.md` rows C2/D3 recommend not building. This path is itself being superseded by the ADR-0018 access axis — `organization → workspace`, with line of business and data domain becoming a classification tree. See `20-modules/01-identity-and-tenancy.md` and ADR-0018 for the current shape.)*
 
 **Tool-first execution** — Preferring an approved governed tool over generating SQL. The mechanism by which cost and risk fall as usage rises.
 

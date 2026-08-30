@@ -148,7 +148,7 @@ Limits are per principal, per tenant, and per endpoint class. Expensive endpoint
 
 ## 11. Documentation requirements
 
-Every endpoint in the generated OpenAPI spec must carry: summary and description, required roles, tenancy behaviour, all error codes it can return, at least one example request and response, rate-limit class, and deprecation status. An endpoint missing any of these fails the docs lint in CI.
+Every endpoint in the generated OpenAPI spec must carry: summary and description, required roles, tenancy behaviour, all error codes it can return, at least one example request and response, rate-limit class, and deprecation status. An endpoint missing any of these is intended to fail the docs lint in CI. **Planned, not wired (2026-08-30):** there is no docs-lint step in `.github/workflows/ci.yml` and no tool for it in the `dev` extras, so this requirement is enforced by review only.
 
 ## Related documents
 

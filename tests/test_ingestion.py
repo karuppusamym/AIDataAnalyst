@@ -78,6 +78,12 @@ def test_metadata_envelope_is_canonical_and_counted() -> None:
         "tables": 1,
         "columns": 2,
         "constraints": 1,
+        # Envelope 1.1 axes. Always reported, zero for a 1.0 payload, so a
+        # consumer never has to tell "sent none" from "not counted".
+        "views": 0,
+        "routines": 0,
+        "routine_parameters": 0,
+        "grants": 0,
     }
     assert envelope_fingerprint(envelope) == envelope_fingerprint(_envelope(emitted_at=emitted_at))
     discovery = envelope_to_discovery(envelope)
@@ -180,6 +186,10 @@ def test_chunked_ingestion_contract_is_order_independent_and_checksum_safe() -> 
         "tables": 2,
         "columns": 4,
         "constraints": 2,
+        "views": 0,
+        "routines": 0,
+        "routine_parameters": 0,
+        "grants": 0,
     }
     assert chunk_fingerprint(first) == chunk_fingerprint(
         MetadataIngestionChunkCreate.model_validate(first.model_dump(mode="json"))

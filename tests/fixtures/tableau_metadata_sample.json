@@ -1,0 +1,122 @@
+{
+  "data": {
+    "generatedAt": "2026-08-29T09:00:00Z",
+    "workbooks": [
+      {
+        "luid": "wb-quarterly-revenue",
+        "name": "Quarterly Revenue",
+        "projectName": "Finance",
+        "sheets": [
+          {
+            "luid": "sheet-revenue-by-region",
+            "name": "Revenue by Region",
+            "sheetFieldInstances": [
+              {
+                "id": "instance-1",
+                "field": {
+                  "__typename": "CalculatedField",
+                  "id": "field-profit-ratio",
+                  "name": "Profit Ratio",
+                  "formula": "SUM([Profit])/SUM([Sales])",
+                  "datasourceName": "Sales Datasource",
+                  "upstreamColumns": [
+                    {
+                      "name": "profit",
+                      "table": {
+                        "name": "orders",
+                        "schema": "public",
+                        "database": { "name": "warehouse" }
+                      }
+                    },
+                    {
+                      "name": "sales",
+                      "table": {
+                        "name": "orders",
+                        "schema": "public",
+                        "database": { "name": "warehouse" }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "instance-2",
+                "field": {
+                  "__typename": "ColumnField",
+                  "id": "field-region",
+                  "name": "Region",
+                  "datasourceName": "Sales Datasource",
+                  "upstreamColumns": [
+                    {
+                      "name": "region",
+                      "table": {
+                        "name": "customer",
+                        "schema": "raw",
+                        "database": { "name": "bank" }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ],
+        "dashboards": [
+          {
+            "luid": "dash-executive-summary",
+            "name": "Executive Summary",
+            "dashboardFieldInstances": [
+              {
+                "id": "instance-3",
+                "field": {
+                  "__typename": "ColumnField",
+                  "id": "field-region",
+                  "name": "Region",
+                  "datasourceName": "Sales Datasource",
+                  "upstreamColumns": [
+                    {
+                      "name": "region",
+                      "table": {
+                        "name": "customer",
+                        "schema": "raw",
+                        "database": { "name": "bank" }
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "instance-4",
+                "field": {
+                  "__typename": "CalculatedField",
+                  "id": "field-profit-ratio",
+                  "name": "Profit Ratio",
+                  "formula": "SUM([Profit])/SUM([Sales])",
+                  "datasourceName": "Sales Datasource",
+                  "upstreamColumns": [
+                    {
+                      "name": "profit",
+                      "table": {
+                        "name": "orders",
+                        "schema": "public",
+                        "database": { "name": "warehouse" }
+                      }
+                    },
+                    {
+                      "name": "sales",
+                      "table": {
+                        "name": "orders",
+                        "schema": "public",
+                        "database": { "name": "warehouse" }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
