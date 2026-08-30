@@ -1,5 +1,6 @@
 import uuid
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
@@ -9,6 +10,10 @@ from aida.connectors.base import (
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
+    DiscoveredGrant,
+    DiscoveredRoutine,
+    DiscoveredRoutineParameter,
+    DiscoveredViewDefinition,
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
@@ -18,6 +23,7 @@ from aida.connectors.discovery import (
     append_grouped_key_rows,
     assemble_catalog,
     build_table_map_from_column_rows,
+    normalize_object_type,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -110,6 +116,498 @@ def _schema_exclusion_clause(alias: str) -> str:
     return f"{alias} NOT IN ({quoted})"
 
 
+# Envelope 1.1 (gap/02 N1). Oracle exposes a view's text, a PL/SQL body and an
+# argument list through LONG columns and through dictionary views a least-privilege
+# reader may not hold. Every one of those failure modes has to arrive as an explicit
+# reason rather than as an empty definition, so the helpers below are pure and unit
+# tested against each of them.
+#
+# A definition longer than this is stored as a prefix with `truncated=True`. It is
+# never silently whole-looking: view-DDL lineage (N2) would read a silent clip as a
+# lineage gap in the estate rather than a gap in this extraction.
+_MAX_DEFINITION_CHARACTERS = 1_000_000
+
+# `wrap`ped PL/SQL announces itself in the first few lines of ALL_SOURCE.
+_WRAP_MARKER_LINES = 4
+
+# ALL_SOURCE splits a package into its spec and its body; both belong to the one
+# routine the envelope reports.
+_SOURCE_TYPES_FOR_OBJECT: dict[str, tuple[str, ...]] = {
+    "PACKAGE": ("PACKAGE", "PACKAGE BODY"),
+    "PROCEDURE": ("PROCEDURE",),
+    "FUNCTION": ("FUNCTION",),
+}
+
+_ARGUMENT_MODES = {"IN": "IN", "OUT": "OUT", "IN/OUT": "INOUT"}
+
+_AUTHID_TO_SECURITY_MODE = {"DEFINER": "DEFINER", "CURRENT_USER": "INVOKER"}
+
+
+def _optional_int(value: object) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _build_view_definition(
+    definition_text: object,
+    declared_length: object,
+    *,
+    object_label: str,
+    is_materialized: bool = False,
+    max_characters: int = _MAX_DEFINITION_CHARACTERS,
+) -> DiscoveredViewDefinition:
+    """Turn one ALL_VIEWS / ALL_MVIEWS row into an honest view definition.
+
+    ``ALL_VIEWS.TEXT`` and ``ALL_MVIEWS.QUERY`` are LONG columns, and a LONG the
+    session could not materialise arrives as NULL or as an empty value while the
+    companion length column (``TEXT_LENGTH`` / ``QUERY_LEN``) still reports the real
+    size. Both are recorded as *unavailable*, never as an empty definition: an empty
+    ``definition_sql`` is reserved for a view whose text really is empty.
+
+    Oracle's ``ALL_VIEWS`` carries no updatability or WITH CHECK OPTION column, so
+    ``is_updatable`` and ``check_option`` stay ``None`` rather than being guessed.
+    """
+    declared = _optional_int(declared_length)
+    if definition_text is None:
+        return DiscoveredViewDefinition(
+            definition_sql=None,
+            is_materialized=is_materialized,
+            unavailable_reason=(
+                f"Oracle returned NULL for the definition text of {object_label}; "
+                "the LONG column was not readable in this session"
+            ),
+        )
+    text = str(definition_text)
+    if not text and declared:
+        return DiscoveredViewDefinition(
+            definition_sql=None,
+            is_materialized=is_materialized,
+            unavailable_reason=(
+                f"Oracle reported {declared} characters of definition text for "
+                f"{object_label} but the LONG column fetched as an empty value"
+            ),
+        )
+    truncated = declared is not None and len(text) < declared
+    if len(text) > max_characters:
+        text = text[:max_characters]
+        truncated = True
+    return DiscoveredViewDefinition(
+        definition_sql=text,
+        is_materialized=is_materialized,
+        truncated=truncated,
+    )
+
+
+def _is_wrapped_source(body: str) -> bool:
+    """True when ALL_SOURCE returned Oracle's obfuscated `wrap` output."""
+    for line in body.splitlines()[:_WRAP_MARKER_LINES]:
+        stripped = line.strip().lower()
+        if stripped == "wrapped" or stripped.endswith(" wrapped"):
+            return True
+    return False
+
+
+def _build_routine_body(
+    source_lines: Sequence[object],
+    *,
+    object_label: str,
+    max_characters: int = _MAX_DEFINITION_CHARACTERS,
+) -> tuple[str | None, bool, str | None]:
+    """Return ``(body_sql, truncated, unavailable_reason)`` for one PL/SQL object.
+
+    Three states, kept apart on purpose: no ALL_SOURCE rows (not visible to this
+    session), a wrapped body (present but obfuscated, so not a body anything can
+    parse), and a body longer than the cap (a prefix, flagged as such).
+    """
+    if not source_lines:
+        return (
+            None,
+            False,
+            f"ALL_SOURCE exposed no rows for {object_label}; PL/SQL text is visible "
+            "only to the owner and to a session holding an explicit privilege on it",
+        )
+    body = "".join(str(line) for line in source_lines)
+    if _is_wrapped_source(body):
+        return (
+            None,
+            False,
+            f"the PL/SQL source of {object_label} is wrapped; ALL_SOURCE returns only "
+            "the obfuscated form, which is not a parseable body",
+        )
+    if len(body) > max_characters:
+        return body[:max_characters], True, None
+    return body, False, None
+
+
+def _normalize_argument_mode(value: object) -> str:
+    if value is None:
+        return "IN"
+    normalized = str(value).strip().upper()
+    return _ARGUMENT_MODES.get(normalized, normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class _OracleEnvelopeRows:
+    """Row sets behind envelope 1.1, plus why an axis is missing when it is.
+
+    ``unavailable`` maps an axis name to the reason its dictionary view refused. It
+    is what stops a denied ``ALL_TAB_PRIVS`` from reading as "this schema grants
+    nothing", which is the failure INV-9 exists to prevent.
+    """
+
+    views: tuple[dict[str, Any], ...] = ()
+    materialized_views: tuple[dict[str, Any], ...] = ()
+    routines: tuple[dict[str, Any], ...] = ()
+    routine_source: tuple[dict[str, Any], ...] = ()
+    arguments: tuple[dict[str, Any], ...] = ()
+    table_comments: tuple[dict[str, Any], ...] = ()
+    column_comments: tuple[dict[str, Any], ...] = ()
+    grants: tuple[dict[str, Any], ...] = ()
+    unavailable: tuple[tuple[str, str], ...] = ()
+
+    def reason(self, axis: str) -> str | None:
+        for name, message in self.unavailable:
+            if name == axis:
+                return message
+        return None
+
+
+def _envelope_routine_parameters(
+    envelope: _OracleEnvelopeRows,
+) -> tuple[dict[tuple[str, str], list[DiscoveredRoutineParameter]], dict[tuple[str, str], str]]:
+    """Group ALL_ARGUMENTS rows into parameter lists and return types.
+
+    Only rows with a NULL ``PACKAGE_NAME`` are used. Oracle records a packaged
+    subprogram's arguments against the subprogram, not against the package object the
+    envelope reports, so a package honestly carries no parameter list rather than an
+    arbitrary merge of its subprograms'.
+
+    ``POSITION = 0`` is a function's return value, not a parameter.
+    ``ALL_ARGUMENTS.DEFAULT_VALUE`` is a LONG that Oracle does not populate, so
+    ``default_expression`` is always ``None`` here.
+    """
+    parameters: dict[tuple[str, str], list[DiscoveredRoutineParameter]] = {}
+    return_types: dict[tuple[str, str], str] = {}
+    for row in envelope.arguments:
+        if row.get("PACKAGE_NAME") is not None:
+            continue
+        key = (str(row["OWNER"]), str(row["OBJECT_NAME"]))
+        position = _optional_int(row.get("POSITION")) or 0
+        data_type = _optional_text(row.get("DATA_TYPE"))
+        if position == 0:
+            if data_type is not None:
+                return_types[key] = data_type
+            continue
+        parameters.setdefault(key, []).append(
+            DiscoveredRoutineParameter(
+                name=_optional_text(row.get("ARGUMENT_NAME")),
+                ordinal_position=position,
+                mode=_normalize_argument_mode(row.get("IN_OUT")),
+                physical_type=data_type or "",
+            )
+        )
+    return parameters, return_types
+
+
+def _envelope_routines(envelope: _OracleEnvelopeRows) -> dict[str, list[DiscoveredRoutine]]:
+    source_by_object: dict[tuple[str, str, str], list[str]] = {}
+    for row in envelope.routine_source:
+        key = (str(row["OWNER"]), str(row["NAME"]), str(row["TYPE"]))
+        source_by_object.setdefault(key, []).append(str(row["TEXT"] or ""))
+
+    parameters, return_types = _envelope_routine_parameters(envelope)
+    source_reason = envelope.reason("routine_source")
+
+    routines: dict[str, list[DiscoveredRoutine]] = {}
+    for row in envelope.routines:
+        owner = str(row["OWNER"])
+        name = str(row["OBJECT_NAME"])
+        object_type = normalize_object_type(str(row["OBJECT_TYPE"]))
+        label = f"{owner}.{name}"
+        lines: list[str] = []
+        for source_type in _SOURCE_TYPES_FOR_OBJECT.get(object_type, (object_type,)):
+            lines.extend(source_by_object.get((owner, name, source_type), []))
+        body, truncated, reason = _build_routine_body(lines, object_label=label)
+        if body is None and source_reason is not None:
+            reason = source_reason
+        attributes: dict[str, Any] = {}
+        if reason is not None and "wrapped" in reason:
+            attributes["wrapped"] = True
+        if object_type == "PACKAGE":
+            attributes["packaged_subprogram_parameters"] = (
+                "ALL_ARGUMENTS records arguments against each packaged subprogram, "
+                "not against the package object, so this routine carries none"
+            )
+        deterministic = _optional_text(row.get("DETERMINISTIC"))
+        routines.setdefault(owner, []).append(
+            DiscoveredRoutine(
+                name=name,
+                routine_type=object_type,
+                language="PLSQL" if body is not None else None,
+                body_sql=body,
+                parameters=tuple(parameters.get((owner, name), ())),
+                return_type=return_types.get((owner, name)),
+                is_deterministic=(
+                    None if deterministic is None else deterministic.upper() == "YES"
+                ),
+                security_mode=_AUTHID_TO_SECURITY_MODE.get(
+                    (_optional_text(row.get("AUTHID")) or "").upper()
+                ),
+                source_description=None,
+                truncated=truncated,
+                unavailable_reason=reason,
+                attributes=attributes,
+            )
+        )
+    return routines
+
+
+def _envelope_grants(envelope: _OracleEnvelopeRows) -> dict[str, list[DiscoveredGrant]]:
+    grants: dict[str, list[DiscoveredGrant]] = {}
+    for row in envelope.grants:
+        schema_name = str(row["TABLE_SCHEMA"])
+        grants.setdefault(schema_name, []).append(
+            DiscoveredGrant(
+                grantee=str(row["GRANTEE"]),
+                grantee_type=str(row.get("GRANTEE_TYPE") or "UNKNOWN"),
+                privilege=str(row["PRIVILEGE"]),
+                object_type=_optional_text(row.get("OBJECT_TYPE")) or "TABLE",
+                object_name=str(row["TABLE_NAME"]),
+                schema_name=schema_name,
+                is_grantable=str(row.get("GRANTABLE") or "NO").strip().upper() == "YES",
+            )
+        )
+    return grants
+
+
+def _apply_envelope(
+    catalogs: tuple[DiscoveredCatalog, ...], envelope: _OracleEnvelopeRows
+) -> tuple[DiscoveredCatalog, ...]:
+    """Fold envelope 1.1 rows onto an already-assembled catalog.
+
+    Written as a rebuild rather than as a change to `aida.connectors.discovery`
+    because the shared assembly helpers are on the v1.0 contract and are used by
+    connectors this workstream does not own.
+    """
+    view_definitions = {
+        (str(row["OWNER"]), str(row["VIEW_NAME"])): _build_view_definition(
+            row.get("TEXT"),
+            row.get("TEXT_LENGTH"),
+            object_label=f"{row['OWNER']}.{row['VIEW_NAME']}",
+        )
+        for row in envelope.views
+    }
+    materialized_definitions = {
+        (str(row["OWNER"]), str(row["MVIEW_NAME"])): _build_view_definition(
+            row.get("QUERY"),
+            row.get("QUERY_LEN"),
+            object_label=f"{row['OWNER']}.{row['MVIEW_NAME']}",
+            is_materialized=True,
+        )
+        for row in envelope.materialized_views
+    }
+    table_comments = {
+        (str(row["OWNER"]), str(row["TABLE_NAME"])): _optional_text(row.get("COMMENTS"))
+        for row in envelope.table_comments
+    }
+    column_comments = {
+        (str(row["OWNER"]), str(row["TABLE_NAME"]), str(row["COLUMN_NAME"])): _optional_text(
+            row.get("COMMENTS")
+        )
+        for row in envelope.column_comments
+    }
+    routines = _envelope_routines(envelope)
+    grants = _envelope_grants(envelope)
+    views_reason = envelope.reason("views")
+
+    rebuilt: list[DiscoveredCatalog] = []
+    for catalog in catalogs:
+        schemas = []
+        for schema in catalog.schemas:
+            tables = []
+            for table in schema.tables:
+                key = (schema.name, table.name)
+                definition = materialized_definitions.get(key)
+                if definition is None and table.object_type == "VIEW":
+                    definition = view_definitions.get(key) or DiscoveredViewDefinition(
+                        definition_sql=None,
+                        unavailable_reason=views_reason
+                        or (
+                            f"ALL_VIEWS exposed no row for {schema.name}.{table.name}; "
+                            "its text was not visible to this session"
+                        ),
+                    )
+                columns = tuple(
+                    replace(
+                        column,
+                        source_description=column_comments.get(
+                            (schema.name, table.name, column.name)
+                        ),
+                    )
+                    for column in table.columns
+                )
+                tables.append(
+                    replace(
+                        table,
+                        columns=columns,
+                        source_description=table_comments.get(key),
+                        view_definition=definition,
+                    )
+                )
+            schemas.append(
+                replace(
+                    schema,
+                    tables=tuple(tables),
+                    routines=tuple(routines.get(schema.name, ())),
+                    grants=tuple(grants.get(schema.name, ())),
+                )
+            )
+        attributes = dict(catalog.attributes)
+        if envelope.unavailable:
+            attributes["envelope_v11_unavailable"] = dict(envelope.unavailable)
+        rebuilt.append(replace(catalog, schemas=tuple(schemas), attributes=attributes))
+    return tuple(rebuilt)
+
+
+async def _fetch_optional_rows(
+    cursor: Any, sql: str
+) -> tuple[tuple[dict[str, Any], ...], str | None]:
+    """Run one supplementary metadata query, turning a refusal into a reason.
+
+    Envelope 1.1 reads dictionary views a least-privilege reader may not hold
+    (`ALL_SOURCE`, `ALL_TAB_PRIVS`, `ALL_MVIEWS`). A denial must not read as "the
+    source has none of these", so it comes back as a reason string that lands on the
+    object or on the catalog rather than as a silent empty list.
+    """
+    try:
+        await cursor.execute(sql)
+        rows = _rows_as_dicts(cursor.description, await cursor.fetchall())
+    except Exception as exc:
+        return (), f"{type(exc).__name__}: {exc}"
+    return tuple(rows), None
+
+
+async def _fetch_envelope_rows(cursor: Any) -> _OracleEnvelopeRows:
+    """Read every envelope 1.1 axis Oracle exposes, recording each refusal."""
+    owner_clause = _schema_exclusion_clause("owner")
+    unavailable: list[tuple[str, str]] = []
+
+    async def _collect(axis: str, sql: str) -> tuple[dict[str, Any], ...]:
+        rows, reason = await _fetch_optional_rows(cursor, sql)
+        if reason is not None:
+            unavailable.append((axis, reason))
+        return rows
+
+    views = await _collect(
+        "views",
+        f"SELECT owner, view_name, text_length, text FROM ALL_VIEWS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    materialized_views = await _collect(
+        "materialized_views",
+        f"SELECT owner, mview_name, query_len, query FROM ALL_MVIEWS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    routines = await _collect(
+        "routines",
+        f"""
+        SELECT
+            ao.owner AS owner,
+            ao.object_name AS object_name,
+            ao.object_type AS object_type,
+            ap.deterministic AS deterministic,
+            ap.authid AS authid
+        FROM ALL_OBJECTS ao
+        LEFT JOIN ALL_PROCEDURES ap
+          ON ap.owner = ao.owner
+         AND ap.object_name = ao.object_name
+         AND ap.procedure_name IS NULL
+        WHERE ao.object_type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE')
+          AND {_schema_exclusion_clause("ao.owner")}
+        ORDER BY ao.owner, ao.object_name
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    routine_source = await _collect(
+        "routine_source",
+        f"""
+        SELECT owner, name, type, line, text
+        FROM ALL_SOURCE
+        WHERE type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY')
+          AND {owner_clause}
+        ORDER BY owner, name, type, line
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    arguments = await _collect(
+        "arguments",
+        f"""
+        SELECT owner, object_name, package_name, argument_name, position, data_type, in_out
+        FROM ALL_ARGUMENTS
+        WHERE data_level = 0 AND {owner_clause}
+        ORDER BY owner, object_name, position
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    table_comments = await _collect(
+        "table_comments",
+        f"SELECT owner, table_name, comments FROM ALL_TAB_COMMENTS WHERE {owner_clause}",  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    column_comments = await _collect(
+        "column_comments",
+        f"""
+        SELECT owner, table_name, column_name, comments
+        FROM ALL_COL_COMMENTS
+        WHERE {owner_clause}
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    # ALL_TAB_PRIVS names the owning schema TABLE_SCHEMA, where DBA_TAB_PRIVS names it
+    # OWNER. ALL_USERS separates a user grantee from a role grantee; Oracle's privilege
+    # views do not say which a grantee is.
+    grants = await _collect(
+        "grants",
+        f"""
+        SELECT
+            p.grantee AS grantee,
+            p.table_schema AS table_schema,
+            p.table_name AS table_name,
+            p.privilege AS privilege,
+            p.grantable AS grantable,
+            p.type AS object_type,
+            CASE
+                WHEN p.grantee = 'PUBLIC' THEN 'PUBLIC'
+                WHEN u.username IS NOT NULL THEN 'USER'
+                ELSE 'ROLE'
+            END AS grantee_type
+        FROM ALL_TAB_PRIVS p
+        LEFT JOIN ALL_USERS u ON u.username = p.grantee
+        WHERE {_schema_exclusion_clause("p.table_schema")}
+        ORDER BY p.table_schema, p.table_name, p.grantee, p.privilege
+        """,  # noqa: S608 -- schema exclusion list is a static hardcoded tuple, not user input
+    )
+    return _OracleEnvelopeRows(
+        views=views,
+        materialized_views=materialized_views,
+        routines=routines,
+        routine_source=routine_source,
+        arguments=arguments,
+        table_comments=table_comments,
+        column_comments=column_comments,
+        grants=grants,
+        unavailable=tuple(unavailable),
+    )
+
+
 class OracleConnector(SqlExecutor):
     connector_type = "oracle"
     dialect = "oracle"
@@ -120,6 +618,13 @@ class OracleConnector(SqlExecutor):
         explain=False,
         delegated_identity=False,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag is set because `discover()` reads the
+        # named dictionary view and lands the result on the envelope, and each
+        # refusal arrives as an `unavailable_reason` rather than as an empty value.
+        views=True,  # ALL_VIEWS.TEXT, ALL_MVIEWS.QUERY
+        routines=True,  # ALL_OBJECTS + ALL_PROCEDURES, ALL_SOURCE, ALL_ARGUMENTS
+        object_comments=True,  # ALL_TAB_COMMENTS, ALL_COL_COMMENTS (table and column)
+        grants=True,  # ALL_TAB_PRIVS
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -257,10 +762,14 @@ class OracleConnector(SqlExecutor):
                     }
                     for row in _rows_as_dicts(cursor.description, await cursor.fetchall())
                 ]
+
+                envelope = await _fetch_envelope_rows(cursor)
         finally:
             await connection.close()
 
-        return _assemble_catalog(catalog_name, column_rows, key_rows, foreign_key_rows)
+        return _assemble_catalog(
+            catalog_name, column_rows, key_rows, foreign_key_rows, envelope=envelope
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await self._connect(timeout_seconds=timeout_seconds)
@@ -411,6 +920,8 @@ def _assemble_catalog(
     column_rows: list[dict[str, Any]],
     key_rows: list[dict[str, Any]],
     foreign_key_rows: list[dict[str, Any]],
+    *,
+    envelope: _OracleEnvelopeRows | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
     """Assemble a catalog from already-normalized, lowercase-keyed discovery rows.
 
@@ -427,4 +938,7 @@ def _assemble_catalog(
         constraint_type_map={"P": "PRIMARY_KEY", "U": "UNIQUE"},
     )
     append_grouped_foreign_key_rows(tables, foreign_key_rows)
-    return assemble_catalog(str(catalog_name), tables)
+    catalogs = assemble_catalog(str(catalog_name), tables)
+    if envelope is None:
+        return catalogs
+    return _apply_envelope(catalogs, envelope)
