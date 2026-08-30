@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)
     usage_boost_batch_size: int = Field(default=200, ge=1, le=5_000)
     usage_boost_max: int = Field(default=30, ge=0, le=100)
+    # GL-6: unowned-asset backlog owner routing runs on an aged-backlog cadence, not a
+    # real-time one -- its own thresholds (glossary_owner_routing.DEFAULT_ROUTE_AFTER /
+    # DEFAULT_ESCALATE_AFTER) are 7 and 14 days, so a sub-daily sweep buys no earlier
+    # routing/escalation, only wasted per-tick DB scans across every organization.
+    # Default once a day; bounded 5 minutes to 7 days so an operator can tighten or
+    # loosen it without a code change but cannot accidentally turn it into a per-tick scan.
+    owner_routing_interval_minutes: int = Field(default=1_440, ge=5, le=10_080)
     knowledge_graph_max_nodes: int = Field(default=250, ge=25, le=2_000)
     knowledge_graph_max_edges: int = Field(default=1_000, ge=50, le=10_000)
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)
