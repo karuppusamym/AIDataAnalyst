@@ -45,6 +45,7 @@ from aida.envelope_models import (
     MetadataSourceGrant,
     MetadataViewDefinition,
 )
+from aida.ingest_screening import CLEAN, screen_text
 from aida.models import (
     DataSource,
     MetadataCatalog,
@@ -57,6 +58,7 @@ from aida.schemas import (
     MetadataIngestionChunkCreate,
     MetadataIngestionCreate,
 )
+from aida.sql_redaction import redact_for_storage
 
 #: The version this build produces and documents. 1.0 stays accepted forever.
 INGESTION_CONTRACT_VERSION = "1.1"
@@ -522,6 +524,34 @@ async def _upsert_description(
     return existing
 
 
+def _store_source_sql(
+    raw: str | None, *, dialect: str
+) -> tuple[str | None, str | None, str, str, list[str]]:
+    """Prepare source-supplied SQL for persistence: redact, fingerprint, screen.
+
+    Returns `(redacted_text, fingerprint, redaction_status, screening_status, reasons)`.
+
+    Both steps happen here, at the single write point, rather than at each of the several
+    places that later read this text. Redaction keeps source values out of the control
+    plane (INV-6); screening records whether the text is safe to put in model context
+    (ADR-0013's unaddressed indirect-injection gap). Screening runs against the **raw**
+    text, because an injection attempt hides in prose and comments, which redaction does
+    not touch and must not.
+    """
+    prepared = redact_for_storage(raw, dialect=dialect)
+    if prepared is None:
+        return None, None, "PARSED", CLEAN, []
+    verdict = screen_text(raw)
+    return (
+        prepared.redacted,
+        prepared.fingerprint,
+        prepared.status,
+        verdict.status,
+        verdict.reason_codes,
+    )
+
+
+
 async def _upsert_view_definition(
     session: AsyncSession,
     datasource: DataSource,
@@ -535,6 +565,12 @@ async def _upsert_view_definition(
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
     availability, default_reason = _availability(discovered.definition_sql)
+    # The CHECK constraint ties availability to the *stored* column. Redaction almost
+    # always yields text -- a lexical scrub needs no parser -- so this only fires when
+    # nothing at all could be stored.
+    _prepared_view = redact_for_storage(discovered.definition_sql, dialect=datasource.dialect)
+    if _prepared_view is not None and _prepared_view.redacted is None:
+        availability, default_reason = UNAVAILABLE, "DEFINITION_NOT_STORABLE"
     reason = discovered.unavailable_reason or (
         default_reason if availability == UNAVAILABLE else None
     )
@@ -548,7 +584,13 @@ async def _upsert_view_definition(
         session.add(existing)
     existing.status = "ACTIVE"
     existing.deprecated_at = None
-    existing.definition_sql = discovered.definition_sql
+    (
+        existing.definition_sql_redacted,
+        existing.definition_fingerprint,
+        existing.redaction_status,
+        existing.screening_status,
+        existing.screening_reason_codes,
+    ) = _store_source_sql(discovered.definition_sql, dialect=datasource.dialect)
     existing.is_materialized = discovered.is_materialized
     existing.is_updatable = discovered.is_updatable
     existing.check_option = discovered.check_option
@@ -577,6 +619,9 @@ async def _upsert_routine(
     row_fingerprint = _fingerprint(asdict(discovered))
     tracker.observe(existing, row_fingerprint)
     availability, default_reason = _availability(discovered.body_sql)
+    _prepared_body = redact_for_storage(discovered.body_sql, dialect=datasource.dialect)
+    if _prepared_body is not None and _prepared_body.redacted is None:
+        availability, default_reason = UNAVAILABLE, "BODY_NOT_STORABLE"
     reason = discovered.unavailable_reason or (
         default_reason if availability == UNAVAILABLE else None
     )
@@ -595,7 +640,13 @@ async def _upsert_routine(
     existing.deprecated_at = None
     existing.routine_type = discovered.routine_type
     existing.language = discovered.language
-    existing.body_sql = discovered.body_sql
+    (
+        existing.body_sql_redacted,
+        existing.body_fingerprint,
+        existing.redaction_status,
+        existing.screening_status,
+        existing.screening_reason_codes,
+    ) = _store_source_sql(discovered.body_sql, dialect=datasource.dialect)
     existing.return_type = discovered.return_type
     existing.is_deterministic = discovered.is_deterministic
     existing.security_mode = discovered.security_mode

@@ -30,7 +30,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import DataSource
-from aida.query_gateway import QueryExecutionGateway
+from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["sql-validation"])
@@ -49,6 +49,9 @@ class ApiModel(BaseModel):
 class GatewaySqlValidationRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
+    # See `QueryExecutionRequest.workspace_id` (ADR-0018): optional while the estate
+    # migrates, required once the unresolved posture flips to DENY.
+    workspace_id: UUID | None = None
 
 
 class SqlFindingRead(ApiModel):
@@ -117,7 +120,12 @@ async def validate_sql(
             correlation_id=get_correlation_id(),
             sql=body.sql,
             requested_limit=body.max_rows,
+            workspace_id=body.workspace_id,
         )
+    except AuthorizationRejected as exc:
+        # Ahead of the blanket handler below, which would otherwise report a refusal
+        # this platform made deliberately as a failure of the customer's warehouse.
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc
     except Exception as exc:  # pragma: no cover - source dry run failed
         raise HTTPException(status_code=502, detail="source query estimate failed") from exc
 

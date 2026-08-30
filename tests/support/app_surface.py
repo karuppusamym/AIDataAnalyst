@@ -276,6 +276,30 @@ def _writes_via_session(node: ast.AST) -> bool:
     return False
 
 
+# Writers the mutation scan deliberately does not descend into.
+#
+# Both record an `AuthorizationShadowRecord`: what the authorization engine *would*
+# have decided, on a workspace that is not yet enforcing. That is telemetry about a
+# decision, not a change to governed state -- nothing downstream reads it, no object
+# differs because it exists, and a request that produces one has done exactly what it
+# would have done without it.
+#
+# Excluding them keeps INV-7 pointed at real mutations. Once a read path is gated,
+# every gated GET reaches this code, and without the exclusion the mutation scan
+# classifies each of them as a write -- which would either bury the genuine findings
+# under a growing exemption list, or push the answer towards adding a `record_audit`
+# call to every read, which is a second access log at request volume.
+#
+# The exclusion is not a free pass: the row itself carries principal, kind, action,
+# resource and reason code, so it is attributable by construction, and
+# `tests/test_inv4_authorization_wiring.py` asserts that it still does. If either
+# function ever writes something other than a shadow record, that test fails and this
+# list is wrong.
+NON_GOVERNED_WRITERS: frozenset[str] = frozenset(
+    {"record_divergence", "record_divergence_durably"}
+)
+
+
 def reaches_session_write(
     module: str,
     function: str,
@@ -296,6 +320,8 @@ def reaches_session_write(
         return True
     seen = seen | {key}
     for name in sorted(_called_names(node)):
+        if name in NON_GOVERNED_WRITERS:
+            continue
         for candidate_module, candidate_name in _candidates(module, name):
             if reaches_session_write(
                 candidate_module,

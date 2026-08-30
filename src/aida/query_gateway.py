@@ -5,11 +5,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp, parse_one
 
+from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
@@ -26,6 +28,7 @@ from aida.models import (
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.sql_guard import SqlGuard
+from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
 from aida.sql_validation import (
     EstimateOutcome,
     SqlFinding,
@@ -49,6 +52,27 @@ class QueryRejected(RuntimeError):
         self.execution_id: Any | None = None
 
 
+class AuthorizationRejected(QueryRejected):
+    """An authorization refusal, shaped as a rejection so no caller has to change.
+
+    A subclass rather than a separate exception on purpose. Every caller of the
+    gateway -- the agent orchestrator, the MCP tool surface, two HTTP handlers --
+    already knows how to record a `QueryRejected`, with the execution id, the failure
+    reason and the run status handling that goes with it. Introducing a sibling type
+    would mean each of those either grows a second branch or silently lets an
+    authorization denial escape as a 500, and the second outcome is the one that
+    happens to whichever caller is overlooked.
+
+    Handlers that want the correct HTTP status catch this *before* `QueryRejected`
+    and answer 403; the ones that do not are still correct, just less specific.
+    """
+
+    def __init__(self, reason_code: str, *, workspace_id: UUID | None = None) -> None:
+        super().__init__(f"AUTHORIZATION_DENIED:{reason_code}")
+        self.reason_code = reason_code
+        self.workspace_id = workspace_id
+
+
 def sensitive_projection_names(
     sql: str, *, dialect: str, sensitive_source_names: set[str]
 ) -> set[str]:
@@ -66,12 +90,13 @@ def sensitive_projection_names(
 
 
 def redact_sql_literals(sql: str, *, dialect: str) -> str:
-    """Create an evidence-safe SQL representation without user/source literal values."""
-    statement = parse_one(sql, read=dialect)
-    redacted = statement.transform(
-        lambda node: exp.Placeholder(this="redacted") if isinstance(node, exp.Literal) else node
-    )
-    return redacted.sql(dialect=dialect, pretty=True)
+    """Create an evidence-safe SQL representation without user/source literal values.
+
+    Re-exported from `aida.sql_redaction`, where the implementation now lives so the
+    ingestion path can use it without importing runtime code (an L1-imports-L3 edge).
+    Kept as a name here because existing callers and tests reference it.
+    """
+    return _redact_sql_literals(sql, dialect=dialect)
 
 
 def audit_sql_hash(key: str, sql: str) -> str:
@@ -401,6 +426,7 @@ class QueryExecutionGateway:
         correlation_id: str,
         sql: str,
         requested_limit: int | None,
+        workspace_id: UUID | None = None,
     ) -> SqlValidationReport:
         """Run the full deterministic pipeline and return findings, without executing.
 
@@ -411,7 +437,40 @@ class QueryExecutionGateway:
         `Docs/review-2026-08/gap/05-validate-sql-handoff.md` for the schema
         change that would be needed to persist validations as first-class rows,
         which is deliberately not made here.
+
+        Authorized as `READ_METADATA` rather than `READ_DATA`, and that distinction
+        is real rather than cosmetic: validation returns findings, table names and a
+        cost estimate, never a row. Gating it at the same level as execution would
+        make the iterate-against-the-compiler loop unavailable to a `viewer`, who is
+        exactly the principal who should be allowed to find out that a statement is
+        wrong without being allowed to run it.
         """
+        try:
+            await gate(
+                session,
+                context,
+                settings=self.settings,
+                action="READ_METADATA",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                workspace_id=workspace_id,
+                datasource_id=datasource.id,
+            )
+        except AuthorizationDenied as exc:
+            record_audit(
+                session,
+                context,
+                action="query.validate.gateway",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                outcome="DENIED",
+                correlation_id=correlation_id,
+                details={"reason": exc.reason_code, "executed": False},
+            )
+            await session.commit()
+            raise AuthorizationRejected(
+                exc.reason_code, workspace_id=exc.workspace_id
+            ) from exc
         outcome = await self._run_validation(
             session,
             datasource=datasource,
@@ -477,6 +536,7 @@ class QueryExecutionGateway:
         sql: str,
         requested_limit: int | None,
         semantic_version: str | None,
+        workspace_id: UUID | None = None,
     ) -> GatewayResult:
         execution = QueryExecution(
             organization_id=datasource.organization_id,
@@ -501,6 +561,28 @@ class QueryExecutionGateway:
 
         started = perf_counter()
         try:
+            # Authorization runs *after* the execution row and its `requested` audit
+            # entry exist, and before anything reaches a connector. Recording first is
+            # what makes a refusal attributable (INV-7): a denied attempt leaves a
+            # REJECTED row naming who asked and why it was refused, which is the
+            # evidence an investigation needs and which gating before the record would
+            # throw away. Nothing has left the platform at this point -- the connector
+            # is opened inside `_run_validation`, below.
+            try:
+                await gate(
+                    session,
+                    context,
+                    settings=self.settings,
+                    action="READ_DATA",
+                    resource_type="datasource",
+                    resource_id=str(datasource.id),
+                    workspace_id=workspace_id,
+                    datasource_id=datasource.id,
+                )
+            except AuthorizationDenied as exc:
+                raise AuthorizationRejected(
+                    exc.reason_code, workspace_id=exc.workspace_id
+                ) from exc
             # One validation pipeline, two entry points (review item N14): this is
             # the identical call `validate` makes, so a statement an agent was told
             # is valid is a statement this path will accept, and a rule that fires
@@ -590,6 +672,12 @@ class QueryExecutionGateway:
                 masked_columns=tuple(masked_columns),
             )
         except QueryRejected as exc:
+            # `AuthorizationRejected` is a `QueryRejected`, so a refusal is bookkept
+            # here by the same code as a rejected statement: same REJECTED status, same
+            # DENIED audit action, same reason field, same execution id handed back to
+            # the caller. A refusal taking its own path through the ledger would be a
+            # second denial vocabulary for operators to learn, and the first one they
+            # forgot to query.
             exc.execution_id = execution.id
             execution.status = "REJECTED"
             execution.error_class = type(exc).__name__

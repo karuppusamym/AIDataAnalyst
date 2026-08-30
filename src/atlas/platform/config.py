@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=768, ge=8, le=8192)
     embedding_chunking_version: int = Field(default=1, ge=1)
 
+    # What to do with a request whose workspace cannot be resolved (ADR-0018 rollout).
+    # SHADOW proceeds and logs; DENY refuses. It defaults to SHADOW because the API
+    # contracts predate ADR-0018 and almost no caller names a workspace yet -- defaulting
+    # to DENY would take the platform down on the day the gate was wired, which is how an
+    # authorization rollout gets reverted instead of finished. The
+    # `authorization.workspace_unresolved` log line counts the callers still to migrate;
+    # when it reaches zero for an environment, this flips there. That flip is the actual
+    # completion of the rollout, and until it happens the platform should say so (INV-9).
+    unresolved_workspace_posture: Literal["SHADOW", "DENY"] = "SHADOW"
+
     entitlement_provider: Literal["outbox", "webhook"] = "outbox"
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None

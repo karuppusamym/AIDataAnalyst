@@ -74,24 +74,24 @@ improve on.
 
 | # | Item | Weeks | Risk | Why it matters |
 |---|---|---|---|---|
-| N1 | **Envelope v1.1: views + DDL, procedures + body, functions, comments, grants** | 3 | Low | Unblocks N2, N3, N6, N7. Nothing else can start without it |
+| ~~N1~~ | ~~**Envelope v1.1: views + DDL, procedures + body, functions, comments, grants**~~ — **SHIPPED** across PostgreSQL, Oracle, Snowflake and BigQuery. Definition and body SQL are stored **redacted + fingerprinted**, never raw (migration `d5f8b21c4a03`), after the first cut leaked source values into the control plane past INV-6's scan | — | — | — |
 | N2 | **View DDL parsing → column-level lineage** | 3 | Low | Largest single lineage coverage win; `sqlglot` already in the stack |
 | N3 | **Procedure body parsing (T-SQL, PL/SQL first)** | 8–10 | **High** | Uncontested in the market; genuinely hard; degrade explicitly rather than silently |
 | N4 | **Lineage proposal / review / negative-knowledge workflow** | 5 | Medium | The stated requirement. Diff-based, impact-ordered, bulk decisions |
-| N5 | **pgvector + hybrid retrieval (lexical ∪ vector ∪ graph, policy before ranking)** | 4 | Medium | Everything downstream — wiki search, document mapping, agent context — depends on it |
+| N5 | **Hybrid retrieval (lexical ∪ vector ∪ graph, policy before ranking)** — **partially unblocked**: ADR-0019 replaced the pgvector assumption with a four-adapter port whose default needs no extension, and the store is built and tested. Still open: nothing produces vectors, because **the embedding model is an unmade decision** (`embedding_model_id` defaults to `unset`) | 3 | Medium | Everything downstream — wiki search, document mapping, agent context — depends on it |
 | ~~N6~~ | ~~**Workspace primitive + source bindings with expiry**~~ — **SHIPPED**. Expiry enforced and tested; binding approval is maker-checker separated | — | — | — |
-| ~~N7~~ | ~~**ABAC policy engine**~~ — **SHIPPED**. Pure evaluator, 19 unit tests, DENY as a hard ceiling, `principal_kind` first-class. Not yet wired into read/execution paths; residency attribute still open | — | — | — |
+| ~~N7~~ | ~~**ABAC policy engine**~~ — **SHIPPED and WIRED**. Pure evaluator, DENY as a hard ceiling, `principal_kind` first-class; reached from the execution path, the validation path and five read surfaces via `authorization_gate`, with subject-independent workspace resolution. **Measuring, not enforcing** — every workspace is in `SHADOW`. Completing it is flipping `unresolved_workspace_posture` to `DENY` once clients pass `workspace_id`. Residency attribute still open | — | — | — |
 | N8 | **Document ingestion: upload → parse → section → map → claims** | 6 | Medium | Data-dictionary spreadsheets are the highest-value special case; build that path first |
 | ~~N9~~ | ~~**Business graph**~~ — **SHIPPED**. Recursive CTE traversal, effective-dated assignments, `as_of` history, roll-up. An asset can now belong to two sibling domains | — | — | — |
 | N10 | **Knowledge compilation: pages, blocks, provenance, staleness, pinning, diff proposals** | 10–12 | Medium | The differentiator. Largest new build, and the one nobody else has |
 | N11 | **Tool generator B — view → tool** | 3 | Low | Views are pre-curated queries; highest quality-per-effort tool source |
 | N12 | **Tool generator C — procedure → tool (read-only proven by parse)** | 4 | Medium | Depends on N3 |
 | N13 | **Federation planner + DuckDB join layer** | 8 | **High** | The other uncontested capability. Must preserve INV-2 — leaf-per-source through the gateway |
-| N14 | **`validate_sql` MCP tool** | 2 | Low | **Highest value per line of code in this plan.** Everything needed already exists in the gateway; it needs splitting validation from execution |
+| ~~N14~~ | ~~**`validate_sql` MCP tool**~~ — **SHIPPED**. Shares `_run_validation` with `execute`, so what validation reports and what execution enforces cannot drift | — | — | — |
 | N15 | **Agent registry + evaluation-gated publication** | 5 | Medium | Makes "production-grade agent" evidenced rather than asserted |
 | N16 | **Negative knowledge as a first-class context-product section** | 2 | Low | Nearly free — the data is a by-product of review workflows already running |
 | N17 | **Exemplar store (verified question→tool/SQL pairs) + benchmark suites** | 4 | Low | The Genie lesson: accuracy is a curation loop |
-| N18 | **Ingestion-time prompt-risk screening for all model-reachable text** | 2 | Low | Closes the indirect-injection gap flagged in four documents and unaddressed everywhere |
+| ~~N18~~ | ~~**Ingestion-time prompt-risk screening for all model-reachable text**~~ — **SHIPPED** (`ingest_screening.py`). Screened once at write; flagged text is **quarantined, not deleted**, and excluded from model context | — | — | — |
 | N19 | **UI rebuild on a real framework** | 12+ | Medium | The one place "start from scratch" is right |
 
 ---

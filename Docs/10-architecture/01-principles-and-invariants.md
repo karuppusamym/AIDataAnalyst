@@ -14,17 +14,20 @@ Principles shape the product. Invariants are what make it safe.
 
 Each invariant names its enforcement point and its test. An invariant without an automated test is a wish.
 
-> **Implementation status (2026-08-30).** By this document's own standard, four of the nine
-> are currently wishes. Tests exist for **INV-2, INV-3, INV-4, INV-5 and INV-8**
-> (`tests/test_tier0_invariants.py` and `tests/test_inv5_tenant_isolation.py`). The tests named
-> below for **INV-1, INV-6, INV-7 and INV-9** do not exist anywhere in `tests/` — verified by
-> searching for each function name across the repository on 2026-08-30. Each is marked
-> **Planned** in place below. The invariants themselves are still binding on design review;
-> what is absent is the automated proof. Closing this is tracker `E4` /
-> `Docs/review-2026-08/gap/02-gap-diff-and-plan.md` §5.
+> **Implementation status (2026-08-30, second revision).** **All nine now have automated
+> tests.** An earlier revision of this paragraph — written the same day — said four were
+> still wishes; the tests for INV-1, INV-6, INV-7 and INV-9 landed after it was written, in
+> `tests/test_inv1_single_authoritative_store.py`, `test_inv6_value_freedom.py`,
+> `test_inv7_attributability.py` and `test_inv9_capability_honesty.py`. INV-2, INV-3, INV-4
+> and INV-8 are in `tests/test_tier0_invariants.py`; INV-5 has both a dedicated file and
+> entries there; INV-4 gained a second file, `test_inv4_authorization_wiring.py`, when the
+> authorization decision was wired into production paths.
 >
-> *This count is volatile: INV-5's test landed during this pass. Re-verify by grepping for the
-> test names rather than trusting this paragraph.*
+> **Having a test is not the same as the invariant holding**, and the per-invariant notes
+> below say which is which — INV-1's test does not prove Neo4j ingests correctly because no
+> Neo4j runs in the suite, and INV-5's structural enforcement (a repository base class) still
+> does not exist. Re-verify by grepping for the test names rather than trusting this
+> paragraph; it has been wrong once already on the same day.
 
 ### INV-1 — Single authoritative store
 
@@ -32,7 +35,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Projections are written only by outbox projectors, never by request-path code. No service dual-writes PostgreSQL and a projection.
 
-**Test — Planned, not written (2026-08-30).** `test_projection_rebuild`: delete Neo4j and the search index entirely, replay from authoritative state, assert full reconstruction and identical query results. No such test exists, and the projection-rebuild drill has never been run. Note also that the "search index" in this statement is itself a target store: there is no search-index dependency or service in the repository, and lexical search runs as BM25-style scoring in PostgreSQL (`src/aida/retrieval.py`).
+**Test — Built (2026-08-30), with a named limit.** `tests/test_inv1_single_authoritative_store.py` (8 tests) asserts the structural property: projections are written only by outbox projectors, no request-path code dual-writes, and no authorization or approval decision reads a projection. What it does **not** prove is that Neo4j ingests correctly, because no Neo4j runs in the suite — the test file says so itself rather than implying coverage it does not have. `test_projection_rebuild` (delete Neo4j and the search index, replay from authoritative state, assert identical query results) remains unwritten, and **the projection-rebuild drill has never been run**. Note also that the "search index" in this statement is a target store: there is no search-index dependency in the repository, and lexical search runs as BM25-style scoring in PostgreSQL (`src/aida/retrieval.py`).
 
 ### INV-2 — One execution choke point
 
@@ -62,7 +65,9 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Production configuration validation refuses to start with development identity, `env://` secret resolution, weak audit keys, or an insecure JWKS URL.
 
-**Test.** `test_production_config_fail_closed`: parameterized over each incomplete-posture case, assert startup refusal or request denial.
+**Test.** `test_production_config_fail_closed` (`tests/test_tier0_invariants.py`): parameterized over each incomplete-posture case, asserting startup refusal or request denial, paired with `test_the_secure_production_baseline_itself_is_accepted` so the check cannot pass by refusing everything.
+
+**Second test — Built (2026-08-30).** `tests/test_inv4_authorization_wiring.py` covers the other half of failing closed: that the authorization decision is actually *reached*. A static scan asserts the gate is reachable from the execution path, the validation path and the five wired read surfaces, that no module outside `workspace_service`/`workspace_api` calls `authorize` directly (which would bypass shadow mode), and — as its own meta-test — that the scan can still tell a gated handler from an ungated one. The behavioural half asserts that an unresolved workspace is a distinct state rather than a quiet allow, that a `SHADOW` workspace records what it would have denied, and that an `ENFORCE` workspace refuses. **Today nothing is denied in production**: every workspace is in `SHADOW` and the unresolved posture defaults to `SHADOW`, so the system measures rather than enforces (ADR-0018, rollout status).
 
 ### INV-5 — Tenant isolation is total
 
@@ -87,7 +92,9 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Ingestion and profiling validators reject attribute keys associated with samples, row values, secrets, or credentials. Persisted SQL passes a redaction pass.
 
-**Test — Planned, not written (2026-08-30).** `test_no_source_values_in_control_plane`: run a full end-to-end fixture with sentinel values in source data; scan every platform table, log line, event payload, and trace for the sentinels. The *design* boundary is real and was verified by reading `src/aida/semantic_inference.py`, which tags every model-bound field `"value_scope": "METADATA_ONLY"`; what is missing is the end-to-end sentinel harness that would prove it holds everywhere.
+**Test — Built (2026-08-30).** `tests/test_inv6_value_freedom.py` (13 tests) runs a sentinel fixture through the query gateway and scans control-plane state for the sentinel, and includes `test_the_control_plane_scan_would_notice_a_leak` — a meta-test that fails if the scan stops being able to find one.
+
+**A leak this test did not cover, and now does.** The scan drove only the query gateway, so the tables metadata envelope 1.1 introduced sat outside it: `metadata_view_definition.definition_sql` and `metadata_routine.body_sql` stored source SQL **raw**, so a view defined `… WHERE ssn = '123-45-6789'` landed verbatim in the control plane. Fixed in migration `d5f8b21c4a03` (redacted column + fingerprint + redaction status, raw columns dropped), with the ingestion path added to the scan. Recorded here because it is the general lesson: *a test is only as strong as the paths its author had in mind*.
 
 ### INV-7 — Attributability of high-impact actions
 
@@ -95,7 +102,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** The unit-of-work commit path requires an audit record for any transaction touching a governed table.
 
-**Test — Planned, not written (2026-08-30).** `test_every_mutation_audits`: reflection over governed model classes; exercise each mutation endpoint; assert a matching audit row. `record_audit` in `src/aida/events.py` writes into the caller's session (so the same-transaction property is structurally available), but nothing asserts that every mutation path calls it.
+**Test — Built (2026-08-30).** `tests/test_inv7_attributability.py` (11 tests). `test_every_mutation_audits` derives the set of mutating routes rather than declaring it — a route qualifies on a mutating verb *or* a call graph that reaches a session write — so a GET that writes is covered and a POST that only reads is checked against a closed read-only list instead of being dropped. Thirteen endpoints in `ai_registry_api` and `product_marketplace_api` that committed governed state with no audit record were found and fixed by it; the exemption dict is now empty and `test_no_unaudited_mutation_remains` asserts that it stays empty.
 
 ### INV-8 — Maker ≠ checker
 
@@ -111,7 +118,7 @@ Structural discovery and bounded profiling are the two source-touching paths tha
 
 **Enforcement.** Capability flags are derived from the certification result, not hand-declared.
 
-**Test — Planned, not written (2026-08-30).** `test_capability_matrix_matches_certification`: assert every advertised capability has a passing certification check. The invariant is nonetheless honoured in the one place it is most visible: `src/aida/connectors/registry.py` distinguishes `register(...)` from `declare_planned(...)`, and Databricks, Teradata and Db2 are declared planned rather than advertised.
+**Test — Built (2026-08-30).** `tests/test_inv9_capability_honesty.py` (11 tests): every advertised capability must trace to a passing certification check, and a capability declared planned must not be reachable as if it were implemented. The invariant is most visible in `src/aida/connectors/registry.py`, which distinguishes `register(...)` from `declare_planned(...)` — Databricks, Teradata and Db2 are declared planned rather than advertised.
 
 ## 3. Design principles
 

@@ -116,11 +116,44 @@ step: workspace unavailable, cross-organization, no membership, role does not pe
 action, no active binding, binding expired, outside the binding's schema scope,
 classification outside the binding, then the policy decision itself.
 
-INV-5 (tenant isolation) is now formalised in the Tier-0 suite against that entry point
-with a real in-memory database — the first of the five previously-unformalised invariants
-to close. What is asserted is that the authorization path denies across an organization
-boundary and denies without membership; what is *not* yet asserted is that every endpoint
-routes through it, which needs an import-linter contract of the kind QG-7 provides for INV-2.
+INV-5 (tenant isolation) is formalised in the Tier-0 suite against that entry point with a
+real in-memory database — the first of the five previously-unformalised invariants to
+close. It asserts that the authorization path denies across an organization boundary and
+denies without membership.
+
+### Rollout status (2026-08-30) — wired, measuring, not enforcing
+
+`authorize` is reached from production traffic as of this date. Surfaces do not call it
+directly; they call `authorization_gate.gate`, which resolves the workspace and then
+defers to `workspace_service.authorize_enforced` so that a workspace's enforcement mode
+is always honoured. Wired: `QueryExecutionGateway.execute` (`READ_DATA`) and `.validate`
+(`READ_METADATA`) — the INV-2 choke point, so all four gateway callers are covered by one
+change — plus `list_tables`, `list_columns`, `list_constraints`,
+`get_latest_table_profile` (`READ_METADATA`) and `preview_agent_retrieval`
+(`CONSUME_CONTEXT`).
+
+**Workspace resolution is subject-independent** (`workspace_resolution.py`). A request
+either names its workspace or has exactly one live binding to the datasource it touches;
+two live bindings is `WORKSPACE_AMBIGUOUS`, a refusal to answer. Resolving by "which
+workspace does this principal have access to" would pick the workspace by the answer and
+then ask the question, which is not a check.
+
+**Three postures, and today only the first is active.** A workspace in `SHADOW` records
+what it would have denied and allows. A workspace in `ENFORCE` denies. A request whose
+workspace cannot be resolved is a third state governed by
+`Settings.unresolved_workspace_posture`, default `SHADOW`; the gate returns `decided=False`
+for it, so no caller can report a check that did not happen. **Flipping that setting to
+`DENY`, per environment, is the completion of this rollout** — measured on 2026-08-30 as
+17 failing tests, each one a surface that does not yet pass a workspace id.
+
+The endpoint-coverage question this section previously left open is answered by
+`tests/test_inv4_authorization_wiring.py` rather than by an import-linter contract:
+import-linter constrains modules, and what needs constraining here is which *functions*
+reach a decision. The static scan asserts the gate is reachable from each wired surface,
+that no module outside `workspace_service`/`workspace_api` calls `authorize` directly
+(the probe endpoint wants the unmodulated answer; everything else must honour shadow
+mode), and — as its own meta-test — that the scan can still tell a gated handler from an
+ungated one.
 
 ## Consequences
 

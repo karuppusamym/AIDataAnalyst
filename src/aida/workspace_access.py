@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,9 +39,12 @@ from aida.models import (
     WorkspaceAccessRule,
 )
 from aida.timeutil import is_live
+from atlas.platform.db import session_factory
 
 SHADOW = "SHADOW"
 ENFORCE = "ENFORCE"
+
+_log = structlog.get_logger(__name__)
 
 
 def _live(expires_at: datetime | None, moment: datetime) -> bool:
@@ -189,6 +193,65 @@ def record_divergence(
             matched_policy_code=matched_policy_code,
         )
     )
+
+
+async def record_divergence_durably(
+    workspace_id: UUID,
+    organization_id: UUID,
+    *,
+    principal_id: str,
+    principal_kind: str,
+    action: str,
+    resource_type: str,
+    resource_id: str | None,
+    reason_code: str,
+    matched_policy_code: str | None = None,
+) -> None:
+    """`record_divergence`, on a session of its own, committed immediately.
+
+    Needed because of where the shadow record is written from. `record_divergence`
+    adds to the caller's session and inherits its fate, which is correct on the
+    workspace administration endpoints -- they commit. It is wrong everywhere the
+    gate is going: a read path never commits, so the divergence would be discarded,
+    and a rejected execution rolls back, so the most interesting divergence of all
+    -- the one attached to a request that failed -- would be the one least likely to
+    survive.
+
+    A shadow record that disappears when the request it describes goes wrong makes
+    the ENFORCE decision on evidence that is biased towards success. Its own
+    transaction is the only way the count means what the readiness report says it
+    means.
+
+    Best-effort by design: this must never turn a working request into a failure,
+    so a write failure here is swallowed after being logged. That is a deliberate
+    asymmetry, and it is safe *only* because nothing is enforced on the strength of
+    this row -- it informs a human decision to flip a workspace to ENFORCE. If that
+    ever becomes automatic, this has to become a hard failure.
+    """
+    try:
+        async with session_factory() as shadow_session:
+            shadow_session.add(
+                AuthorizationShadowRecord(
+                    organization_id=organization_id,
+                    workspace_id=workspace_id,
+                    principal_id=principal_id,
+                    principal_kind=principal_kind,
+                    action=action,
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    shadow_allowed=False,
+                    reason_code=reason_code,
+                    matched_policy_code=matched_policy_code,
+                )
+            )
+            await shadow_session.commit()
+    except Exception:  # pragma: no cover - defensive; see the docstring
+        _log.warning(
+            "authorization.shadow_record_failed",
+            workspace_id=str(workspace_id),
+            action=action,
+            reason_code=reason_code,
+        )
 
 
 @dataclass(frozen=True, slots=True)

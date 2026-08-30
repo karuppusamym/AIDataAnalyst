@@ -13,6 +13,219 @@
 
 ---
 
+## 2026-08-30 (seventh entry)
+
+### The authorization decision is now wired into production paths (Task #19)
+
+For the last four entries this platform had a complete attribute-based authorization
+system -- policy engine, workspace membership, expiring source bindings, rule-derived
+roles, shadow mode -- with **48 passing tests and zero production callers**. Every prior
+entry said so plainly. This entry closes that gap: `authorize` now decides on the
+execution path, the validation path, four catalog read handlers and the retrieval
+preview, and three tests exist to stop it becoming unwired again.
+
+#### The problem that had to be solved first: which workspace is this request in?
+
+`authorize` needs a workspace id. Nothing in the existing API surface supplies one --
+the contracts predate ADR-0018 -- so a resolution step was unavoidable. The obvious
+implementation is a hole:
+
+> find the workspaces this principal belongs to, intersect with the ones bound to this
+> datasource, take the match
+
+That picks the workspace by where the caller already has access and then asks whether
+the caller has access there. It reads as helpful and it is a check with a foregone
+answer. **`aida/workspace_resolution.py` is subject-independent by construction:** every
+rule looks only at the request and at platform state, never at who is asking. There are
+exactly two ways to get a workspace -- the request names one, or the datasource has
+exactly one live binding so the answer is forced. Two live bindings is
+`WORKSPACE_AMBIGUOUS`: a refusal to answer, not a guess.
+
+The single-binding path is what carries the existing estate, because the ADR-0018
+migration gave every datasource exactly one grandfathered binding from its project.
+
+#### An unresolved workspace is a third state, not a quiet allow
+
+Most callers still name no workspace. Making that an allow would hide the size of the
+remaining migration inside a boolean; making it a denial on the day the gate was wired
+would take the platform down. It is its own state, with its own setting
+(`unresolved_workspace_posture`, default `SHADOW`), a `decided=False` flag on the gate's
+result so no caller can claim a check that did not happen, and a warning log line that
+**counts the callers still to migrate**. Flipping that setting to `DENY` is the actual
+completion of this rollout, and it is one setting, not a code change.
+
+#### Wired at the choke point, not at the handlers
+
+The gate sits inside `QueryExecutionGateway.execute` and `.validate`, which INV-2
+already makes the only path to a warehouse. Gating the four callers instead (two HTTP
+handlers, the MCP tool surface, the agent orchestrator) would mean the gate is present
+on the ones somebody remembered.
+
+`AuthorizationRejected` subclasses `QueryRejected` deliberately: every existing caller
+already knows how to record a rejection, with the execution id, failure reason and run
+status handling that goes with it. A sibling exception type would have meant each caller
+either grew a branch or let a denial escape as a 500 -- and the second outcome happens to
+whichever caller is overlooked. Handlers that want the right status catch it first and
+answer **403**, not 422: the statement was never the problem.
+
+Authorization runs *after* the execution row and its `requested` audit entry exist, and
+before anything reaches a connector. A denied attempt therefore leaves a REJECTED row
+naming who asked and why (INV-7), which gating earlier would have thrown away.
+
+#### Two design corrections found while building it
+
+* **A shadow record written into the caller's session is discarded exactly when it
+  matters.** A read handler never commits and a rejected execution rolls back, so the
+  most interesting divergences -- the ones attached to requests that failed -- would be
+  the least likely to survive, biasing the readiness report towards agreement. Since
+  that report is what a human reads before flipping a workspace to `ENFORCE`, the record
+  now gets a transaction of its own (`record_divergence_durably`).
+* **The INV-7 mutation scan was right to flag the gated GETs, and the fix was not an
+  exemption list.** Once a read path is gated every gated GET reaches a `session.add`,
+  and a route-keyed exemption list would grow with each one. `NON_GOVERNED_WRITERS` in
+  the shared scan says instead that recording an authorization divergence is not a
+  mutation of governed state -- nothing reads it, no object differs because it exists --
+  and `test_the_excluded_writers_only_ever_write_attributable_shadow_records` asserts
+  that claim rather than trusting it.
+
+#### Verification evidence
+
+- `ruff check .` clean; `mypy src` clean on 120 files; `lint-imports` **4 contracts kept,
+  0 broken**; `alembic heads` = 1. **716 tests pass** (26 new), 1 xfailed.
+- **This change adds no migration.** Schema is untouched; the only configuration addition
+  is one setting with a safe default.
+- **Measured proof the gate is not a no-op:** the suite was re-run with
+  `AIDA_UNRESOLVED_WORKSPACE_POSTURE=DENY`. **17 tests fail**, every one of them a test
+  whose double supplies no source binding. The gate is live, it fails closed, and the
+  failures name exactly the surfaces that must pass a workspace id before the posture
+  can flip.
+- The static half of `test_inv4_authorization_wiring.py` would pass against a `gate` that
+  returned True unconditionally; the behavioural half would pass against a perfect gate
+  nothing called. Both are present because neither is worth much alone, and
+  `test_the_scan_would_notice_if_a_gate_were_removed` keeps the static half able to fail.
+
+#### Current limitations
+
+- **Nothing is denied in production today**, and that is the intended state: every
+  workspace is in `SHADOW`, the unresolved posture is `SHADOW`, so behaviour is
+  unchanged. What exists now is the *measurement* -- divergences and unresolved-workspace
+  counts accumulating per workspace -- that makes flipping to `ENFORCE` evidence-based.
+  Claiming enforcement on the strength of this entry would be false (INV-9).
+- **Clients do not yet pass `workspace_id`.** `QueryExecutionRequest` and
+  `GatewaySqlValidationRequest` accept it and no caller sends it, so resolution runs
+  through the sole-binding path. The DENY rehearsal above is the list of what to fix.
+- **Coverage is the execution path plus five read surfaces**, not every read in the
+  platform. Query lineage, glossary, stewardship, semantic and marketplace reads are
+  ungated; `test_the_scan_would_notice_if_a_gate_were_removed` currently uses
+  `get_query_lineage` as its ungated control, which is itself a reminder that it should
+  be gated.
+- The per-request cost of a resolved gate (binding lookup, workspace, membership, rules,
+  classification scope, policy load) has been measured only on the synthetic estate from
+  the ADR-0019/0020 benchmarks (auth hot path 0.8 ms with the materialised roll-up). It
+  has not been measured against the bank's real catalogue.
+
+---
+
+## 2026-08-30 (sixth entry)
+
+### Cross-session review: one gap neither session would have found alone
+
+The parallel session stopped after six commits (validate_sql, all nine Tier-0 invariants,
+a documentation truth pass, envelope 1.1 across four connectors, INV-7 auditing). Reviewing
+that work against the same adversarial standard found one defect that exists precisely
+*because* two sessions worked in parallel: each was internally consistent, and the
+inconsistency lived between them.
+
+#### What the other session built, assessed honestly
+
+Strong work, and better than mine in two places:
+
+* **`validate_sql`** is real and shares `_run_validation` with `execute`, so "what
+  validation says" and "what execution enforces" cannot drift. Exactly the design the
+  review recommended.
+* **Five invariant test files** (~90 KB) that include *meta-tests* -- `test_the_cypher_scan
+  _finds_the_statements_it_is_supposed_to`, `test_the_control_plane_scan_would_notice_a
+  _leak`, `test_the_unauthenticated_route_list_stays_closed`. These are the guard against
+  the failure mode this session hit on its own INV-6 test, which asserted nothing. Better
+  practice than mine.
+* Exemption lists are tight and justified: **3** unauthenticated routes, **8** tenant-free
+  routes each carrying a written reason.
+* INV-1 is explicit that it does not prove Neo4j ingests correctly, because no Neo4j is
+  running. Honest about its own limit rather than claiming the invariant outright.
+
+#### The gap
+
+**The same codebase now treated persisted SQL two different ways, and the newer path was
+the unsafe one.**
+
+`dbt_artifacts.py` has always stored `compiled_sql_hash` + `compiled_sql_redacted` and
+never the raw artifact. Envelope 1.1's `metadata_view_definition.definition_sql` and
+`metadata_routine.body_sql` stored source SQL **raw**. A view defined
+`... WHERE ssn = '123-45-6789'` landed verbatim in the control plane -- a source value
+written in a different syntax, which is exactly what INV-6 forbids.
+
+It was invisible because **INV-6's own test drives only the query gateway**, so the tables
+envelope 1.1 introduced sat outside the scan entirely. A test is only as strong as the
+paths its author had in mind.
+
+#### Fixed, migration `d5f8b21c4a03`
+
+Columns replaced with `*_redacted` + `*_fingerprint` + `redaction_status`, raw columns
+**dropped rather than migrated** -- carrying the text forward would defeat the change.
+Redaction extracted to `aida/sql_redaction.py`, which also removed a latent L1-imports-L3
+edge (ingestion would otherwise have imported the gateway).
+
+**A design problem surfaced while building it, and changed the design.** Fail-closed
+redaction -- "store nothing that does not parse" -- discarded most *procedure bodies*,
+because `BEGIN ... END` is procedural rather than a single statement and every dialect
+spells it differently. That would have thrown away the text envelope 1.1 exists to capture,
+and with it procedure lineage: one of the four capabilities no competitor offers. So
+redaction now has three tiers -- `PARSED` (node-level, precise), `LEXICAL` (literals
+removed by scanning; structure survives, values do not), `UNPARSED` (nothing stored).
+Removing literals never actually required a parse.
+
+Numeric literals are scrubbed as well as quoted strings: an account number is as likely to
+appear unquoted as quoted, and `LIMIT 100` losing its number is the accepted cost of not
+guessing which numbers are values.
+
+#### Ingestion-time screening (ADR-0013, N18) -- shipped
+
+`aida/ingest_screening.py` runs the existing deterministic classifier over source-supplied
+text at **write** time, recording a verdict and quarantining what fails. Screening once on
+write is cheaper and more complete than screening on every read, and quarantine changes
+*eligibility for model context* rather than deleting a source's own metadata.
+
+The gap this closes is recorded in ADR-0013, threat model T7, AI-safety AS-1 and
+agent-runtime AG-1, and was addressed in none of them. Envelope 1.1 had just made it much
+larger: a procedure body is kilobytes of source-controlled text that meaning inference and
+tool generation are both designed to read.
+
+Stated plainly in the module: this is defence in depth and it is the weaker layer. INV-3 is
+load-bearing -- a successful injection still produces a proposal that cannot execute.
+
+#### INV-6's test now covers the ingestion path
+
+The systemic fix, not just the instance. Sentinel-laden view and procedure SQL is driven
+through the real redaction path and searched for leakage.
+
+#### Verified on PostgreSQL 16, with an SSN actually in the database
+
+Seeded a raw view definition containing `123-45-6789` at the pre-migration revision, then
+migrated. **5 of 5**: rows preserved, raw column dropped, the SSN gone, CHECK constraint
+rebuilt around the new column, pre-existing row still satisfying it. Downgrade and
+re-upgrade clean with data present.
+
+#### A process failure worth recording
+
+The single-head migration gate produced **two heads twice**, and the second time this
+session missed it -- because the verification command used `alembic heads | tail -1`, which
+showed one line and hid the second head. The gate was built in Phase 0, then not actually
+run. A check you own is not a check you performed.
+
+689 tests passing, ruff and mypy clean, 4 import contracts kept, one head.
+
+---
+
 ## 2026-08-30 (fifth entry)
 
 ### A devil's-advocate check before building found that the next planned change was an outage

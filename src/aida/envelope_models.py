@@ -18,7 +18,7 @@ view-DDL lineage parsing (gap/02 N2) and procedure-to-tool generation (N12).
 Both parse text, so both need the definition back byte-for-byte, and both need to
 tell three states apart that a nullable text column collapses into one:
 
-| State | `availability` | `definition_sql` / `body_sql` | `truncated` |
+| State | `availability` | `definition_sql_redacted` / `body_sql_redacted` | `truncated` |
 |---|---|---|---|
 | The source gave the full text | `AVAILABLE` | the text | `false` |
 | The source gave a prefix | `AVAILABLE` | the prefix | `true` |
@@ -59,12 +59,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 from aida.db import Base
 from aida.models import TimestampMixin
 
-#: `definition_sql` / `body_sql` holds what the source returned, including an
+#: `definition_sql_redacted` / `body_sql_redacted` holds the literal-redacted form of what
+#: the source returned, including an
 #: empty string when the object really is empty.
 AVAILABLE = "AVAILABLE"
 
 #: The source declined, errored, or the connector does not implement the axis.
-#: `definition_sql` / `body_sql` is NULL and `unavailable_reason` says why.
+#: `definition_sql_redacted` / `body_sql_redacted` is NULL and `unavailable_reason` says why.
 UNAVAILABLE = "UNAVAILABLE"
 
 AVAILABILITY_STATES = (AVAILABLE, UNAVAILABLE)
@@ -92,7 +93,7 @@ class MetadataViewDefinition(Base, TimestampMixin):
             name="availability_state",
         ),
         CheckConstraint(
-            "(availability = 'AVAILABLE') = (definition_sql IS NOT NULL)",
+            "(availability = 'AVAILABLE') = (definition_sql_redacted IS NOT NULL)",
             name="availability_matches_definition",
         ),
         Index("ix_metadata_view_definition_org_status", "organization_id", "status"),
@@ -108,7 +109,23 @@ class MetadataViewDefinition(Base, TimestampMixin):
     table_id: Mapped[UUID] = mapped_column(
         ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    definition_sql: Mapped[str | None] = mapped_column(Text)
+    # Literal-redacted, never raw. A view definition is SQL, and SQL carries source
+    # values in its literals -- `WHERE ssn = '123-45-6789'` is a source value written in
+    # a different syntax, so storing the statement stores the value (INV-6). Redaction
+    # matches what the dbt path has always done; briefly, this column did not.
+    definition_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    # Digest of the *original* text, so "has this definition changed" stays answerable
+    # without keeping the thing that changed.
+    definition_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    # PARSED -> every literal replaced. UNPARSED -> the dialect was not understood and
+    # nothing is stored; a statement this parser cannot read is not a licence to keep it.
+    redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
+    # Deterministic prompt-risk verdict, applied at write time. View text is
+    # source-controlled and reaches model context during meaning inference and tool
+    # generation, which makes it an indirect-injection surface. Screening once on write is
+    # cheaper and more complete than screening on every read.
+    screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
+    screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     is_materialized: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_updatable: Mapped[bool | None] = mapped_column(Boolean)
     check_option: Mapped[str | None] = mapped_column(String(30))
@@ -139,7 +156,7 @@ class MetadataRoutine(Base, TimestampMixin):
             name="availability_state",
         ),
         CheckConstraint(
-            "(availability = 'AVAILABLE') = (body_sql IS NOT NULL)",
+            "(availability = 'AVAILABLE') = (body_sql_redacted IS NOT NULL)",
             name="availability_matches_body",
         ),
         Index("ix_metadata_routine_org_status", "organization_id", "status"),
@@ -159,7 +176,14 @@ class MetadataRoutine(Base, TimestampMixin):
     signature: Mapped[str] = mapped_column(String(1000), default="", nullable=False)
     routine_type: Mapped[str] = mapped_column(String(30), nullable=False)
     language: Mapped[str | None] = mapped_column(String(50))
-    body_sql: Mapped[str | None] = mapped_column(Text)
+    # See the note on MetadataViewDefinition.definition_sql_redacted. A procedure body is
+    # the richest literal-bearing text a source hands over, and the largest
+    # indirect-injection surface envelope 1.1 introduced.
+    body_sql_redacted: Mapped[str | None] = mapped_column(Text)
+    body_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    redaction_status: Mapped[str] = mapped_column(String(20), default="PARSED", nullable=False)
+    screening_status: Mapped[str] = mapped_column(String(20), default="CLEAN", nullable=False)
+    screening_reason_codes: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     return_type: Mapped[str | None] = mapped_column(String(255))
     is_deterministic: Mapped[bool | None] = mapped_column(Boolean)
     security_mode: Mapped[str | None] = mapped_column(String(30))

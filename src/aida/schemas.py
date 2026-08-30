@@ -898,6 +898,11 @@ class QueryExecutionRequest(ApiModel):
     sql: str = Field(min_length=1, max_length=200_000)
     max_rows: int | None = Field(default=None, ge=1, le=1_000_000)
     semantic_version: str | None = Field(default=None, max_length=100)
+    # Which workspace is asking (ADR-0018). Optional while the estate migrates: a
+    # datasource with exactly one live binding resolves without it. It stops being
+    # optional when `unresolved_workspace_posture` flips to DENY, and the request
+    # that omits it is refused rather than silently attributed to some workspace.
+    workspace_id: UUID | None = None
 
 
 class QueryExecutionResponse(ApiModel):

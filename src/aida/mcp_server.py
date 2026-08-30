@@ -95,7 +95,7 @@ from aida.models import (
 )
 from aida.platform_schemas import MarketplaceAccessRequestCreate
 from aida.product_marketplace_api import MARKETPLACE_USERS, request_marketplace_access
-from aida.query_gateway import QueryExecutionGateway
+from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
 from aida.sql_validation_api import SQL_VALIDATION_ROLES
@@ -718,6 +718,14 @@ async def _handle_native_validation_tool_call(
             sql=sql,
             requested_limit=requested_limit,
         )
+    except AuthorizationRejected as exc:
+        # Named separately from the blanket handler so the agent is told it was refused
+        # rather than that validation broke. The reason code is safe to return: it names
+        # a policy outcome, never a resource or a policy expression (INV-6).
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": f"Not authorized: {exc.reason_code}"}],
+        }
     except Exception:
         logger.exception("mcp_validate_sql_failed", datasource_id=str(datasource_id))
         return {

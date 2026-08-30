@@ -16,7 +16,21 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from aida.connectors.base import ConnectorCapabilities, QueryEstimate, QueryResult
+from aida.models import SourceBinding
 from aida.security_types import SecurityContext
+
+
+def selected_entity(statement: Any) -> Any:
+    """The ORM entity a `select()` targets, or None.
+
+    Used to tell single-column `scalars` calls apart. Once the query gateway grew an
+    authorization gate there were two such calls on the same path -- the sensitive
+    classification lookup and the source-binding lookup -- and both are one column
+    wide, so the width-based routing these doubles use everywhere else stopped being
+    enough to distinguish them.
+    """
+    descriptions = getattr(statement, "column_descriptions", ()) or ()
+    return descriptions[0].get("entity") if descriptions else None
 
 
 class ExplodingSession:
@@ -241,11 +255,17 @@ class CatalogSession(RecordingSession):
         tables: list[tuple[str, str, str]],
         columns: list[tuple[str, str, str, str]],
         sensitive_columns: list[str],
+        bindings: list[SourceBinding] | None = None,
     ) -> None:
         super().__init__()
         self._tables = tables
         self._columns = columns
         self._sensitive = sensitive_columns
+        # No bindings by default, which resolves to no workspace at all -- the state
+        # the authorization gate treats according to its unresolved posture. That is
+        # the honest default for a double: these tests are about the gateway, and a
+        # binding invented here would quietly assert an access grant they never made.
+        self._bindings = bindings or []
 
     async def execute(self, statement: Any) -> ScriptedResult:
         width = len(getattr(statement, "column_descriptions", ()) or ())
@@ -258,7 +278,9 @@ class CatalogSession(RecordingSession):
             "gateway grew a catalog lookup this double does not model"
         )
 
-    async def scalars(self, _statement: Any) -> ScriptedResult:
+    async def scalars(self, statement: Any) -> ScriptedResult:
+        if selected_entity(statement) is SourceBinding:
+            return ScriptedResult(list(self._bindings))
         return ScriptedResult(list(self._sensitive))
 
     async def get(self, _model: type, _identity: Any) -> Any:  # pragma: no cover - unused

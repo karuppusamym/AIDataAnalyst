@@ -49,11 +49,13 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """Answers the two catalog reads the validation path makes.
+    """Answers the catalog reads and the binding lookup the validation path makes.
 
-    They are told apart by the shape of the SELECT rather than by call order --
-    `allowed_tables` selects three names, `_catalog_columns` selects four -- so
-    the fake stays correct if the phases are ever reordered.
+    The two catalog reads are told apart by the shape of the SELECT rather than by
+    call order -- `allowed_tables` selects three names, `_catalog_columns` selects
+    four -- so the fake stays correct if the phases are ever reordered. The
+    authorization gate's binding lookup comes through `scalars`, which nothing else
+    on this path uses.
     """
 
     def __init__(
@@ -61,9 +63,11 @@ class _FakeSession:
         *,
         tables: list[tuple[str, str, str]],
         columns: list[tuple[str, str, str, str]],
+        bindings: list[Any] | None = None,
     ) -> None:
         self._tables = tables
         self._columns = columns
+        self._bindings = bindings or []
         self.added: list[Any] = []
         self.commits = 0
 
@@ -71,6 +75,12 @@ class _FakeSession:
         if len(statement.column_descriptions) == 4:
             return _FakeResult(list(self._columns))
         return _FakeResult(list(self._tables))
+
+    async def scalars(self, _statement: Select[Any]) -> _FakeResult:
+        # The authorization gate's source-binding lookup. Empty by default, which
+        # leaves the workspace unresolved -- see `CatalogSession` for why a double
+        # should not invent one.
+        return _FakeResult(list(self._bindings))
 
     def add(self, instance: Any) -> None:
         self.added.append(instance)

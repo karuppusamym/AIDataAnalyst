@@ -34,6 +34,7 @@ from aida.timeutil import is_expired
 from aida.workspace_access import (
     apply_enforcement_mode,
     record_divergence,
+    record_divergence_durably,
     rule_derived_roles,
 )
 
@@ -274,6 +275,8 @@ async def authorize(
 async def authorize_enforced(
     session: AsyncSession,
     context: SecurityContext,
+    *,
+    durable_divergence: bool = False,
     **kwargs: Any,
 ) -> AuthorizationResult:
     """`authorize`, then honour the workspace's enforcement mode. Call this from surfaces.
@@ -289,6 +292,13 @@ async def authorize_enforced(
     memberships at all. That is a platform-wide outage dressed as a security improvement.
     Every caller should use this; `authorize` stays public because the authorization-probe
     endpoint deliberately wants the unmodulated answer.
+
+    `durable_divergence` decides where the shadow record lands. The default writes it to
+    the caller's session, which is right for the administration endpoints that commit.
+    Pass True from anywhere that does not commit, or that might roll back -- a read path,
+    or an execution that is about to be rejected -- because a divergence discarded with
+    the request it describes biases the readiness report towards success, and that report
+    is what a human reads before flipping a workspace to ENFORCE.
     """
     result = await authorize(session, context, **kwargs)
     workspace = await session.get(Workspace, kwargs["workspace_id"])
@@ -300,19 +310,35 @@ async def authorize_enforced(
         workspace, allowed=result.allowed, reason_code=result.reason_code
     )
     if outcome.shadow_would_have_denied:
-        record_divergence(
-            session,
-            workspace,
-            principal_id=context.principal_id,
-            principal_kind=str(kwargs.get("principal_kind", "HUMAN")),
-            action=str(kwargs.get("action", "")),
-            resource_type=str(kwargs.get("resource_type", "")),
-            resource_id=kwargs.get("resource_id"),
-            reason_code=result.reason_code,
-            matched_policy_code=(
-                result.decision.matched_policy_code if result.decision else None
-            ),
-        )
+        principal_kind = str(kwargs.get("principal_kind", "HUMAN"))
+        action = str(kwargs.get("action", ""))
+        resource_type = str(kwargs.get("resource_type", ""))
+        resource_id = kwargs.get("resource_id")
+        matched_policy_code = result.decision.matched_policy_code if result.decision else None
+        if durable_divergence:
+            await record_divergence_durably(
+                workspace.id,
+                workspace.organization_id,
+                principal_id=context.principal_id,
+                principal_kind=principal_kind,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                reason_code=result.reason_code,
+                matched_policy_code=matched_policy_code,
+            )
+        else:
+            record_divergence(
+                session,
+                workspace,
+                principal_id=context.principal_id,
+                principal_kind=principal_kind,
+                action=action,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                reason_code=result.reason_code,
+                matched_policy_code=matched_policy_code,
+            )
     return AuthorizationResult(
         allowed=outcome.allowed,
         reason_code=outcome.reason_code,
