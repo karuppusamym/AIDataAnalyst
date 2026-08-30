@@ -122,6 +122,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `table_family.detected` | Family identified | family_id, family_type, members |
 | `table_family_candidate.decided.v1` | Checker approved or rejected a table-family candidate | candidate_id, status |
 | `canonical_table.resolved` | Canonical chosen | entity_ref, table_id, evidence_ref |
+| `canonical_table_group.decided.v1` | Checker approved (with chosen canonical member) or rejected a canonical-table-resolution group | group_id, status, canonical_table_id |
 
 ### Semantics and glossary — topic `atlas.semantics.v1` (key: `organization_id`)
 

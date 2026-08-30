@@ -1252,6 +1252,35 @@ class CrossSourceResolutionCandidateRead(ApiModel):
     updated_at: datetime
 
 
+class CanonicalTableGroupDiscoveryRequest(ApiModel):
+    datasource_ids: list[UUID] | None = Field(
+        default=None,
+        description=(
+            "Optional narrowing to specific datasource(s) within the organization "
+            "(e.g. a known production/reporting pair). Omit to scan every ACTIVE "
+            "datasource in the organization."
+        ),
+    )
+    max_candidates: int = Field(default=100, ge=1, le=500)
+
+
+class CanonicalTableGroupRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    member_table_ids: list[UUID]
+    canonical_table_id: UUID | None
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # KG-5: saved Knowledge Graph / Graph Explorer perspectives
 # ---------------------------------------------------------------------------
@@ -1420,6 +1449,30 @@ class RelationshipCandidateCalibrationRead(ApiModel):
     ground_truth_overrides_applied: int
     buckets: list[RelationshipCandidateCalibrationBucketRead]
     methodology_note: str
+
+
+class CanonicalTableGroupDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    canonical_table_id: UUID | None = Field(
+        default=None,
+        description=(
+            "Required when decision is APPROVE: the steward's chosen canonical "
+            "member, which must be one of the group's member_table_ids. This is "
+            "an override of the detector's default guess, not a restatement of "
+            "it -- the steward may pick any member, not just the suggested one."
+        ),
+    )
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason_and_canonical_choice(self) -> "CanonicalTableGroupDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a canonical table group")
+        if self.decision == "APPROVE" and self.canonical_table_id is None:
+            raise ValueError(
+                "canonical_table_id is required when approving a canonical table group"
+            )
+        return self
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]
