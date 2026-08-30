@@ -111,6 +111,10 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `key.inferred` | Key inferred | table_id, columns, confidence |
 | `composite_key_candidate.decided.v1` | Checker approved or rejected a composite-key candidate | candidate_id, status |
 | `analysis_run.started` / `.completed` / `.cancelled` | Run lifecycle | run_id, scope, counts |
+| `profiling_exception_policy.requested.v1` | PR-2: maker requested a value-bearing profiling exception for one classification | policy_id, datasource_id, classification |
+| `profiling_exception_policy.decided.v1` | PR-2: checker approved or rejected the exception | policy_id, datasource_id, classification, status |
+| `profiling_exception_policy.revoked.v1` | PR-2: an approved exception's authority was withdrawn | policy_id, datasource_id, classification |
+| `profiling.value_artifact_purged.v1` | PR-2: a `ColumnValueProfileArtifact` was hard-deleted once its pinned retention expired | artifact_id, column_id, table_id, policy_id |
 
 ### Relationships — topic `atlas.catalog.v1`
 

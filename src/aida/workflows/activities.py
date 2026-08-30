@@ -2,7 +2,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -29,6 +29,7 @@ from aida.classification_feed import (
 )
 from aida.config import get_settings
 from aida.connectors.base import (
+    ConnectorValueProfilingUnsupported,
     DiscoveredCatalog,
     DiscoveredColumn,
     DiscoveredConstraint,
@@ -46,6 +47,7 @@ from aida.models import (
     AnalysisRun,
     ClassificationEvidence,
     ColumnProfile,
+    ColumnValueProfileArtifact,
     DataSource,
     MetadataCatalog,
     MetadataColumn,
@@ -57,10 +59,13 @@ from aida.models import (
     RenameCandidate,
     TableProfile,
 )
+from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
+from aida.profiling_exceptions import GATED_CLASSIFICATIONS, approved_policy_for
 from aida.quality_service import evaluate_analysis_run
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 from aida.task_tracking import finish_task, heartbeat_task, start_task
+from aida.workflows.continuation import clamp_page_size
 
 logger = structlog.get_logger(__name__)
 
@@ -1260,9 +1265,32 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
 
 
 @activity.defn(name="plan_profile_tasks")
-async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
+async def plan_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
+    """PR-5: keyset-paginated plan, one bounded page per call.
+
+    Replaces the old one-shot plan (every table id for the whole run in a
+    single activity result, `Docs/20-modules/05-profiling-and-classification.md`
+    §13's "fatal at scale" gap) with a page bounded by
+    `settings.profile_plan_page_size`, so a 1M-table run's per-call payload
+    stays flat regardless of run size -- `DatasourceDiscoveryWorkflow` calls
+    this repeatedly, threading `cursor`/`tables_planned_total` from its own
+    compact `ProfilingProgress` checkpoint (never a table-id list) rather than
+    this activity returning the whole run's plan at once.
+
+    `tables_planned_total` (tables already planned across every earlier page
+    of this run, including pages from executions before a `continue_as_new`)
+    enforces `settings.profile_max_tables_per_run` as an overall-run cap, the
+    same cap the old one-shot `.limit(...)` enforced, just spread across many
+    calls instead of one.
+    """
+    run_id = str(payload["run_id"])
+    cursor = payload.get("cursor")
+    tables_planned_total = int(payload.get("tables_planned_total", 0))
     run_uuid = UUID(run_id)
     settings = get_settings()
+    page_size = clamp_page_size(
+        settings.profile_plan_page_size, maximum=settings.profile_plan_page_size
+    )
     async with session_factory() as session:
         run = await session.get(AnalysisRun, run_uuid)
         if run is None:
@@ -1289,23 +1317,54 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
             raise ApplicationError(
                 "datasource is disabled", type="DataSourceDisabledError", non_retryable=True
             )
-        try:
-            table_ids = list(
-                await session.scalars(
-                    select(MetadataTable.id)
-                    .where(
-                        # INV-5: the tenant boundary is restated explicitly rather than
-                        # inherited from the datasource FK, so this query is scoped even
-                        # if a future caller hands it a datasource from another tenant.
-                        MetadataTable.organization_id == run.organization_id,
-                        MetadataTable.datasource_id == datasource.id,
-                        MetadataTable.status == "ACTIVE",
-                        MetadataTable.object_type == "BASE_TABLE",
-                    )
-                    .order_by(MetadataTable.id)
-                    .limit(settings.profile_max_tables_per_run)
-                )
+        common_response = {
+            "run_id": run_id,
+            "max_concurrency": datasource.max_concurrency,
+            "continue_as_new_after_tables": settings.profile_continue_as_new_after_tables,
+        }
+        remaining_budget = max(0, settings.profile_max_tables_per_run - tables_planned_total)
+        if remaining_budget == 0:
+            await finish_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
+                table_id=None,
+                outcome="SUCCESS",
             )
+            return {
+                **common_response,
+                "table_ids": [],
+                "next_cursor": cursor,
+                "has_more": False,
+            }
+        effective_page_size = min(page_size, remaining_budget)
+        try:
+            statement = select(MetadataTable.id).where(
+                # INV-5: the tenant boundary is restated explicitly rather than
+                # inherited from the datasource FK, so this query is scoped even
+                # if a future caller hands it a datasource from another tenant.
+                MetadataTable.organization_id == run.organization_id,
+                MetadataTable.datasource_id == datasource.id,
+                MetadataTable.status == "ACTIVE",
+                MetadataTable.object_type == "BASE_TABLE",
+            )
+            if cursor is not None:
+                try:
+                    (last_id_raw,) = decode_cursor(cursor, arity=1)
+                except InvalidCursor as exc:
+                    raise ApplicationError(
+                        "invalid profiling plan cursor",
+                        type="InvalidCursorError",
+                        non_retryable=True,
+                    ) from exc
+                order_columns: tuple[Any, ...] = (MetadataTable.id,)
+                statement = apply_keyset(statement, order_columns, (UUID(last_id_raw),))
+            statement = statement.order_by(MetadataTable.id)
+            # Fetch one row past the page so "does more remain" is answered by
+            # whether the extra row showed up at all, never by `len(page) ==
+            # effective_page_size` -- that comparison misreads an exact-fit final
+            # page (exactly `effective_page_size` rows left) as "more remains",
+            # which would hand the workflow one pointless extra empty page.
+            rows = list(await session.scalars(statement.limit(effective_page_size + 1)))
         except Exception as exc:
             await finish_task(
                 analysis_run_id=run_uuid,
@@ -1316,6 +1375,9 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
                 error_message=str(exc)[:4000],
             )
             raise
+        has_more = len(rows) > effective_page_size
+        page_rows = rows[:effective_page_size]
+        next_cursor = encode_cursor(str(page_rows[-1])) if page_rows else cursor
         await finish_task(
             analysis_run_id=run_uuid,
             task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
@@ -1323,9 +1385,10 @@ async def plan_profile_tasks(run_id: str) -> dict[str, Any]:
             outcome="SUCCESS",
         )
         return {
-            "run_id": run_id,
-            "table_ids": [str(table_id) for table_id in table_ids],
-            "max_concurrency": datasource.max_concurrency,
+            **common_response,
+            "table_ids": [str(table_id) for table_id in page_rows],
+            "next_cursor": next_cursor,
+            "has_more": has_more,
         }
 
 
@@ -1437,6 +1500,60 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
             await _mark_run_cancelled(run_uuid)
             raise asyncio.CancelledError
         columns_by_name = {column.name: column for column in columns}
+
+        # PR-2: policy-approved value capture -- strictly additive to the
+        # value-free snapshot above, and gated behind BOTH an APPROVED,
+        # unrevoked `ProfilingExceptionPolicy` for the column's classification
+        # AND the connector's `value_range_profiling` capability. ADR-0014's
+        # default is "never capture values"; this is the one explicit,
+        # per-classification exception path, and it fails closed at either
+        # gate rather than simulating support.
+        value_snapshots_by_name: dict[str, Any] = {}
+        policy_by_classification: dict[str, Any] = {}
+        if connector.capabilities.value_range_profiling:
+            gated_columns = [
+                column for column in columns if column.classification in GATED_CLASSIFICATIONS
+            ]
+            if gated_columns:
+                async with session_factory() as policy_session:
+                    for classification in {column.classification for column in gated_columns}:
+                        policy = await approved_policy_for(
+                            policy_session,
+                            organization_id=datasource.organization_id,
+                            datasource_id=datasource.id,
+                            classification=classification,
+                        )
+                        if policy is not None:
+                            policy_by_classification[classification] = policy
+                approved_columns = [
+                    column
+                    for column in gated_columns
+                    if column.classification in policy_by_classification
+                ]
+                if approved_columns:
+                    try:
+                        value_snapshots = await connector.profile_column_values(
+                            schema.name,
+                            table.name,
+                            tuple(column.name for column in approved_columns),
+                            sample_rows=settings.profile_sample_rows,
+                            top_n=settings.profile_value_top_n,
+                            timeout_seconds=settings.query_timeout_seconds,
+                        )
+                        value_snapshots_by_name = {
+                            value_snapshot.name: value_snapshot
+                            for value_snapshot in value_snapshots
+                        }
+                    except ConnectorValueProfilingUnsupported:
+                        # The capability flag was wrong (or changed mid-flight)
+                        # -- fail closed and skip value capture rather than
+                        # fail the whole table's value-free profiling task.
+                        logger.warning(
+                            "value_range_profiling_unsupported",
+                            table_id=str(table_uuid),
+                            connector_type=datasource.connector_type,
+                        )
+
         async with session_factory() as session:
             existing = await session.scalar(
                 select(TableProfile).where(
@@ -1468,20 +1585,43 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
             )
             session.add(profile)
             await session.flush()
+            captured_at = datetime.now(UTC)
             for column_snapshot in snapshot.columns:
                 column = columns_by_name[column_snapshot.name]
-                session.add(
-                    ColumnProfile(
-                        organization_id=datasource.organization_id,
-                        table_profile_id=profile.id,
-                        column_id=column.id,
-                        null_count=column_snapshot.null_count,
-                        non_null_count=column_snapshot.non_null_count,
-                        approximate_distinct_count=column_snapshot.approximate_distinct_count,
-                        min_length=column_snapshot.min_length,
-                        max_length=column_snapshot.max_length,
-                    )
+                column_profile = ColumnProfile(
+                    organization_id=datasource.organization_id,
+                    table_profile_id=profile.id,
+                    column_id=column.id,
+                    null_count=column_snapshot.null_count,
+                    non_null_count=column_snapshot.non_null_count,
+                    approximate_distinct_count=column_snapshot.approximate_distinct_count,
+                    min_length=column_snapshot.min_length,
+                    max_length=column_snapshot.max_length,
                 )
+                session.add(column_profile)
+                value_snapshot = value_snapshots_by_name.get(column_snapshot.name)
+                if value_snapshot is not None:
+                    policy = policy_by_classification[column.classification]
+                    await session.flush()
+                    session.add(
+                        ColumnValueProfileArtifact(
+                            organization_id=datasource.organization_id,
+                            datasource_id=datasource.id,
+                            table_id=table_uuid,
+                            column_id=column.id,
+                            column_profile_id=column_profile.id,
+                            policy_id=policy.id,
+                            classification=column.classification,
+                            min_value=value_snapshot.min_value,
+                            max_value=value_snapshot.max_value,
+                            top_values=[
+                                {"value": value, "count": count}
+                                for value, count in value_snapshot.top_values
+                            ],
+                            captured_at=captured_at,
+                            expires_at=captured_at + timedelta(days=policy.retention_days),
+                        )
+                    )
             await session.commit()
         await finish_task(
             analysis_run_id=run_uuid,
