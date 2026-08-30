@@ -1686,3 +1686,95 @@ class Page(ApiModel):
     limit: int
     offset: int
     total: int
+
+
+# ---------------------------------------------------------------------------
+# TL-1: tool certification corpus and workflow (module 14, tool registry).
+# See aida.models for the ORM shape and aida.tool_certification for the
+# deterministic corpus runner these schemas front.
+# ---------------------------------------------------------------------------
+
+
+class ToolCertificationExpectation(ApiModel):
+    expect: Literal["ACCEPT", "REJECT"]
+    sql_contains: list[str] = Field(default_factory=list, max_length=20)
+    error_contains: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "ToolCertificationExpectation":
+        if self.expect == "REJECT" and self.sql_contains:
+            raise ValueError("sql_contains only applies when expect is ACCEPT")
+        if self.expect == "ACCEPT" and self.error_contains:
+            raise ValueError("error_contains only applies when expect is REJECT")
+        return self
+
+
+class ToolCertificationCaseCreate(ApiModel):
+    case_key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    description: str = Field(min_length=3, max_length=500)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    expectation: ToolCertificationExpectation
+
+
+class ToolCertificationCaseRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    tool_id: UUID
+    case_key: str
+    description: str
+    parameters: dict[str, Any]
+    expectation: dict[str, Any]
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolCertificationRunCreate(ApiModel):
+    rationale: str = Field(min_length=10, max_length=2000)
+    expires_at: datetime
+
+
+class ToolCertificationRunRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    tool_id: UUID
+    tool_version_id: UUID
+    suite_version: str
+    corpus_fingerprint: str
+    status: str
+    total_cases: int
+    passed_cases: int
+    score: int
+    results: list[dict[str, Any]]
+    rationale: str
+    executed_by: str
+    certified_by: str | None
+    decision_reason: str | None
+    issued_at: datetime | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolCertificationDecisionRequest(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_rejection_reason(self) -> "ToolCertificationDecisionRequest":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a certification decision")
+        return self
+
+
+class ToolCertificationStatusRead(ApiModel):
+    tool_id: UUID
+    tool_version_id: UUID | None
+    certified: bool
+    run_id: UUID | None
+    certified_by: str | None
+    issued_at: datetime | None
+    expires_at: datetime | None
+    expired_run_id: UUID | None
+    expired_at: datetime | None
