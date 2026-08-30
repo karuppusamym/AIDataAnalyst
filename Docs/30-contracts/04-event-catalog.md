@@ -55,6 +55,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `tenant.created` | Any hierarchy level created | level, id, parent_id |
 | `tenant.archived` | Level archived | level, id |
 | `secret_reference.rotated` | Reference updated | reference_scheme, path_hash |
+| `organization.integration_policy.updated.v1` | Organization integration policy updated | organization_id, transformation_metadata_integrations |
 
 ### Connectivity — topic `atlas.operational.v1`
 
@@ -63,6 +64,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `datasource.registered` | Source registered | datasource_id, connector_type, network_zone |
 | `datasource.connection_verified` | Connectivity test passed | datasource_id, dialect, version |
 | `datasource.disabled` | Source disabled | datasource_id, reason |
+| `datasource.updated.v1` | Datasource fields patched (status, concurrency, etc.) | datasource_id, status, max_concurrency |
+| `scan_policy.updated.v1` | Datasource scan policy created or updated | scan_policy_id, datasource_id, enabled |
 | `certification.completed` | Certification run finished | datasource_id, score, status, check_results |
 | `connector_agent.registered` | Agent registered | agent_id, zone |
 | `connector_agent.heartbeat_lost` | Agent stopped heartbeating | agent_id, last_seen |
@@ -117,8 +120,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 |---|---|---|
 | `semantic.inference_completed` | Inference run finished | run_id, proposal_count |
 | `semantic.proposal_created` | Proposal queued | proposal_id, object_type |
+| `business_semantics.tool_blueprint_promoted.v1` | Enrichment proposal promoted into a governed tool blueprint draft | proposal_id, governed_tool_version_id |
 | `semantic.annotation_published` | Approved and published | annotation_id, table_id, version |
 | `semantic.version_published` | Model version published | version_id, supersedes |
+| `semantic_model.draft_created.v1` | New semantic model version drafted | semantic_model_version_id, project_id |
+| `semantic_model.cloned.v1` | Semantic model version cloned from an existing one | semantic_model_version_id, based_on_version_id, project_id |
 | `metric.published` / `metric.superseded` | Metric lifecycle | metric_id, version |
 | `glossary.term_published` / `.term_deprecated` | Term lifecycle | term_id, version |
 | `glossary.term.approved.v1` / `.rejected.v1` | Governed term-version decision | term_version_id, term_id, version, review_id |
@@ -146,6 +152,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | Event | Trigger | Key payload |
 |---|---|---|
 | `quality.observation_recorded` | Check evaluated | observation_id, table_id, check, value, baseline |
+| `data_quality.analysis.evaluated.v1` | An analysis run's quality checks all evaluated | analysis_run_id, datasource_id, observations, healthy, warning, critical, no_baseline, incidents_opened, incidents_resolved |
+| `data_quality.policy.changed.v1` | Data-quality policy created or updated for a datasource/scope | datasource_id, scope_key, enabled |
 | `quality.incident_opened` | Threshold breached | incident_id, fingerprint, severity |
 | `quality.incident_reopened` | Re-detected | incident_id |
 | `quality.incident_acknowledged` / `.resolved` | Operator action | incident_id, actor, rationale_ref |
@@ -157,6 +165,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | Event | Trigger | Key payload |
 |---|---|---|
 | `agent.run_started` / `.run_completed` / `.run_denied` | Run lifecycle | run_id, final_state, denial_reason_code |
+| `agent.evaluation.completed.v1` | Agent evaluation suite run finished | evaluation_run_id, status, suite_version |
 | `screening.blocked` | Prompt-risk denial | run_id, classifier_version, score, reason_codes |
 | `agent.tool_selected` | Tool bound | run_id, tool_id, version |
 | `agent.generation_requested` | Model invoked | run_id, route_key |
@@ -176,6 +185,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | Event | Trigger | Key payload |
 |---|---|---|
 | `policy.version_published` | Policy published | policy_id, version |
+| `governance.review_requested.v1` | A governed object (tool version, model route, glossary term, semantic model, stewardship bulk operation, ...) submitted for review | review_id, object_type, object_id, requested_action |
 | `proposal.submitted` / `.assigned` | Proposal lifecycle | proposal_id, object_type, maker |
 | `decision.made` | Checker decided | proposal_id, checker, outcome, rationale_ref |
 | `delegation.granted` / `.revoked` | Delegation | from, to, scope, until |
