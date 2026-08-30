@@ -2,10 +2,13 @@ from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
+from aida.db import get_session
 from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims
 from aida.security_types import SecurityContext as SecurityContext
+from aida.token_revocation import TokenRevokedError, enforce_not_revoked
 
 _oidc_verifiers: dict[tuple[str, str, str, str], OidcVerifier] = {}
 
@@ -26,6 +29,7 @@ def _oidc_verifier(settings: Settings) -> OidcVerifier:
 
 async def get_security_context(
     settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_session),
     principal_id: str | None = Header(default=None, alias="X-Principal-Id"),
     principal_type: str = Header(default="USER", alias="X-Principal-Type"),
     organization_header: UUID | None = Header(default=None, alias="X-Organization-Id"),
@@ -44,8 +48,12 @@ async def get_security_context(
             raise HTTPException(status_code=401, detail="a bearer token is required")
         try:
             claims = await _oidc_verifier(settings).verify(token)
+            # ID-4: a revoked token -- including one presented again after logout or
+            # an admin's response to a compromised credential -- must be rejected on
+            # this, its very next use. A failed lookup denies too (INV-4 fail closed).
+            await enforce_not_revoked(session, claims)
             return context_from_claims(claims, settings)
-        except OidcVerificationError as exc:
+        except (OidcVerificationError, TokenRevokedError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="bearer token verification failed",

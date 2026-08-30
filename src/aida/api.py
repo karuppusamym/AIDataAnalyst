@@ -111,6 +111,9 @@ from aida.schemas import (
     CursorPage,
     DataDomainCreate,
     DataDomainRead,
+    DataSourceBulkOnboardItemRead,
+    DataSourceBulkOnboardRequest,
+    DataSourceBulkOnboardResultRead,
     DataSourceCreate,
     DataSourceRead,
     DataSourceSummaryRead,
@@ -941,22 +944,13 @@ async def create_project(
     return project
 
 
-@router.post(
-    "/projects/{project_id}/datasources",
-    response_model=DataSourceRead,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_datasource(
-    project_id: UUID,
-    body: DataSourceCreate,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
-) -> DataSource:
-    project = await session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    enforce_organization(context, project.organization_id)
+def _validate_datasource_create(body: DataSourceCreate, settings: Settings) -> None:
+    """Shared, DB-free registration validation for a single datasource spec.
+
+    Used by both `create_datasource` and `bulk_onboard_datasources` so the two
+    paths cannot drift: credential-reference provider check and connector-type
+    support are exactly the same rule either way (IN-1).
+    """
     approved_reference_prefix = f"{settings.credential_provider}://"
     if not body.credential_reference.startswith(approved_reference_prefix):
         raise HTTPException(
@@ -971,16 +965,24 @@ async def create_datasource(
             status_code=422,
             detail=f"unsupported connector type: {body.connector_type}",
         )
-    datasource = DataSource(
+
+
+def _build_datasource(project: Project, body: DataSourceCreate) -> DataSource:
+    return DataSource(
         organization_id=project.organization_id,
         line_of_business_id=project.line_of_business_id,
         data_domain_id=project.data_domain_id,
         project_id=project.id,
         **body.model_dump(),
     )
-    session.add(datasource)
-    await session.flush()
-    audit_context = replace(context, organization_id=project.organization_id)
+
+
+def _record_datasource_registration_events(
+    session: AsyncSession,
+    audit_context: SecurityContext,
+    project: Project,
+    datasource: DataSource,
+) -> None:
     record_audit(
         session,
         audit_context,
@@ -1006,8 +1008,150 @@ async def create_datasource(
             "connector_type": datasource.connector_type,
         },
     )
+
+
+@router.post(
+    "/projects/{project_id}/datasources",
+    response_model=DataSourceRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_datasource(
+    project_id: UUID,
+    body: DataSourceCreate,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> DataSource:
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    enforce_organization(context, project.organization_id)
+    _validate_datasource_create(body, settings)
+    datasource = _build_datasource(project, body)
+    session.add(datasource)
+    await session.flush()
+    audit_context = replace(context, organization_id=project.organization_id)
+    _record_datasource_registration_events(session, audit_context, project, datasource)
     await _commit_or_conflict(session, "datasource name already exists in this project")
     return datasource
+
+
+@router.post(
+    "/projects/{project_id}/datasources/bulk-onboard",
+    response_model=DataSourceBulkOnboardResultRead,
+)
+async def bulk_onboard_datasources(
+    project_id: UUID,
+    body: DataSourceBulkOnboardRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> DataSourceBulkOnboardResultRead:
+    """IN-1: register up to DATASOURCE_BULK_ONBOARD_MAX_ITEMS datasources in one call.
+
+    Every item goes through exactly the same registration path a single
+    `create_datasource` call would -- `_validate_datasource_create` and
+    `_build_datasource` are the identical functions that endpoint calls, so
+    there is no bulk-only shortcut on credential-reference validation,
+    connector-type support, or per-project name uniqueness. A bad item (an
+    unapproved credential reference, an unsupported connector type, or a name
+    that collides with an existing datasource or an earlier item in this same
+    batch) fails only that item -- CT-1/RL-6's partial-success precedent, not
+    an all-or-nothing transaction. Each item's insert runs inside its own
+    SAVEPOINT (`session.begin_nested()`) so a `DataSource.project_id+name`
+    uniqueness violation caught at flush time rolls back only that item, never
+    the datasources already staged from earlier in the batch.
+
+    No connectivity probe runs here, in or out of a Temporal workflow: the
+    single-item path doesn't run one either at registration time (that is
+    `test_datasource`, POST `/datasources/{id}/test`, a separate step the
+    caller invokes per source after registration), so there is nothing
+    per-item-slow to defer for the bulk path either -- 200 items is 200 bounded
+    DB writes, not 200 outbound connections.
+    """
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    enforce_organization(context, project.organization_id)
+
+    existing_names = set(
+        await session.scalars(select(DataSource.name).where(DataSource.project_id == project.id))
+    )
+    audit_context = replace(context, organization_id=project.organization_id)
+
+    results: list[DataSourceBulkOnboardItemRead] = []
+    succeeded = 0
+    for index, item in enumerate(body.datasources):
+        try:
+            _validate_datasource_create(item, settings)
+            if item.name in existing_names:
+                raise HTTPException(
+                    status_code=422,
+                    detail="datasource name already exists in this project",
+                )
+        except HTTPException as exc:
+            results.append(
+                DataSourceBulkOnboardItemRead(
+                    index=index,
+                    name=item.name,
+                    status="FAILED",
+                    reason=str(exc.detail),
+                )
+            )
+            continue
+
+        datasource = _build_datasource(project, item)
+        try:
+            async with session.begin_nested():
+                session.add(datasource)
+                await session.flush()
+        except IntegrityError:
+            results.append(
+                DataSourceBulkOnboardItemRead(
+                    index=index,
+                    name=item.name,
+                    status="FAILED",
+                    reason="datasource name already exists in this project",
+                )
+            )
+            continue
+
+        existing_names.add(item.name)
+        _record_datasource_registration_events(session, audit_context, project, datasource)
+        results.append(
+            DataSourceBulkOnboardItemRead(
+                index=index,
+                name=item.name,
+                status="SUCCEEDED",
+                datasource_id=datasource.id,
+                reason=None,
+            )
+        )
+        succeeded += 1
+
+    failed = len(results) - succeeded
+    record_audit(
+        session,
+        audit_context,
+        action="datasource.bulk_register",
+        resource_type="datasource",
+        resource_id=None,
+        outcome="SUCCESS" if not failed else "PARTIAL_SUCCESS" if succeeded else "FAILURE",
+        correlation_id=get_correlation_id(),
+        details={
+            "project_id": str(project.id),
+            "requested_count": len(results),
+            "succeeded_count": succeeded,
+            "failed_count": failed,
+        },
+    )
+    await session.commit()
+    return DataSourceBulkOnboardResultRead(
+        requested_count=len(results),
+        succeeded_count=succeeded,
+        failed_count=failed,
+        results=results,
+    )
 
 
 @router.patch("/datasources/{datasource_id}", response_model=DataSourceRead)

@@ -8379,6 +8379,108 @@
         "title": "DataQualitySummaryRead",
         "type": "object"
       },
+      "DataSourceBulkOnboardItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "name",
+          "status"
+        ],
+        "title": "DataSourceBulkOnboardItemRead",
+        "type": "object"
+      },
+      "DataSourceBulkOnboardRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "datasources": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceCreate"
+            },
+            "maxItems": 200,
+            "minItems": 1,
+            "title": "Datasources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "datasources"
+        ],
+        "title": "DataSourceBulkOnboardRequest",
+        "type": "object"
+      },
+      "DataSourceBulkOnboardResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/DataSourceBulkOnboardItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "results"
+        ],
+        "title": "DataSourceBulkOnboardResultRead",
+        "type": "object"
+      },
       "DataSourceCreate": {
         "additionalProperties": false,
         "properties": {
@@ -10386,6 +10488,195 @@
           "decision"
         ],
         "title": "GovernanceDecisionRequest",
+        "type": "object"
+      },
+      "GovernanceReviewBulkDecisionItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "review_id": {
+            "title": "Review Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "status"
+        ],
+        "title": "GovernanceReviewBulkDecisionItemRead",
+        "type": "object"
+      },
+      "GovernanceReviewBulkDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "filter": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GovernanceReviewBulkSelectionFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rationale_by_review_id": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "format": "uuid"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rationale By Review Id"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "review_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 10000,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Ids"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "GovernanceReviewBulkDecisionRequest",
+        "type": "object"
+      },
+      "GovernanceReviewBulkDecisionResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/GovernanceReviewBulkDecisionItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "selection_mode": {
+            "enum": [
+              "EXPLICIT",
+              "FILTER"
+            ],
+            "title": "Selection Mode",
+            "type": "string"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision",
+          "selection_mode",
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "truncated",
+          "results"
+        ],
+        "title": "GovernanceReviewBulkDecisionResultRead",
+        "type": "object"
+      },
+      "GovernanceReviewBulkSelectionFilter": {
+        "additionalProperties": false,
+        "description": "Reuses `list_governance_reviews`'s existing filter shape (status,\nscoped to the caller's organization) plus an optional object_type\nnarrowing, rather than inventing a new query language.",
+        "properties": {
+          "object_type": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type"
+          },
+          "status": {
+            "default": "PENDING",
+            "maxLength": 30,
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "GovernanceReviewBulkSelectionFilter",
         "type": "object"
       },
       "GovernanceReviewRead": {
@@ -19012,6 +19303,78 @@
           "updated_at"
         ],
         "title": "TermSemanticBindingRead",
+        "type": "object"
+      },
+      "TokenRevocationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "organization_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Organization Id"
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "title": "Revoked At",
+            "type": "string"
+          },
+          "self_revocation": {
+            "title": "Self Revocation",
+            "type": "boolean"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "token_expires_at": {
+            "format": "date-time",
+            "title": "Token Expires At",
+            "type": "string"
+          },
+          "token_identifier": {
+            "title": "Token Identifier",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token_identifier",
+          "subject",
+          "organization_id",
+          "self_revocation",
+          "revoked_at",
+          "token_expires_at"
+        ],
+        "title": "TokenRevocationRead",
+        "type": "object"
+      },
+      "TokenRevocationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "reason"
+        ],
+        "title": "TokenRevocationRequest",
         "type": "object"
       },
       "ToolCertificationCaseCreate": {
@@ -41168,6 +41531,135 @@
         ]
       }
     },
+    "/v1/governance/reviews/bulk-decision": {
+      "post": {
+        "description": "PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING\ngovernance reviews in one call, across whichever object type(s) the\nunified review queue already supports, by explicit id list or by a\nstatus/object-type filter scoped to the caller's organization.\n\nExactly the same maker != checker, PENDING-only, and organization-\nboundary rules as `decide_governance_review` apply per item -- this\ncalls `_apply_governance_review_decision`, the same core the\nsingle-item endpoint calls, so the two paths cannot drift -- but a rule\nviolation on one item marks that item FAILED and continues (RL-6/CT-1's\npartial-success precedent) rather than aborting the whole batch. Each\nitem's dispatch runs inside its own SAVEPOINT (`session.begin_nested`),\nso a failure partway through one item's (possibly multi-table) side\neffects can never leak a partial write into an item reported FAILED --\nverified directly against a real SAVEPOINT rollback, not assumed.\n\nSelection is always a single bulk query: an explicit id list is deduped\nin Python then fetched with one `WHERE id IN (...)`, and a filter pushes\nevery predicate into SQL via `_resolve_governance_review_bulk_subjects`.\nNothing here loads the full review table into Python to filter it there.",
+        "operationId": "bulk_decide_governance_reviews_v1_governance_reviews_bulk_decision_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GovernanceReviewBulkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewBulkDecisionResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Decide Governance Reviews",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
     "/v1/governance/reviews/{review_id}/decision": {
       "post": {
         "operationId": "decide_governance_review_v1_governance_reviews__review_id__decision_post",
@@ -56767,6 +57259,142 @@
         "summary": "Create Datasource"
       }
     },
+    "/v1/projects/{project_id}/datasources/bulk-onboard": {
+      "post": {
+        "description": "IN-1: register up to DATASOURCE_BULK_ONBOARD_MAX_ITEMS datasources in one call.\n\nEvery item goes through exactly the same registration path a single\n`create_datasource` call would -- `_validate_datasource_create` and\n`_build_datasource` are the identical functions that endpoint calls, so\nthere is no bulk-only shortcut on credential-reference validation,\nconnector-type support, or per-project name uniqueness. A bad item (an\nunapproved credential reference, an unsupported connector type, or a name\nthat collides with an existing datasource or an earlier item in this same\nbatch) fails only that item -- CT-1/RL-6's partial-success precedent, not\nan all-or-nothing transaction. Each item's insert runs inside its own\nSAVEPOINT (`session.begin_nested()`) so a `DataSource.project_id+name`\nuniqueness violation caught at flush time rolls back only that item, never\nthe datasources already staged from earlier in the batch.\n\nNo connectivity probe runs here, in or out of a Temporal workflow: the\nsingle-item path doesn't run one either at registration time (that is\n`test_datasource`, POST `/datasources/{id}/test`, a separate step the\ncaller invokes per source after registration), so there is nothing\nper-item-slow to defer for the bulk path either -- 200 items is 200 bounded\nDB writes, not 200 outbound connections.",
+        "operationId": "bulk_onboard_datasources_v1_projects__project_id__datasources_bulk_onboard_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DataSourceBulkOnboardRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataSourceBulkOnboardResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Onboard Datasources"
+      }
+    },
     "/v1/projects/{project_id}/dbt-projects": {
       "get": {
         "operationId": "list_dbt_projects_v1_projects__project_id__dbt_projects_get",
@@ -59255,6 +59883,134 @@
         "summary": "Search Suggest",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/v1/security/tokens/revoke": {
+      "post": {
+        "operationId": "revoke_token_v1_security_tokens_revoke_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TokenRevocationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenRevocationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke a bearer token (self logout, or admin response to a compromised credential)",
+        "tags": [
+          "identity"
         ]
       }
     },

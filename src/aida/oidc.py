@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from time import monotonic
 from typing import Any
@@ -91,6 +92,24 @@ def context_from_claims(claims: dict[str, Any], settings: Settings) -> SecurityC
         roles=frozenset(mapped_roles),
         business_purpose=(business_purpose.strip()[:200] if business_purpose else None),
     )
+
+
+def token_identifier(claims: dict[str, Any]) -> str:
+    """A stable per-token identifier for revocation and replay checks (ID-4).
+
+    Prefers the registered `jti` claim (RFC 7519). Many external issuers omit it, so a
+    token without one still gets a deterministic identifier derived from
+    (subject, issued-at, expiry) -- for any correctly implemented issuer, re-issuing a
+    token to the same subject in the same `iat` second would also have to reuse the
+    same `exp` to collide here, which is not a distinction worth losing revocation
+    coverage over. Called only after `OidcVerifier.verify` has already required
+    `sub`, `iat` and `exp` to be present, so the fallback never sees a missing claim.
+    """
+    jti = claims.get("jti")
+    if isinstance(jti, str) and jti.strip():
+        return f"jti:{jti.strip()}"
+    fingerprint = f"{claims.get('sub')}|{claims.get('iat')}|{claims.get('exp')}"
+    return "fp:" + hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
 
 
 class OidcVerifier:
