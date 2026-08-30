@@ -106,7 +106,7 @@ happens the row names both, rather than being listed twice.
 | PR-3 | Authoritative classification feed integration | 05 | B | P1 | TODO | — | External feed overrides inference |
 | PR-4 | Task-level retry/heartbeat drill-down API | 05 | A | P1 | TODO | — | Operator console shows per-task evidence |
 | PR-5 | Continue-as-new at maximum scale | 05 | D | P0 | TODO | — | 1M-table run completes |
-| RL-1 | Table family / temporal intelligence | 06 | B | P1 | TODO | — | History/snapshot/delta/SCD detected with evidence |
+| RL-1 | Table family / temporal intelligence | 06 | B | P1 | DONE | — | Delivered 2026-08-30. Snapshot (date/period-suffix siblings), history/audit and delta suffix-pair, and SCD Type 2 (temporal-validity column pairs) detection over naming/column evidence, persisted as review-gated `TableFamilyCandidate` rows with maker-checker decision (`table_family_intelligence.py`, `table_family_api.py`) |
 | RL-2 | Canonical table resolution | 06 | B | P1 | TODO | — | Steward override; feeds retrieval ranking |
 | RL-3 | Composite relationship candidates | 06 | B | P1 | TODO | — | Bounded; evidence-backed |
 | RL-4 | Project approved relationships to Neo4j | 06/10 | A | P1 | IN PROGRESS | — | Approved/suggested relationship candidates are already bounded, policy-filtered and visible in Graph Explorer V2 (`intelligence_api.py::get_knowledge_graph`/`get_knowledge_graph_neighborhood`, `knowledge_graph.py::expand_frontier`); still missing: projecting approved `RelationshipCandidate` edges into Neo4j itself — `graph_projector.py` only projects declared FK constraints, not candidates |
