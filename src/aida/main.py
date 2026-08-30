@@ -11,6 +11,8 @@ from sqlalchemy import text
 from temporalio.client import Client
 
 from aida import __version__
+from aida.abac_api import router as abac_router
+from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
@@ -29,6 +31,7 @@ from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
+from aida.search_api import router as search_router
 from aida.schemas import HealthResponse
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
@@ -98,6 +101,9 @@ app.include_router(unified_lineage_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
+app.include_router(search_router)
+app.include_router(abac_router)
+app.include_router(ai_decision_lineage_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

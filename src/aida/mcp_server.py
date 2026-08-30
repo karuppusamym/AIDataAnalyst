@@ -76,8 +76,10 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.mcp_budget import McpBudgetDecision, consume_mcp_budget
 from aida.models import (
+    ConsumptionRecord,
     ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,

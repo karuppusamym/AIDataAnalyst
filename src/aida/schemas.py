@@ -1163,7 +1163,12 @@ UnifiedLineageNodeKind = Literal[
     "TABLE", "DBT_MODEL", "DBT_SOURCE", "DBT_SEED", "DBT_SNAPSHOT", "UNRESOLVED_DATASET"
 ]
 UnifiedLineageEdgeSource = Literal[
-    "FOREIGN_KEY", "SUGGESTED_RELATIONSHIP", "DBT_DEPENDENCY", "OPENLINEAGE_ETL"
+    "FOREIGN_KEY",
+    "SUGGESTED_RELATIONSHIP",
+    "DBT_DEPENDENCY",
+    "OPENLINEAGE_ETL",
+    "VIEW_DEFINITION",
+    "PROCEDURE_DEFINITION",
 ]
 
 
@@ -2122,6 +2127,147 @@ class ContextProductScopeRead(ApiModel):
     unresolved_table_ids: list[UUID]
 
 
+class LineageEdgeRead(ApiModel):
+    """One column-level lineage edge extracted from SQL."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    transformation_type: str
+    confidence: str
+    dialect: str
+
+
+class ViewLineageParseRequest(ApiModel):
+    sql: str = Field(min_length=1, max_length=500_000)
+    dialect: str = Field(default="postgres", pattern=r"^[a-z][a-z0-9_-]{1,49}$")
+
+
+class ViewLineageParseResponse(ApiModel):
+    edges: list[LineageEdgeRead]
+    confidence: str
+    dialect: str
+    sql_hash: str
+    errors: list[str] = Field(default_factory=list)
+    persisted_edge_count: int = 0
+
+
+class ViewLineageEdgeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    source_table_id: UUID | None
+    source_column_id: UUID | None
+    target_table_id: UUID | None
+    target_column_id: UUID | None
+    transformation_type: str
+    confidence: str
+    dialect: str
+    sql_hash: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ProcedureLineageEdgeRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    source_table_id: UUID | None
+    source_column_id: UUID | None
+    target_table_id: UUID | None
+    target_column_id: UUID | None
+    transformation_type: str
+    confidence: str
+    dialect: str
+    sql_hash: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioChangeSetCreate(ApiModel):
+    name: str = Field(min_length=2, max_length=200)
+
+
+class StudioChangeSetRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    name: str
+    author: str
+    status: str
+    base_version_hash: str
+    conflict_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioChangeItemCreate(ApiModel):
+    object_type: Literal["METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"]
+    object_id: str = Field(min_length=1, max_length=100)
+    operation: Literal["CREATE", "UPDATE", "DELETE"]
+    before_snapshot: dict[str, Any] | None = None
+    after_snapshot: dict[str, Any] | None = None
+
+
+class StudioChangeItemRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    change_set_id: UUID
+    object_type: str
+    object_id: str
+    operation: str
+    before_snapshot: dict[str, Any] | None
+    after_snapshot: dict[str, Any] | None
+    diff: dict[str, Any] | None
+    test_status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioConflict(ApiModel):
+    object_type: str
+    object_id: str
+    field_name: str
+    change_set_value: Any
+    current_value: Any
+
+
+class StudioDiffEntry(ApiModel):
+    field: str
+    before: Any
+    after: Any
+
+
+class StudioDiffRead(ApiModel):
+    change_set_id: UUID
+    items: list[dict[str, Any]]
+
+
+class StudioImpactPreview(ApiModel):
+    change_set_id: UUID
+    affected_object_count: int
+    affected_objects: list[dict[str, Any]]
+
+
+class StudioTestResultRead(ApiModel):
+    id: UUID
+    change_set_id: UUID
+    started_at: datetime
+    completed_at: datetime | None
+    passed: bool
+    evidence: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
 class HealthResponse(ApiModel):
     status: str
     service: str
@@ -2357,3 +2503,159 @@ class AuthorizationProbeRead(ApiModel):
     masked_classifications: list[str]
     row_filters: list[str]
     evaluated_policy_count: int
+
+
+# --- DQ-1: Notification and Escalation Routing --------------------------------
+
+
+class NotificationRuleCreate(ApiModel):
+    name: str = Field(min_length=3, max_length=200)
+    conditions: dict[str, Any] = Field(default_factory=dict)
+    channel: Literal["EMAIL", "WEBHOOK", "ITSM"]
+    recipients: list[str] = Field(min_length=1, max_length=100)
+    escalation_after_minutes: int | None = Field(default=None, ge=1, le=525_600)
+    enabled: bool = True
+
+
+class NotificationRuleUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=3, max_length=200)
+    conditions: dict[str, Any] | None = None
+    channel: Literal["EMAIL", "WEBHOOK", "ITSM"] | None = None
+    recipients: list[str] | None = Field(default=None, min_length=1, max_length=100)
+    escalation_after_minutes: int | None = Field(default=None, ge=1, le=525_600)
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def require_change(self) -> "NotificationRuleUpdate":
+        if not self.model_fields_set:
+            raise ValueError("at least one field must be provided")
+        return self
+
+
+class NotificationRuleRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    name: str
+    conditions: dict[str, Any]
+    channel: str
+    recipients: list[str]
+    escalation_after_minutes: int | None
+    enabled: bool
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class NotificationEventRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    incident_id: UUID
+    rule_id: UUID
+    channel: str
+    recipients: list[str]
+    status: str
+    dedup_key: str
+    sent_at: datetime | None
+    escalated_at: datetime | None
+    acknowledged_at: datetime | None
+    acknowledged_by: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- DQ-2: Freshness Watermark Contracts --------------------------------------
+
+
+class FreshnessConfigUpsert(ApiModel):
+    watermark_column: str = Field(min_length=1, max_length=255)
+    classification: str = Field(default="INTERNAL", max_length=30)
+    threshold_minutes: int = Field(ge=1, le=525_600)
+    retention_days: int = Field(default=365, ge=1, le=3650)
+
+
+class FreshnessConfigRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    watermark_column: str
+    classification: str
+    threshold_minutes: int
+    retention_days: int
+    status: str
+    approved_by: str | None
+    approved_at: datetime | None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class FreshnessStatusRead(ApiModel):
+    table_id: UUID
+    status: str  # FRESH, STALE, NOT_CONFIGURED, AWAITING_APPROVAL
+    last_watermark: datetime | None
+    age_minutes: float | None
+    threshold_minutes: int | None
+    evidence: dict[str, Any]
+
+
+# --- DQ-3: Trust Scoring (EE.5) -----------------------------------------------
+
+
+class TrustFactorRead(ApiModel):
+    name: str
+    score: int
+    weight: float
+    evidence: dict[str, Any]
+    explanation: str
+
+
+class TrustScoreRead(ApiModel):
+    overall_score: int
+    grade: str
+    factors: list[TrustFactorRead]
+
+
+# --- OB-1 through OB-4: Observability ----------------------------------------
+
+
+class SloDefinitionCreate(ApiModel):
+    slo_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
+    name: str = Field(min_length=3, max_length=200)
+    target: float = Field(ge=0.0, le=100.0)
+    window_days: int = Field(ge=1, le=365)
+    threshold: float = Field(ge=0.0, le=100.0)
+
+
+class SloDefinitionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    slo_key: str
+    name: str
+    target: float
+    window_days: int
+    threshold: float
+    status: str
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SloBudgetRead(ApiModel):
+    slo_id: UUID
+    slo_key: str
+    name: str
+    target: float
+    current_value: float | None
+    budget_remaining: float | None
+    window_days: int
+    status: str
+
+
+class ArchiveStatusRead(ApiModel):
+    total_archives: int
+    total_events_archived: int
+    latest_archive_id: str | None
+    latest_checksum: str | None
+    legal_hold_count: int
+    status: str
