@@ -1560,6 +1560,84 @@ class RelationshipCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class RelationshipCandidateGroup(Base, TimestampMixin):
+    """A composite (multi-column) FK-like candidate; see RelationshipCandidateGroupMember.
+
+    ``RelationshipCandidate`` above is single-column only -- its unique
+    constraint is keyed on exactly one source/target column pair, and the
+    knowledge graph and impact-analysis code that reads it assumes the same.
+    Rather than restructure that working, already-consumed shape, composite
+    candidates get their own parent/member pair (RL-3): the parent carries
+    the same maker-checker decision fields as ``RelationshipCandidate``, and
+    an ordered set of column pairs lives in the member table below.
+    """
+
+    __tablename__ = "relationship_candidate_group"
+    __table_args__ = (
+        UniqueConstraint(
+            "datasource_id",
+            "member_fingerprint",
+            name="uq_relationship_candidate_group_fingerprint",
+        ),
+        Index("ix_relationship_candidate_group_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    member_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RelationshipCandidateGroupMember(Base):
+    """One ordered column pair belonging to a composite relationship candidate."""
+
+    __tablename__ = "relationship_candidate_group_member"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id", "ordinal", name="uq_relationship_candidate_group_member_ordinal"
+        ),
+        UniqueConstraint(
+            "group_id",
+            "source_column_id",
+            "target_column_id",
+            name="uq_relationship_candidate_group_member_columns",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("relationship_candidate_group.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    target_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+
 class TableFamilyCandidate(Base, TimestampMixin):
     """RL-1: evidence-backed table-family / temporal-intelligence candidate.
 
@@ -1738,58 +1816,44 @@ class CrossSourceResolutionCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class CanonicalTableGroup(Base, TimestampMixin):
-    """RL-2: evidence-backed, review-gated canonical-table-resolution group.
+class CanonicalTableMapping(Base, TimestampMixin):
+    """RL-2: steward override of which table-family member is canonical.
 
-    A single row records one detected group of ``MetadataTable`` rows
-    believed to represent the same logical entity -- a production table and
-    its read-replica/reporting mirror, the same table cloned into a
-    dev/staging environment, or several near-duplicate ingestions of one
-    source. Mirrors the maker-checker shape already established by
-    ``RelationshipCandidate`` / ``TableFamilyCandidate`` /
-    ``CompositeKeyCandidate`` above (PENDING/APPROVED/REJECTED, created_by /
-    reviewed_by / reviewed_at).
-
-    Unlike ``TableFamilyCandidate`` (bounded to one schema) this group can
-    span schemas, catalogs, or datasources, so it carries no single
-    ``datasource_id``/``schema_id`` column -- only ``organization_id``, plus
-    ``member_table_ids``, the "list of ids on one row" convention
-    ``TableFamilyCandidate.member_table_ids`` already established (chosen
-    over ``RelationshipCandidate``'s pairwise source/target-datasource shape
-    because a canonical-duplicate group has no privileged "first" side and
-    can have more than two members).
-
-    ``canonical_table_id`` is nullable until a steward confirms it: the
-    detector's ``pick_default_canonical`` guess is recorded in ``evidence``
-    (under ``default_canonical_table_id``) at discovery time as a
-    *suggestion*, but is deliberately never auto-populated into this column
-    -- ``canonical_table_id`` only ever gets set on ``APPROVE``, from the
-    steward's own choice (which may or may not match the detector's
-    default), keeping "canonical" a claim only a human has actually
-    confirmed. See ``aida.canonical_table_api.decide_canonical_table_group``.
+    ``TableFamilyCandidate`` (RL-1, shipped upstream) already carries
+    ``base_table_id`` -- the algorithm's own "current/live" pick -- but that
+    field is explicitly never set for a SNAPSHOT family (see that model's
+    docstring): a run of dated full copies has no single member the
+    algorithm can call canonical. This table is purely additive to
+    ``TableFamilyCandidate``: it exists only to record an explicit steward
+    decision, which is required to name a canonical member for a SNAPSHOT
+    family and optional (but always wins) for any other family type. A row
+    here only ever exists for a family a steward has actually decided; there
+    is no row for the common "algorithm's pick stands, unreviewed" case.
+    ``resolve_canonical`` (``aida.relationship_intelligence``) is the read
+    path: this override if one exists, else ``base_table_id``, else
+    ``None``.
     """
 
-    __tablename__ = "canonical_table_group"
+    __tablename__ = "canonical_table_mapping"
     __table_args__ = (
-        Index("ix_canonical_table_group_org_status", "organization_id", "status"),
+        UniqueConstraint(
+            "family_candidate_id", name="uq_canonical_table_mapping_family_candidate"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
-    member_table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
-    canonical_table_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
+    family_candidate_id: Mapped[UUID] = mapped_column(
+        ForeignKey("table_family_candidate.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
-    confidence: Mapped[float] = mapped_column(Float, nullable=False)
-    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    reviewed_by: Mapped[str | None] = mapped_column(String(255))
-    review_reason: Mapped[str | None] = mapped_column(String(2000))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    canonical_table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    resolved_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
+    is_steward_override: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class RelationshipCandidateGroundTruthLabel(Base, TimestampMixin):
@@ -1898,6 +1962,8 @@ class GraphPerspective(Base, TimestampMixin):
     owner_principal: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     allowed_viewer_roles: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     view_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 

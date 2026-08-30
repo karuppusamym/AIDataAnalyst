@@ -81,6 +81,8 @@ class Settings(BaseSettings):
         default=300, ge=10, le=5_000
     )
     object_resolution_min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    relationship_candidate_composite_max_columns: int = Field(default=4, ge=2, le=8)
+    relationship_candidate_composite_max_per_table: int = Field(default=25, ge=1, le=500)
     usage_boost_enabled_default: bool = False
     usage_boost_refresh_minutes: int = Field(default=60, ge=5, le=1440)
     usage_boost_window_days: int = Field(default=7, ge=1, le=90)

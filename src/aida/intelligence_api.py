@@ -11,6 +11,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
 from aida.config import Settings, get_settings
@@ -23,6 +24,8 @@ from aida.identity_resolution import IdentityMatch, score_cross_source_match
 from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
 from aida.models import (
     AgentRun,
+    CanonicalTableMapping,
+    ColumnProfile,
     CrossSourceResolutionCandidate,
     DataDomain,
     DataSource,
@@ -38,12 +41,26 @@ from aida.models import (
     QueryMemoryEvidence,
     RelationshipCandidate,
     RelationshipCandidateGroundTruthLabel,
+    RelationshipCandidateGroup,
+    RelationshipCandidateGroupMember,
     RenameCandidate,
     SemanticMetricVersion,
+    TableFamilyCandidate,
+    TableProfile,
+)
+from aida.relationship_intelligence import (
+    ColumnMeta,
+    generate_composite_relationship_candidates,
+    resolve_canonical_table_id,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.schemas import (
     RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS,
+    CanonicalTableMappingRead,
+    CanonicalTableOverrideRequest,
+    CompositeRelationshipCandidateDiscoveryRequest,
+    CompositeRelationshipCandidateMemberRead,
+    CompositeRelationshipCandidateRead,
     CrossSourceObjectResolutionDiscoveryRequest,
     CrossSourceRelationshipCandidateDiscoveryRequest,
     CrossSourceResolutionCandidateDecision,
@@ -68,6 +85,7 @@ from aida.schemas import (
     RelationshipCandidateRead,
     RenameCandidateDecision,
     RenameCandidateRead,
+    TableRef,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -2221,3 +2239,635 @@ async def get_relationship_candidate_confidence_calibration(
         buckets=buckets,
         methodology_note=_CALIBRATION_METHODOLOGY_NOTE,
     )
+
+
+# --------------------------------------------------------------------------
+# RL-2 / RL-3 shared helpers
+#
+# These fetch rows and hand plain, value-free data to ``aida.relationship_intelligence``
+# (pure, unit-tested resolution/generation logic), then persist and shape the
+# result. No source values are read at any point (ADR-0014). RL-1 (table
+# family detection) is not here -- see ``aida.table_family_api`` and
+# ``aida.table_family_intelligence``.
+# --------------------------------------------------------------------------
+
+
+async def _qualified_names(session: AsyncSession, table_ids: set[UUID]) -> dict[UUID, str]:
+    if not table_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(MetadataTable.id, MetadataTable.name, MetadataSchema.name, MetadataCatalog.name)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+            .where(MetadataTable.id.in_(table_ids))
+        )
+    ).all()
+    return {
+        table_id: f"{catalog_name}.{schema_name}.{table_name}"
+        for table_id, table_name, schema_name, catalog_name in rows
+    }
+
+
+async def _latest_table_profiles(
+    session: AsyncSession, datasource_id: UUID, table_ids: set[UUID]
+) -> dict[UUID, TableProfile]:
+    if not table_ids:
+        return {}
+    ranked = (
+        select(
+            TableProfile,
+            func.row_number()
+            .over(partition_by=TableProfile.table_id, order_by=TableProfile.created_at.desc())
+            .label("rn"),
+        )
+        .where(TableProfile.datasource_id == datasource_id, TableProfile.table_id.in_(table_ids))
+        .subquery()
+    )
+    alias = aliased(TableProfile, ranked)
+    rows = (await session.scalars(select(alias).where(ranked.c.rn == 1))).all()
+    return {profile.table_id: profile for profile in rows}
+
+
+async def _column_profile_stats(
+    session: AsyncSession, table_profile_ids: list[UUID]
+) -> dict[UUID, ColumnProfile]:
+    if not table_profile_ids:
+        return {}
+    rows = (
+        await session.scalars(
+            select(ColumnProfile).where(ColumnProfile.table_profile_id.in_(table_profile_ids))
+        )
+    ).all()
+    return {row.column_id: row for row in rows}
+
+
+def _composite_keys_from_constraints(
+    constraints: list[MetadataConstraint], table_ids: set[UUID]
+) -> tuple[
+    dict[UUID, tuple[str, ...]],
+    frozenset[tuple[UUID, tuple[str, ...], UUID, tuple[str, ...]]],
+]:
+    composite_primary_keys: dict[UUID, tuple[str, ...]] = {}
+    declared_composite_fks: set[tuple[UUID, tuple[str, ...], UUID, tuple[str, ...]]] = set()
+    for constraint in constraints:
+        if (
+            constraint.constraint_type == "PRIMARY_KEY"
+            and len(constraint.columns) >= 2
+            and constraint.table_id in table_ids
+        ):
+            composite_primary_keys[constraint.table_id] = tuple(constraint.columns)
+        elif (
+            constraint.constraint_type == "FOREIGN_KEY"
+            and constraint.referenced_table_id is not None
+            and len(constraint.columns) >= 2
+        ):
+            declared_composite_fks.add(
+                (
+                    constraint.table_id,
+                    tuple(name.lower() for name in constraint.columns),
+                    constraint.referenced_table_id,
+                    tuple(name.lower() for name in constraint.referenced_columns),
+                )
+            )
+    return composite_primary_keys, frozenset(declared_composite_fks)
+
+
+async def _build_canonical_read(
+    session: AsyncSession, mapping: CanonicalTableMapping
+) -> CanonicalTableMappingRead:
+    qualified = await _qualified_names(session, {mapping.canonical_table_id})
+    return CanonicalTableMappingRead(
+        id=mapping.id,
+        organization_id=mapping.organization_id,
+        family_candidate_id=mapping.family_candidate_id,
+        canonical_table_id=mapping.canonical_table_id,
+        canonical_qualified_name=qualified.get(mapping.canonical_table_id, ""),
+        resolved_by=mapping.resolved_by,
+        rationale=mapping.rationale,
+        is_steward_override=mapping.is_steward_override,
+        created_at=mapping.created_at,
+        updated_at=mapping.updated_at,
+    )
+
+
+async def _build_composite_read(
+    session: AsyncSession, group: RelationshipCandidateGroup
+) -> CompositeRelationshipCandidateRead:
+    members = (
+        await session.scalars(
+            select(RelationshipCandidateGroupMember)
+            .where(RelationshipCandidateGroupMember.group_id == group.id)
+            .order_by(RelationshipCandidateGroupMember.ordinal)
+        )
+    ).all()
+    column_ids = {member.source_column_id for member in members} | {
+        member.target_column_id for member in members
+    }
+    columns = (
+        (await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(column_ids))))
+        .all()
+        if column_ids
+        else []
+    )
+    names = {column.id: column.name for column in columns}
+    return CompositeRelationshipCandidateRead(
+        id=group.id,
+        organization_id=group.organization_id,
+        datasource_id=group.datasource_id,
+        source_table_id=group.source_table_id,
+        target_table_id=group.target_table_id,
+        detection_rule=group.detection_rule,
+        confidence=group.confidence,
+        evidence=group.evidence,
+        status=group.status,
+        created_by=group.created_by,
+        reviewed_by=group.reviewed_by,
+        review_reason=group.review_reason,
+        reviewed_at=group.reviewed_at,
+        members=[
+            CompositeRelationshipCandidateMemberRead(
+                ordinal=member.ordinal,
+                source_column_id=member.source_column_id,
+                target_column_id=member.target_column_id,
+                source_column_name=names.get(member.source_column_id, ""),
+                target_column_name=names.get(member.target_column_id, ""),
+            )
+            for member in members
+        ],
+        created_at=group.created_at,
+        updated_at=group.updated_at,
+    )
+
+
+# --------------------------------------------------------------------------
+# RL-2 -- canonical table resolution with steward override
+#
+# Table family detection/review (RL-1) lives entirely in
+# ``aida.table_family_api`` / ``aida.table_family_intelligence``, backed by
+# ``TableFamilyCandidate``. What follows only resolves, given an APPROVED
+# family, which member is canonical -- filling the one gap that model leaves
+# open (no steward override mechanism, and ``base_table_id`` is explicitly
+# never set for a SNAPSHOT family).
+# --------------------------------------------------------------------------
+
+_CANONICAL_OVERRIDE_ROLES = ("PlatformAdmin", "MetadataReviewer", "DataSteward")
+
+
+async def _find_approved_family_for_table(
+    session: AsyncSession, datasource_id: UUID, table_id: UUID
+) -> TableFamilyCandidate | None:
+    """The APPROVED ``TableFamilyCandidate`` (if any) that ``table_id`` belongs to.
+
+    ``member_table_ids`` is a plain JSON list of stringified ids (not a JSONB
+    column with a containment operator to lean on), so this scans the
+    (small, per-datasource) set of APPROVED candidates and matches in Python
+    -- the same approach ``aida.table_family_api._existing_member_keys``
+    already uses for the analogous re-detection dedupe check.
+    """
+    candidates = (
+        await session.scalars(
+            select(TableFamilyCandidate).where(
+                TableFamilyCandidate.datasource_id == datasource_id,
+                TableFamilyCandidate.status == "APPROVED",
+            )
+        )
+    ).all()
+    target = str(table_id)
+    for candidate in candidates:
+        if target in candidate.member_table_ids:
+            return candidate
+    return None
+
+
+@router.get(
+    "/datasources/{datasource_id}/canonical-table/resolve",
+    response_model=TableRef | None,
+)
+async def resolve_canonical_table(
+    datasource_id: UUID,
+    table_id: UUID = Query(...),
+    context: SecurityContext = Depends(require_roles(*GRAPH_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> TableRef | None:
+    """``resolve_canonical(scope, entity_ref)`` from the module 06 public interface.
+
+    ``entity_ref`` is any table belonging to the family. Resolution order:
+    an explicit steward override (``CanonicalTableMapping``), else the
+    family's own ``base_table_id``, else ``None`` -- e.g. an un-overridden
+    SNAPSHOT family, where the algorithm never names a "current" member.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None or table.datasource_id != datasource_id:
+        raise HTTPException(status_code=404, detail="metadata table not found")
+    enforce_organization(context, table.organization_id)
+    family = await _find_approved_family_for_table(session, datasource_id, table_id)
+    if family is None:
+        return None
+    mapping = await session.scalar(
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family.id
+        )
+    )
+    effective_id = resolve_canonical_table_id(
+        base_table_id=family.base_table_id,
+        steward_override_table_id=mapping.canonical_table_id if mapping else None,
+    )
+    if effective_id is None:
+        return None
+    qualified = await _qualified_names(session, {effective_id})
+    return TableRef(table_id=effective_id, qualified_name=qualified.get(effective_id, ""))
+
+
+@router.get(
+    "/table-family-candidates/{family_candidate_id}/canonical",
+    response_model=CanonicalTableMappingRead | None,
+)
+async def get_canonical_mapping(
+    family_candidate_id: UUID,
+    context: SecurityContext = Depends(require_roles(*GRAPH_READER_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CanonicalTableMappingRead | None:
+    family = await session.get(TableFamilyCandidate, family_candidate_id)
+    if family is None:
+        raise HTTPException(status_code=404, detail="table family candidate not found")
+    enforce_organization(context, family.organization_id)
+    mapping = await session.scalar(
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family_candidate_id
+        )
+    )
+    if mapping is None:
+        return None
+    return await _build_canonical_read(session, mapping)
+
+
+@router.post(
+    "/table-family-candidates/{family_candidate_id}/canonical/override",
+    response_model=CanonicalTableMappingRead | None,
+)
+async def override_canonical_table(
+    family_candidate_id: UUID,
+    body: CanonicalTableOverrideRequest,
+    context: SecurityContext = Depends(require_roles(*_CANONICAL_OVERRIDE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> CanonicalTableMappingRead | None:
+    """Steward decision naming (or clearing) the canonical member (maker-checker).
+
+    Only accepted against an APPROVED ``TableFamilyCandidate`` -- a family
+    still under review, or rejected, has no canonical member to name yet.
+    ``table_id=None`` clears an existing override (deleting the mapping row)
+    and reverts resolution to the family's own ``base_table_id``; a
+    rationale is always required, including to clear, since either is an
+    auditable decision.
+    """
+    family = await session.get(TableFamilyCandidate, family_candidate_id)
+    if family is None:
+        raise HTTPException(status_code=404, detail="table family candidate not found")
+    enforce_organization(context, family.organization_id)
+    if family.status != "APPROVED":
+        raise HTTPException(
+            status_code=409,
+            detail="canonical table can only be set for an APPROVED table family candidate",
+        )
+
+    mapping = await session.scalar(
+        select(CanonicalTableMapping).where(
+            CanonicalTableMapping.family_candidate_id == family_candidate_id
+        )
+    )
+
+    if body.table_id is None:
+        if mapping is not None:
+            await session.delete(mapping)
+            await session.flush()
+        record_audit(
+            session,
+            replace(context, organization_id=family.organization_id),
+            action="canonical_table.override_cleared",
+            resource_type="table_family_candidate",
+            resource_id=str(family.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"rationale": body.rationale},
+        )
+        record_outbox(
+            session,
+            organization_id=family.organization_id,
+            aggregate_type="table_family_candidate",
+            aggregate_id=str(family.id),
+            event_type="canonical_table.resolved.v1",
+            payload={
+                "family_candidate_id": str(family.id),
+                "canonical_table_id": (
+                    str(family.base_table_id) if family.base_table_id else None
+                ),
+                "steward_override": False,
+            },
+        )
+        await session.commit()
+        return None
+
+    if str(body.table_id) not in family.member_table_ids:
+        raise HTTPException(
+            status_code=409,
+            detail="override target is not a member of this table family",
+        )
+
+    if mapping is None:
+        mapping = CanonicalTableMapping(
+            organization_id=family.organization_id,
+            family_candidate_id=family.id,
+            canonical_table_id=body.table_id,
+            resolved_by=context.principal_id,
+            rationale=body.rationale,
+            is_steward_override=True,
+        )
+        session.add(mapping)
+    else:
+        mapping.canonical_table_id = body.table_id
+        mapping.resolved_by = context.principal_id
+        mapping.rationale = body.rationale
+        mapping.is_steward_override = True
+    await session.flush()
+
+    record_audit(
+        session,
+        replace(context, organization_id=family.organization_id),
+        action="canonical_table.override",
+        resource_type="canonical_table_mapping",
+        resource_id=str(mapping.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"canonical_table_id": str(body.table_id)},
+    )
+    record_outbox(
+        session,
+        organization_id=family.organization_id,
+        aggregate_type="canonical_table_mapping",
+        aggregate_id=str(mapping.id),
+        event_type="canonical_table.resolved.v1",
+        payload={
+            "family_candidate_id": str(family.id),
+            "canonical_table_id": str(mapping.canonical_table_id),
+            "steward_override": True,
+        },
+    )
+    result = await _build_canonical_read(session, mapping)
+    await session.commit()
+    return result
+
+# --------------------------------------------------------------------------
+# RL-3 -- composite (multi-column) relationship candidates
+# --------------------------------------------------------------------------
+
+
+@router.post(
+    "/datasources/{datasource_id}/relationship-candidates/discover-composite",
+    response_model=Page,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def discover_composite_relationship_candidates(
+    datasource_id: UUID,
+    body: CompositeRelationshipCandidateDiscoveryRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Page:
+    """Propose bounded, evidence-backed composite (multi-column) FK-like candidates.
+
+    Single-column candidates keep using ``RelationshipCandidate`` unchanged;
+    this extends generation with the ordered-column-set shape a composite key
+    needs, following the same declared-constraints-are-facts pruning order.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+
+    tables = (
+        await session.scalars(
+            select(MetadataTable).where(
+                MetadataTable.datasource_id == datasource.id, MetadataTable.status == "ACTIVE"
+            )
+        )
+    ).all()
+    table_ids = {table.id for table in tables}
+    columns = (
+        await session.scalars(
+            select(MetadataColumn)
+            .where(MetadataColumn.table_id.in_(table_ids), MetadataColumn.status == "ACTIVE")
+            .order_by(MetadataColumn.table_id, MetadataColumn.ordinal_position)
+            .limit(settings.relationship_candidate_scan_max_columns)
+        )
+    ).all()
+    columns_by_table_id: dict[UUID, list[MetadataColumn]] = {}
+    for column in columns:
+        columns_by_table_id.setdefault(column.table_id, []).append(column)
+
+    profiles_by_table = await _latest_table_profiles(session, datasource.id, table_ids)
+    column_profile_by_column = await _column_profile_stats(
+        session, [profile.id for profile in profiles_by_table.values()]
+    )
+    columns_meta_by_table: dict[UUID, tuple[ColumnMeta, ...]] = {
+        table_id: tuple(
+            ColumnMeta(
+                id=col.id,
+                table_id=col.table_id,
+                name=col.name,
+                physical_type=col.physical_type,
+                nullable=col.nullable,
+                ordinal_position=col.ordinal_position,
+                null_count=(
+                    column_profile_by_column[col.id].null_count
+                    if col.id in column_profile_by_column
+                    else None
+                ),
+                non_null_count=(
+                    column_profile_by_column[col.id].non_null_count
+                    if col.id in column_profile_by_column
+                    else None
+                ),
+                approximate_distinct_count=(
+                    column_profile_by_column[col.id].approximate_distinct_count
+                    if col.id in column_profile_by_column
+                    else None
+                ),
+            )
+            for col in cols
+        )
+        for table_id, cols in columns_by_table_id.items()
+    }
+
+    constraints = (
+        await session.scalars(
+            select(MetadataConstraint).where(
+                MetadataConstraint.datasource_id == datasource.id,
+                MetadataConstraint.status == "ACTIVE",
+            )
+        )
+    ).all()
+    composite_primary_keys, declared_composite_fks = _composite_keys_from_constraints(
+        list(constraints), table_ids
+    )
+    existing_fingerprints = frozenset(
+        await session.scalars(
+            select(RelationshipCandidateGroup.member_fingerprint).where(
+                RelationshipCandidateGroup.datasource_id == datasource.id
+            )
+        )
+    )
+
+    generated = generate_composite_relationship_candidates(
+        columns_by_table=columns_meta_by_table,
+        composite_primary_keys=composite_primary_keys,
+        declared_composite_foreign_keys=declared_composite_fks,
+        existing_fingerprints=existing_fingerprints,
+        max_group_columns=settings.relationship_candidate_composite_max_columns,
+        max_candidates_per_table=settings.relationship_candidate_composite_max_per_table,
+    )[: body.max_candidates]
+
+    created_groups: list[RelationshipCandidateGroup] = []
+    for candidate in generated:
+        group = RelationshipCandidateGroup(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            source_table_id=candidate.source_table_id,
+            target_table_id=candidate.target_table_id,
+            member_fingerprint=candidate.fingerprint,
+            member_count=len(candidate.members),
+            detection_rule=candidate.detection_rule,
+            confidence=candidate.confidence,
+            evidence=candidate.evidence,
+            created_by=context.principal_id,
+        )
+        session.add(group)
+        await session.flush()
+        for pair in candidate.members:
+            session.add(
+                RelationshipCandidateGroupMember(
+                    group_id=group.id,
+                    ordinal=pair.ordinal,
+                    source_column_id=pair.source_column_id,
+                    target_column_id=pair.target_column_id,
+                )
+            )
+        created_groups.append(group)
+    await session.flush()
+
+    record_audit(
+        session,
+        replace(context, organization_id=datasource.organization_id),
+        action="composite_relationship_candidates.discover",
+        resource_type="datasource",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "created_candidates": len(created_groups),
+            "columns_scanned": len(columns),
+            "column_scan_limit": settings.relationship_candidate_scan_max_columns,
+            "max_group_columns": settings.relationship_candidate_composite_max_columns,
+            "value_inspection": False,
+        },
+    )
+    await session.commit()
+
+    items = [await _build_composite_read(session, group) for group in created_groups]
+    return Page(items=items, limit=body.max_candidates, offset=0, total=len(items))
+
+
+@router.get(
+    "/datasources/{datasource_id}/relationship-candidates/composite",
+    response_model=Page,
+)
+async def list_composite_relationship_candidates(
+    datasource_id: UUID,
+    candidate_status: str | None = Query(default=None, max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "Auditor", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    filters = [RelationshipCandidateGroup.datasource_id == datasource.id]
+    if candidate_status:
+        filters.append(RelationshipCandidateGroup.status == candidate_status.upper())
+    total = await session.scalar(
+        select(func.count()).select_from(RelationshipCandidateGroup).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(RelationshipCandidateGroup)
+            .where(*filters)
+            .order_by(
+                RelationshipCandidateGroup.confidence.desc(),
+                RelationshipCandidateGroup.created_at,
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[await _build_composite_read(session, row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/composite-relationship-candidates/{group_id}/decision",
+    response_model=CompositeRelationshipCandidateRead,
+)
+async def decide_composite_relationship_candidate(
+    group_id: UUID,
+    body: RelationshipCandidateDecision,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataReviewer", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> CompositeRelationshipCandidateRead:
+    group = await session.get(RelationshipCandidateGroup, group_id)
+    if group is None:
+        raise HTTPException(status_code=404, detail="composite relationship candidate not found")
+    enforce_organization(context, group.organization_id)
+    if group.created_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker cannot review their own candidate")
+    if group.status != "PENDING":
+        raise HTTPException(
+            status_code=409, detail="composite relationship candidate is already decided"
+        )
+    group.status = "APPROVED" if body.decision == "APPROVE" else "REJECTED"
+    group.reviewed_by = context.principal_id
+    group.review_reason = body.reason
+    group.reviewed_at = datetime.now(UTC)
+    record_audit(
+        session,
+        replace(context, organization_id=group.organization_id),
+        action="composite_relationship_candidate.decide",
+        resource_type="relationship_candidate_group",
+        resource_id=str(group.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"decision": body.decision},
+    )
+    record_outbox(
+        session,
+        organization_id=group.organization_id,
+        aggregate_type="relationship_candidate_group",
+        aggregate_id=str(group.id),
+        event_type="composite_relationship_candidate.decided.v1",
+        payload={"group_id": str(group.id), "status": group.status},
+    )
+    await session.flush()
+    result = await _build_composite_read(session, group)
+    await session.commit()
+    return result
