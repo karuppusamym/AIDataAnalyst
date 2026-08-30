@@ -2067,6 +2067,7 @@ class ContextProductDefinition(ApiModel):
     name: str = Field(min_length=3, max_length=200)
     description: str = Field(min_length=3, max_length=10_000)
     purpose: str = Field(min_length=10, max_length=1000)
+    owner_type: Literal["INDIVIDUAL", "GROUP"]
     owner_principal: str = Field(min_length=2, max_length=255)
     table_ids: list[UUID] = Field(default_factory=list, max_length=1000)
     semantic_model_version_ids: list[UUID] = Field(default_factory=list, max_length=100)

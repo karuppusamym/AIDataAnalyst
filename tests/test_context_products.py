@@ -5,11 +5,14 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from aida.context_product_api import (
     _can_read_context_product_version,
     context_product_fingerprint,
+    create_context_product_version,
+    update_context_product_version,
 )
 from aida.context_product_policy import evaluate_context_product_quality
 from aida.main import app
@@ -21,8 +24,13 @@ from aida.models import (
     ContextProductVersion,
     GovernanceReview,
     OutboxEvent,
+    Project,
 )
-from aida.schemas import ContextProductDefinition, GovernanceDecisionRequest
+from aida.schemas import (
+    ContextProductDefinition,
+    ContextProductVersionCreate,
+    GovernanceDecisionRequest,
+)
 from aida.security import SecurityContext
 from aida.semantic_api import decide_governance_review
 
@@ -92,6 +100,7 @@ def _definition(**changes: object) -> ContextProductDefinition:
         "name": "Revenue analysis context",
         "description": "Approved definitions and tools for revenue analysis.",
         "purpose": "Give analyst agents bounded, governed revenue context.",
+        "owner_type": "GROUP",
         "owner_principal": "data-product-owner",
         "table_ids": [uuid4()],
         "allowed_consumer_roles": ["Analyst"],
@@ -111,6 +120,7 @@ def _candidate(*, organization_id: UUID, product_id: UUID) -> ContextProductVers
         name=definition.name,
         description=definition.description,
         purpose=definition.purpose,
+        owner_type=definition.owner_type,
         owner_principal=definition.owner_principal,
         table_ids=[str(value) for value in definition.table_ids],
         semantic_model_version_ids=[],
@@ -410,3 +420,287 @@ async def test_approved_deprecation_retires_published_context_product() -> None:
         isinstance(value, OutboxEvent) and value.event_type == "context.product_deprecated.v1"
         for value in session.added
     )
+
+
+# --- CX-2: versioned, owned, approved ---------------------------------------
+
+
+def test_ownership_requires_an_explicit_individual_or_group_owner_type() -> None:
+    """Ownership must be explicit and typed, mirroring the INDIVIDUAL/GROUP
+    shape already used for tables and glossary terms (`OwnershipRuleCreate`) --
+    not a bare, untyped owner string.
+    """
+    with pytest.raises(ValidationError):
+        _definition(owner_type="TEAM")
+    with pytest.raises(ValidationError):
+        ContextProductDefinition.model_validate(
+            {
+                "name": "Revenue analysis context",
+                "description": "Approved definitions and tools for revenue analysis.",
+                "purpose": "Give analyst agents bounded, governed revenue context.",
+                "owner_principal": "data-product-owner",
+                "table_ids": [uuid4()],
+                "allowed_consumer_roles": ["Analyst"],
+            }
+        )
+
+    individual = _definition(owner_type="INDIVIDUAL")
+    group = _definition(owner_type="GROUP")
+    assert individual.owner_type == "INDIVIDUAL"
+    assert group.owner_type == "GROUP"
+
+
+class _CreateVersionSession:
+    """Fake session for `create_context_product_version`: `.get()` and
+    `.scalar()` each pop preset results in call order, `.scalars()` returns
+    the preset governed-reference rows, and every UPDATE/DELETE statement is
+    recorded so a test can prove the prior version was never touched.
+    """
+
+    def __init__(
+        self,
+        *,
+        get_results: list[object],
+        scalar_results: list[object],
+        scalars_results: list[list[object]],
+    ) -> None:
+        self._get_queue = list(get_results)
+        self._scalar_queue = list(scalar_results)
+        self._scalars_queue = list(scalars_results)
+        self.added: list[object] = []
+        self.executed_statements: list[object] = []
+        self.committed = False
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        return self._get_queue.pop(0)
+
+    async def scalar(self, _statement: object) -> object:
+        return self._scalar_queue.pop(0)
+
+    async def scalars(self, _statement: object) -> object:
+        values = self._scalars_queue.pop(0)
+
+        class _Scalars:
+            def all(self_inner) -> list[object]:
+                return values
+
+        return _Scalars()
+
+    async def execute(self, statement: object) -> None:
+        self.executed_statements.append(statement)
+
+    def add(self, value: object) -> None:
+        # Mirror the column defaults `models.ContextProductVersion` declares
+        # (`id`, `status`, `created_at`, `updated_at`) -- a real flush against
+        # a live engine applies them; this fake session never flushes, so it
+        # applies them itself rather than asserting against attributes a real
+        # database would have already filled in.
+        if isinstance(value, ContextProductVersion):
+            if value.id is None:
+                value.id = uuid4()
+            if value.status is None:
+                value.status = "DRAFT"
+            if value.created_at is None:
+                value.created_at = datetime.now(UTC)
+            if value.updated_at is None:
+                value.updated_at = datetime.now(UTC)
+        self.added.append(value)
+
+    async def flush(self) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _active_product(*, organization_id: UUID, project_id: UUID) -> ContextProduct:
+    return ContextProduct(
+        id=uuid4(),
+        organization_id=organization_id,
+        project_id=project_id,
+        product_key="revenue_context",
+        lifecycle_status="ACTIVE",
+        created_by="product-author",
+    )
+
+
+def _project(*, organization_id: UUID) -> Project:
+    return Project(
+        id=uuid4(),
+        organization_id=organization_id,
+        line_of_business_id=uuid4(),
+        data_domain_id=uuid4(),
+        name="Revenue",
+        slug="revenue",
+        status="ACTIVE",
+    )
+
+
+async def test_editing_a_product_creates_a_new_version_and_leaves_the_prior_one_untouched() -> (
+    None
+):
+    """CX-2 versioning: a change to a context product creates a new,
+    numbered version pinned to `based_on_version_id`; it never mutates the
+    version it was drafted from -- that version stays queryable exactly as
+    it was (superseding it is the checker's job, at approval, per
+    `test_approval_publishes_candidate_and_supersedes_prior_version`)."""
+    organization_id = uuid4()
+    project = _project(organization_id=organization_id)
+    product = _active_product(organization_id=organization_id, project_id=project.id)
+    published = _candidate(organization_id=organization_id, product_id=product.id)
+    published.status = "PUBLISHED"
+    published.version = 1
+    table_id = published.table_ids[0]
+    context = SecurityContext(
+        principal_id="product-author",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"DataSteward"}),
+    )
+    session = _CreateVersionSession(
+        get_results=[product, project, published],
+        scalar_results=[1],
+        scalars_results=[[UUID(table_id)]],
+    )
+    body = ContextProductVersionCreate(
+        name=published.name,
+        description="Refreshed definitions and tools for revenue analysis.",
+        purpose=published.purpose,
+        owner_type="GROUP",
+        owner_principal="data-product-owner",
+        table_ids=[UUID(table_id)],
+        allowed_consumer_roles=["Analyst"],
+        based_on_version_id=published.id,
+    )
+
+    new_version = await create_context_product_version(
+        product.id, body, context, session  # type: ignore[arg-type]
+    )
+
+    assert new_version.version == 2
+    assert new_version.status == "DRAFT"
+    assert new_version.based_on_version_id == published.id
+    assert new_version.description == body.description
+    # The prior published version is a distinct object and was never queried
+    # for mutation -- only its role bindings for the *new* version were
+    # touched (a delete scoped to the new version's own id).
+    assert published.status == "PUBLISHED"
+    assert published.description != new_version.description
+    assert any(
+        isinstance(value, OutboxEvent) and value.event_type == "context.product_draft_created.v1"
+        for value in session.added
+    )
+    assert session.committed is True
+
+
+async def test_only_a_draft_version_can_be_edited() -> None:
+    """CX-2 versioning: once a version leaves DRAFT (submitted, published,
+    or otherwise decided) it is immutable -- further changes require a new
+    version, not an in-place edit."""
+    organization_id = uuid4()
+    for immutable_status in ("REVIEW_REQUIRED", "PUBLISHED", "REJECTED", "DEPRECATED"):
+        candidate = _candidate(organization_id=organization_id, product_id=uuid4())
+        candidate.status = immutable_status
+        product = ContextProduct(
+            id=candidate.product_id,
+            organization_id=organization_id,
+            project_id=uuid4(),
+            product_key="revenue_context",
+            lifecycle_status="ACTIVE",
+            created_by="product-author",
+        )
+        session = _CreateVersionSession(
+            get_results=[candidate, product],
+            scalar_results=[],
+            scalars_results=[],
+        )
+        context = SecurityContext(
+            principal_id="product-author",
+            principal_type="USER",
+            organization_id=organization_id,
+            roles=frozenset({"DataSteward"}),
+        )
+
+        with pytest.raises(HTTPException) as denied:
+            await update_context_product_version(
+                candidate.id,
+                _definition(),  # type: ignore[arg-type]
+                context,
+                session,  # type: ignore[arg-type]
+            )
+
+        assert denied.value.status_code == 409
+        assert "draft" in denied.value.detail
+
+
+async def test_context_product_self_approval_is_rejected() -> None:
+    """CX-2 maker-checker: the principal who proposed a context product
+    version can never be the principal who approves or rejects it -- the
+    shared `decide_governance_review` maker-checker guard (INV-8) covers
+    `CONTEXT_PRODUCT_VERSION` exactly like every other governed object type.
+    """
+    organization_id = uuid4()
+    candidate = _candidate(organization_id=organization_id, product_id=uuid4())
+    review = _review(organization_id=organization_id, version_id=candidate.id)
+    session = _GovernanceDecisionSession(get_results=[review])
+    maker_context = SecurityContext(
+        principal_id=review.requested_by,  # identical to the maker
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"PlatformAdmin"}),
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        await decide_governance_review(
+            review.id,
+            GovernanceDecisionRequest(decision="APPROVE"),
+            maker_context,
+            session,  # type: ignore[arg-type]
+        )
+
+    assert denied.value.status_code == 409
+    assert "maker-checker" in denied.value.detail
+    # The candidate was never touched -- the guard fires before the review's
+    # object_type is even inspected.
+    assert candidate.status == "REVIEW_REQUIRED"
+    assert session.committed is False
+
+
+async def test_mcp_resource_query_never_matches_an_unpublished_version() -> None:
+    """CX-2 x CX-3: only an approved (`PUBLISHED`) version is exposed through
+    the MCP-facing read path -- the SQL predicate itself excludes DRAFT,
+    REVIEW_REQUIRED, REJECTED, SUPERSEDED, and DEPRECATED versions, so a
+    consumer can never race a pending approval or read a retired version.
+    """
+    from aida.mcp_server import _resolve_context_product_scope
+
+    organization_id = uuid4()
+    context = SecurityContext(
+        principal_id="analyst-agent",
+        principal_type="SERVICE",
+        organization_id=organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+
+    class _CapturingSession:
+        def __init__(self) -> None:
+            self.statements: list[object] = []
+
+        async def execute(self, statement: object) -> object:
+            self.statements.append(statement)
+
+            class _Result:
+                def first(self_inner) -> object:
+                    return None
+
+            return _Result()
+
+    session = _CapturingSession()
+    uri = "atlas://context-products/revenue_context/versions/1"
+
+    result = await _resolve_context_product_scope(uri, session, context)  # type: ignore[arg-type]
+
+    assert result is None
+    compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "PUBLISHED" in compiled
+    assert "context_product_version.status" in compiled

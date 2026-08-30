@@ -51,6 +51,7 @@ def _artifact_payload(
         "description": version.description,
         "purpose": version.purpose,
         "owner": version.owner_principal,
+        "owner_type": version.owner_type,
         "references": references,
         "quality_requirements": version.quality_requirements,
         "policy_summary": version.policy_summary,

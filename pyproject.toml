@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bank-data-intelligence-platform"
-version = "0.1.0"
+version = "0.2.0"
 description = "Governed enterprise metadata and agentic analytics platform"
 requires-python = ">=3.13"
 dependencies = [
