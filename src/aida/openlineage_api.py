@@ -181,8 +181,11 @@ async def _event_read(
             .limit(2000)
         )
     ).all()
+    base_fields = OpenLineageRunEventRead.model_validate(event).model_dump(
+        exclude={"datasets", "table_edges", "column_edges"}
+    )
     return OpenLineageRunEventRead(
-        **OpenLineageRunEventRead.model_validate(event).model_dump(),
+        **base_fields,
         datasets=[OpenLineageDatasetRead.model_validate(item) for item in datasets],
         table_edges=[OpenLineageTableEdgeRead.model_validate(item) for item in table_edges],
         column_edges=[OpenLineageColumnEdgeRead.model_validate(item) for item in column_edges],
