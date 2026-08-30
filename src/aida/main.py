@@ -29,6 +29,7 @@ from aida.schemas import HealthResponse
 from aida.semantic_api import router as semantic_router
 from aida.semantic_intelligence_api import router as semantic_intelligence_router
 from aida.stewardship_api import router as stewardship_router
+from aida.table_family_api import router as table_family_router
 from aida.tool_api import router as tool_router
 
 settings = get_settings()
@@ -84,6 +85,7 @@ app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
+app.include_router(table_family_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

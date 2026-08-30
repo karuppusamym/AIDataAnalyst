@@ -837,6 +837,49 @@ class RelationshipCandidate(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TableFamilyCandidate(Base, TimestampMixin):
+    """RL-1: evidence-backed table-family / temporal-intelligence candidate.
+
+    A single row records one detected grouping -- a snapshot series, a
+    history/audit pair, a delta/CDC pair, or a single SCD Type 2 table -- and
+    follows the exact maker-checker review shape established by
+    ``RelationshipCandidate`` above (PENDING/APPROVED/REJECTED, created_by /
+    reviewed_by / reviewed_at). ``member_table_ids`` holds every
+    ``MetadataTable`` id that belongs to the family (exactly one for SCD,
+    normally two or more otherwise); ``base_table_id`` is the inferred
+    "current/live" table when one can be resolved (never set for SNAPSHOT).
+    """
+
+    __tablename__ = "table_family_candidate"
+    __table_args__ = (
+        Index("ix_table_family_candidate_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    schema_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_schema.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    family_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    member_table_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    base_table_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), index=True
+    )
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SemanticInferenceRun(Base, TimestampMixin):
     """Bounded metadata-only business inference run."""
 

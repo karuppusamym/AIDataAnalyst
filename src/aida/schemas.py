@@ -896,6 +896,41 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class TableFamilyDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2000)
+
+
+class TableFamilyCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    schema_id: UUID
+    family_type: Literal["SNAPSHOT", "HISTORY", "DELTA", "SCD"]
+    member_table_ids: list[UUID]
+    base_table_id: UUID | None
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TableFamilyCandidateDecision(ApiModel):
+    decision: Literal["APPROVE", "REJECT"]
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def require_reason(self) -> "TableFamilyCandidateDecision":
+        if self.decision == "REJECT" and not self.reason:
+            raise ValueError("a reason is required when rejecting a table family candidate")
+        return self
+
+
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]
