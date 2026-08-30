@@ -79,7 +79,7 @@ A versioned, deterministic classifier at the explicit `SCREENED` state, **before
 | No policy influence | The model cannot alter a policy, allowlist, or entitlement |
 | No publication | The model cannot publish a semantic version or approve anything |
 
-`test_model_output_types_are_inert` asserts the absence of any coercion path.
+`test_model_output_types_are_inert` would assert the absence of any coercion path — planned, not yet written (2026-08-30).
 
 ## 7. C6 — Deterministic validation
 

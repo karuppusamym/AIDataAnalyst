@@ -59,4 +59,4 @@ For business-semantic inference specifically, the model receives bounded identif
 ## Enforcement
 
 - INV-3 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_model_output_types_are_inert`
+- Test (planned, not written — 2026-08-30): `test_model_output_types_are_inert`

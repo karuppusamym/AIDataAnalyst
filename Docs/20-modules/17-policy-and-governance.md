@@ -87,7 +87,7 @@ flowchart LR
 | Bulk decisions | One decision covering many items, each retaining its own rationale — a bulk approval is one decision, not a bypass |
 | Delegation | Explicit, time-bounded, audited |
 | Reassignment | Audited |
-| Self-approval | Denied, tested (`test_self_approval_denied`) |
+| Self-approval | Denied; test `test_self_approval_denied` is planned, not yet written (2026-08-30) |
 
 ## 9. Public interface
 

@@ -14,13 +14,24 @@ Principles shape the product. Invariants are what make it safe.
 
 Each invariant names its enforcement point and its test. An invariant without an automated test is a wish.
 
+> **Implementation status (2026-08-30).** By this document's own standard, all nine are
+> currently wishes: none of the nine named test functions below exists anywhere under
+> `tests/` — verified by searching for each function name across the repository on
+> 2026-08-30 (`TS-12`, `tests/test_doc_claims.py`, the automated gate that re-verifies
+> this on every run). Each is marked **Planned, not written** below. The invariants
+> themselves are still binding on design review; what is absent is the automated proof.
+> Tracker `ST-03` (Tier 0 invariant suite) is `TODO`.
+>
+> *This count is volatile: re-verify by grepping for the test names (or running
+> `tests/test_doc_claims.py`) rather than trusting this paragraph.*
+
 ### INV-1 — Single authoritative store
 
 **Statement.** PostgreSQL holds authoritative state. Neo4j, vector indexes, search indexes, Redis, and object-storage indexes are rebuildable projections and are never read as truth for an authorization, approval, or correctness decision.
 
 **Enforcement.** Projections are written only by outbox projectors, never by request-path code. No service dual-writes PostgreSQL and a projection.
 
-**Test.** `test_projection_rebuild`: delete Neo4j and the search index entirely, replay from authoritative state, assert full reconstruction and identical query results.
+**Test — Planned, not written (2026-08-30).** `test_projection_rebuild`: delete Neo4j and the search index entirely, replay from authoritative state, assert full reconstruction and identical query results.
 
 ### INV-2 — One execution choke point
 
@@ -28,7 +39,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Connector `execute_*` methods are private to the gateway module. The module boundary is compile-time-checked (import linter rule).
 
-**Test.** `test_no_connector_execution_outside_gateway`: static analysis over the import graph asserts no module outside `query_gateway` imports a connector execution symbol.
+**Test — Planned, not written (2026-08-30).** `test_no_connector_execution_outside_gateway`: static analysis over the import graph asserts no module outside `query_gateway` imports a connector execution symbol.
 
 ### INV-3 — Model output is never authority
 
@@ -36,7 +47,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Model gateway returns typed, validated proposal objects only. Proposal types are structurally distinct from command types; there is no conversion function.
 
-**Test.** `test_model_output_types_are_inert`: assert no proposal type implements or can be coerced to an executable command interface.
+**Test — Planned, not written (2026-08-30).** `test_model_output_types_are_inert`: assert no proposal type implements or can be coerced to an executable command interface.
 
 ### INV-4 — Fail closed
 
@@ -44,7 +55,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Production configuration validation refuses to start with development identity, `env://` secret resolution, weak audit keys, or an insecure JWKS URL.
 
-**Test.** `test_production_config_fail_closed`: parameterized over each incomplete-posture case, assert startup refusal or request denial.
+**Test — Planned, not written (2026-08-30).** `test_production_config_fail_closed`: parameterized over each incomplete-posture case, assert startup refusal or request denial.
 
 ### INV-5 — Tenant isolation is total
 
@@ -52,7 +63,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Repository base class requires a tenant scope argument; there is no unscoped query helper.
 
-**Test.** `test_cross_tenant_denial`: every list/read/write endpoint and every background worker is exercised with a foreign tenant context and must deny.
+**Test — Planned, not written (2026-08-30).** `test_cross_tenant_denial`: every list/read/write endpoint and every background worker is exercised with a foreign tenant context and must deny.
 
 ### INV-6 — Value-freedom of control-plane state
 
@@ -60,7 +71,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Ingestion and profiling validators reject attribute keys associated with samples, row values, secrets, or credentials. Persisted SQL passes a redaction pass.
 
-**Test.** `test_no_source_values_in_control_plane`: run a full end-to-end fixture with sentinel values in source data; scan every platform table, log line, event payload, and trace for the sentinels.
+**Test — Planned, not written (2026-08-30).** `test_no_source_values_in_control_plane`: run a full end-to-end fixture with sentinel values in source data; scan every platform table, log line, event payload, and trace for the sentinels.
 
 ### INV-7 — Attributability of high-impact actions
 
@@ -68,7 +79,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** The unit-of-work commit path requires an audit record for any transaction touching a governed table.
 
-**Test.** `test_every_mutation_audits`: reflection over governed model classes; exercise each mutation endpoint; assert a matching audit row.
+**Test — Planned, not written (2026-08-30).** `test_every_mutation_audits`: reflection over governed model classes; exercise each mutation endpoint; assert a matching audit row.
 
 ### INV-8 — Maker ≠ checker
 
@@ -76,7 +87,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** A single platform-level approval service; feature modules cannot implement their own approval.
 
-**Test.** `test_self_approval_denied`: for every governed object type, attempt self-approval and assert denial.
+**Test — Planned, not written (2026-08-30).** `test_self_approval_denied`: for every governed object type, attempt self-approval and assert denial.
 
 ### INV-9 — Honest capability reporting
 
@@ -84,7 +95,7 @@ Each invariant names its enforcement point and its test. An invariant without an
 
 **Enforcement.** Capability flags are derived from the certification result, not hand-declared.
 
-**Test.** `test_capability_matrix_matches_certification`: assert every advertised capability has a passing certification check.
+**Test — Planned, not written (2026-08-30).** `test_capability_matrix_matches_certification`: assert every advertised capability has a passing certification check.
 
 ## 3. Design principles
 

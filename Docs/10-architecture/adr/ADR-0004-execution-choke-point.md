@@ -55,4 +55,4 @@ Connector execution methods are **module-private to the gateway**. The boundary 
 ## Enforcement
 
 - INV-2 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_no_connector_execution_outside_gateway` (static import-graph analysis)
+- Test (planned, not written — 2026-08-30): `test_no_connector_execution_outside_gateway` (static import-graph analysis)

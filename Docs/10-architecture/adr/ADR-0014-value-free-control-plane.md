@@ -54,4 +54,4 @@ Classification-specific retention approval could permit bounded, approved value 
 ## Enforcement
 
 - INV-6 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_no_source_values_in_control_plane` (sentinel scan across tables, logs, events, traces)
+- Test (planned, not written — 2026-08-30): `test_no_source_values_in_control_plane` (sentinel scan across tables, logs, events, traces)

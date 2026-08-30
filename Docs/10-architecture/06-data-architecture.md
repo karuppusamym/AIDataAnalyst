@@ -217,7 +217,7 @@ Implements INV-6. This is the table a security reviewer will read first.
 | SQL literals | **Redacted** | **Redacted** | N/A |
 | Credentials | **Reference only** | **No** | **No** |
 
-Enforced by: ingestion attribute-key rejection, profiling value-free contract, SQL redaction pass, log scrubbing middleware, and the model-context builder. Tested by `test_no_source_values_in_control_plane` (INV-6).
+Enforced by: ingestion attribute-key rejection, profiling value-free contract, SQL redaction pass, log scrubbing middleware, and the model-context builder. Planned test `test_no_source_values_in_control_plane` (INV-6) — not yet written; see `10-architecture/01-principles-and-invariants.md`.
 
 ## 9. Backup, recovery, and drills
 
