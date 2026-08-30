@@ -102,6 +102,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
 | `stewardship.bulk_operation_rejected.v1` | Checker rejected a bulk stewardship request | operation_id, review_id |
 | `stewardship.coverage_computed.v1` | Coverage snapshot persisted | snapshot_id, scope, overall_score |
+| `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 

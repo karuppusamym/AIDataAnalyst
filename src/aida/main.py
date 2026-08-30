@@ -13,6 +13,7 @@ from temporalio.client import Client
 from aida import __version__
 from aida.ai_governance_api import router as ai_governance_router
 from aida.api import router
+from aida.asset_description_api import router as asset_description_router
 from aida.config import get_settings
 from aida.context import correlation_id_var
 from aida.db import session_factory
@@ -84,6 +85,7 @@ app.include_router(quality_router)
 app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
+app.include_router(asset_description_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

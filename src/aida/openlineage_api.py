@@ -121,7 +121,9 @@ async def _catalog_matches(
     schema_table = {
         key: values[0] for key, values in schema_table_candidates.items() if len(values) == 1
     }
-    table_only = {key: values[0] for key, values in table_only_candidates.items() if len(values) == 1}
+    table_only = {
+        key: values[0] for key, values in table_only_candidates.items() if len(values) == 1
+    }
     return exact, schema_table, table_only
 
 
@@ -131,7 +133,9 @@ def _matched_table_id_for_dataset(
     schema_table: dict[tuple[str, str], UUID],
     table_only: dict[str, UUID],
 ) -> UUID | None:
-    parts = [part for part in (_normalized_identifier(item) for item in dataset.name.split(".")) if part]
+    parts = [
+        part for part in (_normalized_identifier(item) for item in dataset.name.split(".")) if part
+    ]
     if len(parts) >= 3:
         return exact.get((parts[-3], parts[-2], parts[-1])) or schema_table.get(
             (parts[-2], parts[-1])
@@ -151,7 +155,11 @@ async def _event_read(
         await session.scalars(
             select(OpenLineageDataset)
             .where(OpenLineageDataset.run_event_id == event.id)
-            .order_by(OpenLineageDataset.direction, OpenLineageDataset.namespace, OpenLineageDataset.name)
+            .order_by(
+                OpenLineageDataset.direction,
+                OpenLineageDataset.namespace,
+                OpenLineageDataset.name,
+            )
         )
     ).all()
     table_edges = (
@@ -224,7 +232,8 @@ async def ingest_openlineage_run_event(
         _dataset_key(dataset): matched_table_id for dataset, matched_table_id in inputs_with_matches
     }
     output_lookup = {
-        _dataset_key(dataset): matched_table_id for dataset, matched_table_id in outputs_with_matches
+        _dataset_key(dataset): matched_table_id
+        for dataset, matched_table_id in outputs_with_matches
     }
     unresolved_dataset_count = sum(
         matched_table_id is None
@@ -285,7 +294,10 @@ async def ingest_openlineage_run_event(
                 input_dataset_namespace=edge.input_dataset_namespace,
                 input_dataset_name=edge.input_dataset_name,
                 input_table_id=input_lookup.get(
-                    (_normalized_identifier(edge.input_dataset_namespace), _normalized_identifier(edge.input_dataset_name))
+                    (
+                        _normalized_identifier(edge.input_dataset_namespace),
+                        _normalized_identifier(edge.input_dataset_name),
+                    )
                 ),
                 output_dataset_namespace=edge.output_dataset_namespace,
                 output_dataset_name=edge.output_dataset_name,
@@ -298,28 +310,31 @@ async def ingest_openlineage_run_event(
             )
         )
 
-    for edge in parsed.column_edges:
+    for column_edge in parsed.column_edges:
         session.add(
             OpenLineageColumnEdge(
                 organization_id=datasource.organization_id,
                 run_event_id=event.id,
-                input_dataset_namespace=edge.input_dataset_namespace,
-                input_dataset_name=edge.input_dataset_name,
+                input_dataset_namespace=column_edge.input_dataset_namespace,
+                input_dataset_name=column_edge.input_dataset_name,
                 input_table_id=input_lookup.get(
-                    (_normalized_identifier(edge.input_dataset_namespace), _normalized_identifier(edge.input_dataset_name))
-                ),
-                input_column_name=edge.input_column_name,
-                output_dataset_namespace=edge.output_dataset_namespace,
-                output_dataset_name=edge.output_dataset_name,
-                output_table_id=output_lookup.get(
                     (
-                        _normalized_identifier(edge.output_dataset_namespace),
-                        _normalized_identifier(edge.output_dataset_name),
+                        _normalized_identifier(column_edge.input_dataset_namespace),
+                        _normalized_identifier(column_edge.input_dataset_name),
                     )
                 ),
-                output_column_name=edge.output_column_name,
-                transformation_type=edge.transformation_type,
-                transformation_subtype=edge.transformation_subtype,
+                input_column_name=column_edge.input_column_name,
+                output_dataset_namespace=column_edge.output_dataset_namespace,
+                output_dataset_name=column_edge.output_dataset_name,
+                output_table_id=output_lookup.get(
+                    (
+                        _normalized_identifier(column_edge.output_dataset_namespace),
+                        _normalized_identifier(column_edge.output_dataset_name),
+                    )
+                ),
+                output_column_name=column_edge.output_column_name,
+                transformation_type=column_edge.transformation_type,
+                transformation_subtype=column_edge.transformation_subtype,
             )
         )
 
@@ -382,7 +397,9 @@ async def list_openlineage_run_events(
 ) -> Page:
     datasource = await _datasource_scope(session, datasource_id, context)
     filters = (OpenLineageRunEvent.datasource_id == datasource.id,)
-    total = await session.scalar(select(func.count()).select_from(OpenLineageRunEvent).where(*filters))
+    total = await session.scalar(
+        select(func.count()).select_from(OpenLineageRunEvent).where(*filters)
+    )
     rows = (
         await session.scalars(
             select(OpenLineageRunEvent)

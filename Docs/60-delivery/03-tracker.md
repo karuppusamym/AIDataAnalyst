@@ -3,7 +3,7 @@
 > Status: **Living document.** Owner: Engineering lead. Update at every increment.
 > This is the single place to answer "what is the state of everything." It consolidates the open-work IDs from every module spec, the security backlog, and the test gaps.
 
-**Last reviewed:** 2026-08-28
+**Last reviewed:** 2026-08-30
 
 ## How to use this
 
@@ -101,6 +101,7 @@
 | GL-6 | Unowned-asset backlog with routing | 08 | A | P1 | IN PROGRESS | — | Coverage returns and UI exposes a bounded backlog; automated owner routing/escalation remains |
 | GL-7 | Leaver reassignment | 08 | C | P2 | TODO | — | Whole portfolio in one action |
 | GL-8 | Term linkage inference | 08 | B | P1 | DONE | — | Approved annotation exact-label evidence generates bounded proposals; independent approval creates provenance links |
+| GL-9 | Evidence-scored table description drafting, routed through review | 08 | B | P1 | DONE | — | `tests/test_asset_description.py` proves: (1) `score_evidence` is deterministic and strictly rewards more evidence (zero-evidence < partial < fully-evidenced, threshold 0.4); (2) `ensure_reviewable` blocks a below-threshold draft with 422 and runs before any `GovernanceReview` is constructed in `submit_asset_description_draft`, so a low-evidence draft never reaches `PENDING_APPROVAL`; (3) `apply_asset_description_draft` — the only code path that publishes a draft onto `AssetDocumentationVersion` — has exactly one call site, inside `semantic_api.decide_governance_review`, after that function's self-approval guard, so no score however high bypasses independent review. Manually verified end-to-end against a live Postgres: a zero-evidence table scores 0.24 (submission refused, 422), a fully-evidenced table scores 1.0 (submits fine), self-approval on that review is refused (409), independent approval publishes the drafted text as a new approved `AssetDocumentationVersion`, and a rejected draft is retained and its identical text is not regenerated on the next `generate` call. |
 | **LN-1** | **OpenLineage ingestion** | 09 | A | **P0** | TODO | — | Airflow events produce edges |
 | **LN-2** | **View and procedure lineage** | 09 | A | **P0** | TODO | — | Column-level where dialect permits |
 | **LN-3** | **AI decision lineage as first-class edges** | 09/13 | E | **P0** | TODO | — | Includes rejections and refusals |
@@ -291,12 +292,12 @@ These do not block product development. They **do** block production release.
 | Structural foundation | 7 | 3 | 0 | 10 |
 | Connectors and ingestion | 8 | 7 | 0 | 15 |
 | Catalog / profiling / relationships | 2 | 13 | 2 | 17 |
-| Semantics / glossary / lineage / graph | 8 | 18 | 4 | 30 |
+| Semantics / glossary / lineage / graph | 8 | 19 | 4 | 31 |
 | Quality / retrieval / runtime | 11 | 10 | 3 | 24 |
 | Tools / gateways / governance | 10 | 12 | 2 | 24 |
 | Identity / studio / context / UX / observability | 12 | 16 | 4 | 32 |
 | Testing / performance / certification | 12 | 5 | 1 | 18 |
-| **Total** | **70** | **84** | **16** | **170** |
+| **Total** | **70** | **85** | **16** | **171** |
 
 **The honest read.** 70 P0 items, none assigned, and eight overdue drills. The architecture is well ahead of the operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md` §7. Phase D is not a formality; it is where the product's claims become defensible.
 
