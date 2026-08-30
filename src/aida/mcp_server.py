@@ -1425,6 +1425,27 @@ async def _handle_resources_read(
     if not uri.startswith("atlas://catalog/"):
         return {"contents": [{"uri": uri, "text": "Unknown resource URI scheme."}]}
 
+    inaccessible = {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
+
+    # ---- CX-3: Per-read policy evaluation for catalog resources ----
+    if not _tool_role_eligible(context.roles, list(CATALOG_RESOURCE_READER_ROLES)):
+        record_audit(
+            session,
+            context,
+            action="mcp.catalog_resource.role_denied",
+            resource_type="catalog_resource",
+            resource_id=uri,
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "uri": uri,
+                "allowed_roles": sorted(CATALOG_RESOURCE_READER_ROLES),
+                "principal_roles": sorted(context.roles),
+            },
+        )
+        await session.commit()
+        return inaccessible
+
     # Parse: atlas://catalog/{datasource_id}/{schema}/{table}
     parts = uri.removeprefix("atlas://catalog/").split("/")
     if len(parts) != 3:
@@ -1450,7 +1471,7 @@ async def _handle_resources_read(
     ).first()
 
     if row is None:
-        return {"contents": [{"uri": uri, "text": "Resource not found or not accessible."}]}
+        return inaccessible
 
     table, schema, catalog = row
 
@@ -1489,6 +1510,36 @@ async def _handle_resources_read(
             )
         },
     }
+
+    # ---- CX-3: Audit successful catalog read ----
+    record_audit(
+        session,
+        context,
+        action="mcp.catalog_resource.read",
+        resource_type="catalog_resource",
+        resource_id=str(table.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={"uri": uri, "table_name": table.name, "schema_name": schema.name},
+    )
+
+    # ---- CX-4: Record consumption lineage ----
+    if context.organization_id is not None:
+        await record_consumption(
+            session,
+            organization_id=context.organization_id,
+            edge=ConsumptionEdge(
+                consumer_id=context.principal_id,
+                consumer_type=context.principal_type,
+                resource_type="metadata_table",
+                resource_id=str(table.id),
+                channel="MCP",
+                correlation_id=correlation_id,
+                policy_decision="ALLOW",
+                business_purpose=context.business_purpose,
+                details={"uri": uri},
+            ),
+        )
 
     return {
         "contents": [
