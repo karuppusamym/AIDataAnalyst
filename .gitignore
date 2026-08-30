@@ -18,3 +18,6 @@ artifacts/
 
 # Local scratch space for ad hoc reports and repo bundles - never commit these
 scratch/
+
+# Claude Code local tooling state (background-agent worktrees, etc.) - never commit
+.claude/
