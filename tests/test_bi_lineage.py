@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -15,10 +16,15 @@ from aida.main import app
 from aida.schemas import BiMetricNodeRead
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "tableau_metadata_sample.json"
+POWER_BI_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "power_bi_metadata_sample.json"
 
 
 def tableau_metadata_fixture() -> dict[str, object]:
     return json.loads(FIXTURE_PATH.read_text())
+
+
+def power_bi_metadata_fixture() -> dict[str, object]:
+    return json.loads(POWER_BI_FIXTURE_PATH.read_text())
 
 
 def test_tableau_parser_builds_report_metric_column_edges() -> None:
@@ -88,6 +94,105 @@ def test_tableau_parser_builds_report_metric_column_edges() -> None:
     )
 
 
+def test_power_bi_parser_builds_report_page_measure_column_edges() -> None:
+    parsed = parse_bi_artifact("power_bi", power_bi_metadata_fixture())
+
+    assert parsed.bi_tool == "POWER_BI"
+    assert parsed.generated_at is not None
+
+    reports_by_id = {report.external_id: report for report in parsed.reports}
+    assert set(reports_by_id) == {
+        "rpt-executive-summary",
+        "rpt-executive-summary::ReportSection1",
+        "rpt-executive-summary::ReportSection2",
+    }
+    top_report = reports_by_id["rpt-executive-summary"]
+    assert top_report.report_type == "REPORT"
+    assert top_report.parent_external_id is None
+    assert top_report.project_name == "Sales Analytics"
+    overview_page = reports_by_id["rpt-executive-summary::ReportSection1"]
+    assert overview_page.report_type == "PAGE"
+    assert overview_page.parent_external_id == "rpt-executive-summary"
+    assert overview_page.name == "Overview"
+
+    metrics_by_id = {metric.external_id: metric for metric in parsed.metrics}
+    assert set(metrics_by_id) == {"Orders::measure::Profit Ratio", "Customer::column::Region"}
+    measure = metrics_by_id["Orders::measure::Profit Ratio"]
+    assert measure.field_type == "Measure"
+    assert measure.formula_present is True
+    assert measure.formula_hash is not None
+    assert measure.formula_hash == hashlib.sha256(
+        b"DIVIDE(SUM(Orders[Profit]), SUM(Orders[Sales]))"
+    ).hexdigest()
+    column_field = metrics_by_id["Customer::column::Region"]
+    assert column_field.field_type == "Column"
+    assert column_field.formula_present is False
+    assert column_field.formula_hash is None
+
+    # Report -> metric edges: the top-level report itself carries none (only
+    # its pages reference fields directly); the measure is referenced by two
+    # visuals on the same page but is deduplicated into one edge.
+    report_metric_pairs = {
+        (edge.report_external_id, edge.metric_external_id) for edge in parsed.report_metric_edges
+    }
+    assert report_metric_pairs == {
+        ("rpt-executive-summary::ReportSection1", "Orders::measure::Profit Ratio"),
+        ("rpt-executive-summary::ReportSection1", "Customer::column::Region"),
+        ("rpt-executive-summary::ReportSection2", "Customer::column::Region"),
+    }
+    assert "rpt-executive-summary" not in {r for r, _ in report_metric_pairs}
+
+    # Metric -> column edges: the plain column field resolves to its
+    # underlying source column; the measure's DAX is never parsed for
+    # dependencies, so it carries no metric-column edge at all.
+    metric_column_pairs = {
+        (edge.metric_external_id, edge.column.table_name, edge.column.column_name)
+        for edge in parsed.metric_column_edges
+    }
+    assert metric_column_pairs == {("Customer::column::Region", "Customer", "Region")}
+    region_edge = next(iter(parsed.metric_column_edges))
+    assert region_edge.column == ParsedBiColumnRef(
+        database_name="bank",
+        schema_name="raw",
+        table_name="Customer",
+        column_name="Region",
+    )
+
+
+def test_power_bi_parser_is_deterministic() -> None:
+    first = parse_bi_artifact("power_bi", power_bi_metadata_fixture())
+    second = parse_bi_artifact("power_bi", power_bi_metadata_fixture())
+
+    assert first.fingerprint == second.fingerprint
+    assert len(first.fingerprint) == 64
+
+
+def test_power_bi_dax_expression_is_never_part_of_the_read_contract() -> None:
+    schema = BiMetricNodeRead.model_json_schema()["properties"]
+    assert "expression" not in schema
+    assert "formula_hash" in schema
+    assert "formula_present" in schema
+
+
+def test_power_bi_unresolved_column_reference_is_not_matched_against_an_empty_catalog() -> None:
+    parsed = parse_bi_artifact("power_bi", power_bi_metadata_fixture())
+    region_edge = next(iter(parsed.metric_column_edges))
+
+    # Same generic (tool-agnostic) resolution path Tableau's columns go
+    # through in aida.bi_api: with no catalog rows at all, nothing matches.
+    assert _matched_table_id_for_column_ref(region_edge.column, {}, {}) is None
+
+
+def test_power_bi_parser_rejects_non_object_artifact() -> None:
+    with pytest.raises(BiLineageError, match="must be a JSON object"):
+        parse_bi_artifact("power_bi", ["not", "an", "object"])  # type: ignore[arg-type]
+
+
+def test_power_bi_parser_rejects_missing_workspaces() -> None:
+    with pytest.raises(BiLineageError, match="workspaces array"):
+        parse_bi_artifact("power_bi", {})
+
+
 def test_tableau_parser_is_deterministic() -> None:
     first = parse_bi_artifact("tableau", tableau_metadata_fixture())
     second = parse_bi_artifact("tableau", tableau_metadata_fixture())
@@ -113,14 +218,13 @@ def test_parser_rejects_missing_workbooks() -> None:
         parse_bi_artifact("tableau", {"data": {}})
 
 
-def test_tableau_is_the_only_implemented_bi_tool_today() -> None:
-    assert IMPLEMENTED_BI_TOOLS == frozenset({"TABLEAU"})
+def test_tableau_and_power_bi_are_the_implemented_bi_tools_today() -> None:
+    assert IMPLEMENTED_BI_TOOLS == frozenset({"TABLEAU", "POWER_BI"})
 
 
-def test_power_bi_and_looker_are_accepted_names_but_not_yet_implemented() -> None:
-    for tool in ("POWER_BI", "LOOKER"):
-        with pytest.raises(BiLineageError, match="not yet implemented"):
-            parse_bi_artifact(tool, {"data": {"workbooks": []}})
+def test_looker_is_an_accepted_name_but_not_yet_implemented() -> None:
+    with pytest.raises(BiLineageError, match="not yet implemented"):
+        parse_bi_artifact("LOOKER", {"workspaces": []})
 
 
 def test_unknown_bi_tool_is_rejected() -> None:
