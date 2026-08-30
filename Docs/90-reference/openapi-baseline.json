@@ -4072,6 +4072,101 @@
         "title": "BusinessNodeRollupRead",
         "type": "object"
       },
+      "CanonicalTableMappingRead": {
+        "additionalProperties": false,
+        "description": "RL-2: the steward-set canonical member for an APPROVED table family, if any.\n\n``resolved_by``/``rationale`` describe the steward decision behind this\nrow -- there is no row at all for a family that has not been explicitly\noverridden; see ``resolve_canonical`` for how that case falls back to\n``TableFamilyCandidate.base_table_id``.",
+        "properties": {
+          "canonical_qualified_name": {
+            "title": "Canonical Qualified Name",
+            "type": "string"
+          },
+          "canonical_table_id": {
+            "format": "uuid",
+            "title": "Canonical Table Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "family_candidate_id": {
+            "format": "uuid",
+            "title": "Family Candidate Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_steward_override": {
+            "title": "Is Steward Override",
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          },
+          "resolved_by": {
+            "title": "Resolved By",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "family_candidate_id",
+          "canonical_table_id",
+          "canonical_qualified_name",
+          "resolved_by",
+          "rationale",
+          "is_steward_override",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CanonicalTableMappingRead",
+        "type": "object"
+      },
+      "CanonicalTableOverrideRequest": {
+        "additionalProperties": false,
+        "description": "Steward decision naming (or clearing) the canonical member of an APPROVED family.\n\n``table_id`` must be one of the family's ``member_table_ids``; it is\nonly accepted against an APPROVED ``TableFamilyCandidate``. Setting it to\n``None`` clears an existing override and reverts resolution to the\nfamily's own ``base_table_id`` (``None`` for a family type -- e.g.\nSNAPSHOT -- where the algorithm never picks one) -- itself an auditable\ndecision, so a rationale is always required either way.",
+        "properties": {
+          "rationale": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "table_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Table Id"
+          }
+        },
+        "required": [
+          "rationale"
+        ],
+        "title": "CanonicalTableOverrideRequest",
+        "type": "object"
+      },
       "CatalogBulkActionItemRead": {
         "additionalProperties": false,
         "properties": {
@@ -4777,6 +4872,178 @@
           "updated_at"
         ],
         "title": "CompositeKeyCandidateRead",
+        "type": "object"
+      },
+      "CompositeRelationshipCandidateDiscoveryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "max_candidates": {
+            "default": 200,
+            "maximum": 2000.0,
+            "minimum": 1.0,
+            "title": "Max Candidates",
+            "type": "integer"
+          }
+        },
+        "title": "CompositeRelationshipCandidateDiscoveryRequest",
+        "type": "object"
+      },
+      "CompositeRelationshipCandidateMemberRead": {
+        "additionalProperties": false,
+        "properties": {
+          "ordinal": {
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "source_column_id": {
+            "format": "uuid",
+            "title": "Source Column Id",
+            "type": "string"
+          },
+          "source_column_name": {
+            "title": "Source Column Name",
+            "type": "string"
+          },
+          "target_column_id": {
+            "format": "uuid",
+            "title": "Target Column Id",
+            "type": "string"
+          },
+          "target_column_name": {
+            "title": "Target Column Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ordinal",
+          "source_column_id",
+          "target_column_id",
+          "source_column_name",
+          "target_column_name"
+        ],
+        "title": "CompositeRelationshipCandidateMemberRead",
+        "type": "object"
+      },
+      "CompositeRelationshipCandidateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "detection_rule": {
+            "title": "Detection Rule",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/CompositeRelationshipCandidateMemberRead"
+            },
+            "title": "Members",
+            "type": "array"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "review_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Reason"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "source_table_id": {
+            "format": "uuid",
+            "title": "Source Table Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_table_id": {
+            "format": "uuid",
+            "title": "Target Table Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "datasource_id",
+          "source_table_id",
+          "target_table_id",
+          "detection_rule",
+          "confidence",
+          "evidence",
+          "status",
+          "created_by",
+          "reviewed_by",
+          "review_reason",
+          "reviewed_at",
+          "members",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "CompositeRelationshipCandidateRead",
         "type": "object"
       },
       "ConnectorCapabilityRead": {
@@ -17897,6 +18164,27 @@
         "title": "TableProfileRead",
         "type": "object"
       },
+      "TableRef": {
+        "additionalProperties": false,
+        "description": "A resolved table reference; the return type of ``resolve_canonical``.",
+        "properties": {
+          "qualified_name": {
+            "title": "Qualified Name",
+            "type": "string"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_id",
+          "qualified_name"
+        ],
+        "title": "TableRef",
+        "type": "object"
+      },
       "TermSemanticBindingCreate": {
         "additionalProperties": false,
         "properties": {
@@ -26132,6 +26420,144 @@
         ]
       }
     },
+    "/v1/composite-relationship-candidates/{group_id}/decision": {
+      "post": {
+        "operationId": "decide_composite_relationship_candidate_v1_composite_relationship_candidates__group_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Group Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelationshipCandidateDecision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompositeRelationshipCandidateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Composite Relationship Candidate",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
     "/v1/connectors/capability-matrix": {
       "get": {
         "operationId": "connector_capability_matrix_v1_connectors_capability_matrix_get",
@@ -30986,6 +31412,153 @@
         ]
       }
     },
+    "/v1/datasources/{datasource_id}/canonical-table/resolve": {
+      "get": {
+        "description": "``resolve_canonical(scope, entity_ref)`` from the module 06 public interface.\n\n``entity_ref`` is any table belonging to the family. Resolution order:\nan explicit steward override (``CanonicalTableMapping``), else the\nfamily's own ``base_table_id``, else ``None`` -- e.g. an un-overridden\nSNAPSHOT family, where the algorithm never names a \"current\" member.",
+        "operationId": "resolve_canonical_table_v1_datasources__datasource_id__canonical_table_resolve_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/TableRef"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Resolve Canonical Table V1 Datasources  Datasource Id  Canonical Table Resolve Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Canonical Table",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/composite-key-candidates": {
       "get": {
         "operationId": "list_composite_key_candidates_v1_datasources__datasource_id__composite_key_candidates_get",
@@ -35133,6 +35706,174 @@
         ]
       }
     },
+    "/v1/datasources/{datasource_id}/relationship-candidates/composite": {
+      "get": {
+        "operationId": "list_composite_relationship_candidates_v1_datasources__datasource_id__relationship_candidates_composite_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "candidate_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Candidate Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Composite Relationship Candidates",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/relationship-candidates/discover": {
       "post": {
         "operationId": "discover_relationship_candidates_v1_datasources__datasource_id__relationship_candidates_discover_post",
@@ -35266,6 +36007,145 @@
           }
         },
         "summary": "Discover Relationship Candidates",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/relationship-candidates/discover-composite": {
+      "post": {
+        "description": "Propose bounded, evidence-backed composite (multi-column) FK-like candidates.\n\nSingle-column candidates keep using ``RelationshipCandidate`` unchanged;\nthis extends generation with the ordered-column-set shape a composite key\nneeds, following the same declared-constraints-are-facts pruning order.",
+        "operationId": "discover_composite_relationship_candidates_v1_datasources__datasource_id__relationship_candidates_discover_composite_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompositeRelationshipCandidateDiscoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discover Composite Relationship Candidates",
         "tags": [
           "intelligence-governance"
         ]
@@ -58623,6 +59503,289 @@
         "summary": "Decide Table Family Candidate",
         "tags": [
           "table-family-intelligence"
+        ]
+      }
+    },
+    "/v1/table-family-candidates/{family_candidate_id}/canonical": {
+      "get": {
+        "operationId": "get_canonical_mapping_v1_table_family_candidates__family_candidate_id__canonical_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "family_candidate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Family Candidate Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CanonicalTableMappingRead"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Canonical Mapping V1 Table Family Candidates  Family Candidate Id  Canonical Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Canonical Mapping",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/table-family-candidates/{family_candidate_id}/canonical/override": {
+      "post": {
+        "description": "Steward decision naming (or clearing) the canonical member (maker-checker).\n\nOnly accepted against an APPROVED ``TableFamilyCandidate`` -- a family\nstill under review, or rejected, has no canonical member to name yet.\n``table_id=None`` clears an existing override (deleting the mapping row)\nand reverts resolution to the family's own ``base_table_id``; a\nrationale is always required, including to clear, since either is an\nauditable decision.",
+        "operationId": "override_canonical_table_v1_table_family_candidates__family_candidate_id__canonical_override_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "family_candidate_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Family Candidate Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CanonicalTableOverrideRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/CanonicalTableMappingRead"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Override Canonical Table V1 Table Family Candidates  Family Candidate Id  Canonical Override Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Override Canonical Table",
+        "tags": [
+          "intelligence-governance"
         ]
       }
     },

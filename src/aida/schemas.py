@@ -1122,6 +1122,13 @@ class RelationshipCandidateDecision(ApiModel):
         return self
 
 
+class TableRef(ApiModel):
+    """A resolved table reference; the return type of ``resolve_canonical``."""
+
+    table_id: UUID
+    qualified_name: str
+
+
 class TableFamilyDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=200, ge=1, le=2000)
 
@@ -1329,6 +1336,75 @@ class RelationshipCandidateCalibrationRead(ApiModel):
     ground_truth_overrides_applied: int
     buckets: list[RelationshipCandidateCalibrationBucketRead]
     methodology_note: str
+
+
+class CanonicalTableMappingRead(ApiModel):
+    """RL-2: the steward-set canonical member for an APPROVED table family, if any.
+
+    ``resolved_by``/``rationale`` describe the steward decision behind this
+    row -- there is no row at all for a family that has not been explicitly
+    overridden; see ``resolve_canonical`` for how that case falls back to
+    ``TableFamilyCandidate.base_table_id``.
+    """
+
+    id: UUID
+    organization_id: UUID
+    family_candidate_id: UUID
+    canonical_table_id: UUID
+    canonical_qualified_name: str
+    resolved_by: str
+    rationale: str
+    is_steward_override: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class CanonicalTableOverrideRequest(ApiModel):
+    """Steward decision naming (or clearing) the canonical member of an APPROVED family.
+
+    ``table_id`` must be one of the family's ``member_table_ids``; it is
+    only accepted against an APPROVED ``TableFamilyCandidate``. Setting it to
+    ``None`` clears an existing override and reverts resolution to the
+    family's own ``base_table_id`` (``None`` for a family type -- e.g.
+    SNAPSHOT -- where the algorithm never picks one) -- itself an auditable
+    decision, so a rationale is always required either way.
+    """
+
+    table_id: UUID | None = None
+    rationale: str = Field(min_length=1, max_length=2000)
+
+
+
+
+class CompositeRelationshipCandidateDiscoveryRequest(ApiModel):
+    max_candidates: int = Field(default=200, ge=1, le=2_000)
+
+
+class CompositeRelationshipCandidateMemberRead(ApiModel):
+    ordinal: int
+    source_column_id: UUID
+    target_column_id: UUID
+    source_column_name: str
+    target_column_name: str
+
+
+class CompositeRelationshipCandidateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    source_table_id: UUID
+    target_table_id: UUID
+    detection_rule: str
+    confidence: float
+    evidence: dict[str, Any]
+    status: str
+    created_by: str
+    reviewed_by: str | None
+    review_reason: str | None
+    reviewed_at: datetime | None
+    members: list[CompositeRelationshipCandidateMemberRead]
+    created_at: datetime
+    updated_at: datetime
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]

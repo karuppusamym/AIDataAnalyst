@@ -149,6 +149,17 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
     "data_quality.incident_resolved": (
         "same event as documented `quality.incident_acknowledged` / `.resolved`"
     ),
+    # --- RL-2/RL-3 (module 06 canonical resolution, composite candidates): same
+    # `.v1`-suffix drift as the rest of this baseline. RL-1 (table family
+    # detection) is not here: it shipped as `table_family_candidate.decided.v1`,
+    # already directly documented -- no drift entry needed. ---
+    "canonical_table.resolved.v1": "same event as documented `canonical_table.resolved`",
+    "composite_relationship_candidate.decided.v1": (
+        "composite-candidate sibling of the already-documented-as-drift "
+        "`relationship_candidate.decided.v1` (itself a consolidation of `relationship.approved` "
+        "/ `.rejected`); same decided-with-status-field shape, multi-column candidates instead "
+        "of single-column"
+    ),
 }
 
 # Sites where `event_type=` could not be fully resolved to a closed set of string literals by
