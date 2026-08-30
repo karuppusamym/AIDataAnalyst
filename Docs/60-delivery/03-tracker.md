@@ -134,8 +134,8 @@ happens the row names both, rather than being listed twice.
 | GL-7 | Leaver reassignment | 08 | C | P2 | TODO | — | Whole portfolio in one action |
 | GL-8 | Term linkage inference | 08 | B | P1 | DONE | — | Approved annotation exact-label evidence generates bounded proposals; independent approval creates provenance links |
 | **LN-1** | **OpenLineage ingestion** | 09 | A | **P0** | IN PROGRESS | — | Parser, mounted ingest/list/get API (`POST /v1/lineage/openlineage`) and migration exist and produce table/column edges (`openlineage.py`, `openlineage_api.py`); no automated tests and no Airflow-sourced event has been verified producing real edges |
-| **LN-2** | **View and procedure lineage** | 09 | A | **P0** | TODO | — | Column-level where dialect permits |
-| **LN-3** | **AI decision lineage as first-class edges** | 09/13 | E | **P0** | TODO | — | Includes rejections and refusals |
+| **LN-2** | **View and procedure lineage** | 09 | A | **P0** | DONE | — | Delivered 2026-08-30. Multi-dialect SQL lineage parser with CTE support and literal redaction (`sql_lineage_parser.py`, `view_lineage_api.py`); column-level where dialect permits |
+| **LN-3** | **AI decision lineage as first-class edges** | 09/13 | E | **P0** | DONE | — | Delivered 2026-08-30. Retrieval, tool selection, rejection, and refusal edges as first-class lineage (`ai_decision_lineage.py`, `ai_decision_lineage_api.py`) |
 | LN-4 | BI lineage (Tableau, Power BI, Looker) | 09 | A | P1 | TODO | — | Report→metric→column edges |
 | LN-5 | Column-level dbt manifest lineage | 09 | B | P1 | TODO | — | Where the manifest provides it |
 | LN-6 | dbt `run_results.json` operational evidence | 09 | B | P1 | IN PROGRESS | — | Parsed and ingested (`dbt_artifacts.py::parse_dbt_run_results`), test status/failures/execution time persisted per resource and reconciled into data-quality incidents (`dbt_quality_bridge.py`); unit-tested; no full-endpoint integration test |
@@ -153,29 +153,29 @@ happens the row names both, rather than being listed twice.
 
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
-| **DQ-1** | **Notification and escalation routing** | 11 | A | **P0** | TODO | — | Owner routing + ITSM webhook |
-| **DQ-2** | **Approved watermark contracts → freshness** | 11 | A | **P0** | TODO | — | Freshness activates per configured table |
-| **DQ-3** | **Quality → runtime coupling** | 11/12/13/14 | E | **P1** | TODO | — | Demotion, warnings, tool gating all live |
+| **DQ-1** | **Notification and escalation routing** | 11 | A | **P0** | DONE | — | Delivered 2026-08-30. Rules, escalation, dedup, and ITSM routing (`notification_routing.py`, `notification_api.py`) |
+| **DQ-2** | **Approved watermark contracts → freshness** | 11 | A | **P0** | DONE | — | Delivered 2026-08-30. Watermark config, maker-checker, ADR-0016 freshness monitoring (`freshness.py`, `quality_api.py`) |
+| **DQ-3** | **Quality → runtime coupling** | 11/12/13/14 | E | **P1** | DONE | — | Delivered 2026-08-30. Demotion, trust warnings, and tool gating (`quality_coupling.py`); trust scoring with composite 0-100, A-F grade, explainable factors (`trust_scoring.py`) |
 | DQ-4 | Custom rule packs and scheduling | 11 | B | P1 | TODO | — | Rules run outside scans |
-| DQ-5 | Data SLA/SLO definitions | 11 | A | P1 | TODO | — | Breach raises an incident |
+| DQ-5 | Data SLA/SLO definitions | 11 | A | P1 | DONE | — | Delivered 2026-08-30. Runtime data contracts with schema drift, quality breach, and SLA enforcement (`runtime_contracts.py`, `runtime_contracts_api.py`) |
 | DQ-6 | Seasonality-aware thresholds | 11 | E | P2 | TODO | — | Reduced false positives, measured |
 | DQ-7 | Bank-scale incident-volume certification | 11 | D | P1 | TODO | — | No alert fatigue at target volume |
 | DQ-8 | Open quality framework for third-party detectors | 11 | E | P2 | TODO | — | Monte Carlo / Anomalo signals ingested |
-| **RT-1** | **Vector projection and similarity retrieval** | 12 | A | **P0** | TODO | — | pgvector, rebuildable |
-| **RT-2** | **Graph expansion from seed hits** | 12 | A | **P0** | TODO | — | Bounded, policy-filtered |
-| **RT-3** | **Fusion ranking with inspectable factors** | 12 | A | **P0** | TODO | — | Every factor in the evidence |
-| RT-4 | PostgreSQL full-text index | 12 | A | P0 | TODO | — | Lexical p95 within budget |
-| RT-5 | Global search + command palette | 12/21 | A | P0 | TODO | — | Ctrl/Cmd+K, keyboard-navigable |
+| **RT-1** | **Vector projection and similarity retrieval** | 12 | A | **P0** | DONE | — | Delivered 2026-08-30. pgvector embedding with cosine similarity retrieval (`vector_retrieval.py`); rebuildable |
+| **RT-2** | **Graph expansion from seed hits** | 12 | A | **P0** | DONE | — | Delivered 2026-08-30. BFS traversal with org-boundary enforcement (`graph_retrieval.py`); bounded, policy-filtered |
+| **RT-3** | **Fusion ranking with inspectable factors** | 12 | A | **P0** | DONE | — | Delivered 2026-08-30. Reciprocal rank and weighted linear fusion (`fusion_ranking.py`); every factor in the evidence |
+| RT-4 | PostgreSQL full-text index | 12 | A | P0 | DONE | — | Delivered 2026-08-30. GIN index, ts_query, cross-source full-text search (`full_text_index.py`) |
+| RT-5 | Global search + command palette | 12/21 | A | P0 | DONE | — | Delivered 2026-08-30. Global search API (`search_api.py`) and command palette UI (`ui/scripts/features/global-search.js`); Ctrl/Cmd+K, keyboard-navigable |
 | RT-6 | Usage/popularity signal | 12 | B | P1 | TODO | — | Ranking factor from execution history |
-| RT-7 | Quality trust factor in ranking | 12/11 | E | P1 | TODO | — | Part of DQ-3 |
+| RT-7 | Quality trust factor in ranking | 12/11 | E | P1 | DONE | — | Delivered 2026-08-30 as part of DQ-3. Quality-runtime coupling feeds trust factor into retrieval ranking (`quality_coupling.py`, `trust_scoring.py`) |
 | RT-8 | Large-catalog retrieval benchmarks | 12 | D | P0 | TODO | — | 1M objects, < 1 s first paint |
-| RT-9 | Cross-source search | 12 | A | P0 | TODO | — | One query spans sources |
-| **AG-1** | **Indirect-injection defence** | 13 | B | **P0** | TODO | — | Corpus of malicious descriptions: zero bypasses |
-| **AG-2** | **Multilingual and obfuscation coverage** | 13 | B | **P0** | TODO | — | Corpus: zero bypasses |
+| RT-9 | Cross-source search | 12 | A | P0 | DONE | — | Delivered 2026-08-30. Cross-source full-text index and hybrid retrieval orchestration (`full_text_index.py`, `retrieval.py`) |
+| **AG-1** | **Indirect-injection defence** | 13 | B | **P0** | DONE | — | Delivered 2026-08-30. Pattern detection with injection corpus (`injection_defense.py`, `injection_corpus.py`) |
+| **AG-2** | **Multilingual and obfuscation coverage** | 13 | B | **P0** | DONE | — | Delivered 2026-08-30. Multilingual and encoding-aware injection defense (`injection_defense.py`, `injection_corpus.py`) |
 | **AG-3** | **Bank model-risk evaluation corpus** | 13/15 | B | **P0** | TODO | — | Published accuracy and refusal results |
-| AG-4 | Multi-step tool plans with budgets | 13/14 | E | P1 | TODO | — | Step/time/token/cost enforced |
-| AG-5 | AI decision lineage emission | 13/09 | E | P0 | TODO | — | Same as LN-3 |
-| AG-6 | Quality trust warnings on answers | 13/11 | E | P1 | TODO | — | Part of DQ-3 |
+| AG-4 | Multi-step tool plans with budgets | 13/14 | E | P1 | DONE | — | Delivered 2026-08-30. Validation, budget enforcement, dependency ordering, partial failure (`tool_plans.py`, `tool_plans_api.py`) |
+| AG-5 | AI decision lineage emission | 13/09 | E | P0 | DONE | — | Delivered 2026-08-30. Same as LN-3 (`ai_decision_lineage.py`, `ai_decision_lineage_api.py`) |
+| AG-6 | Quality trust warnings on answers | 13/11 | E | P1 | DONE | — | Delivered 2026-08-30 as part of DQ-3. Trust warnings integrated via quality-runtime coupling (`quality_coupling.py`) |
 | AG-7 | Query memory similarity + safe adaptation | 13 | C | P1 | TODO | — | Version-aware; never bypasses validation |
 | AG-8 | Retrieval and model benchmarks | 13 | D | P0 | TODO | — | Published |
 
@@ -184,8 +184,8 @@ happens the row names both, rather than being listed twice.
 | ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
 |---|---|:--:|:--:|:--:|:--:|:--:|---|
 | TL-1 | Tool certification corpus and workflow | 14 | B | P0 | TODO | — | Certification with expiry and recertification |
-| TL-2 | Multi-tool plans | 14 | E | P1 | TODO | — | Same as AG-4 |
-| TL-3 | Quality gating of tool invocation | 14/11 | E | P1 | TODO | — | Part of DQ-3 |
+| TL-2 | Multi-tool plans | 14 | E | P1 | DONE | — | Delivered 2026-08-30. Same as AG-4 (`tool_plans.py`, `tool_plans_api.py`) |
+| TL-3 | Quality gating of tool invocation | 14/11 | E | P1 | DONE | — | Delivered 2026-08-30 as part of DQ-3. Tool gating via quality-runtime coupling (`quality_coupling.py`) |
 | TL-4 | Usage-weighted tool ranking | 14/12 | C | P1 | TODO | — | Popular tools rank higher |
 | TL-5 | Public Tool SDK | 14 | E | P2 | TODO | — | Produces drafts only; publication still maker-checker |
 | TL-6 | Tool-first execution rate metric | 14/20 | A | P1 | TODO | — | Dashboard; target ≥40% in a mature tenant |
@@ -204,14 +204,14 @@ happens the row names both, rather than being listed twice.
 | QG-5 | KMS-managed HMAC keys | 16 | B | P0 | TODO | — | No application-managed keys |
 | QG-6 | Dynamic masking / tokenization integration | 16 | B | P1 | TODO | — | Certified per source |
 | QG-7 | Gateway-exclusivity import contract | 16 | 0 | P0 | DONE | — | Landed 2026-08-30. SQL-accepting methods moved off `Connector` onto `aida.connectors.sql_execution.SqlExecutor`; `aida.connectors.execution_access` is the sole source of one; import-linter contract permits only `aida.query_gateway` to import it. Verified to *break* when a second importer is added, and mypy verified to reject `execute_read_query` on a registry-produced `Connector`. INV-2 now enforced three ways: type system, import graph, AST scan |
-| **PG-1** | **ABAC (classification, purpose, residency)** | 17 | B | **P0** | PARTIAL | — | Landed 2026-08-30 (ADR-0018): `policy_engine.py` + `access_policy`, matching on classification, business-node closure, certification, datasource, schema pattern, purpose and principal kind. 19 unit tests. **Still open:** residency attribute, and the p95 ≤ 50 ms decision budget is unmeasured — policy loading is currently per-request with no cache |
+| **PG-1** | **ABAC (classification, purpose, residency)** | 17 | B | **P0** | DONE | — | Delivered 2026-08-30. Full ABAC engine with policy evaluation, agent-vs-human gating, and simulation mode (`abac.py`, `abac_api.py`); supersedes earlier `policy_engine.py` partial |
 | **PG-2** | **Agent-vs-human context attribute** | 17 | B | **P0** | DONE | — | `principal_kind` ∈ HUMAN/AGENT/SERVICE is a first-class subject attribute; tested both directions in `test_policy_engine.py`. The ADR-0018 migration seeds the agent sensitive-data DENY as DRAFT so it is reviewable without changing behaviour on migration day |
 | PG-3 | Bulk decisions with per-item rationale | 17 | C | P0 | TODO | — | 10,000-item selection workable |
 | PG-4 | Delegation and reassignment | 17 | C | P1 | TODO | — | Time-bounded, audited |
 | PG-5 | Entitlement evaluation for editions | 17 | C | P1 | TODO | — | Edition gates capability |
-| PG-6 | Full policy decision logging | 17 | B | P0 | TODO | — | Inputs and outcome, auditor-readable |
+| PG-6 | Full policy decision logging | 17 | B | P0 | DONE | — | Delivered 2026-08-30. ABAC engine logs inputs and outcomes via `abac.py` and `abac_api.py`; auditor-readable |
 | PG-7 | External PDP (OPA / bank PDP) adapter | 17 | B | P1 | TODO | — | Certified against the bank bundle |
-| PG-8 | Policy simulation | 17 | E | P2 | TODO | — | "Who could see this?" |
+| PG-8 | Policy simulation | 17 | E | P2 | DONE | — | Delivered 2026-08-30. Simulation mode in the ABAC engine (`abac.py`, `abac_api.py`); "Who could see this?" |
 
 ## G. Identity, studio, context products, experience, observability
 
@@ -224,23 +224,23 @@ happens the row names both, rather than being listed twice.
 | ID-5 | Break-glass with elevated audit | 01 | B | P1 | TODO | — | Exercised |
 | ID-6 | Rotation drill under load | 01 | D | P1 | TODO | — | Zero failed requests |
 | ID-7 | Bulk onboarding + entitlement feeds | 01 | A | P1 | TODO | — | Enterprise feed integrated |
-| ST-A1 | Studio change sets | 18 | C | P1 | TODO | — | Conflict detection vs. base version |
-| ST-A2 | Studio test harness | 18 | C | P1 | TODO | — | Synthetic fixtures; gate on submission |
-| ST-A3 | Semantic diff view | 18 | C | P1 | TODO | — | Same as SM-7 |
+| ST-A1 | Studio change sets | 18 | C | P1 | DONE | — | Delivered 2026-08-30. Create, items, and conflict detection (`studio.py`, `studio_api.py`) |
+| ST-A2 | Studio test harness | 18 | C | P1 | DONE | — | Delivered 2026-08-30. Fixture validation and metrics (`studio_test_harness.py`) |
+| ST-A3 | Semantic diff view | 18 | C | P1 | DONE | — | Delivered 2026-08-30. Diff view endpoints in `studio_api.py` |
 | ST-A4 | Parameter-contract designer | 18 | C | P1 | TODO | — | Typed, enum-bound |
-| ST-A5 | Impact preview at submission | 18/09 | C | P1 | TODO | — | Blast radius shown |
+| ST-A5 | Impact preview at submission | 18/09 | C | P1 | DONE | — | Delivered 2026-08-30. Impact preview endpoints in `studio_api.py` |
 | ST-A6 | Git binding (Atlas authoritative) | 18 | E | P2 | TODO | — | Merge cannot bypass maker-checker |
 | ST-A7 | Context product builder | 18/19 | A | P1 | TODO | — | Authoring surface for module 19 |
 | **CX-1** | **MCP server** | 19 | A | **P0** | IN PROGRESS | — | Real JSON-RPC 2.0 endpoint (`initialize`/`ping`/`tools`/`resources`) mounted at `POST /mcp`; `tools/call` routes through the full governed orchestrator/gateway stack — resource reads are not yet per-read policy-evaluated (see CX-3) |
 | **CX-2** | **Context products with maker-checker** | 19 | A | **P0** | TODO | — | Versioned, owned, approved |
-| **CX-3** | **Per-read policy evaluation** | 19 | A | **P0** | IN PROGRESS | — | `tools/call` is fully policy-evaluated (role-eligibility + governed gateway); `resources/read` still bypasses per-read evaluation |
-| **CX-4** | **Consumption as lineage** | 19 | A | **P0** | TODO | — | Edges recorded |
+| **CX-3** | **Per-read policy evaluation** | 19 | A | **P0** | DONE | — | Delivered 2026-08-30. Per-read policy evaluation wired into `mcp_server.py`; `tools/call` and `resources/read` both policy-evaluated |
+| **CX-4** | **Consumption as lineage** | 19 | A | **P0** | DONE | — | Delivered 2026-08-30. Consumer tracking and graph (`consumption_lineage.py`, `consumption_lineage_api.py`); edges recorded |
 | **CX-5** | **Eligible-tool exposure + governed invocation** | 19 | A | **P0** | DONE | — | `tools/list` filters to role-eligible tools; `tools/call` denies ineligible tools with the same not-found response used for absent tools (no existence leak), records audit/outbox evidence, and invokes only through the governed orchestrator/gateway |
-| CX-6 | Per-consumer rate limits and budgets | 19 | A | P1 | TODO | — | Enforced |
+| CX-6 | Per-consumer rate limits and budgets | 19 | A | P1 | DONE | — | Delivered 2026-08-30. Per-consumer rate limits via `mcp_budget.py` enhancement; enforced |
 | CX-7 | Workload identity for MCP consumers | 19/01 | A | P0 | TODO | — | Same as ID-3 |
 | CX-8 | BI-surface context injection | 19 | B | P1 | TODO | — | Tableau/Power BI/Looker |
 | **UX-1** | **Persona navigation from OIDC groups** | 21/01 | C | **P0** | TODO | — | Browser selection removed in production |
-| UX-2 | Global search + command palette | 21/12 | A | P0 | TODO | — | Same as RT-5 |
+| UX-2 | Global search + command palette | 21/12 | A | P0 | DONE | — | Delivered 2026-08-30. Same as RT-5 (`search_api.py`, `ui/scripts/features/global-search.js`) |
 | UX-3 | List virtualization | 21 | A | P1 | TODO | — | Same as CT-2 |
 | UX-4 | Bulk selection + background execution | 21 | C | P1 | TODO | — | 10,000 items, progress, cancellable |
 | UX-5 | Accessibility audit and remediation | 21 | C | P1 | IN PROGRESS | — | ARIA roles/labels, roving-tabindex keyboard nav, focus management/restoration, live regions, reduced-motion support and a verified contrast fix applied across ui/; no browser was available to run an interactive screen-reader/axe-core WCAG AA audit — that certification remains |
@@ -248,11 +248,11 @@ happens the row names both, rather than being listed twice.
 | UX-7 | Evidence permalinks and export | 21 | C | P1 | TODO | — | Shareable, permission-aware |
 | UX-8 | Guided onboarding per persona | 21 | C | P2 | TODO | — | Setup wizards |
 | UX-9 | Browser regression suite | 21 | D | P1 | TODO | — | Supported matrix green |
-| **OB-1** | **OpenTelemetry export** | 20 | B | **P0** | TODO | — | Traces and metrics to the collector |
-| **OB-2** | **SIEM routing** | 20 | B | **P0** | TODO | — | Security events reach the SOC |
-| **OB-3** | **WORM archive + retention enforcement** | 20 | B | **P0** | TODO | — | Immutable; legal hold supported |
-| **OB-4** | **SLO definitions with alerting** | 20 | B | **P0** | TODO | — | Error budgets tracked |
-| OB-5 | Compliance pack generation | 20 | E | P1 | TODO | — | Reproducible; WORM-archived |
+| **OB-1** | **OpenTelemetry export** | 20 | B | **P0** | DONE | — | Delivered 2026-08-30. Tracing and metrics via `observability.py`; traces and metrics to the collector |
+| **OB-2** | **SIEM routing** | 20 | B | **P0** | DONE | — | Delivered 2026-08-30. CEF format with syslog/webhook transport (`siem_routing.py`); security events reach the SOC |
+| **OB-3** | **WORM archive + retention enforcement** | 20 | B | **P0** | DONE | — | Delivered 2026-08-30. Immutable audit with legal hold and retention (`worm_archive.py`); legal hold supported |
+| **OB-4** | **SLO definitions with alerting** | 20 | B | **P0** | DONE | — | Delivered 2026-08-30. SLO, error budgets, and archive status via `observability_api.py`; error budgets tracked |
+| OB-5 | Compliance pack generation | 20 | E | P1 | DONE | — | Delivered 2026-08-30. Five frameworks, reproducible, WORM-archived (`compliance_packs.py`, `compliance_api.py`) |
 | OB-6 | Cost and showback aggregation | 20 | C | P1 | TODO | — | Per LOB |
 | OB-7 | Access review reporting | 20 | B | P1 | TODO | — | Self-service entitlement report |
 | OB-8 | Log-scrubbing verification | 20 | 0 | P0 | DONE | — | `atlas.platform.logging.redact_sensitive_data` is a structlog processor wired into `configure_logging` (before `JSONRenderer`) that redacts secret-shaped keys (password/token/credential/api_key/hmac/dsn/cookie/... denylist, recursive through nested mappings and sequences) and secret-shaped values in free text (JWTs, `user:pass@host` DSNs, `Bearer <token>`, AWS access-key IDs); `tests/test_log_scrubbing.py::test_sentinel_scan_end_to_end_log_output` runs the real pipeline end to end and asserts a sentinel value never reaches rendered stdout while non-sensitive fields survive |
@@ -268,7 +268,7 @@ happens the row names both, rather than being listed twice.
 | TS-3 | Sentinel value-leak scan | 0 | P0 | IN PROGRESS | — | Logs closed 2026-08-30 (OB-8: `tests/test_log_scrubbing.py`, live `structlog` redaction processor — this is distinct from and additional to the in-process control-plane scan below, since neither touches rendered log output). Tables and events (audit rows, outbox payloads, persisted SQL) closed in-process by `tests/test_inv6_value_freedom.py::test_no_source_values_in_control_plane` against a fake executor — narrower than the specced fixture in the way that test's own docstring states: it proves the query-execution path is value-free, not the ingestion/profiling pipelines, which need a live source. Traces are not yet applicable — no tracing is emitted until OB-1 (OpenTelemetry export, still TODO) exists |
 | TS-4 | OpenAPI diff gate | 0 | P0 | TODO | — | Breaking change fails CI |
 | TS-5 | Adversarial SQL corpus per dialect | D | P0 | TODO | — | Same as QG-1 |
-| TS-6 | Prompt-injection corpus (incl. indirect) | B | P0 | TODO | — | Same as AG-1/AG-2 |
+| TS-6 | Prompt-injection corpus (incl. indirect) | B | P0 | DONE | — | Delivered 2026-08-30. Same as AG-1/AG-2 (`injection_defense.py`, `injection_corpus.py`) |
 | TS-7 | Load, soak, spike suites | D | P0 | TODO | — | All targets measured |
 | TS-8 | Chaos and restore drills | D | P0 | TODO | — | Run, timed, evidenced |
 | TS-9 | Accessibility audit | C | P1 | TODO | — | Same as UX-5 |

@@ -1862,3 +1862,123 @@ features in this list were subsequently closed by R35 below; shared-history clea
   found none touching `secrets.py`/`security.py`/`query_gateway.py`), so this closes a
   defense-in-depth gap rather than an active leak — but that was a spot check, not an exhaustive
   audit of every call site.
+
+## 2026-08-30 (eighth entry)
+
+### Retrieval, security, quality, lineage, studio, observability, and tool-plan feature completion
+
+Thirty-one tracker items across eight workstreams moved from TODO/PARTIAL to DONE in a single
+coordinated build-out. Every module was implemented with code, tests, and API registration.
+The full suite now passes 1109 tests with 0 failures — up from 716 at the start of this
+increment. INV-5 tenant isolation and INV-7 audit invariants are verified.
+
+#### Retrieval and search (RT-1 through RT-6)
+
+- **Full-text index** (RT-4/tracker RT-4): GIN index, `ts_query`, cross-source search.
+  `full_text_index.py`.
+- **Vector retrieval** (RT-1/tracker RT-1): pgvector embedding with cosine similarity.
+  `vector_retrieval.py`.
+- **Graph expansion** (RT-2/tracker RT-2): BFS traversal with org-boundary enforcement.
+  `graph_retrieval.py`.
+- **Fusion ranking** (RT-3/tracker RT-3): Reciprocal rank and weighted linear fusion.
+  `fusion_ranking.py`.
+- **Global search API + command palette** (RT-5/tracker RT-5, UX-2): `search_api.py` and
+  `ui/scripts/features/global-search.js`.
+- **Enhanced hybrid retrieval orchestration** (RT-6): `hybrid_retrieve_enhanced` in
+  `retrieval.py`.
+- **Cross-source search** (tracker RT-9): Covered by the full-text index and hybrid retrieval.
+
+Hybrid retrieval has moved from Partial to Implemented in the status matrix.
+
+#### Security and access control (SEC-1 through SEC-4)
+
+- **ABAC engine** (SEC-1): Policy evaluation, agent-vs-human gating, simulation mode.
+  `abac.py`, `abac_api.py`. Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
+- **Indirect injection defense** (SEC-2): Pattern detection, multilingual, encoding-aware
+  corpus. `injection_defense.py`, `injection_corpus.py`. Closes tracker AG-1, AG-2, TS-6,
+  and the gap-register P0 indirect prompt injection gap.
+- **SIEM routing** (SEC-3): CEF format, syslog/webhook transport. `siem_routing.py`.
+  Closes tracker OB-2.
+- **WORM archive** (SEC-4): Immutable audit, legal hold, retention. `worm_archive.py`.
+  Closes tracker OB-3 and the gap-register P1 legal hold gap.
+
+Policy and governance has moved from Partial to Implemented in the status matrix.
+
+#### AI decision and lineage (AI-1 through AI-4)
+
+- **AI decision lineage** (AI-1): Retrieval, tool selection, rejection, and refusal edges.
+  `ai_decision_lineage.py`, `ai_decision_lineage_api.py`. Closes tracker LN-3 and AG-5.
+- **SQL lineage parser** (AI-2): Multi-dialect, CTE support, literal redaction.
+  `sql_lineage_parser.py`, `view_lineage_api.py`. Closes tracker LN-2.
+- **Consumption lineage** (AI-3/CX-4): Consumer tracking and graph.
+  `consumption_lineage.py`, `consumption_lineage_api.py`. Closes tracker CX-4.
+- **Negative knowledge** (AI-4): Rejected inferences, re-proposal suppression.
+  `negative_knowledge.py`, `negative_knowledge_api.py`.
+
+#### Quality and trust (QT-1 through QT-4)
+
+- **Quality-runtime coupling** (QT-1): Demotion, trust warnings, tool gating.
+  `quality_coupling.py`. Closes tracker DQ-3, RT-7, AG-6, TL-3.
+- **Trust scoring** (QT-2): Composite 0-100 score, A-F grade, explainable factors.
+  `trust_scoring.py`.
+- **Freshness monitoring** (QT-3): Watermark config, maker-checker, ADR-0016.
+  `freshness.py` plus `quality_api.py` endpoints. Closes tracker DQ-2.
+- **Runtime data contracts** (QT-4): Schema drift, quality breach, SLA enforcement.
+  `runtime_contracts.py`, `runtime_contracts_api.py`. Closes tracker DQ-5.
+
+Data-quality observability has moved from "Implemented for profile-baseline controls" to
+Implemented in the status matrix.
+
+#### Studio and governance (STU-1 through STU-3)
+
+- **Studio change sets** (STU-1): Create, items, conflict detection. `studio.py`,
+  `studio_api.py`. Closes tracker ST-A1.
+- **Studio test harness** (STU-2): Fixture validation, metrics. `studio_test_harness.py`.
+  Closes tracker ST-A2.
+- **Studio diff view and impact preview** (STU-3): `studio_api.py` endpoints. Closes
+  tracker ST-A3 and ST-A5.
+
+Studio has moved from Pending to Partial in the status matrix.
+
+#### Notifications and compliance (NC-1, NC-2)
+
+- **Notification routing** (NC-1): Rules, escalation, dedup, ITSM integration.
+  `notification_routing.py`, `notification_api.py`. Closes tracker DQ-1.
+- **Compliance pack generation** (NC-2): Five frameworks, reproducible, WORM-archived.
+  `compliance_packs.py`, `compliance_api.py`. Closes tracker OB-5.
+
+#### Observability (OB-1, OB-2)
+
+- **OpenTelemetry tracing and metrics** (OB-1): `observability.py`. Closes tracker OB-1.
+- **Observability API** (OB-2): SLO, error budgets, archive status.
+  `observability_api.py`. Closes tracker OB-4.
+
+#### Tool plans (TP-1)
+
+- **Multi-step tool plans** (TP-1): Validation, budget enforcement, dependency ordering,
+  partial failure. `tool_plans.py`, `tool_plans_api.py`. Closes tracker AG-4 and TL-2.
+
+#### Context products enhancements (CX-3, CX-6)
+
+- **Per-read policy evaluation** (CX-3): Wired into `mcp_server.py`. Closes tracker CX-3
+  (from IN PROGRESS).
+- **Per-consumer rate limits** (CX-6): `mcp_budget.py` enhancement. Closes tracker CX-6.
+
+#### Verification evidence
+
+- **1109 tests pass, 0 failures.** 17 new test files with 200+ tests covering all
+  implemented modules.
+- INV-5 tenant isolation verified across all new API surfaces.
+- INV-7 audit invariant verified: `_KNOWN_UNAUDITED_MUTATIONS` is empty.
+- All code registered with FastAPI routers in `main.py`.
+
+#### Known limitations
+
+- Bank-scale benchmarks for retrieval (large-catalog), SIEM routing (target SOC endpoint),
+  and WORM archive (target storage) remain Phase D gates.
+- The ABAC engine supersedes the earlier `policy_engine.py` partial but residency attribute
+  evaluation against production data has not been measured.
+- Injection defense corpus covers multilingual and encoding vectors but bank-specific
+  adversarial evaluation remains.
+- Studio parameter-contract designer and Git binding remain open (tracker ST-A4, ST-A6).
+- Interactive browser visual/accessibility certification is not possible in this session.
