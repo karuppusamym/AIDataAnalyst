@@ -14,6 +14,7 @@ from temporalio.client import Client
 
 from aida import __version__
 from aida.abac_api import router as abac_router
+from aida.access_review_api import router as access_review_router
 from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
@@ -227,6 +228,7 @@ app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
 app.include_router(search_router)
 app.include_router(abac_router)
+app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
 app.include_router(view_lineage_router)
 app.include_router(studio_router)

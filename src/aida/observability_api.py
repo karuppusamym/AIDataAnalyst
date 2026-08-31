@@ -1,9 +1,10 @@
-"""Observability API (OB-1 through OB-4).
+"""Observability API (OB-1 through OB-4, OB-6).
 
-SLO definitions CRUD, error budget consumption, and audit archive
-status endpoints.
+SLO definitions CRUD, error budget consumption, audit archive status, and
+cost/showback aggregation endpoints.
 """
 
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,11 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
+from aida.cost_showback import build_cost_showback_report, totals_for
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import AuditArchiveRecord, SloDefinition, SloMeasurement
 from aida.schemas import (
     ArchiveStatusRead,
+    CostShowbackRead,
+    CostShowbackTotalsRead,
+    LobCostRowRead,
     Page,
     SloBudgetRead,
     SloDefinitionCreate,
@@ -199,4 +204,64 @@ async def get_archive_status(
         latest_checksum=latest.checksum if latest else None,
         legal_hold_count=legal_hold_count,
         status=status,
+    )
+
+
+@router.get(
+    "/observability/cost/showback",
+    response_model=CostShowbackRead,
+    summary="Cost/showback aggregation, per line of business",
+)
+async def get_cost_showback(
+    period_start: datetime = Query(...),
+    period_end: datetime = Query(...),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "Operations", "ComplianceOfficer", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> CostShowbackRead:
+    """Real-time showback report: `QueryExecution` rows aggregated by the LOB
+    their `DataSource` belongs to. See `aida.cost_showback` module docstring
+    for exactly what `total_plan_cost_units` is (a per-connector proxy) and is
+    not (a reconciled dollar cost) -- this platform has no billing
+    integration, and `cost_basis` on every response says so explicitly rather
+    than let a proxy metric be mistaken for one.
+    """
+    org_id = context.require_organization()
+    if period_end <= period_start:
+        raise HTTPException(
+            status_code=422, detail="period_end must be after period_start"
+        )
+
+    report = await build_cost_showback_report(
+        session,
+        organization_id=org_id,
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    rows = [
+        LobCostRowRead(
+            line_of_business_id=row.line_of_business_id,
+            line_of_business_code=row.line_of_business_code,
+            line_of_business_name=row.line_of_business_name,
+            datasource_count=row.datasource_count,
+            query_count=row.query_count,
+            completed_count=row.completed_count,
+            rejected_count=row.rejected_count,
+            failed_count=row.failed_count,
+            total_row_count=row.total_row_count,
+            total_elapsed_ms=row.total_elapsed_ms,
+            total_plan_cost_units=row.total_plan_cost_units,
+        )
+        for row in report.rows
+    ]
+    return CostShowbackRead(
+        organization_id=report.organization_id,
+        period_start=report.period_start,
+        period_end=report.period_end,
+        generated_at=report.generated_at,
+        cost_basis=report.cost_basis,
+        rows=rows,
+        totals=CostShowbackTotalsRead(**totals_for(report.rows)),
     )

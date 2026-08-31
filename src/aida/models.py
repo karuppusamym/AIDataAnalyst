@@ -4561,6 +4561,51 @@ class CompliancePackRecord(Base, TimestampMixin):
 
 
 # ---------------------------------------------------------------------------
+# Access Review / Self-Service Entitlement Reporting (OB-7)
+# ---------------------------------------------------------------------------
+
+
+class AccessReviewReportRecord(Base, TimestampMixin):
+    """WORM-archived self-service entitlement report (OB-7).
+
+    Snapshots what one principal (`subject_principal_id`) was entitled to see at
+    `generated_at`, built from real persisted `WorkspaceMembership` and
+    `SourceBinding` rows plus an ABAC policy overlay -- never authored by hand,
+    matching the reproducibility bar OB-5's `CompliancePackRecord` sets for this
+    module. Append-only: nothing here is ever updated or deleted, which is what
+    lets a bank's access-review process point at a specific report as the record
+    of what was disclosed, to whom, and when.
+    """
+
+    __tablename__ = "access_review_report"
+    __table_args__ = (
+        Index(
+            "ix_access_review_report_org_subject",
+            "organization_id",
+            "subject_principal_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    subject_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    subject_principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # True when the subject generated their own report; False when an elevated
+    # role (PlatformAdmin/DataAdmin/ComplianceOfficer) pulled it on their behalf --
+    # always audited via `requested_by` either way.
+    is_self_service: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    entitlements: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+# ---------------------------------------------------------------------------
 # Negative Knowledge Surface (Phase E - EE.3)
 # ---------------------------------------------------------------------------
 
