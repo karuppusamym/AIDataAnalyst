@@ -2933,3 +2933,62 @@ that first manifest.
   but adding a stored verdict at dbt ingestion would need a `models.py` migration and was out of this
   item's scope (`models.py` is flagged as under concurrent edit; `envelope_models.py` exists
   specifically to avoid touching it).
+
+## 2026-08-31 — AU-10 (one non-`env` secret provider) closed
+
+- Closed the audit's stated deployment blocker: `SecretResolver` registered exactly one provider
+  (`env`), and production config forbids `credential_provider == "env"`, so no credential resolved
+  in any production-valid configuration — the `SecretProvider` Protocol and caching already existed
+  correctly, only the fetch was missing. `secrets.py`'s new `VaultKvSecretProvider` implements that
+  fetch against HashiCorp Vault's KV v2 secrets engine over plain `httpx`, registered under scheme
+  `vault` in `SecretResolver.__init__` unconditionally alongside `env` whenever
+  `Settings.secrets_vault_url`/`secrets_vault_token` are configured — the same "always register, let
+  `credential_provider` and the reference scheme decide which is used" shape `env` already had, so
+  `provider_available()`/`resolve()` fail closed exactly the way an unimplemented provider
+  (`cyberark`, `aws-sm`, ...) already does when it is not configured, rather than crashing at
+  `SecretResolver()` construction.
+- Matches the wire/error-handling conventions `signing.py`'s `VaultTransitSigningProvider` (QG-5)
+  and `tokenization.py`'s `VaultTransformTokenizationProvider` (QG-6) already established for this
+  codebase's Vault integrations: bearer `X-Vault-Token` header, `{base_url}/v1/...` path shape, fail
+  closed on network error/non-2xx/malformed body, and the provider itself holds no secret material —
+  only a `base_url`, `kv_mount`, and the request token. The one deliberate difference: `SecretProvider.resolve`
+  is synchronous (every existing call site — `workflows/activities.py`, `query_gateway.py`,
+  `model_gateway.py`, `policy_native_sync_api.py` — calls `resolve()` from non-async code), so this
+  adapter uses `httpx.Client`, not `httpx.AsyncClient`, the way `VaultTransitSigningProvider`/
+  `VaultTransformTokenizationProvider` do for their async `SigningProvider`/`TokenizationProvider`
+  protocols.
+- Reference shape: `vault://<kv-path>#<field>`, e.g. `vault://bank/data-sources/core#dsn` — `key`
+  (the reference's `#fragment`) selects one field out of the KV v2 secret's data map, defaulting to
+  the conventional `"value"` field when the reference carries no fragment. KV v2's per-write
+  `metadata.version` is carried through as `ResolvedSecret.version`, informational provenance for
+  whichever value was actually fetched.
+- New `Settings` fields in `atlas/platform/config.py`: `secrets_vault_url`, `secrets_vault_token`
+  (`SecretStr | None`), `secrets_vault_kv_mount` (default `"secret"`), `secrets_vault_timeout_seconds`.
+  `credential_provider`'s `Literal` already accepted `"vault"` before this change — only `"env"` was
+  forbidden in production, and only `env` actually resolved anything. The bootstrap Vault token is
+  deliberately *not* itself a `SecretResolver` reference — that would be circular, since `vault` is
+  now the very provider `hmac_signing_vault_token_reference` (QG-5) and `tokenization_vault_token_reference`
+  (QG-6) resolve through — it is injected directly into process config the way a Vault Agent
+  auto-auth sidecar (or an equivalent platform mechanism) ordinarily delivers a short-lived root
+  token, documented inline as the same directly-injected-bearer-credential shape
+  `entitlement_webhook_token` already uses.
+- 13 tests in `tests/test_secrets.py` (4 pre-existing + 9 new): the documented KV v2 wire contract
+  against a mocked `httpx` transport (path, bearer token, default-vs-fragment field selection,
+  `metadata.version` surfaced correctly), fail-closed tests (network error, non-2xx, malformed/
+  non-JSON body, a response missing the requested field), a no-extra-secret-material assertion
+  mirroring `VaultTransitSigningProvider`'s equivalent test, and two end-to-end tests through
+  `SecretResolver` itself (`credential_provider="vault"` configured now actually resolves a
+  reference end to end against a mocked transport; left unconfigured it fails closed with
+  `provider_available() is False`, same as `cyberark`).
+- Scope held to `secrets.py`, its config wiring (`atlas/platform/config.py`), and its tests, per the
+  coordinator's scope discipline for this item — the `SecretProvider` Protocol's shape was not
+  touched.
+- Verification, foreground start to finish per the coordinator's standing correction (a backgrounded
+  run does not survive this session's own turn boundaries): `ruff check .` clean, `mypy src` clean
+  (190 files, strict), full `pytest` suite green (all tests passing, 0 failures).
+- Not yet DONE, stated plainly: `VaultKvSecretProvider` has never made a request against a real
+  Vault instance — verified only against a mocked HTTP transport asserting the documented KV v2 API,
+  the same standing limitation already recorded for QG-5's `VaultTransitSigningProvider`, QG-6's
+  `VaultTransformTokenizationProvider`, and the connector work (CN-1c/CN-2a). No production
+  deployment artifact configures `secrets_vault_url`/`secrets_vault_token` yet — that is AU-9's
+  scope, not this item's.

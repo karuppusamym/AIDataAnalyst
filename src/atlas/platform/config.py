@@ -48,6 +48,23 @@ class Settings(BaseSettings):
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
     credential_provider: Literal["env", "vault", "cyberark", "aws-sm", "azure-kv", "gcp-sm"] = "env"
     secret_cache_ttl_seconds: int = Field(default=60, ge=0, le=3600)
+    # AU-10: HashiCorp Vault's KV v2 secrets engine, the `credential_provider="vault"`
+    # implementation of `aida.secrets.SecretProvider` (see
+    # `aida.secrets.VaultKvSecretProvider`) -- the provider every production-valid
+    # `credential_provider` reference actually resolves through, since "env" is
+    # forbidden in production below. `secrets_vault_token` is the bootstrap credential
+    # that authenticates *to* Vault; it is deliberately not itself a `SecretResolver`
+    # reference (that would be circular -- this is the "vault" scheme provider
+    # `SecretResolver` uses to resolve every other reference, including
+    # `hmac_signing_vault_token_reference` and `tokenization_vault_token_reference`
+    # below). It is injected directly into process config the way a Vault Agent
+    # auto-auth sidecar (or an equivalent platform mechanism) ordinarily delivers a
+    # short-lived root token -- the same directly-injected-bearer-credential shape
+    # `entitlement_webhook_token` already uses.
+    secrets_vault_url: str | None = Field(default=None, max_length=500)
+    secrets_vault_token: SecretStr | None = Field(default=None)
+    secrets_vault_kv_mount: str = Field(default="secret", max_length=200)
+    secrets_vault_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
     database_url: str = "postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida"
     database_pool_size: int = Field(default=10, ge=1, le=100)
     database_max_overflow: int = Field(default=20, ge=0, le=200)
