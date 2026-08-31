@@ -116,7 +116,10 @@ EXEMPT_SRC_PATH_PREFIXES = ("src/atlas",)
 # names (e.g. "identity_tenancy module privacy"), never a short CLI-style slug like these.
 # The AU-13 entries are CI job/tool names (`.github/workflows/ci.yml`) mentioned on a line
 # that also happens to say "contract" (e.g. "...the CI-runner regression-gate mechanism...");
-# `migration-drift` (AU-8) is this file's own CI job name, same shape.
+# `migration-drift` (AU-8) is this file's own CI job name, same shape. `snowflake-connector-
+# python` (AU-13 follow-up) is a PyPI package name pinned in `pyproject.toml`, mentioned on
+# the same tracker row that separately explains this very false-positive pattern (using the
+# word "contract" to describe this test), same shape as `python-tds` elsewhere in this file.
 EXEMPT_CONTRACT_SLUGS = {
     "lint-imports",
     "import-linter",
@@ -125,6 +128,7 @@ EXEMPT_CONTRACT_SLUGS = {
     "secret-scan",
     "docker-build",
     "migration-drift",
+    "snowflake-connector-python",
 }
 
 # A bare `test_xxx` mention that is a real, non-test artefact, verified by hand:
