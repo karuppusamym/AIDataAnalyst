@@ -36,6 +36,7 @@ from aida.catalog_bulk_actions import (
     match_columns_by_pattern,
     match_tables_by_filter,
 )
+from aida.catalog_read_model import compose_catalog_rows
 from aida.classification import SENSITIVE_CLASSES
 from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
 from aida.config import Settings, get_settings
@@ -104,6 +105,7 @@ from aida.schemas import (
     CatalogBulkOwnRequest,
     CatalogBulkSelectionFilter,
     CatalogBulkTagRequest,
+    CatalogRowRead,
     CertificationDecisionRequest,
     ClassificationFeedIngestRequest,
     ClassificationFeedIngestResponse,
@@ -1863,6 +1865,139 @@ async def list_tables(
         limit=limit,
         offset=offset,
         cursor=cursor,
+    )
+
+
+@router.get("/organizations/{organization_id}/catalog/rows", response_model=CursorPage)
+async def list_catalog_rows(
+    organization_id: UUID,
+    q: str | None = Query(default=None, min_length=2, max_length=200),
+    object_type: str | None = Query(default=None, max_length=30),
+    table_status: str = Query(default="ACTIVE", alias="status", max_length=30),
+    certification: str | None = Query(default=None, max_length=20),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None, description=_CURSOR_DESCRIPTION),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> CursorPage:
+    """UX-12: the composed catalog-table-list read model.
+
+    One request returns everything the catalog table UI needs per row
+    (description, proposal state, owner, certification, quality, glossary
+    terms, row estimate) instead of the five separate calls per table this
+    replaces (`Docs/20-modules/21-experience-shell.md`). Read-only: this
+    module never accepts or forwards a caller-supplied statement, so ADR-0004
+    (the execution gateway is the only path to a source query) is untouched.
+
+    Reuses `list_tables`' own keyset contract (`aida.pagination`) and its own
+    permission gate (`aida.authorization_gate.gate`, action `READ_METADATA`,
+    resource_type `datasource`) rather than introducing either anew -- the
+    gate is called once per DISTINCT datasource on the page (bounded by how
+    many datasources this org has, not by page size), and a row from a
+    datasource the caller cannot read is dropped from the page rather than
+    failing the whole request, which is why a page can come back shorter than
+    `limit` for a caller with partial datasource access; `next_cursor` still
+    walks every remaining row exactly once.
+    """
+    enforce_organization(context, organization_id)
+
+    order_columns: tuple[Any, ...] = (MetadataTable.name, MetadataTable.id)
+    filters: list[Any] = [MetadataTable.organization_id == organization_id]
+    if table_status != "ALL":
+        filters.append(MetadataTable.status == table_status)
+    if object_type and object_type != "ALL":
+        filters.append(MetadataTable.object_type == object_type)
+    if q:
+        normalized_query = q.strip().lower()
+        filters.append(
+            or_(
+                func.lower(MetadataTable.name).contains(normalized_query),
+                func.lower(func.coalesce(MetadataTable.source_description, "")).contains(
+                    normalized_query
+                ),
+            )
+        )
+
+    base_query = (
+        select(MetadataTable, MetadataSchema.name, DataSource.name)
+        .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+        .join(DataSource, DataSource.id == MetadataTable.datasource_id)
+        .where(*filters)
+    )
+
+    total: int | None = None
+    if cursor is not None:
+        try:
+            raw_values = decode_cursor(cursor, arity=len(order_columns))
+            last_values = tuple(
+                coerce(value) for coerce, value in zip((str, UUID), raw_values, strict=True)
+            )
+        except (InvalidCursor, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="invalid cursor") from exc
+        statement = apply_keyset(
+            base_query.order_by(*order_columns), order_columns, last_values
+        ).limit(limit)
+    else:
+        total = (
+            await session.scalar(select(func.count()).select_from(MetadataTable).where(*filters))
+            or 0
+        )
+        statement = base_query.order_by(*order_columns).limit(limit).offset(offset)
+
+    db_rows = (await session.execute(statement)).all()
+    page_rows: list[tuple[MetadataTable, str, str]] = [
+        (table, schema_name, datasource_name) for table, schema_name, datasource_name in db_rows
+    ]
+    next_cursor = (
+        encode_cursor(page_rows[-1][0].name, str(page_rows[-1][0].id))
+        if len(page_rows) == limit
+        else None
+    )
+
+    # One gate() call per distinct datasource on the page -- not per row --
+    # cached so a page dominated by one denied datasource still costs one
+    # call for it, not one per row from it.
+    datasource_allowed: dict[UUID, bool] = {}
+    for table, _, _ in page_rows:
+        datasource_id = table.datasource_id
+        if datasource_id in datasource_allowed:
+            continue
+        try:
+            await gate(
+                session,
+                context,
+                settings=settings,
+                action="READ_METADATA",
+                resource_type="datasource",
+                resource_id=str(datasource_id),
+                datasource_id=datasource_id,
+            )
+        except AuthorizationDenied:
+            datasource_allowed[datasource_id] = False
+        else:
+            datasource_allowed[datasource_id] = True
+    permitted_rows = [row for row in page_rows if datasource_allowed.get(row[0].datasource_id)]
+
+    items: list[CatalogRowRead] = await compose_catalog_rows(session, permitted_rows)
+
+    if certification and certification != "ALL":
+        # Certification is a derived, not stored, value (the latest
+        # AssetCertification row projected through expiry), so it is filtered
+        # here rather than in SQL -- the same reason the permission filter
+        # above can leave a page short of `limit`: walk further with
+        # `next_cursor` to keep collecting matches.
+        items = [item for item in items if item.certification == certification]
+
+    return CursorPage(
+        items=items,
+        limit=limit,
+        offset=offset,
+        total=total,
+        next_cursor=next_cursor,
     )
 
 

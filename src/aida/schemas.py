@@ -3061,6 +3061,39 @@ class CursorPage(ApiModel):
     next_cursor: str | None = None
 
 
+class CatalogRowRead(ApiModel):
+    """UX-12: the composed catalog-table-list read model.
+
+    One row assembles fields that otherwise live on five different endpoints
+    keyed by table id (description, ownership, certification, quality,
+    glossary terms, row estimate) -- see `aida.catalog_read_model` for how
+    each field is sourced and composed. Mirrors `CatalogRowRead` in
+    `ui-next/src/lib/types.ts` field-for-field; that file is the client
+    already typed against this endpoint, so this schema follows it rather
+    than the reverse.
+    """
+
+    id: UUID
+    name: str
+    schema_name: str
+    datasource_name: str
+    object_type: str
+    status: str
+    description: str | None
+    # True when `description` came from an unreviewed proposal (a pending
+    # GL-9 draft) rather than an approved source. ADR-0001: models propose,
+    # humans and deterministic services decide -- the UI must never render a
+    # proposal as though it were established fact.
+    description_is_proposed: bool
+    owner: str | None
+    certification: str  # CERTIFIED | EXPIRED | NONE | REVOKED
+    certification_expires_at: datetime | None
+    quality: str  # PASSING | INCIDENT_OPEN | STALE | UNKNOWN
+    glossary_terms: list[str]
+    row_count_estimate: int | None
+    updated_at: datetime
+
+
 # --- ADR-0018: three-axis tenancy -------------------------------------------
 
 

@@ -51576,6 +51576,236 @@
         "summary": "Get Catalog Bulk Action Run"
       }
     },
+    "/v1/organizations/{organization_id}/catalog/rows": {
+      "get": {
+        "description": "UX-12: the composed catalog-table-list read model.\n\nOne request returns everything the catalog table UI needs per row\n(description, proposal state, owner, certification, quality, glossary\nterms, row estimate) instead of the five separate calls per table this\nreplaces (`Docs/20-modules/21-experience-shell.md`). Read-only: this\nmodule never accepts or forwards a caller-supplied statement, so ADR-0004\n(the execution gateway is the only path to a source query) is untouched.\n\nReuses `list_tables`' own keyset contract (`aida.pagination`) and its own\npermission gate (`aida.authorization_gate.gate`, action `READ_METADATA`,\nresource_type `datasource`) rather than introducing either anew -- the\ngate is called once per DISTINCT datasource on the page (bounded by how\nmany datasources this org has, not by page size), and a row from a\ndatasource the caller cannot read is dropped from the page rather than\nfailing the whole request, which is why a page can come back shorter than\n`limit` for a caller with partial datasource access; `next_cursor` still\nwalks every remaining row exactly once.",
+        "operationId": "list_catalog_rows_v1_organizations__organization_id__catalog_rows_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 2,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "ACTIVE",
+              "maxLength": 30,
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "certification",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 20,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Certification"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque keyset cursor from a previous page's next_cursor. When supplied, offset is ignored, no total is computed, and the response cost stays bounded by limit no matter how many pages precede it.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Opaque keyset cursor from a previous page's next_cursor. When supplied, offset is ignored, no total is computed, and the response cost stays bounded by limit no matter how many pages precede it.",
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CursorPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Catalog Rows"
+      }
+    },
     "/v1/organizations/{organization_id}/data-domains": {
       "get": {
         "description": "List a tenant's data domains without an N+1 traversal through every LOB --\nsame pattern as list_organization_projects, feeding the workspace tree\n(Org -> LOB -> Domain -> Project -> Source) instead of a flat source picker.",

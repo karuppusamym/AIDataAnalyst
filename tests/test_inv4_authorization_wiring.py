@@ -94,7 +94,13 @@ def test_the_validation_path_is_gated() -> None:
 
 @pytest.mark.parametrize(
     "handler",
-    ["list_tables", "list_columns", "list_constraints", "get_latest_table_profile"],
+    [
+        "list_tables",
+        "list_columns",
+        "list_constraints",
+        "get_latest_table_profile",
+        "list_catalog_rows",
+    ],
 )
 def test_the_catalog_read_handlers_are_gated(handler: str) -> None:
     assert reaches_call("aida.api", handler, _GATE_CALLS)

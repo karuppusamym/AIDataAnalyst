@@ -2538,6 +2538,7 @@ Studio has moved from Pending to Partial in the status matrix.
   identity); FK discovery is best-effort against a Unity Catalog surface newer than PK/UNIQUE and
   unverified live; no certification run or version fixtures yet (CN-3 remains open for every
   adapter, not specific to this one).
+
 ## 2026-08-31 — LN-7 (transitive cross-kind impact traversal) closed
 
 - On re-checking the live tracker before starting, most of LN-7's exit criterion — "bounded
@@ -2666,3 +2667,103 @@ Studio has moved from Pending to Partial in the status matrix.
   gateway — same honesty convention as that section's existing "Batch forced-restart... Current
   for local only" row. Updated `Docs/20-modules/15-model-gateway.md` §14 and §15 to match rather
   than leave the "Designed, not drilled" claim standing.
+
+## 2026-08-31 — UX-12 (`CatalogRowRead` read-model endpoint) closed
+
+- Module 21's rebuild plan named one backend gap: `MetadataTableRead` returns eight fields, so a
+  governed catalog row on the new `ui-next` Catalog screen (UX-11, already DONE) cost five further
+  per-table calls — 100 rows = 501 requests. Closed by `GET /v1/organizations/{org}/catalog/rows`
+  (`aida.api.list_catalog_rows`), composing description, proposal state, owner, certification,
+  quality, glossary terms and a row-count estimate into one response per row, in a fixed number of
+  batched queries independent of page size — not a query per row, which is exactly the pattern
+  this endpoint exists to remove.
+- New module `aida/catalog_read_model.py` holds the composition. Each field's source, chosen from
+  what already exists in the platform rather than anything new:
+  - **description / description_is_proposed** — the tracker's "proposal state" folded into one
+    boolean because the client type (`CatalogRowRead` in `ui-next/src/lib/types.ts`) has no separate
+    field for it. Precedence: latest `APPROVED` `AssetDocumentationVersion` readme (GL-9's
+    evidence-scored drafting pipeline, `asset_description_service.py`) → a `PENDING_APPROVAL`
+    `AssetDescriptionDraft` shown as a proposal → the older
+    `MetadataBusinessAnnotation.business_description` (always review-approved) → the
+    connector-sourced `MetadataTable.source_description` → `None`.
+  - **owner** — GL-2 `OwnershipAssignment` (status `ACTIVE`, `subject_type` `TABLE`), falling back
+    to the approved documentation version's `owner_principal`, mirroring the two-source definition
+    of "owned" already in `stewardship_api._owned_table_ids`.
+  - **certification** — CT-5 `AssetCertification` (`asset_type` `TABLE`), newest row first,
+    projected through the existing `asset_certification_is_active` query-time projection rather than
+    trusting the raw `status` column, same as every other certification caller.
+  - **quality** — module 11's `DataQualityIncident` (`OPEN`/`ACKNOWLEDGED` → `INCIDENT_OPEN`) and
+    `DataQualityObservation` recency (no observation ever → `UNKNOWN`; last observation older than
+    14 days → `STALE`; otherwise `PASSING`). Module 11's own coupling API (`get_trust_signal`, DQ-3)
+    is documented as planned, not built, so this reads the source tables directly.
+  - **glossary_terms** — GL-8/SM-2 `AssetTermLink` joined to `GlossaryTermVersion` (status
+    `APPROVED`), the same join `asset_description_service.gather_evidence` already uses per table.
+  - **row_count_estimate** — latest `TableProfile.row_count_estimate` (module 05 profiling), batched
+    with the `row_number() OVER (PARTITION BY table_id ...)` idiom
+    `intelligence_api._latest_table_profiles` and `quality_service` already use for the same
+    "latest per table" problem, rather than inventing a new one.
+- CT-2's `CursorPage` keyset contract is reused verbatim (`aida.pagination.apply_keyset`/
+  `decode_cursor`/`encode_cursor`, the same primitives `list_tables` calls), including `total: null`
+  under a cursor — the endpoint never runs a `COUNT(*)` on the keyset path.
+- Permission-filtered by the same gate `list_tables` already applies (`aida.authorization_gate.gate`,
+  action `READ_METADATA`, resource_type `datasource`) rather than a new authorization path — called
+  once per **distinct datasource** on the page (cached, so a page dominated by one denied datasource
+  still costs one call for it, not one per row), and a row from a datasource the caller cannot read
+  is dropped from the page rather than failing the whole request. `enforce_organization` still fires
+  first and unconditionally denies a foreign organization before any session access, same as every
+  other organization-scoped read — the generic
+  `test_inv5_tenant_isolation.py::test_cross_tenant_denial` parametrization picks the new route
+  up automatically since its path names `{organization_id}`, and `list_catalog_rows` was added
+  to `test_inv4_authorization_wiring.py`'s
+  `test_the_catalog_read_handlers_are_gated` parametrization alongside `list_tables`/`list_columns`/
+  `list_constraints`/`get_latest_table_profile`.
+- No writes anywhere in the new code path (no `session.add`/`commit`) and no source-system SQL is
+  accepted or forwarded, so ADR-0004 (the execution gateway is the only path to a source query) is
+  untouched by construction, not just by inspection.
+- `certification` is also accepted as an optional query filter, applied after composition (the
+  states are derived, not stored columns) rather than as a correlated SQL subquery — the same reason
+  permission filtering above can leave a page short of `limit`: walk further with `next_cursor` to
+  keep collecting matches.
+- Tests: new `tests/test_catalog_rows_read_model.py` (11 tests, real SQLite execution via aiosqlite
+  — PostgreSQL is unreachable in this sandbox, same rationale `test_catalog_pagination.py` already
+  documents) covering: the full composed shape against a fully-seeded row; the description precedence
+  chain across five source combinations; all four quality states; all three reachable certification
+  states plus the `certification` query filter; the CT-2 cursor walk (every row exactly once,
+  `total` non-null only on page one) and the offset-mode/invalid-cursor cases mirrored from
+  `test_catalog_pagination.py`; a cross-organization 403 fired before the (intentionally
+  exploding-on-touch) session is used; per-datasource permission filtering proven by monkeypatching
+  `aida.api.gate` to deny one of two seeded datasources and asserting both that the denied
+  datasource's row is dropped and that `gate` was called exactly twice (once per distinct
+  datasource, not once per row); and a query-count-bounded test (`before_cursor_execute` statement
+  counter, the same pattern `test_bulk_governance_decisions.py`'s `_StatementCounter` uses) proving
+  the statement count is identical for a 4-row and a 24-row page.
+- Surfaced and fixed one latent gap along the way: `asset_certification_is_active`'s naive/aware
+  datetime comparison raises under SQLite (`DateTime(timezone=True)` round-trips naive there,
+  tz-aware under PostgreSQL in production) — nothing had previously combined a SQLite-seeded
+  certification row with that check in a test. Fixed locally in `catalog_read_model.py` with a small
+  `_as_aware` coercion and a non-frozen proxy dataclass satisfying `AssetCertificationLike` without
+  mutating the ORM row (a frozen dataclass's fields are read-only, which mypy correctly refuses to
+  accept against a protocol declaring settable attributes) — `asset_certification.py` itself was left
+  unchanged, out of scope for this item.
+- `ui-next/src/lib/api.ts`'s `VITE_USE_FIXTURES` flag was left at its default (fixtures on) rather
+  than flipped to `0`: it also gates `fetchAssetEvidence`
+  (UX-13, `GET /v1/metadata/tables/{id}/evidence`), which does not exist yet — flipping the flag
+  now would 404 the evidence pane rather than just switch the catalog table to real data. Noted in
+  `00-status.md`'s new `ui-next` shell rebuild row rather than silently left unflipped; the honest
+  fix is either landing UX-13 first or splitting the flag per-endpoint.
+- `Docs/90-reference/openapi-baseline.json` regenerated via `scripts/openapi_diff.py
+  --accept-baseline`; the diff gate confirmed the change is additive only (`added path
+  '/v1/organizations/{organization_id}/catalog/rows'`, no breaking changes) before the baseline was
+  regenerated.
+- Verification: `ruff check .` clean. `mypy src` clean (185 files). Full `pytest` suite green except
+  two pre-existing, unrelated failures in `test_doc_claims.py` (`test_cited_test_path_resolves`)
+  citing `tests/test_studio.py::TestParameterContractDesigner`, which does not exist as a class or
+  function in that file (confirmed present on a clean checkout via `git stash` before this item's
+  changes) — a stale citation from the prior ST-A4 entry above, left unfixed as out of scope for a
+  UX-12 read-model change.
+- Known limitations: no dedicated composite index on `(organization_id, status, name, id)` for the
+  org-wide keyset order (the existing `ix_metadata_table_org_status` and per-datasource composite
+  index don't cover this exact ordering) — acceptable for a first landing, worth revisiting once
+  bank-scale row counts are available; and the certification query filter, being applied after
+  composition, can return fewer than `limit` items per page for a narrow filter, same as permission
+  filtering already can.
