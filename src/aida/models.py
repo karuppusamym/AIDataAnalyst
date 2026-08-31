@@ -5062,6 +5062,84 @@ class TermSemanticBinding(Base, TimestampMixin):
 
 
 # ---------------------------------------------------------------------------
+# SM-4: Metric suggestions from approved annotations
+# ---------------------------------------------------------------------------
+
+
+class SemanticMetricProposal(Base, TimestampMixin):
+    """A candidate metric definition proposed from real, already-approved
+    evidence: a `MetadataBusinessAnnotation` (approved business context on a
+    table) plus a numeric column on that table whose name matches a known
+    measure-keyword vocabulary (`metric_suggestion_service.MEASURE_KEYWORDS`).
+
+    Mirrors GL-8's `GlossaryLinkProposal` evidence-inference shape (an
+    inferred candidate, not a steward assertion, so it starts `DRAFT` rather
+    than `PENDING_APPROVAL`) and GL-9's evidence-scored review gate
+    (`metric_suggestion_service.score_evidence` / `ensure_reviewable`): the
+    score sets review priority and gates submission, it never skips
+    independent review.
+
+    Approval (`metric_suggestion_service.apply_metric_suggestion_proposal`,
+    called only from `semantic_api.decide_governance_review`) publishes a
+    real `SemanticMetric` + `SemanticMetricVersion` -- see that function's
+    docstring for how it satisfies `SemanticMetricVersion`'s mandatory
+    `semantic_model_version_id` FK without bundling the new metric into an
+    unrelated model version's own review.
+    """
+
+    __tablename__ = "semantic_metric_proposal"
+    __table_args__ = (
+        UniqueConstraint(
+            "table_id",
+            "measure_column_id",
+            "source_annotation_id",
+            name="uq_semantic_metric_proposal_evidence",
+        ),
+        Index("ix_semantic_metric_proposal_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    measure_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_annotation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_business_annotation.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    proposed_slug: Mapped[str] = mapped_column(String(100), nullable=False)
+    proposed_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    proposed_description: Mapped[str] = mapped_column(Text, nullable=False)
+    proposed_aggregation: Mapped[str] = mapped_column(String(30), nullable=False)
+    proposed_grain: Mapped[str] = mapped_column(String(1000), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_metric_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("semantic_metric_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
 # QG-6: dynamic masking / tokenization integration
 # ---------------------------------------------------------------------------
 

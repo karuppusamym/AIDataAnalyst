@@ -36,6 +36,7 @@ from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
+from aida.metric_suggestion_api import router as metric_suggestion_router
 from aida.models import Organization
 from aida.negative_knowledge_api import router as negative_knowledge_router
 from aida.notification_api import router as notification_router
@@ -242,6 +243,7 @@ app.include_router(token_revocation_router)
 app.include_router(detokenization_router)
 app.include_router(persona_router)
 app.include_router(asset_description_router)
+app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(
     mcp_router
