@@ -13,7 +13,6 @@ from sqlalchemy import select, text
 from temporalio.client import Client
 
 from aida import __version__
-from aida.abac_api import router as abac_router
 from aida.access_review_api import router as access_review_router
 from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
@@ -131,6 +130,67 @@ async def _audit_archive_loop(loop_settings: Settings) -> None:
             logger.exception("audit_archive_cycle_failed")
 
 
+async def _connect_temporal(loop_settings: Settings) -> Client | None:
+    """AU-12: bounded, non-fatal Temporal connect.
+
+    `Client.connect` performs a real RPC handshake (lazy=False, the default)
+    with no built-in timeout of its own, so an unreachable or slow Temporal
+    server can hang or raise indefinitely. This bounds the attempt to
+    `temporal_connect_timeout_seconds` and turns any failure -- timeout,
+    connection refused, DNS failure, whatever -- into a logged `None` rather
+    than an exception, so callers (`lifespan` at startup,
+    `_temporal_reconnect_loop` afterward) never need their own try/except
+    around the connect call itself. `None` is the app's "Temporal degraded"
+    state: `/health/ready` already reports it as `temporal: DOWN` (see
+    `readiness` below) once this returns.
+    """
+    try:
+        return await asyncio.wait_for(
+            Client.connect(
+                loop_settings.temporal_address,
+                namespace=loop_settings.temporal_namespace,
+            ),
+            timeout=loop_settings.temporal_connect_timeout_seconds,
+        )
+    except Exception:
+        logger.warning(
+            "temporal_connect_failed",
+            temporal_address=loop_settings.temporal_address,
+            temporal_namespace=loop_settings.temporal_namespace,
+            timeout_seconds=loop_settings.temporal_connect_timeout_seconds,
+            exc_info=True,
+        )
+        return None
+
+
+async def _temporal_reconnect_loop(app: FastAPI, loop_settings: Settings) -> None:
+    """AU-12: background retry after a failed startup connect.
+
+    Only ever runs when `lifespan` found `app.state.temporal_client` still
+    `None` after the initial attempt -- a live outage at process start. Polls
+    on `temporal_reconnect_interval_seconds` and, on success, publishes the
+    new client onto `app.state.temporal_client` so `/health/ready` (which
+    reads that same attribute) flips back to `temporal: UP` on its very next
+    call, with no restart needed. Mirrors `_audit_archive_loop`'s shape
+    (started/cancelled from `lifespan`, `CancelledError` re-raised so
+    shutdown cancellation is never swallowed) for consistency with this
+    module's one existing background-task convention.
+    """
+    while app.state.temporal_client is None:
+        await asyncio.sleep(loop_settings.temporal_reconnect_interval_seconds)
+        # `_connect_temporal` already converts every non-cancellation failure into
+        # a logged `None` -- nothing left for this loop to catch except
+        # CancelledError, which it must not swallow, so it is left unhandled here.
+        client = await _connect_temporal(loop_settings)
+        if client is not None:
+            app.state.temporal_client = client
+            logger.info(
+                "temporal_reconnected",
+                temporal_address=loop_settings.temporal_address,
+                temporal_namespace=loop_settings.temporal_namespace,
+            )
+
+
 @traced
 async def _traced_dispatch(
     request: Request,
@@ -148,11 +208,26 @@ async def _traced_dispatch(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.temporal_client = None
+    temporal_reconnect_task: asyncio.Task[None] | None = None
     if settings.temporal_enabled:
-        app.state.temporal_client = await Client.connect(
-            settings.temporal_address,
-            namespace=settings.temporal_namespace,
-        )
+        app.state.temporal_client = await _connect_temporal(settings)
+        if app.state.temporal_client is None:
+            # AU-12: a Temporal outage at startup no longer aborts process
+            # startup -- the app comes up degraded (temporal-dependent routes
+            # unavailable, /health/ready reports `temporal: DOWN`) instead of
+            # never starting, and this task retries in the background so it
+            # recovers on its own once Temporal is reachable again.
+            logger.warning(
+                "temporal_unavailable_at_startup",
+                temporal_address=settings.temporal_address,
+                retry_interval_seconds=settings.temporal_reconnect_interval_seconds,
+            )
+            temporal_reconnect_task = asyncio.create_task(
+                _temporal_reconnect_loop(app, settings)
+            )
+        else:
+            logger.info("temporal_connected", temporal_address=settings.temporal_address)
+    app.state.temporal_reconnect_task = temporal_reconnect_task
 
     tracing_active = configure_tracing(
         TracingConfig(
@@ -196,6 +271,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         archive_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await archive_task
+    if temporal_reconnect_task is not None:
+        temporal_reconnect_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await temporal_reconnect_task
     logger.info("service_stopped", service=settings.service_name)
 
 
@@ -229,7 +308,6 @@ app.include_router(context_product_router)
 app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
 app.include_router(search_router)
-app.include_router(abac_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
 app.include_router(view_lineage_router)

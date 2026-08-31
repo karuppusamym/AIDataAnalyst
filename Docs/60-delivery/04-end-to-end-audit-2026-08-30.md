@@ -59,7 +59,7 @@ points, no `getattr` module lookup anywhere in `src/`).
 | `quality_coupling.py`, `trust_scoring.py` | 416 | **DQ-3, RT-7, AG-6, TL-3** | `check_tool_gate` gates nothing; no trust warning is ever emitted; the trust factor never enters ranking. |
 | `retrieval.py` + `fusion_ranking` + `vector_store` + `embedding_provider` + `graph_retrieval` + `vector_retrieval` | ~2,320 | **RT-1, RT-2, RT-3, RT-9, SM-2** | The live retrieval path is a different implementation (`agent_intelligence.GovernedRetriever`). `retrieval.py:43-52` even documents the hand-off that was never performed. Nothing embeds the catalogue. |
 | `injection_defense.py`, `injection_corpus.py` | 726 | **AG-1, AG-2, TS-6** | Live screening is a different, 86-line module (`ingest_screening.py`). Note the *live* path does work — but `is_eligible_for_model_context`, whose docstring calls it "the one question every model-context builder must ask", has zero callers. |
-| `abac.py` | — | **PG-1, PG-6, PG-8** | Real enforcement runs through `policy_engine.evaluate`. `abac.py` is imported only by its own router and its own test. |
+| `abac.py` (deleted 2026-08-31, PG-1/PG-6/PG-8/AU-11 — does not exist any more) | — | **PG-1, PG-6, PG-8** | Real enforcement runs through `policy_engine.evaluate`. `abac.py` is imported only by its own router and its own test. Confirmed and acted on 2026-08-31: `abac.py`/`abac_api.py` deleted, `policy_engine.py` wired end to end (see PG-1's tracker row for the call chain), PG-8's simulation ported to `aida.policy_engine.simulate` + `POST /v1/workspaces/{id}/authorization-simulations` rather than lost. |
 | data_contracts.py (deleted 2026-08-31, AU-6) | 272 | — | Orphaned duplicate of the live `runtime_contracts.py`. Zero importers, zero tests. |
 
 **The one that matters most commercially.** The competitive analysis in §L positions the
@@ -179,9 +179,11 @@ graph.** Until a DONE row requires proof of reachability, this will recur.
    table and the read API all exist.
 6. Wire the remaining dead modules **or delete them and reopen the tracker rows.** Either is
    honest; leaving them is not. data_contracts.py deleted 2026-08-31 under AU-6 (no tracker row
-   cited it, so none needed reopening); `abac.py` still recommended for deletion outright (live
-   duplicate exists), and `quality_coupling`/`trust_scoring` still need wiring (their rows are
-   load-bearing for the product story).
+   cited it, so none needed reopening). `abac.py` does not exist any more -- deleted 2026-08-31
+   under PG-1/PG-6/PG-8/AU-11 rather than merely recommended for deletion, once `policy_engine.py`
+   (its live duplicate) was confirmed as the one already wired end to end and PG-8's simulation
+   mode was ported rather than lost (see PG-1/PG-8's tracker rows). `quality_coupling`/
+   `trust_scoring` still need wiring (their rows are load-bearing for the product story).
 7. **Behavioural authz tests**: a table-driven suite asserting the expected role set per route,
    generated from the live app so it cannot drift.
 8. **One migration test** that applies all 84 to an empty database and diffs against

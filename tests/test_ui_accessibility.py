@@ -99,7 +99,8 @@ def test_completed_control_plane_features_have_a_tabbed_ui() -> None:
         "bi",
     ):
         assert f'data-control-tab="{tab}"' in html
-    assert "/v1/abac/policies" in script
+    assert "/access-policies" in script
+    assert "/authorization-simulations" in script
     assert "/v1/observability/slo" in script
     assert "/v1/compliance/packs" in script
     assert "/v1/studio/change-sets" in script

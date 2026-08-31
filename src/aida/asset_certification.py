@@ -24,6 +24,8 @@ projection rather than trusting the raw status column.
 from datetime import UTC, datetime
 from typing import Protocol
 
+from aida.timeutil import is_live
+
 
 class AssetCertificationLike(Protocol):
     status: str
@@ -33,9 +35,16 @@ class AssetCertificationLike(Protocol):
 def asset_certification_is_active(
     certification: AssetCertificationLike, *, at: datetime | None = None
 ) -> bool:
-    """Whether a certification row currently counts as an active certification."""
+    """Whether a certification row currently counts as an active certification.
+
+    Compared through `aida.timeutil.is_live` rather than a raw `>` (the same fix
+    `workspace_service._expired` already needed): a timestamp read back from
+    SQLite is naive while `datetime.now(UTC)`/a caller-supplied `at` is aware,
+    and the raw comparison raises on that mismatch. PostgreSQL round-trips
+    `expires_at` aware either way, so this changes nothing there.
+    """
     moment = at or datetime.now(UTC)
-    return certification.status == "ACTIVE" and certification.expires_at > moment
+    return certification.status == "ACTIVE" and is_live(certification.expires_at, moment)
 
 
 def current_asset_certification[T: AssetCertificationLike](

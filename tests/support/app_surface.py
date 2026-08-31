@@ -25,7 +25,7 @@ calls against functions defined in the same module, names imported from another
 """
 
 import ast
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -65,6 +65,46 @@ def route_id(route: APIRoute) -> str:
     """Stable, readable identifier used in assertion messages and parametrize ids."""
     method = sorted(route.methods)[0] if route.methods else "?"
     return f"{method} {route.path} -> {route.endpoint.__module__}.{route.endpoint.__name__}"
+
+
+def _iter_dependants(dependant: Any) -> Iterator[Any]:
+    """Every `Dependant` in a route's dependency tree, the route's own included."""
+    yield dependant
+    for sub in dependant.dependencies:
+        yield from _iter_dependants(sub)
+
+
+def require_roles_gate(
+    route: APIRoute,
+) -> tuple[Callable[..., Awaitable[Any]], tuple[str, ...]] | None:
+    """The `require_roles(...)` dependency callable and its declared role tuple for `route`.
+
+    `None` when the route carries no `require_roles` dependency at all (AU-7: a handful of
+    routes -- health/metrics, `/v1/me`, `/mcp`, and two administrative actions that manually
+    role-check inside the handler body so the denial path can be audited before the 403 is
+    raised, see `detokenization_api.py`'s module docstring -- are gated some other way, by
+    design, and are out of scope for a suite about `require_roles` specifically).
+
+    `require_roles` is a dependency *factory*: `require_roles("PlatformAdmin", ...)` returns a
+    closure over `allowed`, and it is that closure -- not `require_roles` itself -- that FastAPI
+    wires into `route.dependant.dependencies`. The declared role set is therefore not
+    recoverable from `route.endpoint`'s signature or from the source text the way most of this
+    module's other helpers work: it lives in the closure FastAPI already built, in
+    `__closure__`, keyed by the free-variable name in `__code__.co_freevars`. Reading it back
+    this way -- rather than re-parsing the `require_roles(...)` call with `ast` -- is what makes
+    this work for a role set built from an aliased constant (`require_roles(*COMPILER_ROLES)`),
+    where the AST at the call site names a variable, not a role.
+    """
+    for dependant in _iter_dependants(route.dependant):
+        call = dependant.call
+        if getattr(call, "__qualname__", "") != "require_roles.<locals>.dependency":
+            continue
+        freevars = call.__code__.co_freevars
+        cells = call.__closure__ or ()
+        for name, cell in zip(freevars, cells, strict=True):
+            if name == "allowed":
+                return call, tuple(cell.cell_contents)
+    return None
 
 
 @dataclass(frozen=True, slots=True)

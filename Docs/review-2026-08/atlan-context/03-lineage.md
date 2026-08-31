@@ -308,7 +308,8 @@ because "affected" is a claim and "affected via column lineage from raw_sales" i
 
 **The argument against propagating is stronger for us than for Atlan, and it still loses.**
 For Atlan a wrong propagated PII tag mislabels an asset. For us it is an *enforcement input*:
-`abac.py` gates resource conditions on `classification` and `sensitivity`, so a propagated tag
+`abac.py` (does not exist any more; `aida.policy_engine` is the live equivalent, PG-1/AU-11
+2026-08-31) gated resource conditions on `classification` and `sensitivity`, so a propagated tag
 changes who can query what. The brief's framing — "a propagated PII tag that is wrong is worse
 than no tag" — is right about the *authoritative* label and wrong about the derived one, and the
 distinction is the whole design:

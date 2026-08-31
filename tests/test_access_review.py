@@ -3,8 +3,9 @@
 `aida.access_review.build_entitlement_report` answers "what am I entitled to
 see" from real persisted `WorkspaceMembership` and `SourceBinding` rows --
 the same tables `workspace_service.authorize` reads on the live
-query-execution path -- plus an ABAC policy overlay (`aida.abac.evaluate`,
-PG-8's engine) for the self-service case. These tests seed a real in-memory
+query-execution path -- plus a live access-policy overlay
+(`aida.policy_engine.evaluate`, PG-8's engine) for the self-service case.
+These tests seed a real in-memory
 database with real grants and assert the report reflects them, and exercise
 the real `access_review_api` endpoint functions end to end, including
 persistence of the append-only `AccessReviewReportRecord`.
@@ -30,7 +31,7 @@ from aida.access_review_api import (
 )
 from aida.db import Base
 from aida.models import (
-    AbacPolicyRecord,
+    AccessPolicy,
     AuditEvent,
     DataDomain,
     DataSource,
@@ -269,11 +270,11 @@ async def test_report_is_scoped_to_the_subject_principal_not_the_caller(
 
 
 # ---------------------------------------------------------------------------
-# ABAC overlay: self-service only
+# Policy overlay: self-service only
 # ---------------------------------------------------------------------------
 
 
-async def test_self_service_report_evaluates_abac_for_bound_classifications(
+async def test_self_service_report_evaluates_policy_for_bound_classifications(
     session: AsyncSession,
 ) -> None:
     org = await _organization(session)
@@ -284,42 +285,45 @@ async def test_self_service_report_evaluates_abac_for_bound_classifications(
     )
     session.add_all(
         [
-            AbacPolicyRecord(
+            AccessPolicy(
                 organization_id=org.id,
-                policy_key="allow-internal",
+                code="allow-internal",
                 version=1,
                 name="Analysts may see INTERNAL",
                 description="d",
-                effect="PERMIT",
-                subject_conditions={"role": "Analyst"},
-                resource_conditions={"classification": "INTERNAL"},
+                effect="ALLOW",
+                subject_match={"roles": ["Analyst"]},
+                resource_match={"classifications": ["INTERNAL"]},
+                action_match=["READ_DATA"],
                 priority=100,
                 status="ACTIVE",
                 created_by="steward-1",
             ),
-            AbacPolicyRecord(
+            AccessPolicy(
                 organization_id=org.id,
-                policy_key="deny-restricted",
+                code="deny-restricted",
                 version=1,
                 name="Analysts may not see RESTRICTED",
                 description="d",
                 effect="DENY",
-                subject_conditions={"role": "Analyst"},
-                resource_conditions={"classification": "RESTRICTED"},
+                subject_match={"roles": ["Analyst"]},
+                resource_match={"classifications": ["RESTRICTED"]},
+                action_match=["READ_DATA"],
                 priority=10,
                 status="ACTIVE",
                 created_by="steward-1",
             ),
             # Inactive policy: must be ignored.
-            AbacPolicyRecord(
+            AccessPolicy(
                 organization_id=org.id,
-                policy_key="retired",
+                code="retired",
                 version=1,
                 name="Retired policy",
                 description="d",
                 effect="DENY",
-                subject_conditions={"role": "Analyst"},
-                resource_conditions={"classification": "INTERNAL"},
+                subject_match={"roles": ["Analyst"]},
+                resource_match={"classifications": ["INTERNAL"]},
+                action_match=["READ_DATA"],
                 priority=1,
                 status="RETIRED",
                 created_by="steward-1",
@@ -340,8 +344,8 @@ async def test_self_service_report_evaluates_abac_for_bound_classifications(
     )
 
     decisions = {d.classification: d.decision for d in report.abac_classification_decisions}
-    assert decisions == {"INTERNAL": "PERMIT", "RESTRICTED": "DENY"}
-    assert "Evaluated 2 active ABAC polic" in report.abac_note
+    assert decisions == {"INTERNAL": "ALLOW", "RESTRICTED": "DENY"}
+    assert "Evaluated 2 active access polic" in report.abac_note
 
 
 async def test_on_behalf_of_report_never_runs_abac(session: AsyncSession) -> None:

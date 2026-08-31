@@ -2040,8 +2040,11 @@ class CompositeKeyCandidate(Base, TimestampMixin):
     datasource_id: Mapped[UUID] = mapped_column(
         ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    # AU-8: no separate `index=True` here -- __table_args__ already declares
+    # ix_composite_key_candidate_table on this column; a second, differently
+    # named index over the same single column was drift with no migration.
     table_id: Mapped[UUID] = mapped_column(
-        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False
     )
     table_profile_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("table_profile.id", ondelete="SET NULL"), index=True
@@ -4213,8 +4216,11 @@ class StudioEvalRun(Base, TimestampMixin):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    # AU-8: no separate `index=True` here -- __table_args__ already declares
+    # ix_studio_eval_run_change_set with this column leading, and no migration
+    # ever created a second single-column index; the ORM declaration was drift.
     change_set_id: Mapped[UUID] = mapped_column(
-        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False
     )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -4322,8 +4328,11 @@ class NotificationEventRecord(Base, TimestampMixin):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    # AU-8: no separate `index=True` here -- __table_args__ already declares
+    # ix_notification_event_incident on this column; a second, differently
+    # named index over the same single column was drift with no migration.
     incident_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_quality_incident.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("data_quality_incident.id", ondelete="CASCADE"), nullable=False
     )
     rule_id: Mapped[UUID] = mapped_column(
         ForeignKey("notification_rule.id", ondelete="CASCADE"), nullable=False, index=True
@@ -4462,7 +4471,15 @@ class AuditEvent(Base):
         Index("ix_audit_correlation", "correlation_id"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # `.with_variant(Integer, "sqlite")`: SQLite only rowid-aliases a primary key
+    # column declared literally `INTEGER PRIMARY KEY`, so a bare `BigInteger` compiles
+    # to `BIGINT` there and SQLAlchemy stops treating the column as autoincrementing
+    # (every insert then supplies a NULL `id` and SQLite's NOT NULL constraint fires).
+    # PostgreSQL is unaffected -- the variant only changes what SQLite's DDL compiler
+    # emits, not the production `BIGINT`/`BIGSERIAL` column.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     organization_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), index=True
     )

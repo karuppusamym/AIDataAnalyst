@@ -7,8 +7,9 @@ Three things are covered:
      "informational only if a benchmark is missing on either side" rules are
      verified without needing to run any real benchmark.
   2. `measure()` is proven to actually catch a slowdown in a *real*
-     benchmarked function -- `aida.abac.evaluate`, wrapped with an artificial
-     `time.sleep` -- mirroring how `tests/test_openapi_diff_gate.py` proves
+     benchmarked function -- `aida.policy_engine.evaluate`, the engine wired
+     into the query-execution path, wrapped with an artificial `time.sleep`
+     -- mirroring how `tests/test_openapi_diff_gate.py` proves
      `openapi_diff.py`'s gate catches a real breaking API change rather than
      only testing the classifier against synthetic fixtures.
   3. The committed baseline (`Docs/90-reference/perf-baseline.json`) is
@@ -141,44 +142,44 @@ def test_measure_reports_a_plausible_median_for_a_known_duration() -> None:
 
 
 def test_gate_catches_an_artificial_slowdown_in_a_real_benchmarked_function(monkeypatch) -> None:
-    import aida.abac as abac_module
-    from scripts.perf_baseline import _make_abac_benchmark
+    import aida.policy_engine as policy_engine_module
+    from scripts.perf_baseline import _make_policy_engine_benchmark
 
-    # Baseline: the real, unmodified abac.evaluate().
-    baseline_ms = measure(_make_abac_benchmark())
+    # Baseline: the real, unmodified policy_engine.evaluate().
+    baseline_ms = measure(_make_policy_engine_benchmark())
 
     # Wrap the real benchmarked function with an artificial delay -- the
     # same technique the task's own definition of done calls for, and the
     # same idea as TS-4's test suite proving its gate catches a real
     # breaking change rather than only a synthetic one.
-    original_evaluate = abac_module.evaluate
+    original_evaluate = policy_engine_module.evaluate
 
     def slow_evaluate(*args: object, **kwargs: object) -> object:
         time.sleep(0.002)  # +2ms/call * 50 calls/iteration dwarfs the ~0.7ms baseline
         return original_evaluate(*args, **kwargs)
 
-    monkeypatch.setattr(abac_module, "evaluate", slow_evaluate)
+    monkeypatch.setattr(policy_engine_module, "evaluate", slow_evaluate)
 
-    # `_make_abac_benchmark()` re-imports `abac.evaluate` fresh each call, so
-    # calling it now (after the patch) picks up the slow version.
-    current_ms = measure(_make_abac_benchmark())
+    # `_make_policy_engine_benchmark()` re-imports `policy_engine.evaluate` fresh
+    # each call, so calling it now (after the patch) picks up the slow version.
+    current_ms = measure(_make_policy_engine_benchmark())
 
     regressions = find_regressions(
-        {"abac_evaluate_500_policies": baseline_ms},
-        {"abac_evaluate_500_policies": current_ms},
+        {"policy_engine_evaluate_500_policies": baseline_ms},
+        {"policy_engine_evaluate_500_policies": current_ms},
         threshold_pct=20.0,
     )
 
     assert len(regressions) == 1
-    assert regressions[0].name == "abac_evaluate_500_policies"
+    assert regressions[0].name == "policy_engine_evaluate_500_policies"
     assert current_ms > baseline_ms
 
 
 def test_gate_passes_when_nothing_regressed() -> None:
-    from scripts.perf_baseline import _make_abac_benchmark
+    from scripts.perf_baseline import _make_policy_engine_benchmark
 
-    baseline_ms = measure(_make_abac_benchmark())
-    current_ms = measure(_make_abac_benchmark())  # unmodified, same code path
+    baseline_ms = measure(_make_policy_engine_benchmark())
+    current_ms = measure(_make_policy_engine_benchmark())  # unmodified, same code path
 
     # A generous threshold, not the production 20.0 default: this proves the
     # gate's *direction* -- unmodified real code isn't flagged -- using real
@@ -188,8 +189,8 @@ def test_gate_passes_when_nothing_regressed() -> None:
     # already covered precisely by the synthetic `find_regressions` tests
     # above, which carry no timing risk.
     regressions = find_regressions(
-        {"abac_evaluate_500_policies": baseline_ms},
-        {"abac_evaluate_500_policies": current_ms},
+        {"policy_engine_evaluate_500_policies": baseline_ms},
+        {"policy_engine_evaluate_500_policies": current_ms},
         threshold_pct=200.0,
     )
 

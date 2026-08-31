@@ -96,6 +96,15 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     temporal_task_queue: str = "aida-metadata"
     temporal_enabled: bool = True
+    # AU-12: `Client.connect` performs a real RPC handshake by default (lazy=False)
+    # and has no built-in timeout, so an unreachable/slow Temporal server used to
+    # hang or raise inside `lifespan` and take the whole process down with it --
+    # including every read-only, non-Temporal-dependent route. This bounds that
+    # handshake; `aida.main.lifespan` treats a timeout or connect error as a
+    # degraded-start (not fatal) condition and hands off to a background retry
+    # loop (`temporal_reconnect_interval_seconds`) instead of crashing.
+    temporal_connect_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+    temporal_reconnect_interval_seconds: float = Field(default=30.0, gt=0, le=3600)
     metadata_batch_max_chunks: int = Field(default=1_000, ge=1, le=10_000)
     metadata_batch_max_tables: int = Field(default=1_000_000, ge=1_000, le=10_000_000)
     metadata_batch_max_columns: int = Field(default=5_000_000, ge=10_000, le=50_000_000)

@@ -1893,7 +1893,10 @@ Hybrid retrieval has moved from Partial to Implemented in the status matrix.
 #### Security and access control (SEC-1 through SEC-4)
 
 - **ABAC engine** (SEC-1): Policy evaluation, agent-vs-human gating, simulation mode.
-  `abac.py`, `abac_api.py`. Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
+  `abac.py` (does not exist any more) and `abac_api.py` (does not exist any more) -- both deleted 2026-08-31 under
+  PG-1/PG-6/PG-8/AU-11: that engine was never wired into the money path, `policy_engine.py` was,
+  and PG-8's simulation mode was ported to `aida.policy_engine.simulate` rather than lost (see
+  those tracker rows). Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
 - **Indirect injection defense** (SEC-2): Pattern detection, multilingual, encoding-aware
   corpus. `injection_defense.py`, `injection_corpus.py`. Closes tracker AG-1, AG-2, TS-6,
   and the gap-register P0 indirect prompt injection gap.
@@ -2343,7 +2346,7 @@ Studio has moved from Pending to Partial in the status matrix.
   in-process hot paths rather than any invented benchmark: `SqlGuard.validate()` over every case in
   QG-1's own adversarial SQL corpus (`tests/fixtures/adversarial_sql_corpus/*.json`, all 5 certified
   dialects); `abac.evaluate()` over 500 policies, the exact scenario PG-1's own
-  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises, reused here rather than
+  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises at the time (that file does not exist any more -- `abac.py`/`tests/test_abac.py` deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11, the benchmark retargeted to `aida.policy_engine.evaluate`), reused here rather than
   reimplemented; `fuse_results()`, hybrid retrieval's reciprocal-rank-fusion combiner, over a
   synthetic 500-candidate catalog; and `app.openapi()` — TS-4's own gate input — with FastAPI's
   schema cache cleared every iteration so it is genuinely regenerated, not cached.
@@ -2363,7 +2366,9 @@ Studio has moved from Pending to Partial in the status matrix.
 - 16 tests (`tests/test_perf_baseline_gate.py`): pure `find_regressions()` coverage of the threshold
   boundary and edge cases (exactly-at-threshold passes, missing-on-either-side entries are
   informational only, a zero baseline doesn't divide by zero), plus — per this item's own definition
-  of done — `aida.abac.evaluate` wrapped with an artificial `time.sleep` to prove the gate actually
+  of done — aida.abac.evaluate (retargeted 2026-08-31 to `aida.policy_engine.evaluate` when
+  `abac.py` was deleted under PG-1/PG-6/PG-8/AU-11; aida.abac.evaluate does not exist any more)
+  wrapped with an artificial `time.sleep` to prove the gate actually
   flags a regression in a real benchmarked function (not just a synthetic fixture), and the same
   unmodified benchmark proven not to be flagged.
 - Found and fixed two false positives of its own in the same edit: the tracker row's prose cited the
@@ -3184,7 +3189,8 @@ stack wired into the live orchestration path, not deleted
   lexical scan instead. `retrieval.py:43-52`'s own docstring documented the intended hand-off
   ("Import and call from `agent_intelligence.GovernedRetriever.retrieve()`") that had never been
   made. Confirmed no concurrent session had already closed this gap: `03-tracker.md`'s AU-6 row
-  lists only `abac.py` and `quality_coupling`/`trust_scoring` as its remaining unwired modules.
+  listed only abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `quality_coupling`/`trust_scoring` as its remaining unwired modules at the time.
 - **Decision: wire in, not retire.** `retrieval.py`'s lexical stage (`hybrid_retrieve`) was a
   strict superset of `GovernedRetriever`'s own scan (same object types plus glossary-term
   binding folding, SM-2), and `hybrid_retrieve_enhanced` already orchestrated vector similarity,
@@ -3403,9 +3409,10 @@ of that script, run on every push.
   rebase picked up `676bbf8` ("wire retrieval.py's hybrid/vector/graph/fusion stack into the live
   orchestration path"), closing RT-1/RT-2/RT-3/RT-9/SM-2 — `vector_store.py` alone stayed behind,
   per that commit's own known-limitations note: it's a persisted index the change didn't
-  populate, using live per-query embedding instead. `abac.py` and `ai_decision_lineage.py` are
+  populate, using live per-query embedding instead. abac.py (does not exist any more; deleted
+  2026-08-31 under PG-1/PG-6/PG-8/AU-11) and `ai_decision_lineage.py` were
   **not** on this list and never were:
-  both routers are registered on the live app (`main.py:126-127`), so both modules are
+  both routers were registered on the live app (`main.py:126-127`), so both modules were
   module-reachable — the audit's separate finding that their core *functions* (`record_decision`,
   real ABAC enforcement vs. the `policy_engine.evaluate` duplicate) have no live caller is a
   function-level claim this module-level gate cannot see or contradict; that is explicitly AU-2's
@@ -3423,7 +3430,8 @@ of that script, run on every push.
   second full-suite run.
 - Known limitations: this is a module-level gate only, exactly matching AU-1's exit criterion —
   it proves *something* on a live path imports a module, not that a specific function in it is
-  ever called. `abac.py`/`ai_decision_lineage.py` above are the concrete example of that
+  ever called. abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `ai_decision_lineage.py` above were the concrete example of that
   boundary. Closing that gap is AU-2, already tracked, not reopened here. The allow-list will
   need re-verification again the next time a sibling session wires in one of its remaining 5
   entries — that's expected maintenance, not a defect in the gate, and this session watched it
@@ -3623,3 +3631,836 @@ of that script, run on every push.
   that never matched the question at all is not distinguishable from one deliberately excluded.
   `UX-13`'s asset-evidence endpoint (still TODO) is the natural place for a future reader to surface
   this per-asset, once it lands.
+
+## 2026-08-31 — PG-1/PG-6/PG-8/AU-11 (ABAC engine decision, real query-path wiring) closed
+
+### The decision: `policy_engine.py`, not abac.py
+
+Two contradictory claims sat in the tracker at once: PG-1's own DONE text (2026-08-30) called
+abac.py "supersedes earlier `policy_engine.py` partial", while the same-day end-to-end audit
+(`04-end-to-end-audit-2026-08-30.md` §2) said the opposite — "Real enforcement runs through
+`policy_engine.evaluate`. abac.py is imported only by its own router and its own test." Both
+files were read in full before deciding, not just the tracker row that was read first:
+
+- **abac.py** (187 lines): a pure in-memory function — `evaluate(subject_attrs, resource_attrs,
+  env_attrs, policies)` over dict-shaped attributes, deny-overrides, a generic condition matcher
+  (scalar/list/range operators), plus a genuinely nice `simulate(..., vary_subject_attrs)`. No
+  policy persistence, no workspace/membership/binding integration, no business-node classification
+  closure. Its only consumer was its own router, abac_api.py (mounted in `main.py`, so live but
+  reachable from nowhere else), which read/wrote `AbacPolicyRecord`/`AbacDecisionRecord` — and the
+  decision record stored raw subject/resource/environment attribute dicts, an INV-6 value-freedom
+  violation the query path's own decision log never had.
+- **`policy_engine.py`** (303 lines): `evaluate(policies: tuple[PolicyRecord, ...], subject:
+  Subject, resource: Resource, action, *, now)` — DB-backed `PolicyRecord` loaded from
+  `access_policy` (`aida.business_graph.load_policies`), `Resource` already carrying
+  `classifications`/`business_node_ids`/`certification`/`datasource_id`/`schema_name`/
+  `quality_state`/`freshness_state` as first-class typed attributes (exactly AU-11's four axes,
+  already modeled — the gap was never in the engine), DENY as a hard ceiling evaluated first and
+  unconditional, default-deny (INV-4), MASK/FILTER obligation accumulation, `principal_kind` as a
+  first-class subject attribute, and value-freedom by construction (`PolicyDecision` carries reason
+  codes and policy ids only). It was already reached from the real query-execution path — not by
+  this session, but by prior ADR-0018 rollout work (`aida.authorization_gate.gate` →
+  `aida.workspace_service.authorize_enforced` → `aida.policy_engine.evaluate`, wired into both
+  `QueryExecutionGateway.validate` and `.execute`) — proven by the pre-existing
+  `tests/test_inv4_authorization_wiring.py`, both its static reachability scan and its behavioural
+  half (SHADOW proceeds and records, ENFORCE denies, an unresolved workspace is its own state).
+
+`policy_engine.py` is the surviving engine: richer, DB-integrated, value-free, and already the one
+production traffic reaches. abac.py/abac_api.py were dead weight duplicating a decision the
+platform had already made elsewhere, and were deleted rather than wired in — wiring in a second,
+weaker, disconnected evaluator alongside the one already carrying real traffic would have made the
+system's authorization story less honest, not more complete.
+
+### What was built
+
+- **Deleted**: src/aida/abac.py, src/aida/abac_api.py, tests/test_abac.py, the `abac_router`
+  mount in `main.py`, and the now-orphaned `POST /v1/abac/{policies,evaluate,simulate}` /
+  `GET /v1/abac/{policies,decisions}` routes. `AbacPolicyRecord`/`AbacDecisionRecord` ORM models
+  left in `models.py` (unused, harmless) rather than migrated away — dropping the underlying
+  `abac_policy`/`abac_decision` tables needs an Alembic migration, judged out of scope for this
+  item and flagged separately rather than bundled in silently.
+- **PG-6 (decision logging) kept honest**: abac.py's decision log was the value-freedom violation
+  above, so it was not "ported" — the real path's existing logging (`record_audit` around every
+  `authorization_gate.gate()` call on the query path, into `AuditEvent`; `record_divergence`/
+  `record_divergence_durably` into `AuthorizationShadowRecord` for SHADOW-mode divergences) was
+  confirmed as the actual, value-free decision log. `compliance_packs.py`'s ACCESS_REVIEW section
+  queried the now-dead `AbacDecisionRecord` (would have silently reported zero decisions and zero
+  denials forever, in a *compliance report*) — repointed to `AuditEvent` filtered on
+  `query.validate.gateway`/`query.execute.requested`.
+- **PG-8 (simulation) ported, not lost**: abac.py's `simulate(..., vary_subject_attrs)` had no
+  real equivalent on `policy_engine.py` or its callers — the existing `POST /v1/authorization-probes`
+  endpoint only answers "would *I* (the calling context) be allowed", never "who could see this"
+  across hypothetical subjects. Added `aida.policy_engine.simulate(policies, subjects, resource,
+  action, *, now)` — `evaluate` run once per subject, built directly on it rather than a second
+  implementation — and a new endpoint, `POST /v1/workspaces/{workspace_id}/authorization-simulations`
+  (`workspace_api.py`), which loads the organization's real `access_policy` rows
+  (`aida.business_graph.load_policies`) and the resource's real business-node classification closure
+  (`aida.business_graph.classification_scope`), then evaluates every caller-supplied hypothetical
+  `{principal_kind, roles, purpose}` against them. Also extended `AuthorizationProbeRequest` to
+  accept `quality_state`/`freshness_state` (it already took `classifications`/`certification` but
+  not the other two AU-11 axes) so the probe can answer against all four.
+- **AU-11 (real attributes on the gate call)**: `validate`/`execute` used to call `gate()` with no
+  `classifications`/`certification`/`quality_state`/`freshness_state` at all (defaulting to
+  `frozenset()`/`None`), so every policy rule keyed on those axes — even though `policy_engine.py`
+  already modeled them — was structurally unreachable. New module `policy_resource_attributes.py`
+  resolves one worst-case value per axis from the query's actual referenced tables (parsed once via
+  `self.guard.validate` *before* gating, threaded into `_run_validation` rather than re-parsed):
+  classification is the union of `MetadataColumn.classification` (module 05); certification is
+  `CERTIFIED` only if every referenced table has a currently-active `AssetCertification` (GL-5/CT-5,
+  via `aida.asset_certification.current_asset_certification`), else `UNCERTIFIED`; quality_state
+  prefers an open `DataQualityIncident` (module 11) and falls back to the latest
+  `DataQualityObservation.status`; freshness_state runs `aida.freshness.evaluate_freshness` (DQ-2,
+  ADR-0016: scan age is never presented as freshness) per table against its
+  `FreshnessWatermarkConfig`/`FreshnessObservation` and takes the worst. All four values now reach
+  both gate calls in `query_gateway.py`.
+- **Two pre-existing latent bugs surfaced and fixed**, both only reachable once a real end-to-end
+  DB test actually exercised this path (nothing had before): `AuditEvent.id`'s `BigInteger` primary
+  key did not autoincrement under SQLite (`.with_variant(Integer, "sqlite")` in `models.py` — the
+  same fix pattern UX-12's entry above independently hit for `asset_certification_is_active`, one
+  entry up in this log); and `asset_certification.py`/`freshness.py` compared an aware `now` against
+  a SQLite-naive stored timestamp with a raw `>`/`-` instead of through `aida.timeutil.as_utc`/
+  `is_live`, the same fix `workspace_service._expired` already needed and the fix UX-12 applied
+  locally in `catalog_read_model.py` rather than at the source — this time fixed at the source
+  (`asset_certification.py` itself), since AU-11's new caller does not pre-normalize the way
+  `catalog_read_model.py` does.
+
+### Tests
+
+New `tests/test_au11_policy_resource_attributes.py` (11 tests): 7 resolver unit tests against a
+real (sqlite) database — no referenced tables resolves to every axis's empty default; classification
+is the union across a table's columns; certification is `UNCERTIFIED` if any referenced table lacks
+an active certification and `CERTIFIED` once all do, with expiry re-falling-back to `UNCERTIFIED`;
+quality_state prefers an open CRITICAL incident over a healthy observation and falls back to the
+latest observation status; freshness_state takes the worst (`STALE`) across a stale/fresh table
+pair — plus 4 end-to-end tests driving a real `QueryExecutionGateway.execute` call (real sqlite DB,
+`FakeSqlExecutor` standing in for the warehouse connector) with a real `AccessPolicy` row: a DENY
+keyed on `classifications ∋ PII` rejects a query touching the PII column and allows the same query
+once the column is dropped; an ALLOW suppressed by `condition.deny_when_quality_state_in` (the
+shape `_matches_state_condition` and the pre-existing `test_quality_state_can_gate_access` establish
+— the condition suppresses the ALLOW while the state matches, and default-deny takes over) rejects
+a query against a table with an open CRITICAL incident and allows the same query once there is
+none. `tests/test_policy_engine.py` gained 3 tests for `simulate()` (varies HUMAN/AGENT/SERVICE
+against a classification-keyed DENY; empty-subjects returns no decisions; equivalence to calling
+`evaluate` per subject). `tests/support/doubles.py`'s `CatalogSession` extended (entity+name-aware
+routing rather than raw column-count alone, since two of the new lookups are 1- and 2-column selects
+that collided with existing shapes) to model the five new catalog lookups AU-11 added, with honest
+empty defaults matching its existing convention for bindings/tokenized-columns.
+`tests/test_inv7_attributability.py`'s `_READ_ONLY_POST_ROUTES` swapped its `POST /v1/abac/simulate`
+entry for the new simulation endpoint. `scripts/perf_baseline.py`'s benchmark and
+`tests/test_perf_baseline_gate.py` retargeted from `abac.evaluate()` to `policy_engine.evaluate()`
+(same 500-policy, 50-call-per-iteration shape); `Docs/90-reference/perf-baseline.json` and
+`Docs/90-reference/openapi-baseline.json` regenerated via each script's own `--accept-baseline`.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4 contracts kept (no new
+contract needed — `policy_resource_attributes.py` is a plain leaf-ward addition). Full `pytest`
+suite green (exit 0, zero failures) after the doc-claims gate (`test_doc_claims.py`) was brought
+current: every stale abac.py/abac_api.py/aida.abac.evaluate citation across `03-tracker.md`,
+`04-end-to-end-audit-2026-08-30.md`, this log, and two `Docs/review-2026-08/atlan-context/`
+research notes annotated "does not exist any more" (or de-backticked where the dotted-module
+collector has no such exemption) rather than silently left to rot into false claims.
+
+### Scope note
+
+`quality_coupling.py`/`trust_scoring.py` wiring (DQ-3/RT-7/AG-6/TL-3) and the retrieval-stack work
+the end-to-end audit also flagged are explicitly out of scope for this item — concurrent sibling
+work per the task brief. `AU-11`'s quality_state resolution reads `DataQualityIncident`/
+`DataQualityObservation` directly rather than through `quality_coupling.py`'s not-yet-wired gating
+
+## 2026-08-31 — AU-7 (behavioural authorization tests for `require_roles`) closed
+
+### The finding
+
+`04-end-to-end-audit-2026-08-30.md` §5: "`require_roles` has 348 call sites and zero
+behavioural tests. Nothing constructs a principal with the wrong role and asserts 403. A route
+declared `require_roles('Viewer')` that should be `PlatformAdmin`-only passes every gate in
+this repo." The tracker's exit criterion asked for a table-driven suite, generated from the
+live app, asserting the expected role set per route and that a wrong-role principal gets 403.
+
+### What was built
+
+New `tests/test_au7_behavioural_authz.py`, driven entirely off the live app rather than a
+hand-maintained list — reusing `tests/support/app_surface.py`'s established `iter_api_routes`
+convention (the same one `test_inv5_tenant_isolation.py`/`test_inv7_attributability.py` use)
+rather than writing a second route enumerator.
+
+`app_surface.py` gained one new helper, `require_roles_gate(route)`. Extracting a route's
+declared role set turned out not to be an AST problem: `require_roles(*allowed)` is a
+dependency *factory* — the object FastAPI actually wires into `route.dependant.dependencies`
+is the inner closure it returns, not `require_roles` itself, so the declared roles are not
+sitting in the source text at the call site when that call site passes an aliased constant
+(`require_roles(*COMPILER_ROLES)`, `require_roles(*UNIFIED_LINEAGE_READER_ROLES)`, ...) — an
+AST scan would see a variable name, not a role. `require_roles_gate` instead reads the value
+back out of the closure Python already built: `call.__closure__`, keyed by the free-variable
+name in `call.__code__.co_freevars`. This reads what the live app actually wired rather than
+re-deriving it from source, so it is correct for every one of the 324 call sites regardless of
+whether the route wrote its roles inline or through a shared constant.
+
+Of 333 live routes, 323 carry a `require_roles` gate. The other 10 are named individually in
+`_NOT_ROLE_GATED_ROUTES` with a reason each, and `test_the_not_role_gated_route_list_stays_closed`
+asserts the live set matches the list exactly (in either direction) rather than trusting it to
+stay true: 3 genuinely unauthenticated routes (health/metrics — already INV-5's own exclusion),
+`GET /v1/me` (returns the caller's own identity, nothing to gate a role on), `POST /mcp`
+(per-tool authorization lives inside `mcp_server.py`, not at the transport route), the 3
+`consumption_lineage_api.py` reads (tenant-scoped via `enforce_organization`, no role
+restriction by design — CX-4), and `POST /v1/security/tokens/revoke` /
+`POST /v1/security/tokens/detokenize` (manually role-checked inside the handler body on
+purpose, per `detokenization_api.py`'s own module docstring, specifically so a denied attempt
+is itself audited before the 403 — a bare `Depends(require_roles(...))` failure never reaches
+a handler body at all).
+
+For each of the 323 gated routes, two parametrized tests drive the real dependency callable
+directly (the same "call the real thing FastAPI wired, not a reimplementation" convention
+`test_inv5_tenant_isolation.py` uses for `route.endpoint`, applied one level up at the
+dependency the endpoint sits behind):
+
+- `test_wrong_role_is_denied` — a principal holding one synthetic role
+  (`AU7-Probe-Unknown-Role`, which is not a real platform role anywhere in `src/aida` and is
+  therefore disjoint from every route's declared set by construction) is asserted to get a 403
+  from the gate. One probe validates unmodified across a route allowing one role and a route
+  allowing nine, because the property under test is "a role outside the declared set is
+  rejected", not "this specific other role is rejected".
+- `test_an_allowed_role_passes_the_role_gate` — a principal holding a declared-allowed role is
+  asserted not to be rejected by the gate. Deliberately scoped to the role gate alone, per the
+  tracker's own scoping note: the assertion is that `require_roles` itself lets the principal
+  through, not that the whole request would succeed — a route can still deny that principal
+  downstream for tenancy or any other reason, which is INV-5's job, not this suite's.
+
+Plus 3 structural sanity/tripwire tests: the gated-route set is non-empty (≥300, so a broken
+enumeration can't silently parametrize over nothing), every gate declares at least one role
+(`require_roles()` called bare would deny every principal unconditionally via
+`frozenset().isdisjoint(())` always being `True` — a distinct bug shape from a merely wrong
+role set, held structurally rather than trusted by inspection), and the exclusion-list-stays-
+closed test described above. 646 parametrized cases + 3 sanity tests = 649 new tests, all
+generated from the live app, none hand-listed.
+
+### Bug hunt
+
+Before writing the suite, hand-audited: every mutating route (POST/PUT/PATCH/DELETE) whose
+allowed set includes a broad or `Viewer`-inclusive role, every route whose path or handler name
+names a sensitive concern (`kill-switch`, `security`, `credential`, `policy`, `organization`,
+`revoke`, `token`, `admin`, `sync`, `delete`, ...), every single-role (`PlatformAdmin`-only)
+declaration (`POST /v1/organizations`, kill-switch engage/release), and the three modules using
+a paired `READ_ROLES`/`WRITE_ROLES`-style constant convention (`asset_description_api.py`,
+`glossary_api.py`, `stewardship_api.py`) for a read endpoint accidentally wired to the write
+constant or vice versa — each checked against its own module's documented intent, not guessed.
+
+**No genuine role-misconfiguration was found.** The one pattern that looked suspicious at
+first pass — `graph_perspectives_api.py`'s `create`/`update`/`delete` endpoints all allowing
+`Viewer` and `Auditor` alongside the admin/steward roles — turned out to be a documented,
+deliberate design: a graph perspective is "a personal/shared productivity artifact, not a
+governed object" (that module's own docstring); the broad `require_roles` gate only decides who
+may call the endpoint at all, and a second, owner-only check inside the handler body (`_can_view`
+plus an explicit owner comparison on PATCH/DELETE) does the real authorization. This is a clean
+bill of health, not the absence of a check — the specific routes inspected are named above and
+in the tracker row.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files) — `require_roles_gate` lives in
+`tests/support/`, outside `mypy src`'s `packages = ["aida"]` scope, consistent with every other
+`tests/support/` helper, so it is ruff-checked but not mypy-checked. Full `pytest` suite green:
+4,069 collected tests, 0 failures, 0 errors, 6 skipped (pre-existing, unrelated to this change),
+in ~196s (`--junitxml` confirmed the count independently of the terminal summary line, which an
+unrelated pre-existing OpenTelemetry metrics-exporter-at-shutdown warning in
+`test_observability.py` intermittently pushes past the tail of captured stdout on some runs).
+API, so it does not depend on that sibling work landing first.
+
+---
+
+## 2026-08-31 — AU-13 (dependency/secret scanning, SBOM, and a real `docker build` in CI) closed
+
+Four gates added to `.github/workflows/ci.yml`, plus the `Dockerfile` fix the audit called out,
+following the existing checkout/setup/run job pattern exactly. No application code touched.
+
+### `dependency-scan`
+
+`pip-audit` (no API key required, unlike `safety`; `uv` itself has no native audit subcommand —
+checked `uv --help` directly) runs via `uvx --python 3.13 pip-audit` against
+`uv export --frozen --no-dev --no-hashes` — the identical non-dev dependency set the fixed
+`Dockerfile` now installs, so the scan and the shipped image can't silently diverge. `--python 3.13`
+matters: pip-audit's default resolve venv picked up Python 3.11 and failed to resolve
+`numpy==2.5.2` (requires `>=3.12`) before this was pinned — a real failure caught by running the
+job locally before landing it, not assumed.
+
+Running it against the real, current `uv.lock` found **16 genuine, currently-unfixed CVEs** across
+three already-pinned packages: `cryptography` 45.0.7 (7 IDs, fixed in 46.0.6/46.0.7), `pyjwt`
+2.10.1 (7 IDs, fixed in 2.12.0/2.13.0), `pyopenssl` 25.3.0 (2 IDs, fixed in 26.0.0). Bumping those
+pins is a `pyproject.toml`/`uv.lock` change — outside this row's file scope (`ci.yml` +
+`Dockerfile` only) and not something to force through unilaterally on a branch many concurrent
+sessions push to continuously. The gate therefore carries a small, dated, **named** `--ignore-vuln`
+baseline listing exactly those 16 IDs with their fix versions in a comment — not a blanket
+exemption: any other known-vulnerable package, or a new CVE against an already-pinned one, still
+fails the job today. A full, unbaselined `pip-audit` JSON report is uploaded as a build artifact
+every run regardless, so the 16-CVE baseline stays visible rather than getting quietly swept away.
+A task suggestion to bump the three packages and shrink the baseline was queued (the spawn_task
+call itself twice hit a tool timeout in this session — worth re-issuing or picking up manually).
+
+A CycloneDX 1.6 SBOM (`uvx --from cyclonedx-bom cyclonedx-py requirements`) is generated from the
+same locked, non-dev requirement set and uploaded alongside the pip-audit report — validated
+locally: 94 components, valid CycloneDX 1.6 JSON.
+
+### `secret-scan`
+
+`gitleaks` v8.21.2 — a single static binary with no license requirement, chosen over
+`trufflehog`/the `gitleaks-action` marketplace action (which gates some usage behind a license key)
+for a plain, dependency-free `curl`+`run:` step matching this file's existing convention. Scans the
+full git history (`fetch-depth: 0`), not just the checked-out tree.
+
+Run locally against the real repository history before landing: found 6 findings, all confirmed
+synthetic — a fake Databricks token (`dapi0123456789abcdef`) and a placeholder BigQuery
+service-account JSON in connector-DSN-parsing unit tests, plus a `TEST_DSN_AU4_POSITIVE`
+environment-variable *name* (not a secret value) tripping the generic-entropy rule in
+`test_inv6_value_freedom.py`. New `.gitleaks.toml` extends the default ruleset unchanged and adds
+one narrow **path**-based allowlist for exactly those 3 test files — path-based rather than
+commit/fingerprint-based deliberately, because this branch is rebased constantly by concurrent
+sessions, which rewrites commit hashes and would silently invalidate a fingerprint allowlist on the
+next rebase. Re-run after adding the config: `no leaks found`, exit 0. Every other rule and every
+other path, including any future commit to those same 3 files, is still scanned.
+
+### `docker-build`
+
+Runs `docker build --tag aida:${{ github.sha }} .`, then a smoke step —
+`docker run --rm ... python -c "import aida.main"` inside the built image — directly validating
+that AU-9's k8s manifests (landed earlier the same day) actually have a working image behind them,
+which they did not before this row: nothing built the Dockerfile in CI.
+
+### Dockerfile fix
+
+`Dockerfile:15` (the audit's `:17` citation had already drifted — confirmed by reading the file
+fresh before touching it) was `python -m pip install .`, an unpinned, fresh dependency resolve at
+image-build time — able to silently pull different transitive versions than whatever CI last
+tested. Replaced with: install `uv` (pinned `0.8.17`) via pip, copy `pyproject.toml` + `uv.lock` +
+`alembic.ini`/`src`/`migrations`, then `RUN uv sync --frozen --no-dev` into `/app/.venv` (on
+`PATH`) — the same `--frozen` contract `ci.yml`'s `UV_FROZEN=1` already documents for every other
+job, so the image can no longer float away from what CI actually resolved and tested against.
+
+### Docker build validation — real, but partial, and here's exactly why
+
+Docker (client 29.3.1 + daemon, started via `sudo dockerd`) is available in this sandbox, and a
+full `docker build .` was attempted, not assumed to be unavailable. The daemon itself works, and
+once given the session's proxy env vars it successfully resolves `docker.io` manifests — but the
+image-layer *blob* download redirects to `production.cloudfront.docker.com`, which this sandbox's
+egress proxy denies as an organization policy CONNECT rejection (confirmed via
+`/__agentproxy/status`'s `recentRelayFailures: connect_rejected`, not a transient network blip —
+retried once at first because the earlier symptom looked like a plain rate limit, then stopped
+once the policy-denial signature was confirmed, per the proxy README's explicit "report, don't
+route around, a 403 policy denial" instruction). This blocks only *this local validation attempt*
+— the real GitHub Actions runners the `docker-build` job executes on have ordinary internet access
+and are unaffected.
+
+In place of the blocked full build, the Dockerfile's actual new logic was validated directly
+(outside the container, running the identical commands the image's `RUN` layer runs):
+`uv sync --frozen --no-dev` against the real, committed `uv.lock` installs cleanly into an
+isolated venv, and `import aida.main` against that venv succeeds, producing a real `FastAPI` app
+instance — the same import the new smoke-test step performs inside the container, just run one
+layer up from where the sandbox's network policy blocks the base-image pull.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4/4 contracts kept. Full
+`pytest` suite green: 3,414 passed, 5 skipped, 1 xfailed, 0 failures (confirmed twice — the first
+run showed a single unrelated failure in `test_config.py::test_environment_must_be_explicit_outside_tests`
+caused by this session's own shell having `AIDA_ENVIRONMENT` exported ambiently, not by any change
+in this diff; re-run with a clean shell environment, matching exactly how the `tests` CI job
+invokes pytest, passed clean).
+
+### Scope note
+
+Only `.github/workflows/ci.yml`, `Dockerfile`, and the new `.gitleaks.toml` were touched (the last
+is CI tooling configuration enabling the `secret-scan` job, not application code). The 16-CVE
+dependency baseline and the follow-up task to clear it are deliberate, documented debt, not an
+oversight — see the `dependency-scan` section above and tracker row AU-13.
+
+---
+
+## 2026-08-31 — AU-2 (redefine DONE to require a live call site) closed: process rule plus a 36-row re-verification sweep
+
+### The process fix
+
+`03-tracker.md`'s "How to use this" section previously defined `DONE` only as "its exit condition
+is verifiably met" — the same one-line bar that let the 17 rows `04-end-to-end-audit-2026-08-30.md`
+found get marked `DONE` on a passing unit test with zero live callers. A new paragraph, **"The
+live-call-site rule (AU-2, added 2026-08-31...)"**, now sits immediately after the existing
+`**Rules.**` line: any row whose exit evidence claims a module/function/endpoint is "wired",
+"reachable", "live" or "called from" something must name a concrete `file:line` on a path
+transitively reachable from one of the five processes in `tests/test_reachability_gate.py`'s
+`ENTRY_POINTS` dict (`aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+`aida.projectors.graph_projector`, `aida.projectors.outbox_publisher`) — not a passing test or a
+module's mere existence. Two exceptions are named explicitly rather than left implicit: module-level
+reachability is necessary but not sufficient (a row about one *function* needs that function's own
+call site, the AU-1-vs-AU-5 `ai_decision_lineage.py` distinction), and a row blocked on
+infrastructure the harness cannot reach (live Kafka, a real IdP) may cite an in-process proof if it
+says so plainly. A row that cannot produce this evidence is not `DONE`.
+
+### The re-verification sweep
+
+36 `DONE` rows across sections A, B, C, D, E, F, G, M and N were re-checked by grepping the actual
+code for the row's cited call site and confirming the containing router/module is `include_router`'d
+(or otherwise imported/called) from a real entry point — not by re-reading the row's own prose:
+
+- **A**: ST-01, ST-02, ST-03, ST-11, ST-12, ST-16 (`mcp_server.py`'s `validate_sql` tool slug +
+  `sql_validation_router` mounted `main.py:61,218`), ST-17 (`record_audit` at 11+ sites each in
+  `ai_registry_api.py`/`product_marketplace_api.py`, both routers included `main.py:211,226`).
+- **B**: IN-1 (`bulk_onboard_datasources`, `api.py:1044`), IN-5b (`persist_envelope_extensions`
+  called `workflows/activities.py:982`).
+- **C**: CT-1 (`catalog_bulk_actions` imported `api.py:25`, 6 bulk-* endpoints `api.py:3154-3504`),
+  RL-4 (`UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` used `graph_projector.py:471`), PR-4 (`start_task`/
+  `heartbeat_task`/`finish_task` called 10+ times in `workflows/activities.py`, read endpoints
+  `api.py:1534,1578`).
+- **D**: GL-1..GL-4 — the vaguest pre-rule exit text found in this sweep (no file names at all,
+  despite being P0) — strengthened in place with concrete citations (`glossary_api.py:175,282`,
+  `stewardship_api.py:417,484,551`, routers mounted `main.py:32,59,62,221,222`); GL-6
+  (`run_owner_routing_pass` called from the scheduler's own loop, `scheduler.py:539`); LN-5
+  (`extract_column_lineage` called `dbt_api.py:370`, `dbt_router` mounted `main.py:30,212`).
+- **E**: DQ-1, DQ-2, DQ-5, RT-4, RT-5, AG-4 — `notification_router`/`quality_router`/
+  `runtime_contracts_router`/`search_router`/`tool_plans_router` all confirmed `include_router`'d
+  (`main.py:219,227,231,234,237`).
+- **F**: TL-2 (same router as AG-4), MG-2 (`kill_switch_blocking_state` called
+  `model_gateway.py:375`, `ai_governance_router` mounted `main.py:17,210`), QG-7 (structural
+  import-linter claim, not a call-site claim), PG-2 (`principal_kind_of` derives from the real
+  `SecurityContext` at `authorization_gate.py:61-68`, called `:133,151` on the query-gateway
+  authorization path — not a hardcoded default), PG-3 (`POST /v1/governance/reviews/bulk-decision`
+  at `semantic_api.py:1562`, `semantic_router` mounted `main.py:59`).
+- **G**: ID-4 (`enforce_not_revoked` called `security.py:83` inside `get_security_context`), CX-1
+  (`/mcp` router `mcp_server.py:140` mounted via `mcp_router`, `main.py:37`), OB-4
+  (`observability_router` mounted `main.py:49`), OB-8 (`redact_sensitive_data` wired into
+  `configure_logging`, `logging.py:144`, called `main.py:74`), CX-6 (`consume_mcp_budget` called
+  `mcp_server.py:2004`).
+- **M**: UX-12 (`compose_catalog_rows` called `api.py:1985` inside `list_catalog_rows`).
+- **N**: AU-4 (`hide_parameters=True` at `atlas/platform/db.py:40`; AU-3/AU-5/AU-9 read and found
+  already carrying exactly this rule's evidence shape, so not re-derived).
+
+**Result: no additional false `DONE` found.** Every row in this sample was genuinely reachable from
+a live entry point — the concurrent wiring work earlier the same day (AG-5/LN-3, OB-1/OB-2/OB-3,
+RT-1/RT-2/RT-3/RT-9/SM-2, AG-1/AG-2/TS-6, DQ-3/AG-6/TL-3 with RT-7 correctly still open, PG-1/PG-6/
+PG-8, AU-6) already accounted for the 17 rows the original audit caught, and this sweep found no
+eighteenth. `tests/test_reachability_gate.py` re-run clean (5/5) to confirm the module-level graph
+this sweep's function-level spot-checks build on had not drifted mid-session.
+
+### Scope note
+
+Honestly not a full audit: roughly 130 of the 170+ tracker rows (most of section C beyond the 3
+sampled, section H's certification rows — all status `—`, so out of scope by definition — and §L's
+competitive-review items) were not individually re-verified, per this item's own "representative
+sample, not all 170+ rows" instruction. A full sweep remains open work for a future pass.
+
+### A doc-claims regression caught and fixed in the same pass
+
+This entry's own first draft in `03-tracker.md` cited the test file using `::`-qualified syntax
+against a module-level dict rather than a function, and separately used a bare hyphenated slug for
+an endpoint name on a table row that also mentioned an unrelated import-linter contract elsewhere in
+the same (very long, single-line) row — both tripped `test_doc_claims.py`'s mechanical citation gate
+(TS-12) on the first full-suite run, since that gate reads any hyphenated backtick-quoted token on a
+line containing the word "contract" as a contract-name citation. Fixed by dropping the `::`
+qualifier and writing the endpoint's full path instead of the bare slug — exactly the kind of drift
+that gate exists to catch, this time caught before merge rather than after.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). Full `pytest` suite green (exit 0, zero
+`FAILED` lines) including the full doc-claims gate re-run in isolation to confirm the fix
+(`test_doc_claims.py` — all passing). Docs-only change to `03-tracker.md` plus this log entry; no
+application code touched.
+
+---
+
+## 2026-08-31 — AU-12 (survive a Temporal outage) closed
+
+### The problem
+
+`main.py`'s `lifespan` used to `await Client.connect(settings.temporal_address, ...)` directly, with
+no timeout and no try/except. `temporalio.client.Client.connect` performs a real RPC handshake by
+default (`lazy=False`) with no built-in timeout of its own, so an unreachable or slow-to-respond
+Temporal server hung or raised right there — and since `lifespan` runs before the ASGI server ever
+starts serving traffic, that took the *entire process* down with it, not only the Temporal-dependent
+routes. The end-to-end audit's finding was precise: the readiness probe at `/health/ready` was
+already written to report `temporal: DOWN` correctly (`request.app.state.temporal_client` truthy
+check) — it just could never execute, because the process never survived far enough to bind a port.
+
+### The fix
+
+- **`_connect_temporal(loop_settings) -> Client | None`** (`main.py:130-160`): wraps `Client.connect`
+  in `asyncio.wait_for(..., timeout=settings.temporal_connect_timeout_seconds)` inside try/except.
+  Any failure — timeout, connection refused, DNS failure — becomes a logged `temporal_connect_failed`
+  warning (`exc_info=True`) and a `None` return, never a raised exception. `CancelledError` is left
+  uncaught (it's a `BaseException`, not caught by `except Exception`) so shutdown cancellation is
+  never swallowed.
+- **`lifespan`** (`main.py:206-227`) calls `_connect_temporal` instead of `Client.connect` directly.
+  On failure it logs `temporal_unavailable_at_startup` and starts a background
+  `_temporal_reconnect_loop` task — the app comes up degraded (Temporal-dependent routes
+  unavailable, `/health/ready` reports `temporal: DOWN`) instead of never starting.
+- **`_temporal_reconnect_loop(app, loop_settings)`** (`main.py:163-188`): polls on
+  `settings.temporal_reconnect_interval_seconds` and, once `_connect_temporal` succeeds, publishes
+  the new client onto `app.state.temporal_client` — the same attribute `/health/ready` reads — so
+  readiness flips back to `temporal: UP` on its own, no restart needed. Cancelled at shutdown
+  alongside the existing `archive_task` (`main.py:271-274`), mirroring `_audit_archive_loop`'s
+  (OB-3) started/cancelled-from-`lifespan`, log-and-retry-on-failure, `CancelledError`-re-raised
+  shape — this module's one existing background-task convention, reused rather than reinvented.
+  `worker.py`/`scheduler.py` were checked first per the task brief's instruction and have no
+  reconnection pattern of their own: both are standalone, single-shot-connect processes that rely
+  on their process supervisor (not application code) to restart them on a Temporal outage, so there
+  was nothing to reuse from them — `lifespan`'s in-process background retry is a new pattern here
+  because `main.py` is the one long-lived process among the three that must stay up and serve
+  non-Temporal traffic through an outage.
+- Two new `Settings` fields in `atlas/platform/config.py`: `temporal_connect_timeout_seconds`
+  (default 10.0s) and `temporal_reconnect_interval_seconds` (default 30.0s).
+- The readiness probe itself (`main.py:380-399`) is unchanged — its `temporal` dependency check was
+  already correct, it just needed to actually be reachable.
+
+### Tests
+
+New `tests/test_au12_temporal_outage_resilience.py` (5 tests), driving real ASGI `lifespan` via
+`fastapi.testclient.TestClient` against `aida.main.app` — the same pattern
+`test_observability.py::test_lifespan_wires_tracing_and_metrics_...` already established — with a
+fake class monkeypatched onto `aida.main.Client` standing in for `temporalio.client.Client` (no live
+Temporal server in this environment): `test_temporal_outage_at_startup_does_not_crash_app` (a
+raising fake `connect()` — entering the TestClient's lifespan context does not raise, `/health/live`
+still returns 200); `test_readiness_reports_temporal_down_during_outage` (`/health/ready` genuinely
+reports `dependencies["temporal"] == "DOWN"`); `test_temporal_connect_is_bounded_by_timeout_not_hanging`
+(a fake `connect()` that sleeps 30s against a 0.2s `temporal_connect_timeout_seconds` — startup
+returns in well under 5s, proving the timeout is enforced and not just the try/except); 
+`test_readiness_recovers_to_up_once_reconnect_succeeds` (a fake `connect()` that fails once then
+succeeds — `/health/ready` starts at `DOWN`, then flips to `UP` on its own within a few
+`temporal_reconnect_interval_seconds` cycles, no restart); `test_temporal_reconnect_task_is_cancelled_on_shutdown`
+(the reconnect task is running while the app is up, and is cancelled/done once the TestClient context
+exits — mirrors `_audit_archive_loop`'s existing shutdown-cancellation contract).
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict). Full `pytest` suite: exit code 0, zero
+`FAILED`/`ERROR` lines (confirmed via `grep -c "^FAILED\|^ERROR"` on the captured log, since an
+unrelated OTEL metrics-exporter atexit thread occasionally swallows pytest's own final summary line
+in this sandbox — a pre-existing environment quirk, not a test failure: the isolated run of just the
+new file reports plainly, `5 passed in 5.52s`). One pre-existing, unrelated failure mode was
+investigated rather than ignored: `test_config.py::test_environment_must_be_explicit_outside_tests`
+(AU-3) fails whenever `AIDA_ENVIRONMENT` is present in the ambient shell env at test time, because
+pydantic-settings marks an env-sourced field as "set" the same as an explicitly-passed one, so the
+test's `_running_under_pytest` monkeypatch alone can't reproduce a truly-unset variable once one is
+present in the process environment. Confirmed via `git stash` that this reproduces identically on
+the unmodified branch tip (`fb6fe65`), with or without this change — a latent conflict with
+`.github/workflows/ci.yml`'s workflow-level `AIDA_ENVIRONMENT: "development"` (added under AU-3,
+commit `cf1e65b`, whose own comment says the `tests` job is "exempt via its own pytest detection" —
+true for every other test, but not this one, which deliberately defeats that detection to test the
+non-pytest branch). Left unfixed: out of AU-12's scope (`main.py` Temporal-connect logic, the
+readiness probe, and their tests only), flagged here and in the tracker for whoever picks up AU-3
+next or notices CI go red on it.
+
+### Scope note
+
+Only `main.py`'s Temporal-connect logic in `lifespan`, the background reconnect task, the two new
+`Settings` fields it needs, and their tests were touched — per the task brief, the readiness probe's
+own logic was already correct and needed no change beyond becoming reachable.
+
+## 2026-08-31 — AU-8 (migration↔ORM drift gate) closed: found and fixed real drift on the first run
+
+`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` Section 5: "84 migrations, zero tests apply
+them. All 19 DB-backed test files build schema from the ORM, so ORM↔migration drift is
+structurally invisible. The tracker records this bug firing once already (DQ-1) — the instance was
+fixed, no gate was added." This closes that gap with the gate the tracker's exit criterion
+describes verbatim, and — because nothing had ever checked this before, on a branch multiple
+concurrent sessions push migrations and ORM changes to all day — it found real drift on its first
+real run, before it had even landed.
+
+### The gate
+
+New `tests/test_migration_orm_drift.py`, deliberately **not** folded into the shared fixture path
+every other DB-backed test uses (`Base.metadata.create_all` against an in-memory SQLite engine —
+see `tests/test_tier0_invariants.py:298-300` for the pattern all 19 files share): it resets a real
+Postgres database's `public` schema to genuinely empty (`DROP SCHEMA public CASCADE; CREATE SCHEMA
+public` — chosen over `CREATEDB` because it works for any role that merely owns the target
+database, which is the common case for both a local dev Postgres and a CI service container's
+default user, without needing superuser or database-creation grants), runs `alembic upgrade head`
+through Alembic's own Python API (`alembic.command.upgrade`, not a subprocess), then reflects the
+result and diffs it against `Base.metadata` with `alembic.autogenerate.compare_metadata` — the same
+machinery `alembic revision --autogenerate` uses, run in the opposite direction. Any diff fails the
+test with every difference rendered in the failure message.
+
+Two real mechanical obstacles, both worth recording since they'd trip up the next person who tries
+this: (1) `migrations/env.py` calls `get_settings().database_url` itself and overwrites whatever URL
+the `alembic.config.Config` object was given, so pointing a real `alembic upgrade` at a scratch
+database requires setting `AIDA_DATABASE_URL` in the process environment *and* clearing
+`get_settings`'s `@lru_cache` before and after (`atlas/platform/config.py:459`) — the test does both,
+restoring each in a `finally`. (2) `alembic.command.upgrade` drives Alembic's own
+`asyncio.run(run_async_migrations())` internally (`migrations/env.py:78`), so it cannot be called
+from inside a coroutine that is itself already running inside an `asyncio.run()` — the test's schema
+reset, the migration run, and the post-migration diff are three separate top-level calls for exactly
+this reason, not one `async def` wrapping all three.
+
+Postgres, not SQLite: `Settings.database_url` defaults to `postgresql+asyncpg://...`
+(`atlas/platform/config.py:92`) and several migrations use Postgres-only DDL (`CREATE EXTENSION
+pg_trgm`, `USING gin (... gin_trgm_ops)` in `f9a2b3c4d5e6_catalog_scale_indexes.py`) with no SQLite
+equivalent, so a real migration run needs a real Postgres. **A real Postgres 16 instance was
+available in this sandbox** (`service postgresql start`; a pre-existing non-superuser `aida` role and
+database were already provisioned) and the gate ran against it for real throughout this work — this
+was not a "skip and hope CI catches it" delivery. If Postgres genuinely isn't reachable the test
+skips with the connection error as the reason (`pytest.skip`, verified by pointing it at a closed
+port) rather than failing CI on infrastructure absence; a new `migration-drift` job in
+`.github/workflows/ci.yml` provides a real one there via a `postgres:16` service container — the only
+CI job that needs one, which is why it's split out from `tests` rather than added to it (folding a
+~10-second real-Postgres migration run into the shared fast fixture path was explicitly the thing
+DQ-1/this row's exit criterion said not to do). Verified both directions before landing: passes
+clean at HEAD, and fails with the exact diagnostic expected when drift exists — confirmed by
+temporarily adding an ORM column with no migration, watching the test fail and name it, then
+reverting.
+
+### Real drift found and fixed (not synthetic)
+
+1. **8 ORM tables with no migration at all**: `consumption_record`, `negative_assertion`,
+   `search_index`, `vector_embedding`, `freshness_observation`, `freshness_watermark_config`,
+   `procedure_lineage_edge`, `view_lineage_edge` — all real, in-use ORM classes in `src/aida/
+   models.py` that some concurrent session on this branch added without an accompanying migration.
+2. **`composite_key_candidate` missing 5 columns**: `table_profile_id`, `column_names`,
+   `column_count`, `key_fingerprint`, `estimated_distinctness_ratio` (plus the FK and index
+   `table_profile_id` needs) — present in the ORM, absent from the table's original migration
+   (`6500275e1d36_composite_key_candidate.py`), added later without a follow-up migration.
+3. **`data_quality_incident.latest_observation_id` was live-broken in the database**: migration
+   `1b7e4c9a62d0_durable_data_quality.py` created it `NOT NULL` with `ON DELETE CASCADE` against
+   `data_quality_observation`, while the ORM (`models.py:1399-1401`) correctly declares it nullable
+   with `ON DELETE SET NULL`. `NOT NULL` plus `ON DELETE SET NULL` is self-contradictory — deleting a
+   referenced observation would have raised a Postgres constraint violation instead of nulling the
+   pointer, the first time anyone actually exercised that path against a real database. Fixed to
+   match the ORM, which is what the code elsewhere assumes ("latest observation" is documented and
+   used as optional).
+4. **3 columns migrated as `postgresql.JSONB` against house style**: `ai_remediation
+   .resolution_evidence`, `ai_trust_snapshot.factors`/`blockers` (`c8a4d3e91f02_production_control
+   _evidence.py`) — 43 other migrations in this repo use plain `sa.JSON` (matching the ORM's own
+   `mapped_column(JSON, ...)` convention, used 132 times in `models.py` with zero prior uses of
+   `JSONB`); this migration was the one outlier. Altered to `sa.JSON` to match.
+5. **`audit_archive_record`'s unique constraint had the wrong name**: created via raw SQL inline
+   `UNIQUE` (`e8f1a2b3c4d5_completed_control_plane_tables.py`), which Postgres auto-named
+   `audit_archive_record_archive_id_key`, instead of this repo's naming convention
+   (`uq_audit_archive_record_archive_id`, from `NAMING_CONVENTION` in `atlas/platform/db.py:17-23`).
+   Renamed to match.
+
+All five landed in one new migration, `migrations/versions/09be3ab5b008_au8_reconcile_orm_migration
+_drift.py` — generated with `alembic revision --autogenerate` (after the env.py fix below made the
+diff accurate) and hand-corrected in two places autogenerate got wrong: it double-applied the naming
+convention to `consumption_record`'s already-explicitly-named `CheckConstraint` through a redundant
+`op.f()` wrap, and the raw generated file used `typing.Union`/`from typing import Sequence` instead
+of this repo's `X | Y` / `from collections.abc import Sequence` convention every other migration in
+`migrations/versions/` follows — both fixed, then `ruff format`/`ruff check --fix` run over the file.
+
+### One real root cause, and one real ORM bug, both found along the way
+
+- **`migrations/env.py` imported `aida.models` but never `aida.envelope_models`**
+  (`envelope_models.py` defines `MetadataViewDefinition`, `MetadataRoutine`,
+  `MetadataRoutineParameter`, `MetadataObjectDescription`, `MetadataSourceGrant` — all real, already
+  correctly migrated tables), so those five tables were invisible to `Base.metadata` for *every*
+  Alembic autogenerate run, not just this test's first one. Concretely: they showed up as spurious
+  `remove_table` diffs the first time this test ran, before the fix — Base.metadata was incomplete,
+  not the database. Fixed by importing `envelope_models` alongside `models` in `migrations/env.py`, which also
+  means any future `alembic revision --autogenerate` will finally see that module.
+- **Three FK columns had a redundant, unused second index**: `NotificationEventRecord.incident_id`,
+  `StudioEvalRun.change_set_id`, `CompositeKeyCandidate.table_id` each declared `index=True` on the
+  column in addition to an already-covering named `Index` in `__table_args__` (e.g.
+  `ix_notification_event_incident` already covers `incident_id`; `index=True` would add a second,
+  differently-named index over the exact same column). No migration had ever created the redundant
+  second index for any of the three — confirmed this is drift, not an intentional pattern, against
+  `StudioTestRun.change_set_id`, which has the identical shape in the ORM but *does* have both
+  indexes in its migration, and was correctly left untouched. `index=True` removed from the three
+  real cases (fixing the ORM, not adding a wasteful duplicate-index migration) since a second index
+  covering an already-indexed single column serves no purpose.
+- **Deliberately not "fixed"**: three raw-SQL trigram/expression indexes on `metadata_table`
+  (`ix_metadata_table_catalog_page`, `ix_metadata_table_name_trgm`,
+  `ix_metadata_table_description_trgm`, all from `f9a2b3c4d5e6_catalog_scale_indexes.py`'s
+  `USING gin (lower(name) gin_trgm_ops)`-shaped DDL) have no clean SQLAlchemy `Index()` equivalent
+  and are absent from `Base.metadata` by design. Excluded from comparison via an `include_object`
+  filter added to both `migrations/env.py` (so real autogenerate runs don't propose dropping them
+  either) and `test_migration_orm_drift.py`, each carrying the same named set with a comment
+  requiring the two stay in sync.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict — `migrations/` and `tests/` are outside
+its scope, matching the `quality` CI job). `alembic heads` confirms exactly one head (`09be3ab5b008`)
+after landing — the `migrations` CI job's own gate. Full `pytest` suite: 3,415 passed, 5 skipped, 1
+xfailed, run against the same real local Postgres instance the drift gate itself used (not skipped
+locally). `.github/workflows/ci.yml` gained the `migration-drift` job (Postgres 16 service
+container, `POSTGRES_USER=aida`/`POSTGRES_PASSWORD=aida-local-only`/`POSTGRES_DB=aida_migration
+_drift_test` matching `AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL`) so this keeps running against a real
+database on every push, not just in this sandbox.
+
+## 2026-08-31 — RT-7 (quality trust factor in ranking) closed for real; DQ-3's third and last leg lands
+
+This item's own tracker row (see the `2026-08-31 — DQ-3 / TL-3 / AG-6 wired for real; RT-7 honestly
+deferred` entry above) explicitly deferred RT-7 rather than guess at it, because at that time
+`retrieval.py::hybrid_retrieve`/`fusion_ranking.py` had no live caller — wiring the trust factor
+into a ranking implementation nothing called would not have satisfied the exit criterion ("Part of
+DQ-3"). Re-checked before starting, per the task brief's own instruction: `retrieval.py`'s
+`hybrid_retrieve_enhanced` (Stage 4, fusion) is now genuinely reachable from
+`agent_intelligence.GovernedRetriever.retrieve()`, itself called from
+`GovernedAgentOrchestrator.run()` — confirmed by re-reading the RT-1/RT-2/RT-3 wiring entry above
+and the current `agent_intelligence.py`, not assumed. That was this row's own stated blocking
+precondition, now satisfied.
+
+### What was built
+
+- `retrieval.py::hybrid_retrieve_enhanced`'s Stage 4 (`retrieval.py:923` on) no longer appends the
+  hardcoded `SignalScore(signal="quality_trust", raw_score=0.5)` placeholder to every candidate.
+  Instead:
+  1. Every candidate is resolved to the `MetadataTable` id(s) it actually touches. TABLE, COLUMN,
+     BUSINESS_ANNOTATION, DBT_RESOURCE, and SEMANTIC_METRIC candidates already carry a
+     `table_id`/`source_table_id` UUID string in their metadata from Stage 1 — read directly.
+     GOVERNED_TOOL candidates instead carry `referenced_tables` (SQL-qualified table-name strings,
+     the tool version's own declared dependencies) — resolved to this datasource's table ids via
+     `quality_coupling.resolve_table_ids`, the exact same helper TL-3's tool gate already resolves
+     the same field through, so a tool's ranking-time trust factor and its gating-time trust factor
+     can never disagree about which table it depends on.
+  2. All resolved table ids across every candidate are batched into one
+     `quality_coupling.fetch_open_incidents` call (not one query per candidate) to fetch the real
+     OPEN/ACKNOWLEDGED `DataQualityIncident` rows.
+  3. Each candidate's `quality_trust` signal is `min(demote_in_retrieval(table_id, incidents) for
+     table_id in candidate's tables)` — the worst-case table wins, same "worst factor" convention
+     AG-6's trust-score computation already uses for the same helper.
+  4. A demoted candidate additionally gets `metadata["quality_trust_demotion"]` (`retrieval.py:1002`)
+     — `{"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids": [...], "worst_factor": <score>}` —
+     so the *reason* for a lower rank is visible on the hit itself, not just a bare number in the
+     fusion breakdown. The numeric factor was already going to be inspectable for free (RT-3's
+     `build_evidence` puts every signal's `raw_score`/`weight`/`weighted_score` into
+     `retrieval_evidence.factors` regardless of which signal it is); this closes the "which table,
+     why" gap the numeric-only view leaves.
+  5. A candidate with no resolvable table (e.g. a bare GLOSSARY_TERM hit with no bound semantic
+     object) gets the neutral 1.0, matching `demote_in_retrieval`'s own "no active incidents" return
+     rather than inventing a different default.
+- `quality_coupling.py` itself is unchanged — no signature adjustment was needed. `demote_in_retrieval`
+  already took a bare `asset_id: str` + `incidents: list[IncidentSummary]`, which is exactly what the
+  retrieval-side resolution above produces per candidate.
+
+### Tests
+
+New `tests/test_rt7_quality_trust_ranking.py` (3 tests), same in-memory-sqlite-via-aiosqlite,
+ORM-seeded `_Scenario` pattern `test_agent_orchestrator_retrieval_wiring.py` (RT-1/RT-2/RT-3) and
+`test_quality_runtime_coupling.py` (TL-3/AG-6) both established — driven through the real live
+retrieval entry point, `agent_intelligence.GovernedRetriever.retrieve()`, **not** a direct call into
+`quality_coupling.demote_in_retrieval` or `hybrid_retrieve_enhanced` in isolation. That
+direct-unit-test-only shape is the exact failure mode `04-end-to-end-audit-2026-08-30.md` found
+across this codebase (real, tested modules with zero live callers) and the standard this wave's
+wiring work has held itself to throughout.
+
+- `test_governed_retriever_demotes_table_with_open_critical_incident`: two tables
+  (`widgets_flagged`, `widgets_clean`) score identically on every lexical signal (same token overlap,
+  same exact-phrase bonus) — the only difference is an OPEN CRITICAL `DataQualityIncident` on
+  `widgets_flagged`. Asserts the flagged table's `quality_trust` factor is `0.3` vs. the clean
+  table's `1.0`, its `weighted_score` is lower, its overall fused `final_score` is measurably lower
+  than the clean table's (DoD #1: "a candidate touching a table with an open quality incident gets
+  measurably demoted relative to an identical candidate on a clean table"), and its evidence carries
+  `metadata["quality_trust_demotion"] == {"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids":
+  [...], "worst_factor": 0.3}` while the clean table's metadata carries no such key.
+- `test_governed_retriever_does_not_demote_on_resolved_incident`: a RESOLVED incident does not
+  gate/demote — only OPEN/ACKNOWLEDGED do, matching `demote_in_retrieval`'s own filter and TL-3/AG-6's
+  existing behaviour for the same status check.
+- `test_governed_retriever_demotes_governed_tool_via_referenced_tables`: a GOVERNED_TOOL candidate
+  (no `table_id`/`source_table_id` of its own, only `referenced_tables`) whose one referenced table
+  carries an open CRITICAL incident is demoted the same way (`quality_trust` factor `0.3`,
+  `quality_trust_demotion` naming the resolved table id) — proving the tool-shaped candidate branch
+  isn't silently skipped because its metadata shape differs from a bare table/column hit.
+
+### Tracker
+
+RT-7 moved TODO → **DONE** with the real exit evidence above (file:line citations, real test names,
+not reference-only text). DQ-3 moved IN PROGRESS → **DONE** — RT-7 was its last of three wiring legs
+(TL-3 tool gating and AG-6 answer trust warnings already closed for real in the entry above); all
+three now resolve incidents through the same `quality_coupling.resolve_table_ids`/
+`fetch_open_incidents` helpers.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, no new files added to the checked set). Full
+`pytest` suite run foreground: exit code 0, progress output at 100% with no `F`/`E` markers anywhere
+in the run (a background OpenTelemetry metrics-exporter thread throws `ValueError: I/O operation on
+closed file` during interpreter teardown in `test_observability.py`'s span-export test, printed to
+stderr after the run itself completes — a pre-existing, unrelated background-thread teardown quirk,
+not a test failure; it also swallowed the final `N passed in Ys` summary line from the captured
+log, hence citing exit code + zero-failure-marker dot output as the pass evidence instead of quoting
+that line directly).
+
+### Scope discipline
+
+Touched only `retrieval.py` (Stage 4 of `hybrid_retrieve_enhanced`) and its new test file, per the
+task brief. `quality_coupling.py` needed no signature change — `demote_in_retrieval`'s existing
+`(asset_id, incidents)` shape was already sufficient, so TL-3/AG-6's call sites are untouched and
+unaffected. `fusion_ranking.py`/`vector_retrieval.py`/`graph_retrieval.py` (RT-1/RT-2/RT-3/RT-9/SM-2's
+own files) were not modified — the fusion mechanics they own already treat `quality_trust` as an
+ordinary named signal; only the raw score fed into it needed to become real. RT-6 (usage/popularity
+ranking factor, the other Stage-4 placeholder) is untouched and still `raw_score=0.5` — a separate
+tracker row, not this one's scope.
+
+## 2026-08-31 (continued) — AU-13 follow-up: the 16-CVE dependency baseline cleared, not just bumped
+
+The follow-up task AU-13 explicitly queued (clear the `dependency-scan` job's `--ignore-vuln`
+baseline by actually bumping `cryptography`/`pyjwt`/`pyopenssl`) landed the same day.
+
+### The three-package bump wasn't just three packages
+
+`pyproject.toml` pinned only `PyJWT[crypto]==2.10.1` directly; `cryptography` and `pyopenssl` were
+transitive (pulled in via `PyJWT[crypto]`, `google-auth[pyopenssl]`, and
+`snowflake-connector-python`'s own `cryptography`/`pyOpenSSL` requirements). To actually move the
+resolved versions — not just wish for it — both were added as explicit direct pins:
+`PyJWT[crypto]` 2.10.1 -> 2.13.0, `cryptography` (new direct pin) -> 50.0.1, `pyOpenSSL` (new
+direct pin) -> 26.4.0.
+
+The pyopenssl fix does not resolve on its own. `snowflake-connector-python==3.15.0` (and every
+3.x/early-4.x release checked on PyPI: 3.16.0, 4.0.0, 4.3.0 all still say
+`pyOpenSSL<26.0.0,>=22.0.0` or `>=24.0.0,<26.0.0`) caps `pyOpenSSL` below the CVE-fixed 26.0.0, so
+`uv lock` refused to resolve with a fixed pyopenssl until the connector's own ceiling moved.
+`snowflake-connector-python==4.4.0` is the first release that drops the upper bound
+(`pyOpenSSL>=24.0.0`), so it was bumped too — 3.15.0 -> 4.4.0. This dependency is used at exactly
+one call site, `src/aida/connectors/snowflake.py`'s `_get_connection()`, via
+`snowflake.connector.connect(**kwargs)` with only long-stable keyword arguments
+(`account`/`user`/`database`/`schema`/`warehouse`/`role`/`login_timeout`/`network_timeout`/
+`password`/`authenticator`/`token`) — nothing there changed across the major-version jump, and
+`mypy src` (which has an explicit `ignore_missing_imports` override for `snowflake.*`) stayed
+clean.
+
+### The baseline's own "fixed in 46.0.6/46.0.7" claim turned out to be stale
+
+Bumping `cryptography` to 46.0.7 first — the version the `dependency-scan` job's baseline comment
+named as the fix for all 7 of its cryptography CVEs — and re-running the unfiltered
+`pip-audit -r requirements-locked.txt` locally showed 4 of those 7 still open:
+`PYSEC-2026-3552`/`3553`/`3554` and `GHSA-537c-gmf6-5ccf`, each fixed only in 48.0.1/49.0.0/50.0.0
+per pip-audit's own advisory data — CVEs published against `cryptography` after the baseline
+comment was dated, not a scan error. `cryptography` went to 50.0.1 (current latest on PyPI at scan
+time) instead, which pulled `pyOpenSSL` up to 26.4.0 (the first pyOpenSSL release whose
+`cryptography<51,>=49.0.0` window admits it — 26.0.0 itself caps `cryptography<47`). A second
+unfiltered `pip-audit` re-scan against the fully-updated lock came back clean: **0 known
+vulnerabilities** in the locked, non-dev dependency set, versus the original baseline's 16 CVEs
+across the 3 packages. The lesson worth keeping: an ignore-vuln baseline's "fixed in Y" comment is
+a claim about the world on the day it was written, not a fact that stays true — re-scan after
+bumping rather than trusting the old comment, which is exactly what happened here.
+
+`src/` has no direct `cryptography`/`OpenSSL` imports at all (`grep -rln "cryptography\|OpenSSL"
+src/` — no hits); the only place `cryptography.hazmat.primitives.asymmetric.rsa` is imported is
+three *test* files generating RSA keys for signed-JWT fixtures (`tests/test_oidc.py`,
+`tests/test_persona_derivation.py`, `tests/test_token_revocation.py`), a stable, unaffected API.
+`src/aida/oidc.py`'s only `PyJWT` call site (`jwt.get_unverified_header`, `jwt.PyJWK.from_dict`,
+`jwt.decode`, `jwt.PyJWTError`/`jwt.InvalidTokenError`) is unchanged 2.x API — no source changes
+were needed anywhere for the version bump itself.
+
+### `.github/workflows/ci.yml`
+
+The `dependency-scan` job's `pip-audit -- fail on any unbaselined known vulnerability` step had its
+16-entry `--ignore-vuln` list removed entirely (0 remain after the re-scan above), and its comment
+rewritten to record both the original 2026-08-31 AU-13 baseline and this same-day follow-up that
+cleared it, so a future reader sees why the baseline is currently empty rather than assuming it was
+never populated.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, unchanged from AU-13's original count). Full
+`pytest` suite: exit 0, zero `FAILED`/`ERROR` lines, with one test explicitly deselected —
+`test_doc_claims.py::test_cited_import_linter_contract_name_resolves` — confirmed (by stashing this
+change and re-running just that test against unmodified `origin/feature/snowflake-dbt-lineage-mcp`)
+to already fail identically before this change: it misreads the AU-13 tracker row's own
+backtick-quoted CI job names (`` `dependency-scan` ``, `` `pip-audit` ``, `` `secret-scan` ``,
+`` `docker-build` ``) as import-linter contract-name citations. Pre-existing and out of this
+change's scope; not touched.
+
+### Scope note
+
+`pyproject.toml`, `uv.lock`, and `.github/workflows/ci.yml`'s `dependency-scan` job were the
+intended surface. `snowflake-connector-python`'s version bump in `pyproject.toml`/`uv.lock` was not
+separately requested but was a hard resolver requirement to get a CVE-fixed `pyopenssl` at all (see
+above) — no unrelated `src/` refactoring rode along with it. See tracker row AU-13's follow-up note
+for the version table.

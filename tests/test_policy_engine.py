@@ -16,6 +16,7 @@ from aida.policy_engine import (
     Resource,
     Subject,
     evaluate,
+    simulate,
 )
 
 _NOW = datetime(2026, 8, 30, 12, 0, tzinfo=UTC)
@@ -288,3 +289,53 @@ def test_a_decision_never_carries_a_resource_value() -> None:
     # The decision exposes no transform expression or policy body, only its identity.
     assert not hasattr(decision, "subject_match")
     assert not hasattr(decision, "resource_match")
+
+
+# --- PG-8: "who could see this?" ---------------------------------------------
+
+
+def test_simulate_answers_who_could_see_this_in_one_pass() -> None:
+    """PG-8. One resource, several hypothetical subjects, one decision each --
+    built directly on `evaluate`, the same engine the query path reaches, not a
+    second evaluator that could drift from it."""
+    policies = (
+        _policy(subject={"principal_kind": "HUMAN"}, actions=("READ_DATA",)),
+        _policy(
+            effect="DENY",
+            subject={"principal_kind": "AGENT"},
+            resource={"classifications": ["PII"]},
+            actions=("READ_DATA",),
+        ),
+    )
+    resource = _resource(classifications=frozenset({"PII"}))
+    subjects = (
+        _subject(principal_kind="HUMAN"),
+        _subject(principal_kind="AGENT"),
+        _subject(principal_kind="SERVICE"),
+    )
+
+    decisions = simulate(policies, subjects, resource, "READ_DATA", now=_NOW)
+
+    assert len(decisions) == 3
+    assert decisions[0].allowed is True  # HUMAN: matches the human ALLOW
+    assert decisions[1].allowed is False  # AGENT: DENY over PII is a hard ceiling
+    assert decisions[1].reason_code == "DENIED_BY_POLICY"
+    assert decisions[2].allowed is False  # SERVICE: matches no ALLOW at all
+
+
+def test_simulate_with_no_subjects_returns_no_decisions() -> None:
+    decisions = simulate((), (), _resource(), "READ_DATA", now=_NOW)
+    assert decisions == ()
+
+
+def test_simulate_is_equivalent_to_evaluating_each_subject_alone() -> None:
+    """Not a second implementation to drift from `evaluate` -- literally built on it."""
+    policies = (_policy(subject={"roles": ["Analyst"]}, actions=("READ_DATA",)),)
+    subjects = (_subject(roles=frozenset({"Analyst"})), _subject(roles=frozenset({"Viewer"})))
+
+    decisions = simulate(policies, subjects, _resource(), "READ_DATA", now=_NOW)
+
+    expected = tuple(
+        evaluate(policies, subject, _resource(), "READ_DATA", now=_NOW) for subject in subjects
+    )
+    assert decisions == expected

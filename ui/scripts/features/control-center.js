@@ -4,7 +4,7 @@
 
   const controlState = {
     bulkRuns: [], unowned: [], workspaces: [], members: [], bindings: [],
-    policies: [], decisions: [], slos: [], notificationRules: [], archive: null,
+    policies: [], slos: [], notificationRules: [], archive: null,
     packs: [], refusals: [], changeSets: [], biConnections: [], activePlanId: null,
   };
 
@@ -74,6 +74,7 @@
     preserveSelect("bi-project", selectOptions(state.projects, project => `${project.name} / ${project.lobName}`, "No projects"));
     const workspaceOptions = selectOptions(controlState.workspaces, workspace => workspace.name, "No workspaces");
     preserveSelect("control-workspace", workspaceOptions);
+    preserveSelect("policy-workspace", workspaceOptions);
     const connectionOptions = selectOptions(controlState.biConnections, connection => connection.display_name, "No Tableau connections");
     preserveSelect("bi-connection", connectionOptions);
   }
@@ -95,10 +96,9 @@
   }
 
   function renderPolicy() {
-    const policyRows = controlState.policies.map(policy => `<tr><td>${esc(policy.name)}</td><td>${esc(policy.policy_key)}</td><td>${badge(policy.effect)}</td><td>${esc(policy.priority)}</td><td>${badge(policy.status || "ACTIVE")}</td></tr>`);
-    const decisionRows = controlState.decisions.slice(0, 100).map(decision => `<tr><td>${badge(decision.decision || decision.effect)}</td><td>${esc(decision.subject_id || decision.principal_id || "Attribute request")}</td><td>${esc(decision.resource_id || decision.resource_type || "Resource")}</td><td>${esc((decision.matched_policy_keys || decision.policy_keys || []).join?.(", ") || decision.policy_key || "Default")}</td><td>${when(decision.created_at || decision.decided_at)}</td></tr>`);
-    setHtml("abac-policy-list", `<h3>Policies</h3>${table(["Name", "Key", "Effect", "Priority", "Status"], policyRows, "No ABAC policies")}`);
-    setHtml("abac-decision-list", `<h3>Decision log</h3>${table(["Decision", "Subject", "Resource", "Policy", "Time"], decisionRows, "No ABAC decisions")}`);
+    const policyRows = controlState.policies.map(policy => `<tr><td>${esc(policy.name)}</td><td>${esc(policy.code)}</td><td>${badge(policy.effect)}</td><td>${esc((policy.action_match || []).join(", ") || "ALL")}</td><td>${esc(policy.priority)}</td><td>${badge(policy.status || "ACTIVE")}</td></tr>`);
+    setHtml("abac-policy-list", `<h3>Access policies</h3>${table(["Name", "Code", "Effect", "Actions", "Priority", "Status"], policyRows, "No access policies")}`);
+    setHtml("abac-decision-list", `<h3>Simulation output</h3><div class="control-summary">${empty("No simulation run yet", "Run a policy simulation to inspect how the live engine evaluates hypothetical subjects.")}</div>`);
   }
 
   function renderReliability() {
@@ -149,12 +149,11 @@
     if (!state.organizationId) return;
     configureSelectors();
     const org = encodeURIComponent(state.organizationId);
-    const [bulkRuns, unowned, workspaces, policies, decisions, slos, notificationRules, archive, packs, refusals, changeSets] = await Promise.all([
+    const [bulkRuns, unowned, workspaces, policies, slos, notificationRules, archive, packs, refusals, changeSets] = await Promise.all([
       settled(`/v1/organizations/${org}/catalog-bulk-actions?limit=100&offset=0`),
       settled(`/v1/organizations/${org}/stewardship/unowned-backlog?limit=100&offset=0`),
       settled(`/v1/organizations/${org}/workspaces?limit=200&offset=0`),
-      settled(`/v1/abac/policies?organization_id=${org}&limit=200&offset=0`),
-      settled(`/v1/abac/decisions?organization_id=${org}&limit=100&offset=0`),
+      settled(`/v1/organizations/${org}/access-policies`),
       settled("/v1/observability/slo?limit=200&offset=0"),
       settled("/v1/notification-rules?limit=200&offset=0"),
       api("/v1/observability/archive/status").catch(() => null),
@@ -162,7 +161,7 @@
       settled(`/v1/ai-decisions/refusals?organization_id=${org}&limit=100&offset=0`),
       settled("/v1/studio/change-sets?limit=200&offset=0"),
     ]);
-    Object.assign(controlState, { bulkRuns, unowned, workspaces, policies, decisions, slos, notificationRules, archive, packs, refusals, changeSets });
+    Object.assign(controlState, { bulkRuns, unowned, workspaces, policies, slos, notificationRules, archive, packs, refusals, changeSets });
     renderCatalog(); renderAccess(); renderPolicy(); renderReliability(); renderCompliance(); renderStudio();
     await Promise.all([loadWorkspaceDetail(), loadBiConnections()]);
   }
@@ -199,8 +198,8 @@
     $("#workspace-member-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api(`/v1/workspaces/${$("#control-workspace").value}/members`, { method: "POST", body: JSON.stringify({ principal_id: data.get("principal_id"), principal_kind: data.get("principal_kind"), role: data.get("role"), expires_at: isoOrNull(data.get("expires_at")) }) }), "Workspace member added."); });
     $("#source-binding-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api(`/v1/workspaces/${$("#control-workspace").value}/source-bindings`, { method: "POST", body: JSON.stringify({ datasource_id: data.get("datasource_id"), purpose: data.get("purpose"), schema_scope: csv(data.get("schema_scope")), permitted_classifications: csv(data.get("permitted_classifications")), masking_profile: data.get("masking_profile") || "DEFAULT", max_query_cost: data.get("max_query_cost") === "" ? null : Number(data.get("max_query_cost")) }) }), "Source binding submitted for independent review."); });
 
-    $("#abac-policy-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api("/v1/abac/policies", { method: "POST", body: JSON.stringify({ policy_key: data.get("policy_key"), name: data.get("name"), description: data.get("description"), effect: data.get("effect"), subject_conditions: parseJson(data.get("subject_conditions"), "Subject conditions"), resource_conditions: parseJson(data.get("resource_conditions"), "Resource conditions"), environment_conditions: parseJson(data.get("environment_conditions"), "Environment conditions"), priority: Number(data.get("priority")) }) }), "ABAC policy created."); });
-    $("#abac-simulate-form")?.addEventListener("submit", async event => { event.preventDefault(); const data = new FormData(event.target); try { const result = await api("/v1/abac/simulate", { method: "POST", body: JSON.stringify({ subject_attributes: parseJson(data.get("subject_attributes"), "Subject attributes"), resource_attributes: parseJson(data.get("resource_attributes"), "Resource attributes"), environment_attributes: parseJson(data.get("environment_attributes"), "Environment attributes"), vary_subject_attributes: [] }) }); recordOutput("abac-simulation-result", result); message("Policy simulation completed without changing access.", true); } catch (error) { message(error.message); } });
+    $("#abac-policy-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api(`/v1/organizations/${state.organizationId}/access-policies`, { method: "POST", body: JSON.stringify({ code: data.get("code"), name: data.get("name"), description: data.get("description"), effect: data.get("effect"), priority: Number(data.get("priority")), action_match: csv(data.get("action_match")), subject_match: parseJson(data.get("subject_match"), "Subject match"), resource_match: parseJson(data.get("resource_match"), "Resource match"), transform: parseJson(data.get("transform"), "Transform"), condition: parseJson(data.get("condition"), "Condition"), status: data.get("status") || "DRAFT" }) }), "Access policy created."); });
+    $("#abac-simulate-form")?.addEventListener("submit", async event => { event.preventDefault(); const data = new FormData(event.target); const workspaceId = data.get("workspace_id") || $("#control-workspace")?.value || controlState.workspaces[0]?.id; if (!workspaceId) return message("Choose a workspace before running a policy simulation."); try { const result = await api(`/v1/workspaces/${workspaceId}/authorization-simulations`, { method: "POST", body: JSON.stringify({ workspace_id: workspaceId, action: data.get("action"), resource_type: data.get("resource_type"), resource_id: data.get("resource_id") || null, datasource_id: data.get("datasource_id") || null, schema_name: data.get("schema_name") || null, classifications: csv(data.get("classifications")), certification: data.get("certification") || null, quality_state: data.get("quality_state") || null, freshness_state: data.get("freshness_state") || null, subjects: parseJson(data.get("subjects"), "Subjects") }) }); recordOutput("abac-simulation-result", result); setHtml("abac-decision-list", `<h3>Simulation output</h3><pre class="control-output">${esc(JSON.stringify(result, null, 2))}</pre>`); message("Policy simulation completed without changing access.", true); } catch (error) { message(error.message); } });
 
     $("#slo-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api("/v1/observability/slo", { method: "POST", body: JSON.stringify({ slo_key: data.get("slo_key"), name: data.get("name"), target: Number(data.get("target")), window_days: Number(data.get("window_days")), threshold: Number(data.get("threshold")) }) }), "SLO definition created."); });
     $("#notification-rule-form")?.addEventListener("submit", event => { event.preventDefault(); submit(event.target, async data => api("/v1/notification-rules", { method: "POST", body: JSON.stringify({ name: data.get("name"), conditions: parseJson(data.get("conditions"), "Conditions"), channel: data.get("channel"), recipients: csv(data.get("recipients")), escalation_after_minutes: data.get("escalation_after_minutes") === "" ? null : Number(data.get("escalation_after_minutes")), enabled: data.get("enabled") === "on" }) }), "Notification rule created."); });

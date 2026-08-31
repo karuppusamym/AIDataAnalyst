@@ -19,9 +19,9 @@ per-workspace helpers, because a report needs every live membership and
 binding for one principal across *all* their workspaces in one pass, not a
 single (workspace, datasource) pair.
 
-`abac.evaluate` (PG-8's policy engine) is layered on top as a **self-service
+`policy_engine.evaluate` (PG-8's live engine) is layered on top as a **self-service
 only** overlay: it shows, for each classification a principal's bindings
-nominally permit, whether an ACTIVE `AbacPolicyRecord` policy would actually
+nominally permit, whether an ACTIVE `AccessPolicy` policy would actually
 grant it given their real, live role attributes. It cannot run for a
 report pulled *about* another principal -- this platform persists no role
 assignment for anyone but the caller making the current request (roles
@@ -42,9 +42,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.abac import AbacPolicy, evaluate
+from aida.business_graph import load_policies
 from aida.models import (
-    AbacPolicyRecord,
     AccessReviewReportRecord,
     DataSource,
     LineOfBusiness,
@@ -52,6 +51,7 @@ from aida.models import (
     Workspace,
     WorkspaceMembership,
 )
+from aida.policy_engine import Resource, Subject, evaluate
 from aida.timeutil import is_expired
 
 ABAC_SELF_SERVICE_ONLY_NOTE = (
@@ -116,31 +116,14 @@ def _compute_checksum(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-async def _load_active_policies(session: AsyncSession, organization_id: UUID) -> list[AbacPolicy]:
-    rows = (
-        await session.scalars(
-            select(AbacPolicyRecord)
-            .where(
-                AbacPolicyRecord.organization_id == organization_id,
-                AbacPolicyRecord.status == "ACTIVE",
-            )
-            .order_by(AbacPolicyRecord.priority)
-        )
-    ).all()
-    return [
-        AbacPolicy(
-            id=str(row.id),
-            policy_key=row.policy_key,
-            version=row.version,
-            name=row.name,
-            effect="DENY" if row.effect == "DENY" else "PERMIT",
-            subject_conditions=row.subject_conditions,
-            resource_conditions=row.resource_conditions,
-            environment_conditions=row.environment_conditions,
-            priority=row.priority,
-        )
-        for row in rows
-    ]
+def _principal_kind(subject_principal_type: str) -> str:
+    mapping = {
+        "USER": "HUMAN",
+        "HUMAN": "HUMAN",
+        "AGENT": "AGENT",
+        "SERVICE": "SERVICE",
+    }
+    return mapping.get(subject_principal_type.upper(), "HUMAN")
 
 
 async def build_entitlement_report(
@@ -227,28 +210,34 @@ async def build_entitlement_report(
             }
         )
         if classifications:
-            policies = await _load_active_policies(session, organization_id)
-            subject_attrs: dict[str, Any] = {
-                "role": sorted(requester_roles),
-                "principal_type": subject_principal_type,
-            }
+            policies = await load_policies(session, organization_id)
+            subject = Subject(
+                principal_id=subject_principal_id,
+                principal_kind=_principal_kind(subject_principal_type),
+                roles=frozenset(requester_roles),
+            )
             for classification in classifications:
                 result = evaluate(
-                    subject_attrs,
-                    {"classification": classification, "resource_type": "metadata_column"},
-                    {},
                     policies,
+                    subject,
+                    Resource(
+                        resource_type="metadata_column",
+                        classifications=frozenset({classification}),
+                    ),
+                    "READ_DATA",
                 )
                 abac_decisions.append(
                     ClassificationDecision(
                         classification=classification,
-                        decision=result.decision,
-                        reasons=result.reasons,
-                        contributing_policy_ids=result.contributing_policies,
+                        decision="ALLOW" if result.allowed else "DENY",
+                        reasons=[result.reason_code],
+                        contributing_policy_ids=[
+                            str(policy_id) for policy_id in result.evaluated_policy_ids
+                        ],
                     )
                 )
             abac_note = (
-                f"Evaluated {len(policies)} active ABAC polic"
+                f"Evaluated {len(policies)} active access polic"
                 f"{'y' if len(policies) == 1 else 'ies'} against the caller's live role "
                 f"attributes for the {len(classifications)} distinct classification"
                 f"{'' if len(classifications) == 1 else 's'} named in this principal's "

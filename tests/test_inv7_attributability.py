@@ -65,9 +65,10 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "shows what the governed retriever would assemble for a question; "
         "persists nothing"
     ),
-    "POST /v1/abac/simulate": (
-        "simulates ABAC policy evaluation over varied attributes; reads "
-        "policies and returns results without persisting decisions"
+    "POST /v1/workspaces/{workspace_id}/authorization-simulations": (
+        "simulates the real ABAC policy engine over varied hypothetical "
+        "subjects (PG-8, aida.policy_engine.simulate); reads policies and "
+        "returns results without persisting decisions"
     ),
     "POST /v1/studio/parameter-contracts/validate": (
         "validates a caller-supplied tool parameter contract (ST-A4) and returns "

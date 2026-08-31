@@ -984,30 +984,24 @@ async def hybrid_retrieve_enhanced(
                 )
 
     # ------------------------------------------------------------------
-    # Stage 4: Quality-trust demotion (RT-7 / DQ-3) and usage-popularity
-    # (RT-6) -- both real signals derived from persisted data, replacing
-    # the raw_score=0.5 placeholder every candidate used to carry
-    # regardless of its actual quality or usage history.
+    # Stage 4: quality/trust demotion (RT-7/DQ-3) and usage/popularity
+    # (RT-6). Both are derived from persisted runtime evidence rather than
+    # placeholders, and both batch their shared lookups per retrieval call.
     # ------------------------------------------------------------------
     candidate_table_ids: dict[str, set[UUID]] = {}
     tool_name_pool: set[str] = set()
     for key, candidate in candidates.items():
-        ids: set[UUID] = set()
+        table_ids: set[UUID] = set()
         if candidate.object_type == "TABLE":
-            # A TABLE candidate's object_id IS the MetadataTable id, whether it
-            # arrived via the lexical scan or FK graph expansion (Stage 3 unwraps
-            # `GraphHit.object_id` back to the raw table id for exactly this reason).
-            ids.add(UUID(candidate.object_id))
+            table_ids.add(UUID(candidate.object_id))
         else:
             for field_name in ("table_id", "source_table_id"):
                 raw = candidate.metadata.get(field_name)
                 if raw:
-                    ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+                    table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
             if candidate.object_type == "GOVERNED_TOOL":
-                # Governed tools carry SQL-qualified table *names*, not ids -- the
-                # same shape `resolve_table_ids` already resolves for TL-3/AG-6.
                 tool_name_pool.update(candidate.metadata.get("referenced_tables") or [])
-        candidate_table_ids[key] = ids
+        candidate_table_ids[key] = table_ids
 
     if tool_name_pool:
         tool_table_ids = await resolve_table_ids(
@@ -1025,11 +1019,10 @@ async def hybrid_retrieve_enhanced(
     for ids in candidate_table_ids.values():
         all_table_ids.update(ids)
 
-    # One shared incident fetch and one shared execution-history fetch for every
-    # candidate in this call, rather than a per-candidate round trip -- the same
-    # batching discipline the vector stage above already follows.
-    incidents = await fetch_open_incidents(
-        session, datasource=datasource, table_ids=list(all_table_ids)
+    incidents = (
+        await fetch_open_incidents(session, datasource=datasource, table_ids=list(all_table_ids))
+        if all_table_ids
+        else []
     )
     usage_counts = await _table_execution_counts(
         session,
@@ -1041,16 +1034,25 @@ async def hybrid_retrieve_enhanced(
     for key, candidate in candidates.items():
         ids = candidate_table_ids.get(key) or set()
         if ids:
-            # Worst-of, mirroring AG-6's `worst_factor` -- a candidate touching
-            # several tables is only as trustworthy/popular as its weakest one.
-            quality_trust_score = min(demote_in_retrieval(str(tid), incidents) for tid in ids)
+            per_table_scores = {
+                str(table_id): demote_in_retrieval(str(table_id), incidents)
+                for table_id in ids
+            }
+            quality_trust_score = min(per_table_scores.values())
             popularity_count = max(usage_counts.get(tid, 0) for tid in ids)
+            demoted_ids = sorted(
+                table_id for table_id, score in per_table_scores.items() if score < 1.0
+            )
         else:
-            # No resolvable table -- e.g. a GLOSSARY_TERM with no bound semantic
-            # object's table. No basis to demote or promote: neutral trust,
-            # zero measured popularity.
             quality_trust_score = 1.0
             popularity_count = 0
+            demoted_ids = []
+        if demoted_ids:
+            candidate.metadata["quality_trust_demotion"] = {
+                "reason": "OPEN_QUALITY_INCIDENT",
+                "demoted_table_ids": demoted_ids,
+                "worst_factor": quality_trust_score,
+            }
         usage_popularity_score = min(1.0, popularity_count / _USAGE_POPULARITY_SATURATION)
         candidate.signals.append(
             SignalScore(signal="quality_trust", raw_score=round(quality_trust_score, 4))
