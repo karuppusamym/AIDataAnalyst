@@ -19,6 +19,7 @@ from aida.studio import (
     create_change_set,
     detect_conflicts,
     remove_item,
+    validate_parameter_contract,
 )
 from aida.studio_test_harness import (
     TestFixture,
@@ -587,6 +588,121 @@ class TestSuite:
 
 
 # ---------------------------------------------------------------------------
+# ST-A4: parameter-contract designer
+# ---------------------------------------------------------------------------
+
+
+class TestParameterContractDesigner:
+    def test_valid_contract_renders_a_sample(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT * FROM t WHERE id = :id AND region = :region",
+            raw_definitions=[
+                {"name": "id", "parameter_type": "INTEGER", "minimum": 1, "maximum": 100},
+                {
+                    "name": "region",
+                    "parameter_type": "STRING",
+                    "allowed_values": ["NY", "TX"],
+                },
+            ],
+        )
+        assert result.valid is True
+        assert result.errors == []
+        assert len(result.definitions) == 2
+        assert result.sample_rendered_sql is not None
+        assert "'NY'" in result.sample_rendered_sql
+
+    def test_invalid_type_reports_typed_error_not_a_crash(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT 1",
+            raw_definitions=[{"name": "x", "parameter_type": "BLOB"}],
+        )
+        assert result.valid is False
+        assert any("parameter_type" in error and "BLOB" in error for error in result.errors)
+
+    def test_inverted_bounds_rejected(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT 1",
+            raw_definitions=[
+                {
+                    "name": "x",
+                    "parameter_type": "INTEGER",
+                    "minimum": 10,
+                    "maximum": 1,
+                }
+            ],
+        )
+        assert result.valid is False
+        assert any("minimum" in error.lower() for error in result.errors)
+
+    def test_sensitive_parameter_with_default_rejected(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT 1",
+            raw_definitions=[
+                {
+                    "name": "secret",
+                    "parameter_type": "STRING",
+                    "sensitive": True,
+                    "default": "leaked",
+                }
+            ],
+        )
+        assert result.valid is False
+        assert any("sensitive" in error.lower() for error in result.errors)
+
+    def test_duplicate_name_rejected(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT 1",
+            raw_definitions=[
+                {"name": "id", "parameter_type": "INTEGER"},
+                {"name": "id", "parameter_type": "STRING"},
+            ],
+        )
+        assert result.valid is False
+        assert any("duplicate parameter name: id" in error for error in result.errors)
+
+    def test_undeclared_placeholder_rejected(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT * FROM t WHERE id = :id",
+            raw_definitions=[],
+        )
+        assert result.valid is False
+        assert any("undeclared placeholders" in error for error in result.errors)
+
+    def test_unused_definition_rejected(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT 1",
+            raw_definitions=[{"name": "id", "parameter_type": "INTEGER"}],
+        )
+        assert result.valid is False
+        assert any("unused parameter definitions" in error for error in result.errors)
+
+    def test_enum_bound_value_out_of_range_after_structural_pass_still_renders_sample(
+        self,
+    ) -> None:
+        # allowed_values takes precedence over minimum/maximum for the synthetic sample.
+        result = validate_parameter_contract(
+            sql_template="SELECT * FROM t WHERE status = :status",
+            raw_definitions=[
+                {
+                    "name": "status",
+                    "parameter_type": "STRING",
+                    "allowed_values": ["ACTIVE", "INACTIVE"],
+                }
+            ],
+        )
+        assert result.valid is True
+        assert "'ACTIVE'" in result.sample_rendered_sql
+
+    def test_malformed_sql_template_reported_not_raised(self) -> None:
+        result = validate_parameter_contract(
+            sql_template="SELECT FROM WHERE (((",
+            raw_definitions=[],
+        )
+        assert result.valid is False
+        assert result.errors
+
+
+# ---------------------------------------------------------------------------
 # Schema / API route presence
 # ---------------------------------------------------------------------------
 
@@ -610,6 +726,7 @@ class TestRouteRegistration:
         assert "/v1/studio/change-sets/{change_set_id}/diff" in paths
         assert "/v1/studio/change-sets/{change_set_id}/impact" in paths
         assert "/v1/studio/change-sets/{change_set_id}/detect-conflicts" in paths
+        assert "/v1/studio/parameter-contracts/validate" in paths
 
     def test_view_lineage_routes_present_in_openapi(self) -> None:
         try:

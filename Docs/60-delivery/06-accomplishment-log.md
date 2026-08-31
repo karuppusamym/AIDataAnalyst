@@ -2043,3 +2043,47 @@ Studio has moved from Pending to Partial in the status matrix.
   page today (12:25: 1,199; 17:20: 1,391; 17:35: 2,387) — each correction was accurate when made and
   stale within the hour, which is itself the fact worth recording: on a branch this actively
   developed, treat every count in `00-status.md` as a timestamped snapshot, not a stable number.
+
+## 2026-08-31 — ST-A4 (Studio parameter-contract designer) closed
+
+- Studio's TOOL change-item validation (`studio_test_harness.py::_validate_tool_item`) previously
+  re-implemented a weaker, ad hoc version of parameter-contract checking: it verified only that
+  parameter names were unique and that `parameter_type` was one of the five known literals. It did
+  not check `allowed_values`, `minimum`/`maximum`, the `sensitive`+`default` conflict, or whether
+  the declared parameters actually matched the SQL template's placeholders — all of which module
+  14's real `ToolParameterDefinition` (`schemas.py`) and `tool_rendering.py` already enforce for
+  published tools.
+- Closed by adding `validate_parameter_contract()` to `studio.py`, which parses each raw definition
+  as a real `ToolParameterDefinition` (structured pydantic errors on failure, not a crash),
+  cross-checks declared names against `tool_rendering.template_placeholders()`, and — once
+  structurally valid — proves the contract renders by substituting one representative in-bounds
+  value per parameter through the real `render_tool_sql()`. `_validate_tool_item` now calls this
+  directly instead of its previous hand-rolled loop. Also exposed standalone at
+  `POST /v1/studio/parameter-contracts/validate` (`studio_api.py`) so an author can validate a
+  contract incrementally while still drafting, before it is attached to any change item.
+- 9 new tests (`tests/test_studio.py::TestParameterContractDesigner`): valid contract renders a
+  sample, invalid type reported as a typed error (not a crash), inverted bounds rejected, sensitive
+  parameter with default rejected, duplicate name rejected, undeclared placeholder rejected, unused
+  definition rejected, `allowed_values` takes precedence for the synthetic sample, malformed SQL
+  template reported rather than raised. Full suite green (exit 0, no failures); `ruff check .`,
+  `mypy src` (184 files), and `lint-imports` (4 contracts kept, 0 broken) all clean.
+- The new endpoint is stateless (no DB session, persists nothing), so it needed the same documented
+  exemption `POST /v1/context-compiler/validate` already has in both `test_inv5_tenant_isolation.py`
+  (`_TENANT_FREE_ROUTES`) and `test_inv7_attributability.py` (`_READ_ONLY_POST_ROUTES`) — added with
+  the same rationale rather than weakening either invariant's default (every route must reach a
+  tenant boundary check or a documented, falsifiable exemption).
+- OpenAPI baseline (`Docs/90-reference/openapi-baseline.json`) regenerated via
+  `scripts/openapi_diff.py --accept-baseline`; the diff gate itself confirmed the change is
+  additive only (`added path '/v1/studio/parameter-contracts/validate'`, no breaking changes) before
+  the baseline was regenerated, so no `info.version` bump was needed.
+- Known limitation: no live-DB / FastAPI-test-client coverage of the new endpoint end-to-end — the
+  same "systemic no-DB-test-harness gap" already named for CT-1/TL-1/LN-4 in the tracker. Core-logic
+  coverage is thorough; wiring-level coverage relies on the route-registration and INV-5/INV-7
+  route-classification tests instead.
+- Context: this branch is under very heavy concurrent multi-session development (see the
+  17:35 UTC addendum above). Before starting this item, 8 speculative parallel workstreams were
+  launched against a base that turned out to be 182 commits behind origin; every one of those items
+  (RT-1..4, LN-2, DQ-1/2, PG-1/2/6, AG-1/2, ST-A1/2/3/5, ST-02, TS-4, TS-6) had already been
+  delivered by other concurrent sessions by the time that was discovered, so all 8 were stopped
+  before any wrote code, and ST-A4 — the one item confirmed still open after re-checking the live
+  tracker — was picked up directly instead.

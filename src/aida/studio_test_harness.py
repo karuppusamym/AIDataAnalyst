@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from aida.studio import ChangeItem, ChangeSet, TestResult
+from aida.studio import ChangeItem, ChangeSet, TestResult, validate_parameter_contract
 
 
 @dataclass
@@ -74,7 +74,10 @@ def _validate_tool_item(
     item: ChangeItem,
     fixture: TestFixture | None,
 ) -> TestResult:
-    """Validate a governed tool change item against parameter contracts."""
+    """Validate a governed tool change item against its typed, enum-bound parameter
+    contract (ST-A4), reusing the real ``ToolParameterDefinition`` schema and SQL
+    renderer instead of a loose dict-shape check.
+    """
     failures: list[str] = []
     evidence: dict[str, Any] = {"object_type": "TOOL", "object_id": item.object_id}
 
@@ -93,38 +96,38 @@ def _validate_tool_item(
         if f not in snapshot:
             failures.append(f"missing required tool field: {f}")
 
-    # Validate parameter schema if present
     parameters = snapshot.get("parameters", [])
-    if isinstance(parameters, list):
-        param_names: list[str] = []
-        for param in parameters:
-            if not isinstance(param, dict):
-                failures.append("parameter must be a dict")
-                continue
-            name = param.get("name")
-            if not name:
-                failures.append("parameter missing name")
-            elif name in param_names:
-                failures.append(f"duplicate parameter name: {name}")
-            else:
-                param_names.append(name)
+    if not isinstance(parameters, list):
+        failures.append("parameters must be a list")
+        parameters = []
 
-            valid_types = {"STRING", "INTEGER", "NUMBER", "BOOLEAN", "DATE"}
-            ptype = param.get("parameter_type")
-            if ptype and ptype not in valid_types:
-                failures.append(f"invalid parameter type: {ptype}")
+    if failures:
+        evidence["validation"] = "failed"
+        evidence["parameter_count"] = len(parameters)
+        return TestResult(passed=False, failures=failures, evidence=evidence)
+
+    contract = validate_parameter_contract(
+        sql_template=snapshot["sql_template"],
+        raw_definitions=parameters,
+        dialect=snapshot.get("dialect", "postgres"),
+    )
+    evidence["parameter_count"] = len(parameters)
+    evidence["parameter_contract_errors"] = contract.errors
+    if contract.sample_rendered_sql is not None:
+        evidence["sample_rendered_sql"] = contract.sample_rendered_sql
+    if not contract.valid:
+        failures.extend(contract.errors)
 
     # Validate against fixture if provided
     if fixture and fixture.synthetic_data:
         test_params = fixture.synthetic_data.get("test_parameters", {})
-        for param in parameters:
-            if isinstance(param, dict) and param.get("required"):
+        for param in contract.definitions:
+            if param.get("required"):
                 name = param.get("name", "")
                 if name not in test_params:
                     evidence.setdefault("missing_test_params", []).append(name)
 
     evidence["validation"] = "passed" if not failures else "failed"
-    evidence["parameter_count"] = len(parameters) if isinstance(parameters, list) else 0
     return TestResult(passed=len(failures) == 0, failures=failures, evidence=evidence)
 
 

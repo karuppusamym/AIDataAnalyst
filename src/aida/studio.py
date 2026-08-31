@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from pydantic import ValidationError
+
+from aida.schemas import ToolParameterDefinition
+from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
+
 ObjectType = Literal["METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"]
 Operation = Literal["CREATE", "UPDATE", "DELETE"]
 ChangeSetStatus = Literal["DRAFT", "TESTING", "SUBMITTED", "MERGED", "REJECTED"]
@@ -241,6 +246,127 @@ def detect_conflicts(
                 )
 
     return conflicts
+
+
+@dataclass
+class ParameterContractValidation:
+    """Result of validating a typed, enum-bound tool parameter contract.
+
+    Reuses ``ToolParameterDefinition`` (the module-14 tool-registry contract) and
+    ``tool_rendering``'s placeholder/render machinery directly, so a Studio author
+    gets exactly the type, bounds, enum, and sensitive-default checks the tool
+    gateway enforces at publish time -- plus a cross-check against the SQL
+    template's actual placeholders and a proof-of-render against one
+    representative in-bounds value per parameter.
+    """
+
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    definitions: list[dict[str, Any]] = field(default_factory=list)
+    sample_rendered_sql: str | None = None
+
+
+def _synthetic_contract_value(definition: ToolParameterDefinition) -> Any:
+    """Build one representative, in-bounds, allowed value for a dry-run render."""
+    if definition.allowed_values:
+        return definition.allowed_values[0]
+    if definition.parameter_type == "STRING":
+        value = "sample"
+        if definition.max_length is not None:
+            value = value[: max(definition.max_length, 1)]
+        return value
+    if definition.parameter_type == "INTEGER":
+        low = int(definition.minimum) if definition.minimum is not None else 0
+        high = int(definition.maximum) if definition.maximum is not None else low + 1
+        return min(max(0, low), high)
+    if definition.parameter_type == "NUMBER":
+        num_low = float(definition.minimum) if definition.minimum is not None else 0.0
+        num_high = float(definition.maximum) if definition.maximum is not None else num_low + 1.0
+        return min(max(0.0, num_low), num_high)
+    if definition.parameter_type == "BOOLEAN":
+        return True
+    if definition.parameter_type == "DATE":
+        return "2026-01-01"
+    raise ValueError(f"unsupported parameter type: {definition.parameter_type}")
+
+
+def validate_parameter_contract(
+    *,
+    sql_template: str,
+    raw_definitions: list[dict[str, Any]],
+    dialect: str = "postgres",
+) -> ParameterContractValidation:
+    """Validate a governed tool's typed, enum-bound parameter contract (ST-A4).
+
+    Each raw definition is parsed as a real ``ToolParameterDefinition`` -- not a
+    loose dict-shape check -- so invalid types, non-enum values, inverted bounds,
+    and sensitive-with-default conflicts are all caught the same way module 14's
+    tool gateway catches them. Declared parameter names are then cross-checked
+    against the SQL template's actual placeholders (missing/unused), and, once
+    the contract is structurally sound, one representative value per parameter is
+    substituted through the real renderer to prove the contract actually renders.
+    """
+    errors: list[str] = []
+    definitions: list[ToolParameterDefinition] = []
+    seen_names: set[str] = set()
+
+    for index, raw in enumerate(raw_definitions):
+        try:
+            definition = ToolParameterDefinition.model_validate(raw)
+        except ValidationError as exc:
+            for error in exc.errors():
+                field_path = ".".join(str(part) for part in error["loc"]) or "<root>"
+                errors.append(
+                    f"parameter[{index}].{field_path}: {error['msg']} "
+                    f"(got {error.get('input')!r})"
+                )
+            continue
+        if definition.name in seen_names:
+            errors.append(f"duplicate parameter name: {definition.name}")
+            continue
+        seen_names.add(definition.name)
+        definitions.append(definition)
+
+    if errors:
+        return ParameterContractValidation(valid=False, errors=errors)
+
+    try:
+        placeholders = template_placeholders(sql_template, dialect=dialect)
+    except Exception as exc:  # sqlglot parse failure on a malformed template
+        return ParameterContractValidation(
+            valid=False,
+            errors=[f"sql_template failed to parse for dialect {dialect!r}: {exc}"],
+        )
+
+    declared_names = {definition.name for definition in definitions}
+    missing = sorted(placeholders - declared_names)
+    unused = sorted(declared_names - placeholders)
+    if missing:
+        errors.append(f"undeclared placeholders: {', '.join(missing)}")
+    if unused:
+        errors.append(f"unused parameter definitions: {', '.join(unused)}")
+
+    serialized = [definition.model_dump(mode="json") for definition in definitions]
+    if errors:
+        return ParameterContractValidation(valid=False, errors=errors, definitions=serialized)
+
+    sample_values = {
+        definition.name: _synthetic_contract_value(definition) for definition in definitions
+    }
+    try:
+        rendered = render_tool_sql(
+            sql_template, dialect=dialect, definitions=definitions, values=sample_values
+        )
+    except ToolParameterError as exc:
+        return ParameterContractValidation(
+            valid=False,
+            errors=[f"contract does not render with a representative value set: {exc}"],
+            definitions=serialized,
+        )
+
+    return ParameterContractValidation(
+        valid=True, definitions=serialized, sample_rendered_sql=rendered.sql
+    )
 
 
 def compute_impact(change_set: ChangeSet) -> ImpactPreview:
