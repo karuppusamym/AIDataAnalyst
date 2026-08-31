@@ -2655,11 +2655,11 @@ Studio has moved from Pending to Partial in the status matrix.
   additive only.
 - `ruff check .` and `mypy src` (184 files) both clean. Full `pytest` suite green apart from two
   pre-existing, unrelated failures confirmed present on the freshly-reset base branch before this
-  session made any change (`tests/test_doc_claims.py::test_cited_test_path_resolves` for
-  `tests/test_studio.py::TestParameterContractDesigner` — that file defines the cited tests as
-  flat functions, not a class of that name; ST-A4's own accomplishment-log entry above cites the
-  same nonexistent class) — left alone as out of this item's module-15/AI-governance scope, not
-  silently fixed.
+  session made any change (`tests/test_doc_claims.py::test_cited_test_path_resolves`, for a
+  citation elsewhere in this file and in the tracker of a `TestParameterContractDesigner` class
+  that `tests/test_studio.py` does not define — that file has the cited tests as flat functions,
+  not a class of that name) — left alone as out of this item's module-15/AI-governance scope, not
+  silently fixed; flagged separately as its own suggested task.
 - Updated `Docs/60-delivery/03-tracker.md` row MG-2 to DONE, E9 (kill-switch drill) to DONE, and
   §I "Drill currency"'s kill-switch row from Never/OVERDUE to 2026-08-31 (in-process/local),
   explicit that it is current for local/in-process only pending a timed run against a deployed
