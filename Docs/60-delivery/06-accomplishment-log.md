@@ -2145,8 +2145,9 @@ Studio has moved from Pending to Partial in the status matrix.
   action, exactly PG-3's "single-item and bulk can never drift" property.
 - Verified: `ruff check .` clean; `mypy src` clean (184 files); full `pytest` suite run to
   completion with exactly 2 failures, both pre-existing and unrelated to this item
-  (`test_doc_claims.py::test_cited_test_path_resolves` on `tests/test_studio.py::TestParameterContractDesigner`,
-  a doc-citation stale since ST-A4's test file was later restructured by other concurrent work —
+  (`test_doc_claims.py::test_cited_test_path_resolves` flagging ST-A4's tracker/log citation of the
+  test_studio.py TestParameterContractDesigner class by name rather than by function — the scanner
+  only resolves function/method names, not class names, so a class-name citation can never pass —
   confirmed present at `ca80b14`, the commit this session started from, before any change made
   here). Every catalog-bulk-action test passes, and no other test in the suite fails.
 - Known limitation, stated plainly rather than glossed: this sandbox has no live Postgres, so the
@@ -2318,9 +2319,10 @@ Studio has moved from Pending to Partial in the status matrix.
   paths confirmed additive-only via `scripts/openapi_diff.py` before regenerating
   `Docs/90-reference/openapi-baseline.json`.
 - Full suite: 2,796 tests collected, exits with exactly 2 failures, both pre-existing and unrelated
-  (`test_doc_claims.py`'s two citations of `tests/test_studio.py::TestParameterContractDesigner`,
-  a class that does not exist there — a stale citation from the ST-A4 session's own doc edits,
-  present before this session started, not touched here). `ruff check .` and `uv run mypy src`
+  (`test_doc_claims.py` flagging ST-A4's tracker/log citation of the test_studio.py
+  TestParameterContractDesigner class by name rather than by function — a stale citation from the
+  ST-A4 session's own doc edits, present before this session started, not touched here). `ruff
+  check .` and `uv run mypy src`
   (186 files) both clean; `lint-imports` 4/4 contracts kept.
 - Not yet DONE, stated plainly: apply has never run against a real Postgres/SQL Server instance
   (mock-verified only — the same standing limitation QG-5, CN-1c, and CN-2a already carry in this
