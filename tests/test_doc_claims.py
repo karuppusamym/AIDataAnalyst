@@ -114,7 +114,18 @@ EXEMPT_SRC_PATH_PREFIXES = ("src/atlas",)
 # line mentioning "contract"/"import-linter") but are actually the tool's own name, never a
 # contract *name* — this repo's real `pyproject.toml` contracts carry long descriptive
 # names (e.g. "identity_tenancy module privacy"), never a short CLI-style slug like these.
-EXEMPT_CONTRACT_SLUGS = {"lint-imports", "import-linter"}
+# The AU-13 entries are CI job/tool names (`.github/workflows/ci.yml`) mentioned on a line
+# that also happens to say "contract" (e.g. "...the CI-runner regression-gate mechanism...");
+# `migration-drift` (AU-8) is this file's own CI job name, same shape.
+EXEMPT_CONTRACT_SLUGS = {
+    "lint-imports",
+    "import-linter",
+    "dependency-scan",
+    "pip-audit",
+    "secret-scan",
+    "docker-build",
+    "migration-drift",
+}
 
 # A bare `test_xxx` mention that is a real, non-test artefact, verified by hand:
 # `Connector.test_connection` is an interface method every connector implements
