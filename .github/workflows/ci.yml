@@ -37,6 +37,22 @@
 #                    outbox_publisher) and fails on any src/aida module unreachable from all
 #                    of them, unless it's on that file's small, named, tracker-row-justified
 #                    allow-list.
+#   dependency-scan -- tracker AU-13: the same audit found no dependency-vulnerability scan
+#                    and no SBOM. pip-audit runs against the exact `uv.lock`-locked, non-dev
+#                    dependency set (via `uv export --frozen --no-dev`) -- the same set the
+#                    Dockerfile now installs -- and fails on any *unbaselined* known
+#                    vulnerability; a small, dated, named --ignore-vuln baseline (see the
+#                    step) covers what's already in the locked set today so this gate blocks
+#                    new regressions without retroactively red-lining every push on
+#                    pre-existing, out-of-file-scope dependency debt. A CycloneDX SBOM is
+#                    generated and uploaded alongside the full (unbaselined) report.
+#   secret-scan   -- tracker AU-13: gitleaks scans the full git history. `.gitleaks.toml`
+#                    extends gitleaks' default ruleset with one narrow, path-based allowlist
+#                    for three test files' synthetic connector-auth fixtures (fake tokens
+#                    used to test DSN parsing); nothing else is excluded.
+#   docker-build  -- tracker AU-13: the audit found the Dockerfile was never built in CI, so
+#                    a broken image was only ever found at deploy. This job runs a real
+#                    `docker build` and a smoke import inside the built image.
 #
 # A change that breaks any of these does not merge.
 
@@ -205,3 +221,113 @@ jobs:
 
       - name: pytest
         run: uv run pytest
+
+  dependency-scan:
+    name: Dependency vulnerability scan + SBOM (AU-13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Export the locked, non-dev dependency set from uv.lock
+        # The same set the Dockerfile now installs (`uv sync --frozen --no-dev`),
+        # so this scan and the shipped image can never silently drift apart.
+        run: uv export --frozen --no-dev --no-hashes -o requirements-locked.txt
+
+      - name: pip-audit -- full report (uploaded as an artifact, not gating)
+        run: uvx --python 3.13 pip-audit -r requirements-locked.txt --format json -o pip-audit-report.json
+        continue-on-error: true
+
+      - name: pip-audit -- fail on any unbaselined known vulnerability
+        # Gates on any known vulnerability in the locked dependency set that
+        # isn't in the baseline below. The baseline is a dated, named list of
+        # what's already present in uv.lock today (dependency-version bumps
+        # are out of this change's file scope -- ci.yml/Dockerfile only; see
+        # Docs/60-delivery/03-tracker.md row AU-13) -- not a blanket
+        # allowlist, so a new vulnerable package (or a new CVE against an
+        # already-pinned one) still fails this job. Re-run the export +
+        # unfiltered pip-audit above locally after bumping a package and
+        # drop its entries here once the fix lands.
+        #
+        # Baseline recorded 2026-08-31:
+        #   cryptography 45.0.7: GHSA-537c-gmf6-5ccf, PYSEC-2026-2141, PYSEC-2026-35,
+        #     PYSEC-2026-3552, PYSEC-2026-3553, PYSEC-2026-3554, PYSEC-2026-36
+        #     (fixed in cryptography 46.0.6/46.0.7)
+        #   pyjwt 2.10.1: PYSEC-2025-183, PYSEC-2026-120, PYSEC-2026-175, PYSEC-2026-176,
+        #     PYSEC-2026-177, PYSEC-2026-178, PYSEC-2026-179 (fixed in pyjwt 2.12.0/2.13.0)
+        #   pyopenssl 25.3.0: PYSEC-2026-2268, PYSEC-2026-2269 (fixed in pyopenssl 26.0.0)
+        run: |
+          uvx --python 3.13 pip-audit -r requirements-locked.txt \
+            --ignore-vuln GHSA-537c-gmf6-5ccf --ignore-vuln PYSEC-2026-2141 \
+            --ignore-vuln PYSEC-2026-35   --ignore-vuln PYSEC-2026-3552 \
+            --ignore-vuln PYSEC-2026-3553 --ignore-vuln PYSEC-2026-3554 \
+            --ignore-vuln PYSEC-2026-36 \
+            --ignore-vuln PYSEC-2025-183 --ignore-vuln PYSEC-2026-120 \
+            --ignore-vuln PYSEC-2026-175 --ignore-vuln PYSEC-2026-176 \
+            --ignore-vuln PYSEC-2026-177 --ignore-vuln PYSEC-2026-178 \
+            --ignore-vuln PYSEC-2026-179 \
+            --ignore-vuln PYSEC-2026-2268 --ignore-vuln PYSEC-2026-2269
+
+      - name: Generate CycloneDX SBOM from the locked dependency set
+        run: uvx --from cyclonedx-bom cyclonedx-py requirements requirements-locked.txt -o sbom.cdx.json --output-format json
+
+      - name: Upload dependency-scan artifacts (requirements, pip-audit report, SBOM)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependency-scan-${{ github.sha }}
+          path: |
+            requirements-locked.txt
+            pip-audit-report.json
+            sbom.cdx.json
+          retention-days: 90
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans the full git history, not just the checked-out tree
+
+      - name: Install gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+
+      - name: gitleaks detect
+        # .gitleaks.toml extends the default ruleset with one narrow,
+        # path-based allowlist for three test files' synthetic connector-auth
+        # fixtures; every other rule, and every other path, stays live.
+        run: gitleaks detect --source . --config .gitleaks.toml --redact --no-banner --report-format json --report-path gitleaks-report.json
+
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report-${{ github.sha }}
+          path: gitleaks-report.json
+          retention-days: 90
+
+  docker-build:
+    name: Docker image build (AU-13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: docker build
+        run: docker build --tag aida:${{ github.sha }} .
+
+      - name: Smoke check -- the built image can actually import the app
+        run: docker run --rm -e AIDA_ENVIRONMENT=development aida:${{ github.sha }} python -c "import aida.main; print('aida.main import OK:', aida.main.app)"

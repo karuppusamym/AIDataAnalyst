@@ -3768,3 +3768,109 @@ the end-to-end audit also flagged are explicitly out of scope for this item — 
 work per the task brief. `AU-11`'s quality_state resolution reads `DataQualityIncident`/
 `DataQualityObservation` directly rather than through `quality_coupling.py`'s not-yet-wired gating
 API, so it does not depend on that sibling work landing first.
+
+---
+
+## 2026-08-31 — AU-13 (dependency/secret scanning, SBOM, and a real `docker build` in CI) closed
+
+Four gates added to `.github/workflows/ci.yml`, plus the `Dockerfile` fix the audit called out,
+following the existing checkout/setup/run job pattern exactly. No application code touched.
+
+### `dependency-scan`
+
+`pip-audit` (no API key required, unlike `safety`; `uv` itself has no native audit subcommand —
+checked `uv --help` directly) runs via `uvx --python 3.13 pip-audit` against
+`uv export --frozen --no-dev --no-hashes` — the identical non-dev dependency set the fixed
+`Dockerfile` now installs, so the scan and the shipped image can't silently diverge. `--python 3.13`
+matters: pip-audit's default resolve venv picked up Python 3.11 and failed to resolve
+`numpy==2.5.2` (requires `>=3.12`) before this was pinned — a real failure caught by running the
+job locally before landing it, not assumed.
+
+Running it against the real, current `uv.lock` found **16 genuine, currently-unfixed CVEs** across
+three already-pinned packages: `cryptography` 45.0.7 (7 IDs, fixed in 46.0.6/46.0.7), `pyjwt`
+2.10.1 (7 IDs, fixed in 2.12.0/2.13.0), `pyopenssl` 25.3.0 (2 IDs, fixed in 26.0.0). Bumping those
+pins is a `pyproject.toml`/`uv.lock` change — outside this row's file scope (`ci.yml` +
+`Dockerfile` only) and not something to force through unilaterally on a branch many concurrent
+sessions push to continuously. The gate therefore carries a small, dated, **named** `--ignore-vuln`
+baseline listing exactly those 16 IDs with their fix versions in a comment — not a blanket
+exemption: any other known-vulnerable package, or a new CVE against an already-pinned one, still
+fails the job today. A full, unbaselined `pip-audit` JSON report is uploaded as a build artifact
+every run regardless, so the 16-CVE baseline stays visible rather than getting quietly swept away.
+A task suggestion to bump the three packages and shrink the baseline was queued (the spawn_task
+call itself twice hit a tool timeout in this session — worth re-issuing or picking up manually).
+
+A CycloneDX 1.6 SBOM (`uvx --from cyclonedx-bom cyclonedx-py requirements`) is generated from the
+same locked, non-dev requirement set and uploaded alongside the pip-audit report — validated
+locally: 94 components, valid CycloneDX 1.6 JSON.
+
+### `secret-scan`
+
+`gitleaks` v8.21.2 — a single static binary with no license requirement, chosen over
+`trufflehog`/the `gitleaks-action` marketplace action (which gates some usage behind a license key)
+for a plain, dependency-free `curl`+`run:` step matching this file's existing convention. Scans the
+full git history (`fetch-depth: 0`), not just the checked-out tree.
+
+Run locally against the real repository history before landing: found 6 findings, all confirmed
+synthetic — a fake Databricks token (`dapi0123456789abcdef`) and a placeholder BigQuery
+service-account JSON in connector-DSN-parsing unit tests, plus a `TEST_DSN_AU4_POSITIVE`
+environment-variable *name* (not a secret value) tripping the generic-entropy rule in
+`test_inv6_value_freedom.py`. New `.gitleaks.toml` extends the default ruleset unchanged and adds
+one narrow **path**-based allowlist for exactly those 3 test files — path-based rather than
+commit/fingerprint-based deliberately, because this branch is rebased constantly by concurrent
+sessions, which rewrites commit hashes and would silently invalidate a fingerprint allowlist on the
+next rebase. Re-run after adding the config: `no leaks found`, exit 0. Every other rule and every
+other path, including any future commit to those same 3 files, is still scanned.
+
+### `docker-build`
+
+Runs `docker build --tag aida:${{ github.sha }} .`, then a smoke step —
+`docker run --rm ... python -c "import aida.main"` inside the built image — directly validating
+that AU-9's k8s manifests (landed earlier the same day) actually have a working image behind them,
+which they did not before this row: nothing built the Dockerfile in CI.
+
+### Dockerfile fix
+
+`Dockerfile:15` (the audit's `:17` citation had already drifted — confirmed by reading the file
+fresh before touching it) was `python -m pip install .`, an unpinned, fresh dependency resolve at
+image-build time — able to silently pull different transitive versions than whatever CI last
+tested. Replaced with: install `uv` (pinned `0.8.17`) via pip, copy `pyproject.toml` + `uv.lock` +
+`alembic.ini`/`src`/`migrations`, then `RUN uv sync --frozen --no-dev` into `/app/.venv` (on
+`PATH`) — the same `--frozen` contract `ci.yml`'s `UV_FROZEN=1` already documents for every other
+job, so the image can no longer float away from what CI actually resolved and tested against.
+
+### Docker build validation — real, but partial, and here's exactly why
+
+Docker (client 29.3.1 + daemon, started via `sudo dockerd`) is available in this sandbox, and a
+full `docker build .` was attempted, not assumed to be unavailable. The daemon itself works, and
+once given the session's proxy env vars it successfully resolves `docker.io` manifests — but the
+image-layer *blob* download redirects to `production.cloudfront.docker.com`, which this sandbox's
+egress proxy denies as an organization policy CONNECT rejection (confirmed via
+`/__agentproxy/status`'s `recentRelayFailures: connect_rejected`, not a transient network blip —
+retried once at first because the earlier symptom looked like a plain rate limit, then stopped
+once the policy-denial signature was confirmed, per the proxy README's explicit "report, don't
+route around, a 403 policy denial" instruction). This blocks only *this local validation attempt*
+— the real GitHub Actions runners the `docker-build` job executes on have ordinary internet access
+and are unaffected.
+
+In place of the blocked full build, the Dockerfile's actual new logic was validated directly
+(outside the container, running the identical commands the image's `RUN` layer runs):
+`uv sync --frozen --no-dev` against the real, committed `uv.lock` installs cleanly into an
+isolated venv, and `import aida.main` against that venv succeeds, producing a real `FastAPI` app
+instance — the same import the new smoke-test step performs inside the container, just run one
+layer up from where the sandbox's network policy blocks the base-image pull.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4/4 contracts kept. Full
+`pytest` suite green: 3,414 passed, 5 skipped, 1 xfailed, 0 failures (confirmed twice — the first
+run showed a single unrelated failure in `test_config.py::test_environment_must_be_explicit_outside_tests`
+caused by this session's own shell having `AIDA_ENVIRONMENT` exported ambiently, not by any change
+in this diff; re-run with a clean shell environment, matching exactly how the `tests` CI job
+invokes pytest, passed clean).
+
+### Scope note
+
+Only `.github/workflows/ci.yml`, `Dockerfile`, and the new `.gitleaks.toml` were touched (the last
+is CI tooling configuration enabling the `secret-scan` job, not application code). The 16-CVE
+dependency baseline and the follow-up task to clear it are deliberate, documented debt, not an
+oversight — see the `dependency-scan` section above and tracker row AU-13.
