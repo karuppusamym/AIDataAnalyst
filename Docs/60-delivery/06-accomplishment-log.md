@@ -2755,12 +2755,12 @@ Studio has moved from Pending to Partial in the status matrix.
   --accept-baseline`; the diff gate confirmed the change is additive only (`added path
   '/v1/organizations/{organization_id}/catalog/rows'`, no breaking changes) before the baseline was
   regenerated.
-- Verification: `ruff check .` clean. `mypy src` clean (185 files). Full `pytest` suite green except
-  two pre-existing, unrelated failures in `test_doc_claims.py` (`test_cited_test_path_resolves`)
-  citing `tests/test_studio.py::TestParameterContractDesigner`, which does not exist as a class or
-  function in that file (confirmed present on a clean checkout via `git stash` before this item's
-  changes) — a stale citation from the prior ST-A4 entry above, left unfixed as out of scope for a
-  UX-12 read-model change.
+- Verification: `ruff check .` clean. `mypy src` clean (187 files). Full `pytest` suite green —
+  before this item's rebase onto origin, two pre-existing `test_doc_claims.py` failures were
+  present (a stale test-path citation in the ST-A4 entry above, confirmed present via `git stash`
+  before this item's own changes and unrelated to this work); a separate concurrent session fixed
+  that citation, and the fix was picked up by this item's own rebase onto origin before pushing, so
+  no failures remain.
 - Known limitations: no dedicated composite index on `(organization_id, status, name, id)` for the
   org-wide keyset order (the existing `ix_metadata_table_org_status` and per-datasource composite
   index don't cover this exact ordering) — acceptable for a first landing, worth revisiting once
