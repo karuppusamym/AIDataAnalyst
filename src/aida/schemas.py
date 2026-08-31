@@ -1108,6 +1108,11 @@ class GovernedToolVersionRead(ApiModel):
     approved_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # TL-4: completed-execution count for this tool (all versions, bounded
+    # lookback window) -- the usage signal `list_tools` and MCP `tools/list`
+    # rank by. Always 0 for a brand-new draft; never populated by
+    # `model_validate` on a bare ORM row, only by `tool_api._tool_read`.
+    usage_count: int = 0
 
 
 class ToolExecutionRequest(ApiModel):
@@ -1893,6 +1898,58 @@ class UnifiedLineageImpactRead(ApiModel):
     node_limit: int
     upstream_truncated: bool
     downstream_truncated: bool
+
+
+class ToolDeprecationDependentToolRead(ApiModel):
+    """Another PUBLISHED governed tool that depends on a table the
+    deprecating version depends on, or a table transitively downstream of
+    one (TL-7)."""
+
+    tool_version_id: UUID
+    tool_id: UUID
+    slug: str
+    version: int
+    name: str
+    shared_table_count: int
+
+
+class ToolDeprecationDependentContextProductRead(ApiModel):
+    """A PUBLISHED context product that would be affected by this tool
+    version's deprecation (TL-7)."""
+
+    context_product_version_id: UUID
+    product_id: UUID
+    product_key: str
+    version: int
+    name: str
+    reason: Literal["ELIGIBLE_TOOL", "SHARED_TABLE"]
+
+
+class ToolDeprecationImpactRead(ApiModel):
+    """Blast radius of deprecating a governed tool version, computed fresh
+    against live data -- never a stale, post-hoc snapshot (TL-7).
+
+    `downstream_nodes` reuses LN-7's own node shape
+    (`UnifiedLineageImpactNodeRead`) because it *is* LN-7's traversal,
+    seeded from this version's own declared `referenced_tables`.
+    """
+
+    tool_version_id: UUID
+    tool_id: UUID
+    slug: str
+    version: int
+    status: str
+    dependency_tables: list[str]
+    downstream_nodes: list[UnifiedLineageImpactNodeRead]
+    downstream_truncated: bool
+    dependent_tool_versions: list[ToolDeprecationDependentToolRead]
+    dependent_context_products: list[ToolDeprecationDependentContextProductRead]
+    active_consumer_count: int
+    recent_execution_count: int
+    lookback_days: int
+    requested_depth: int
+    node_limit: int
+    total_blast_radius: int
 
 
 class SemanticInferenceRequest(ApiModel):

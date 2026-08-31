@@ -107,6 +107,7 @@ from aida.query_gateway import AuthorizationRejected, QueryExecutionGateway
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
 from aida.security import SecurityContext, get_security_context
 from aida.sql_validation_api import SQL_VALIDATION_ROLES
+from aida.tool_usage import get_tool_usage_counts
 from aida.unified_lineage_api import (
     UNIFIED_LINEAGE_READER_ROLES,
     LineageNodeNotFoundError,
@@ -510,7 +511,7 @@ async def _handle_tools_list(
         )
     ).all()
 
-    tools = []
+    eligible: list[tuple[GovernedToolVersion, GovernedTool]] = []
     seen_slugs: set[str] = set()
     for version, tool in rows:
         # Only surface the latest published version of each slug
@@ -528,7 +529,19 @@ async def _handle_tools_list(
             continue
         if eligible_version_ids is not None and version.id not in eligible_version_ids:
             continue
+        eligible.append((version, tool))
 
+    # TL-4: usage-weighted ranking. Popular tools rank higher in the catalog
+    # an MCP client is offered -- ordered on the same real, already-persisted
+    # signal `tool_api.py::list_tools` ranks on (completed `ToolExecution`
+    # rows, counted per tool over a bounded lookback window), applied here
+    # *after* the CX-5 eligibility filter so ranking only ever reorders tools
+    # the caller can already see, never expands or hides the candidate set.
+    usage_counts = await get_tool_usage_counts(session, organization_id=context.organization_id)
+    eligible.sort(key=lambda pair: (-usage_counts.get(pair[1].id, 0), pair[1].slug))
+
+    tools = []
+    for version, tool in eligible:
         # Build JSON Schema from parameter_schema
         properties: dict[str, Any] = {}
         required: list[str] = []
@@ -565,6 +578,7 @@ async def _handle_tools_list(
                     "version": version.version,
                     "status": version.status,
                     "allowed_roles": sorted(version.allowed_roles),
+                    "usage_count": usage_counts.get(tool.id, 0),
                 },
             }
         )
