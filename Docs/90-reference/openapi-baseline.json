@@ -11043,6 +11043,11 @@
             "title": "Updated At",
             "type": "string"
           },
+          "usage_count": {
+            "default": 0,
+            "title": "Usage Count",
+            "type": "integer"
+          },
           "version": {
             "title": "Version",
             "type": "integer"
@@ -20732,6 +20737,198 @@
           "expired_at"
         ],
         "title": "ToolCertificationStatusRead",
+        "type": "object"
+      },
+      "ToolDeprecationDependentContextProductRead": {
+        "additionalProperties": false,
+        "description": "A PUBLISHED context product that would be affected by this tool\nversion's deprecation (TL-7).",
+        "properties": {
+          "context_product_version_id": {
+            "format": "uuid",
+            "title": "Context Product Version Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "product_id": {
+            "format": "uuid",
+            "title": "Product Id",
+            "type": "string"
+          },
+          "product_key": {
+            "title": "Product Key",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "ELIGIBLE_TOOL",
+              "SHARED_TABLE"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "context_product_version_id",
+          "product_id",
+          "product_key",
+          "version",
+          "name",
+          "reason"
+        ],
+        "title": "ToolDeprecationDependentContextProductRead",
+        "type": "object"
+      },
+      "ToolDeprecationDependentToolRead": {
+        "additionalProperties": false,
+        "description": "Another PUBLISHED governed tool that depends on a table the\ndeprecating version depends on, or a table transitively downstream of\none (TL-7).",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "shared_table_count": {
+            "title": "Shared Table Count",
+            "type": "integer"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "tool_id": {
+            "format": "uuid",
+            "title": "Tool Id",
+            "type": "string"
+          },
+          "tool_version_id": {
+            "format": "uuid",
+            "title": "Tool Version Id",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_version_id",
+          "tool_id",
+          "slug",
+          "version",
+          "name",
+          "shared_table_count"
+        ],
+        "title": "ToolDeprecationDependentToolRead",
+        "type": "object"
+      },
+      "ToolDeprecationImpactRead": {
+        "additionalProperties": false,
+        "description": "Blast radius of deprecating a governed tool version, computed fresh\nagainst live data -- never a stale, post-hoc snapshot (TL-7).\n\n`downstream_nodes` reuses LN-7's own node shape\n(`UnifiedLineageImpactNodeRead`) because it *is* LN-7's traversal,\nseeded from this version's own declared `referenced_tables`.",
+        "properties": {
+          "active_consumer_count": {
+            "title": "Active Consumer Count",
+            "type": "integer"
+          },
+          "dependency_tables": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependency Tables",
+            "type": "array"
+          },
+          "dependent_context_products": {
+            "items": {
+              "$ref": "#/components/schemas/ToolDeprecationDependentContextProductRead"
+            },
+            "title": "Dependent Context Products",
+            "type": "array"
+          },
+          "dependent_tool_versions": {
+            "items": {
+              "$ref": "#/components/schemas/ToolDeprecationDependentToolRead"
+            },
+            "title": "Dependent Tool Versions",
+            "type": "array"
+          },
+          "downstream_nodes": {
+            "items": {
+              "$ref": "#/components/schemas/UnifiedLineageImpactNodeRead"
+            },
+            "title": "Downstream Nodes",
+            "type": "array"
+          },
+          "downstream_truncated": {
+            "title": "Downstream Truncated",
+            "type": "boolean"
+          },
+          "lookback_days": {
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "node_limit": {
+            "title": "Node Limit",
+            "type": "integer"
+          },
+          "recent_execution_count": {
+            "title": "Recent Execution Count",
+            "type": "integer"
+          },
+          "requested_depth": {
+            "title": "Requested Depth",
+            "type": "integer"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_id": {
+            "format": "uuid",
+            "title": "Tool Id",
+            "type": "string"
+          },
+          "tool_version_id": {
+            "format": "uuid",
+            "title": "Tool Version Id",
+            "type": "string"
+          },
+          "total_blast_radius": {
+            "title": "Total Blast Radius",
+            "type": "integer"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_version_id",
+          "tool_id",
+          "slug",
+          "version",
+          "status",
+          "dependency_tables",
+          "downstream_nodes",
+          "downstream_truncated",
+          "dependent_tool_versions",
+          "dependent_context_products",
+          "active_consumer_count",
+          "recent_execution_count",
+          "lookback_days",
+          "requested_depth",
+          "node_limit",
+          "total_blast_radius"
+        ],
+        "title": "ToolDeprecationImpactRead",
         "type": "object"
       },
       "ToolExecutionRequest": {
@@ -68685,6 +68882,135 @@
           }
         },
         "summary": "Execute Tool Certification",
+        "tags": [
+          "governed-tools"
+        ]
+      }
+    },
+    "/v1/tool-versions/{version_id}/deprecation-impact": {
+      "get": {
+        "description": "TL-7: preview the blast radius of deprecating this tool version,\ncomputed fresh against live data -- read-only, no state change, so a\nmaker can call this any number of times before deciding whether to\nsubmit the deprecation at all.",
+        "operationId": "get_tool_deprecation_impact_v1_tool_versions__version_id__deprecation_impact_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolDeprecationImpactRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Tool Deprecation Impact",
         "tags": [
           "governed-tools"
         ]

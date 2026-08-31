@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -40,6 +40,9 @@ from aida.schemas import (
     ToolCertificationRunCreate,
     ToolCertificationRunRead,
     ToolCertificationStatusRead,
+    ToolDeprecationDependentContextProductRead,
+    ToolDeprecationDependentToolRead,
+    ToolDeprecationImpactRead,
     ToolExecutionRequest,
     ToolExecutionResponse,
     ToolParameterDefinition,
@@ -52,7 +55,9 @@ from aida.tool_certification import (
     corpus_fingerprint,
     run_certification_corpus,
 )
+from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
 from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
+from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
 
 router = APIRouter(prefix="/v1", tags=["governed-tools"])
 
@@ -70,7 +75,9 @@ CERTIFICATION_READ_ROLES = (
 )
 
 
-def _tool_read(tool: GovernedTool, version: GovernedToolVersion) -> GovernedToolVersionRead:
+def _tool_read(
+    tool: GovernedTool, version: GovernedToolVersion, *, usage_count: int = 0
+) -> GovernedToolVersionRead:
     return GovernedToolVersionRead(
         id=version.id,
         tool_id=tool.id,
@@ -95,7 +102,67 @@ def _tool_read(tool: GovernedTool, version: GovernedToolVersion) -> GovernedTool
         approved_at=version.approved_at,
         created_at=version.created_at,
         updated_at=version.updated_at,
+        usage_count=usage_count,
     )
+
+
+def _impact_read(
+    tool: GovernedTool, version: GovernedToolVersion, impact: DeprecationImpact
+) -> ToolDeprecationImpactRead:
+    return ToolDeprecationImpactRead(
+        tool_version_id=version.id,
+        tool_id=tool.id,
+        slug=tool.slug,
+        version=version.version,
+        status=version.status,
+        dependency_tables=list(impact.dependency_tables),
+        downstream_nodes=list(impact.downstream_nodes),
+        downstream_truncated=impact.downstream_truncated,
+        dependent_tool_versions=[
+            ToolDeprecationDependentToolRead(
+                tool_version_id=item.tool_version_id,
+                tool_id=item.tool_id,
+                slug=item.slug,
+                version=item.version,
+                name=item.name,
+                shared_table_count=item.shared_table_count,
+            )
+            for item in impact.dependent_tool_versions
+        ],
+        dependent_context_products=[
+            ToolDeprecationDependentContextProductRead(
+                context_product_version_id=item.context_product_version_id,
+                product_id=item.product_id,
+                product_key=item.product_key,
+                version=item.version,
+                name=item.name,
+                reason=item.reason,
+            )
+            for item in impact.dependent_context_products
+        ],
+        active_consumer_count=impact.active_consumer_count,
+        recent_execution_count=impact.recent_execution_count,
+        lookback_days=impact.lookback_days,
+        requested_depth=impact.requested_depth,
+        node_limit=impact.node_limit,
+        total_blast_radius=impact.total_blast_radius,
+    )
+
+
+def _impact_summary(impact: DeprecationImpact) -> dict[str, int | bool]:
+    """Compact, audit/outbox-safe summary of a `DeprecationImpact` -- counts
+    only, no node/table identifiers, so the immutable evidence trail stays
+    proportionate to an audit detail payload rather than duplicating the
+    full preview response."""
+    return {
+        "downstream_node_count": len(impact.downstream_nodes),
+        "downstream_truncated": impact.downstream_truncated,
+        "dependent_tool_version_count": len(impact.dependent_tool_versions),
+        "dependent_context_product_count": len(impact.dependent_context_products),
+        "active_consumer_count": impact.active_consumer_count,
+        "recent_execution_count": impact.recent_execution_count,
+        "total_blast_radius": impact.total_blast_radius,
+    }
 
 
 def _query_response(result: GatewayResult) -> QueryExecutionResponse:
@@ -292,21 +359,55 @@ async def list_tools(
     ]
     if tool_status:
         filters.append(GovernedToolVersion.status == tool_status.upper())
+
+    # TL-4: usage-weighted ranking. Popularity is counted per *tool* (every
+    # version's completed executions over a bounded lookback window, the
+    # same signal `aida.tool_usage.get_tool_usage_counts` exposes to the MCP
+    # `tools/list` catalog) rather than per version, so a newly-published
+    # version of a heavily-used tool doesn't fall to the bottom of the list.
+    # Joined in and ordered on at the SQL level -- not resolved in Python
+    # after the fact -- so the ranking holds across pages, not just within
+    # one already-fetched page.
+    since = datetime.now(UTC) - timedelta(days=DEFAULT_USAGE_LOOKBACK_DAYS)
+    usage_subquery = (
+        select(
+            GovernedToolVersion.tool_id.label("tool_id"),
+            func.count(ToolExecution.id).label("usage_count"),
+        )
+        .join(ToolExecution, ToolExecution.tool_version_id == GovernedToolVersion.id)
+        .where(
+            GovernedToolVersion.organization_id == project.organization_id,
+            ToolExecution.organization_id == project.organization_id,
+            ToolExecution.status == "COMPLETED",
+            ToolExecution.created_at >= since,
+        )
+        .group_by(GovernedToolVersion.tool_id)
+        .subquery()
+    )
+    usage_count_column = func.coalesce(usage_subquery.c.usage_count, 0)
     base = (
-        select(GovernedToolVersion, GovernedTool)
+        select(GovernedToolVersion, GovernedTool, usage_count_column)
         .join(GovernedTool, GovernedTool.id == GovernedToolVersion.tool_id)
+        .outerjoin(usage_subquery, usage_subquery.c.tool_id == GovernedTool.id)
         .where(*filters)
     )
     total = await session.scalar(select(func.count()).select_from(base.subquery()))
     rows = (
         await session.execute(
-            base.order_by(GovernedTool.slug, GovernedToolVersion.version.desc())
+            base.order_by(
+                usage_count_column.desc(),
+                GovernedTool.slug,
+                GovernedToolVersion.version.desc(),
+            )
             .limit(limit)
             .offset(offset)
         )
     ).all()
     return Page(
-        items=[_tool_read(tool, version) for version, tool in rows],
+        items=[
+            _tool_read(tool, version, usage_count=usage_count)
+            for version, tool, usage_count in rows
+        ],
         limit=limit,
         offset=offset,
         total=total or 0,
@@ -388,6 +489,7 @@ async def submit_tool_deprecation(
         require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> GovernanceReview:
     version = await session.get(GovernedToolVersion, version_id)
     if version is None:
@@ -407,6 +509,25 @@ async def submit_tool_deprecation(
     )
     if existing:
         return existing
+
+    # TL-7: compute the deprecation blast radius *before* the deprecation
+    # review is even created, and record it as immutable evidence on this
+    # real submission -- not a standalone report nobody consults. The
+    # checker deciding this review (`semantic_api.py`'s generic governance
+    # decision handler) can pull this audit row; a maker submitting the
+    # deprecation sees the same evidence in this endpoint's own response.
+    tool = await session.get(GovernedTool, version.tool_id)
+    datasource = await session.get(DataSource, version.datasource_id)
+    if tool is None or datasource is None:
+        raise HTTPException(status_code=409, detail="tool dependency is unavailable")
+    impact = await compute_deprecation_impact(
+        session,
+        tool=tool,
+        version=version,
+        datasource=datasource,
+        settings=settings,
+    )
+
     review = GovernanceReview(
         organization_id=version.organization_id,
         object_type="GOVERNED_TOOL_VERSION",
@@ -424,7 +545,10 @@ async def submit_tool_deprecation(
         resource_id=str(review.id),
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
-        details={"tool_version_id": str(version.id)},
+        details={
+            "tool_version_id": str(version.id),
+            "deprecation_impact": _impact_summary(impact),
+        },
     )
     record_outbox(
         session,
@@ -436,11 +560,47 @@ async def submit_tool_deprecation(
             "review_id": str(review.id),
             "object_type": review.object_type,
             "object_id": review.object_id,
+            "deprecation_impact": _impact_summary(impact),
             "requested_action": review.requested_action,
         },
     )
     await session.commit()
     return review
+
+
+@router.get(
+    "/tool-versions/{version_id}/deprecation-impact",
+    response_model=ToolDeprecationImpactRead,
+)
+async def get_tool_deprecation_impact(
+    version_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin", "Reviewer", "Auditor")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ToolDeprecationImpactRead:
+    """TL-7: preview the blast radius of deprecating this tool version,
+    computed fresh against live data -- read-only, no state change, so a
+    maker can call this any number of times before deciding whether to
+    submit the deprecation at all.
+    """
+    version = await session.get(GovernedToolVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="tool version not found")
+    enforce_organization(context, version.organization_id)
+    tool = await session.get(GovernedTool, version.tool_id)
+    datasource = await session.get(DataSource, version.datasource_id)
+    if tool is None or datasource is None:
+        raise HTTPException(status_code=409, detail="tool dependency is unavailable")
+    impact = await compute_deprecation_impact(
+        session,
+        tool=tool,
+        version=version,
+        datasource=datasource,
+        settings=settings,
+    )
+    return _impact_read(tool, version, impact)
 
 
 @router.post("/tool-versions/{version_id}/execute", response_model=ToolExecutionResponse)
