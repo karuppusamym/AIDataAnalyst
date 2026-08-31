@@ -3478,6 +3478,101 @@ class ArchiveStatusRead(ApiModel):
     status: str
 
 
+# --- OB-6: cost / showback aggregation, per line of business -----------------
+
+
+class LobCostRowRead(ApiModel):
+    line_of_business_id: UUID
+    line_of_business_code: str
+    line_of_business_name: str
+    datasource_count: int
+    query_count: int
+    completed_count: int
+    rejected_count: int
+    failed_count: int
+    total_row_count: int
+    total_elapsed_ms: int
+    total_plan_cost_units: float | None
+
+
+class CostShowbackTotalsRead(ApiModel):
+    datasource_count: int
+    query_count: int
+    completed_count: int
+    rejected_count: int
+    failed_count: int
+    total_row_count: int
+    total_elapsed_ms: int
+    total_plan_cost_units: float | None
+
+
+class CostShowbackRead(ApiModel):
+    organization_id: UUID
+    period_start: datetime
+    period_end: datetime
+    generated_at: datetime
+    cost_basis: str
+    rows: list[LobCostRowRead]
+    totals: CostShowbackTotalsRead
+
+
+# --- OB-7: access review / self-service entitlement reporting ---------------
+
+
+class WorkspaceEntitlementRead(ApiModel):
+    workspace_id: UUID
+    workspace_name: str
+    workspace_slug: str
+    role: str
+    granted_by: str
+    expires_at: datetime | None
+
+
+class SourceEntitlementRead(ApiModel):
+    workspace_id: UUID
+    datasource_id: UUID
+    datasource_name: str
+    line_of_business_code: str | None
+    line_of_business_name: str | None
+    schema_scope: list[str]
+    permitted_classifications: list[str]
+    masking_profile: str
+    purpose: str
+    expires_at: datetime | None
+
+
+class ClassificationDecisionRead(ApiModel):
+    classification: str
+    decision: str
+    reasons: list[str]
+    contributing_policy_ids: list[str]
+
+
+class GenerateEntitlementReportRequest(ApiModel):
+    # Omit to generate a self-service report for the caller's own identity.
+    # Set to pull a report for a different principal -- requires an elevated
+    # role and is always audited as generated "on behalf of" that principal.
+    principal_id: str | None = Field(default=None, min_length=1, max_length=255)
+    principal_type: str = Field(default="USER", max_length=30)
+
+
+class EntitlementReportRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    subject_principal_id: str
+    subject_principal_type: str
+    is_self_service: bool
+    requested_by: str
+    workspace_memberships: list[WorkspaceEntitlementRead]
+    source_entitlements: list[SourceEntitlementRead]
+    abac_classification_decisions: list[ClassificationDecisionRead]
+    abac_note: str
+    checksum: str
+    generated_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # TL-1: tool certification corpus and workflow (module 14, tool registry).
 # See aida.models for the ORM shape and aida.tool_certification for the

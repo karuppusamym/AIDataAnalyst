@@ -4747,6 +4747,41 @@
         "title": "CertificationDecisionRequest",
         "type": "object"
       },
+      "ClassificationDecisionRead": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "title": "Classification",
+            "type": "string"
+          },
+          "contributing_policy_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Contributing Policy Ids",
+            "type": "array"
+          },
+          "decision": {
+            "title": "Decision",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "classification",
+          "decision",
+          "reasons",
+          "contributing_policy_ids"
+        ],
+        "title": "ClassificationDecisionRead",
+        "type": "object"
+      },
       "ClassificationFeedIngestRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6622,6 +6657,112 @@
           "rule_type"
         ],
         "title": "ContractQualityRuleDefinition",
+        "type": "object"
+      },
+      "CostShowbackRead": {
+        "additionalProperties": false,
+        "properties": {
+          "cost_basis": {
+            "title": "Cost Basis",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "period_end": {
+            "format": "date-time",
+            "title": "Period End",
+            "type": "string"
+          },
+          "period_start": {
+            "format": "date-time",
+            "title": "Period Start",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/LobCostRowRead"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/CostShowbackTotalsRead"
+          }
+        },
+        "required": [
+          "organization_id",
+          "period_start",
+          "period_end",
+          "generated_at",
+          "cost_basis",
+          "rows",
+          "totals"
+        ],
+        "title": "CostShowbackRead",
+        "type": "object"
+      },
+      "CostShowbackTotalsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_count": {
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "datasource_count": {
+            "title": "Datasource Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "query_count": {
+            "title": "Query Count",
+            "type": "integer"
+          },
+          "rejected_count": {
+            "title": "Rejected Count",
+            "type": "integer"
+          },
+          "total_elapsed_ms": {
+            "title": "Total Elapsed Ms",
+            "type": "integer"
+          },
+          "total_plan_cost_units": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Plan Cost Units"
+          },
+          "total_row_count": {
+            "title": "Total Row Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "datasource_count",
+          "query_count",
+          "completed_count",
+          "rejected_count",
+          "failed_count",
+          "total_row_count",
+          "total_elapsed_ms",
+          "total_plan_cost_units"
+        ],
+        "title": "CostShowbackTotalsRead",
         "type": "object"
       },
       "CoverageDimensionRead": {
@@ -9345,6 +9486,99 @@
         "title": "EntitlementOperation",
         "type": "object"
       },
+      "EntitlementReportRead": {
+        "additionalProperties": false,
+        "properties": {
+          "abac_classification_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/ClassificationDecisionRead"
+            },
+            "title": "Abac Classification Decisions",
+            "type": "array"
+          },
+          "abac_note": {
+            "title": "Abac Note",
+            "type": "string"
+          },
+          "checksum": {
+            "title": "Checksum",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "is_self_service": {
+            "title": "Is Self Service",
+            "type": "boolean"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "source_entitlements": {
+            "items": {
+              "$ref": "#/components/schemas/SourceEntitlementRead"
+            },
+            "title": "Source Entitlements",
+            "type": "array"
+          },
+          "subject_principal_id": {
+            "title": "Subject Principal Id",
+            "type": "string"
+          },
+          "subject_principal_type": {
+            "title": "Subject Principal Type",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workspace_memberships": {
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceEntitlementRead"
+            },
+            "title": "Workspace Memberships",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "subject_principal_id",
+          "subject_principal_type",
+          "is_self_service",
+          "requested_by",
+          "workspace_memberships",
+          "source_entitlements",
+          "abac_classification_decisions",
+          "abac_note",
+          "checksum",
+          "generated_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "EntitlementReportRead",
+        "type": "object"
+      },
       "EvaluationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -9848,6 +10082,32 @@
           "estimate"
         ],
         "title": "GatewaySqlValidationResponse",
+        "type": "object"
+      },
+      "GenerateEntitlementReportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "principal_id": {
+            "anyOf": [
+              {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal Id"
+          },
+          "principal_type": {
+            "default": "USER",
+            "maxLength": 30,
+            "title": "Principal Type",
+            "type": "string"
+          }
+        },
+        "title": "GenerateEntitlementReportRequest",
         "type": "object"
       },
       "GeneratePackRequest": {
@@ -12042,6 +12302,78 @@
           "dialect"
         ],
         "title": "LineageEdgeRead",
+        "type": "object"
+      },
+      "LobCostRowRead": {
+        "additionalProperties": false,
+        "properties": {
+          "completed_count": {
+            "title": "Completed Count",
+            "type": "integer"
+          },
+          "datasource_count": {
+            "title": "Datasource Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "line_of_business_code": {
+            "title": "Line Of Business Code",
+            "type": "string"
+          },
+          "line_of_business_id": {
+            "format": "uuid",
+            "title": "Line Of Business Id",
+            "type": "string"
+          },
+          "line_of_business_name": {
+            "title": "Line Of Business Name",
+            "type": "string"
+          },
+          "query_count": {
+            "title": "Query Count",
+            "type": "integer"
+          },
+          "rejected_count": {
+            "title": "Rejected Count",
+            "type": "integer"
+          },
+          "total_elapsed_ms": {
+            "title": "Total Elapsed Ms",
+            "type": "integer"
+          },
+          "total_plan_cost_units": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Plan Cost Units"
+          },
+          "total_row_count": {
+            "title": "Total Row Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "line_of_business_id",
+          "line_of_business_code",
+          "line_of_business_name",
+          "datasource_count",
+          "query_count",
+          "completed_count",
+          "rejected_count",
+          "failed_count",
+          "total_row_count",
+          "total_elapsed_ms",
+          "total_plan_cost_units"
+        ],
+        "title": "LobCostRowRead",
         "type": "object"
       },
       "MarketplaceAccessRequestCreate": {
@@ -18921,6 +19253,95 @@
         "title": "SourceBindingRead",
         "type": "object"
       },
+      "SourceEntitlementRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "datasource_name": {
+            "title": "Datasource Name",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "line_of_business_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Of Business Code"
+          },
+          "line_of_business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Of Business Name"
+          },
+          "masking_profile": {
+            "title": "Masking Profile",
+            "type": "string"
+          },
+          "permitted_classifications": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Permitted Classifications",
+            "type": "array"
+          },
+          "purpose": {
+            "title": "Purpose",
+            "type": "string"
+          },
+          "schema_scope": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Schema Scope",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "datasource_id",
+          "datasource_name",
+          "line_of_business_code",
+          "line_of_business_name",
+          "schema_scope",
+          "permitted_classifications",
+          "masking_profile",
+          "purpose",
+          "expires_at"
+        ],
+        "title": "SourceEntitlementRead",
+        "type": "object"
+      },
       "SqlFindingRead": {
         "additionalProperties": false,
         "properties": {
@@ -22065,6 +22486,54 @@
         "title": "WorkspaceCreate",
         "type": "object"
       },
+      "WorkspaceEntitlementRead": {
+        "additionalProperties": false,
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "granted_by": {
+            "title": "Granted By",
+            "type": "string"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          },
+          "workspace_name": {
+            "title": "Workspace Name",
+            "type": "string"
+          },
+          "workspace_slug": {
+            "title": "Workspace Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "workspace_name",
+          "workspace_slug",
+          "role",
+          "granted_by",
+          "expires_at"
+        ],
+        "title": "WorkspaceEntitlementRead",
+        "type": "object"
+      },
       "WorkspaceMembershipCreate": {
         "additionalProperties": false,
         "properties": {
@@ -23609,6 +24078,419 @@
         "summary": "Simulate ABAC policy evaluation",
         "tags": [
           "abac"
+        ]
+      }
+    },
+    "/v1/access-review/entitlements/generate": {
+      "post": {
+        "operationId": "generate_entitlement_report_v1_access_review_entitlements_generate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateEntitlementReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementReportRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Generate a self-service entitlement report",
+        "tags": [
+          "access-review"
+        ]
+      }
+    },
+    "/v1/access-review/reports": {
+      "get": {
+        "operationId": "list_entitlement_reports_v1_access_review_reports_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "subject_principal_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Subject Principal Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List persisted entitlement reports",
+        "tags": [
+          "access-review"
+        ]
+      }
+    },
+    "/v1/access-review/reports/{report_id}": {
+      "get": {
+        "operationId": "get_entitlement_report_v1_access_review_reports__report_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Report Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntitlementReportRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get a persisted entitlement report",
+        "tags": [
+          "access-review"
         ]
       }
     },
@@ -48388,6 +49270,145 @@
           }
         },
         "summary": "Get Archive Status",
+        "tags": [
+          "observability"
+        ]
+      }
+    },
+    "/v1/observability/cost/showback": {
+      "get": {
+        "description": "Real-time showback report: `QueryExecution` rows aggregated by the LOB\ntheir `DataSource` belongs to. See `aida.cost_showback` module docstring\nfor exactly what `total_plan_cost_units` is (a per-connector proxy) and is\nnot (a reconciled dollar cost) -- this platform has no billing\nintegration, and `cost_basis` on every response says so explicitly rather\nthan let a proxy metric be mistaken for one.",
+        "operationId": "get_cost_showback_v1_observability_cost_showback_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "period_start",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Period Start",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "period_end",
+            "required": true,
+            "schema": {
+              "format": "date-time",
+              "title": "Period End",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CostShowbackRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cost/showback aggregation, per line of business",
         "tags": [
           "observability"
         ]
