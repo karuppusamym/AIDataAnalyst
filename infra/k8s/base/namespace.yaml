@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aida
+  labels:
+    app.kubernetes.io/name: aida
+    app.kubernetes.io/part-of: aida-platform

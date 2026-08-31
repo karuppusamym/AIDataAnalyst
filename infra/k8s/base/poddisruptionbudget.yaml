@@ -1,0 +1,13 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aida-api
+  namespace: aida
+  labels:
+    app.kubernetes.io/name: aida-api
+    app.kubernetes.io/part-of: aida-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aida-api

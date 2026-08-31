@@ -2767,3 +2767,88 @@ Studio has moved from Pending to Partial in the status matrix.
   bank-scale row counts are available; and the certification query filter, being applied after
   composition, can return fewer than `limit` items per page for a narrow filter, same as permission
   filtering already can.
+
+## 2026-08-31 (eleventh entry)
+
+### AU-9: the first production deployment artifact — a reviewable Kubernetes manifest
+
+The 2026-08-30 end-to-end audit's §4 said it plainly: *"No production deployment artifact
+exists. `infra/` contains four `init.sql` seed files... Whoever writes the first manifest
+decides whether C1 is set correctly — and there is currently nothing to review."* This entry is
+that first manifest.
+
+- New `infra/k8s/base/`: `namespace.yaml`, `serviceaccount.yaml` (no API token mounted —
+  least privilege), `configmap.yaml`, `secret.example.yaml` (template only, deliberately
+  excluded from `kustomization.yaml`), `deployment.yaml`, `service.yaml`,
+  `poddisruptionbudget.yaml`, `migration-job.yaml` (mirrors compose.yaml's `migrate` service —
+  `alembic upgrade head` on the same image before/alongside rollout), and
+  `kustomization.yaml` tying the applyable resources together. Companion `infra/k8s/README.md`
+  states what a deployer must supply and what this manifest does and does not cover.
+- Real env var names were read from `src/atlas/platform/config.py` (`Settings`,
+  `env_prefix="AIDA_"`), not guessed: `AIDA_ENVIRONMENT=production` and
+  `AIDA_IDENTITY_PROVIDER=oidc` are pinned in `configmap.yaml`, directly answering audit
+  findings C1 (typo'd variable names are silently dropped by `extra="ignore"`, so a reviewed
+  manifest with the *correct* names is the available mitigation short of an application-code
+  fix) and C2 (the default `development` identity provider trusts an unauthenticated
+  `X-Roles` header).
+- Checked the `Dockerfile` before assuming a fix was needed: it already creates and switches
+  to a non-root `aida` user (uid/gid 10001, `USER aida`) — no image change was required.
+  `deployment.yaml`'s pod- and container-level `securityContext` (`runAsNonRoot: true`,
+  `runAsUser/Group: 10001`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
+  `capabilities: drop: [ALL]`, `seccompProfile: RuntimeDefault`) was set to match that image
+  rather than assert a number nothing enforces.
+- CPU/memory requests and limits are inline and commented as tunable defaults, not
+  measurements — no load test exists for this codebase yet (audit §5), so the entry says that
+  rather than implying a capacity-planning result.
+- `image:` in both `deployment.yaml` and `migration-job.yaml` is
+  `REPLACE_ME_REGISTRY/aida-api@sha256:REPLACE_ME_WITH_REAL_DIGEST` — the manifest's *shape*
+  forbids a floating tag, matching the audit's specific call-out of `compose.yaml`/minio's
+  `:latest`. The README documents that the CI/CD pipeline expected to populate the real digest
+  does not exist yet (audit remediation item #12, still open) and that populating it is not
+  this item's job.
+- Every credential-bearing value (DB DSN, Redis URL, Neo4j password, object-store keys,
+  `AIDA_AUDIT_HMAC_KEY`/`AIDA_TOKENIZATION_KEY` — both required to independently be
+  32+ characters in production per `Settings.reject_insecure_production_configuration`
+  regardless of signing provider, `OPENAI_API_KEY`/`GEMINI_API_KEY`) is referenced via
+  `envFrom: secretRef: aida-api-secrets`, never hardcoded. `secret.example.yaml` documents the
+  required keys as a template a deployer populates via `kubectl create secret` or, preferably,
+  a secrets operator — it is excluded from `kustomization.yaml` specifically so `kubectl apply
+  -k` can never apply placeholder credentials by accident.
+- Readiness/liveness probes point at the existing `/health/ready`/`/health/live` routes in
+  `src/aida/main.py` (audit-confirmed to exist already).
+- Honest gap surfaced while writing the ConfigMap: `Settings` forbids
+  `credential_provider=="env"` in production, so `configmap.yaml` sets
+  `AIDA_CREDENTIAL_PROVIDER=vault` to satisfy that startup check — but per audit remediation
+  item #10, no non-`env` `SecretProvider` is actually implemented in `src/aida/secrets.py` yet
+  (only the `Protocol` and caching exist). This lets the process pass config validation, not
+  actually resolve production credentials end to end. `infra/k8s/README.md` states this
+  explicitly rather than letting the manifest imply it's solved; the real fix is AU-10.
+- Validation: this sandbox has no reachable Kubernetes cluster, said plainly rather than
+  glossed over. `kubectl` v1.30.5 and `kubeconform` v0.6.7 were fetched to do the strongest
+  offline check available. `kubectl kustomize infra/k8s/base` renders all 7 resources with no
+  errors; `kubectl apply --dry-run=client` was attempted but this kubectl version calls out to
+  a live API server even in client mode for resource-mapping discovery, which fails with no
+  cluster present. `kubeconform -strict -summary` against the rendered output validated all 7
+  resources (plus the excluded `secret.example.yaml` template, checked separately) against the
+  real, versioned Kubernetes v1.30 OpenAPI schema — 7/7 and 1/1 valid, zero errors. This is a
+  stronger structural check than dry-run client validation would have been, but it is still not
+  `--dry-run=server` against a real cluster, which is named in the README as the next real
+  validation step once one exists.
+- Verification: confirmed via `git diff --stat` that no application source was modified before
+  running checks (only new `infra/k8s/` files and doc updates). `ruff check .`: 2 pre-existing
+  `UP042` findings in `src/aida/sql_lineage_parser.py` (str+Enum inheritance), confirmed via
+  `git diff --stat HEAD -- src/aida/sql_lineage_parser.py` (empty) to already be present on
+  `origin/feature/snowflake-dbt-lineage-mcp` before this work and untouched by it. `mypy src`:
+  clean, 190 files (required an `uv sync --all-extras --dev` first — the base `uv run mypy`
+  environment didn't have `pydantic` installed for the mypy plugin). Full `pytest` suite: exit
+  code 0, no failures (all `.`/`s`/`x` markers across the full run, consistent with the prior
+  entry's skip/xfail counts).
+- Known limitations, stated in `infra/k8s/README.md` rather than left implicit: no CI builds
+  or digest-pins the image yet (#12); no non-`env` secret provider is implemented (AU-10); no
+  Ingress/TLS termination, NetworkPolicy, or autoscaling is included (explicitly out of scope,
+  left to the deployer's existing platform conventions); resource requests/limits are
+  defaults, not measurements; the Temporal-outage readiness coupling (audit remediation #11)
+  is unfixed in application code and this manifest's probe wiring cannot paper over it; and
+  the datastores themselves (Postgres, Redis, Temporal, Neo4j, Redpanda, object storage) are
+  referenced by in-cluster hostname but this directory does not include manifests to actually
+  run them — that would be its own tracker item.

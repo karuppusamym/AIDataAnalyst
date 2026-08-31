@@ -1,0 +1,94 @@
+# Non-secret application configuration for the aida-api Deployment.
+#
+# Variable names and defaults are read directly from
+# `src/atlas/platform/config.py` (the `AIDA_` prefixed `Settings` model,
+# re-exported by `src/aida/config.py`). Anything containing credential
+# material lives in `secret.example.yaml` instead -- see that file and
+# the README in this directory for what a deployer must supply.
+#
+# `AIDA_ENVIRONMENT=production` and `AIDA_IDENTITY_PROVIDER=oidc` are
+# pinned here deliberately (tracker AU-9 / audit finding C1+C2): the
+# config model defaults both to insecure development values, and
+# `extra="ignore"` in Settings.model_config means a typo'd variable name
+# is silently dropped rather than failing startup. Pinning the correct
+# names in a reviewed manifest is the mitigation available today; the
+# upstream fix (fail-closed on unknown AIDA_* vars, `extra="forbid"`) is
+# tracked separately as audit remediation item #3 and is NOT this file's
+# job to implement.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aida-api-config
+  namespace: aida
+  labels:
+    app.kubernetes.io/name: aida-api
+    app.kubernetes.io/part-of: aida-platform
+data:
+  # --- C1: environment must be explicit and correct -----------------------
+  AIDA_ENVIRONMENT: "production"
+  AIDA_LOG_LEVEL: "INFO"
+
+  # --- C2: identity must come from a verified OIDC token, never dev headers
+  AIDA_IDENTITY_PROVIDER: "oidc"
+  # REQUIRED, deployer-supplied (not secret -- these are public issuer/
+  # audience identifiers, not credentials). Replace before applying.
+  AIDA_OIDC_ISSUER: "https://REPLACE_ME.example.com/"
+  AIDA_OIDC_AUDIENCE: "REPLACE_ME-aida-api"
+  # Settings.reject_insecure_production_configuration requires this URL to
+  # be HTTPS in production -- enforced at process startup, not just here.
+  AIDA_OIDC_JWKS_URL: "https://REPLACE_ME.example.com/.well-known/jwks.json"
+  AIDA_OIDC_SUBJECT_CLAIM: "sub"
+  AIDA_OIDC_ROLES_CLAIM: "roles"
+  AIDA_OIDC_ORGANIZATION_CLAIM: "organization_id"
+  # Bank-specific IdP group -> Atlas role/persona mapping. Empty by default;
+  # a deployer with no mapping configured effectively grants no roles, which
+  # fails safe (see security.py) rather than falling open like the dev
+  # header path did.
+  AIDA_OIDC_ROLE_MAPPINGS: "{}"
+  AIDA_OIDC_GROUPS_CLAIM: "groups"
+  AIDA_OIDC_PERSONA_MAPPINGS: "{}"
+
+  # --- Credential resolution (Settings forbids credential_provider="env"
+  # in production). `vault` is set as the placeholder that satisfies that
+  # startup check. IMPORTANT: per the 2026-08-30 audit (remediation #10),
+  # no non-"env" SecretProvider is actually implemented yet in
+  # `aida/secrets.py` -- only the Protocol and caching exist. Setting this
+  # to "vault" lets the process pass config validation; it does NOT mean
+  # connector credential resolution actually works end to end. Track that
+  # gap under the audit's #10, not here.
+  AIDA_CREDENTIAL_PROVIDER: "vault"
+
+  # --- QG-5 / QG-6: production forbids an application-managed local signer
+  # / tokenizer. These point at HashiCorp Vault's Transit / Transform
+  # engines; the raw keys never enter this process when these are set.
+  # A deployer without Vault available cannot legally run AIDA_ENVIRONMENT=
+  # production per this codebase's own validator -- that is intentional
+  # (see C1/C3 in the audit) and this manifest does not work around it.
+  AIDA_HMAC_SIGNING_PROVIDER: "vault_transit"
+  AIDA_HMAC_SIGNING_VAULT_URL: "https://REPLACE_ME-vault.example.com"
+  AIDA_HMAC_SIGNING_VAULT_KEY_NAME: "audit-hmac"
+  AIDA_TOKENIZATION_PROVIDER: "vault_transform"
+  AIDA_TOKENIZATION_VAULT_URL: "https://REPLACE_ME-vault.example.com"
+  AIDA_TOKENIZATION_VAULT_ROLE_NAME: "pii-tokens"
+
+  # --- C1: dev conveniences explicitly disabled. Default in config.py is
+  # `true`; production requires this to be false or the process refuses to
+  # start. Set explicitly rather than relying on that refusal as the only
+  # guardrail.
+  AIDA_ALLOW_DEVELOPMENT_SQL_OVERRIDE: "false"
+
+  # --- Dependency endpoints (non-secret connection info; credentials for
+  # these are in the Secret). Point these at real production endpoints --
+  # the values below are placeholders for the in-cluster names this
+  # Deployment would use if the datastores also ran in-cluster.
+  AIDA_TEMPORAL_ADDRESS: "temporal-frontend.aida.svc.cluster.local:7233"
+  AIDA_TEMPORAL_NAMESPACE: "aida-production"
+  AIDA_TEMPORAL_TASK_QUEUE: "aida-metadata"
+  AIDA_NEO4J_URI: "bolt://neo4j.aida.svc.cluster.local:7687"
+  AIDA_NEO4J_USER: "neo4j"
+  AIDA_OBJECT_STORE_ENDPOINT: "https://REPLACE_ME-object-store.example.com"
+  AIDA_KAFKA_BOOTSTRAP_SERVERS: "redpanda.aida.svc.cluster.local:9092"
+
+  # --- Model generation is off by default; flip only with a real approved
+  # route (Settings requires model_route when model_generation_enabled).
+  AIDA_MODEL_GENERATION_ENABLED: "false"
