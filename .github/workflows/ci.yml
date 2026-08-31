@@ -304,33 +304,25 @@ jobs:
 
       - name: pip-audit -- fail on any unbaselined known vulnerability
         # Gates on any known vulnerability in the locked dependency set that
-        # isn't in the baseline below. The baseline is a dated, named list of
-        # what's already present in uv.lock today (dependency-version bumps
-        # are out of this change's file scope -- ci.yml/Dockerfile only; see
-        # Docs/60-delivery/03-tracker.md row AU-13) -- not a blanket
-        # allowlist, so a new vulnerable package (or a new CVE against an
-        # already-pinned one) still fails this job. Re-run the export +
-        # unfiltered pip-audit above locally after bumping a package and
-        # drop its entries here once the fix lands.
+        # isn't in the baseline below (currently empty -- see history). A new
+        # vulnerable package, or a new CVE against an already-pinned one,
+        # still fails this job. Re-run the export + unfiltered pip-audit
+        # above locally after bumping a package and drop its entries here
+        # once the fix lands.
         #
-        # Baseline recorded 2026-08-31:
-        #   cryptography 45.0.7: GHSA-537c-gmf6-5ccf, PYSEC-2026-2141, PYSEC-2026-35,
-        #     PYSEC-2026-3552, PYSEC-2026-3553, PYSEC-2026-3554, PYSEC-2026-36
-        #     (fixed in cryptography 46.0.6/46.0.7)
-        #   pyjwt 2.10.1: PYSEC-2025-183, PYSEC-2026-120, PYSEC-2026-175, PYSEC-2026-176,
-        #     PYSEC-2026-177, PYSEC-2026-178, PYSEC-2026-179 (fixed in pyjwt 2.12.0/2.13.0)
-        #   pyopenssl 25.3.0: PYSEC-2026-2268, PYSEC-2026-2269 (fixed in pyopenssl 26.0.0)
+        # 2026-08-31 (AU-13): baselined 16 pre-existing CVEs across
+        #   cryptography 45.0.7, pyjwt 2.10.1, pyopenssl 25.3.0 because
+        #   bumping them was outside AU-13's file scope.
+        # 2026-08-31 (follow-up): bumped cryptography to 50.0.1, PyJWT to
+        #   2.13.0, and pyOpenSSL to 26.4.0 (see Docs/60-delivery/03-tracker.md
+        #   AU-13 note). That also required bumping snowflake-connector-python
+        #   3.15.0 -> 4.4.0, whose <26.0.0 pyopenssl ceiling otherwise made a
+        #   fixed pyopenssl unresolvable. A re-run of the unfiltered pip-audit
+        #   above found zero remaining known vulnerabilities in the locked
+        #   set, so the baseline below is empty; re-add entries here if a
+        #   future scan finds something that again can't be fixed in scope.
         run: |
-          uvx --python 3.13 pip-audit -r requirements-locked.txt \
-            --ignore-vuln GHSA-537c-gmf6-5ccf --ignore-vuln PYSEC-2026-2141 \
-            --ignore-vuln PYSEC-2026-35   --ignore-vuln PYSEC-2026-3552 \
-            --ignore-vuln PYSEC-2026-3553 --ignore-vuln PYSEC-2026-3554 \
-            --ignore-vuln PYSEC-2026-36 \
-            --ignore-vuln PYSEC-2025-183 --ignore-vuln PYSEC-2026-120 \
-            --ignore-vuln PYSEC-2026-175 --ignore-vuln PYSEC-2026-176 \
-            --ignore-vuln PYSEC-2026-177 --ignore-vuln PYSEC-2026-178 \
-            --ignore-vuln PYSEC-2026-179 \
-            --ignore-vuln PYSEC-2026-2268 --ignore-vuln PYSEC-2026-2269
+          uvx --python 3.13 pip-audit -r requirements-locked.txt
 
       - name: Generate CycloneDX SBOM from the locked dependency set
         run: uvx --from cyclonedx-bom cyclonedx-py requirements requirements-locked.txt -o sbom.cdx.json --output-format json

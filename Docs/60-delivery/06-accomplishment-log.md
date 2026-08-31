@@ -4386,3 +4386,81 @@ own files) were not modified — the fusion mechanics they own already treat `qu
 ordinary named signal; only the raw score fed into it needed to become real. RT-6 (usage/popularity
 ranking factor, the other Stage-4 placeholder) is untouched and still `raw_score=0.5` — a separate
 tracker row, not this one's scope.
+
+## 2026-08-31 (continued) — AU-13 follow-up: the 16-CVE dependency baseline cleared, not just bumped
+
+The follow-up task AU-13 explicitly queued (clear the `dependency-scan` job's `--ignore-vuln`
+baseline by actually bumping `cryptography`/`pyjwt`/`pyopenssl`) landed the same day.
+
+### The three-package bump wasn't just three packages
+
+`pyproject.toml` pinned only `PyJWT[crypto]==2.10.1` directly; `cryptography` and `pyopenssl` were
+transitive (pulled in via `PyJWT[crypto]`, `google-auth[pyopenssl]`, and
+`snowflake-connector-python`'s own `cryptography`/`pyOpenSSL` requirements). To actually move the
+resolved versions — not just wish for it — both were added as explicit direct pins:
+`PyJWT[crypto]` 2.10.1 -> 2.13.0, `cryptography` (new direct pin) -> 50.0.1, `pyOpenSSL` (new
+direct pin) -> 26.4.0.
+
+The pyopenssl fix does not resolve on its own. `snowflake-connector-python==3.15.0` (and every
+3.x/early-4.x release checked on PyPI: 3.16.0, 4.0.0, 4.3.0 all still say
+`pyOpenSSL<26.0.0,>=22.0.0` or `>=24.0.0,<26.0.0`) caps `pyOpenSSL` below the CVE-fixed 26.0.0, so
+`uv lock` refused to resolve with a fixed pyopenssl until the connector's own ceiling moved.
+`snowflake-connector-python==4.4.0` is the first release that drops the upper bound
+(`pyOpenSSL>=24.0.0`), so it was bumped too — 3.15.0 -> 4.4.0. This dependency is used at exactly
+one call site, `src/aida/connectors/snowflake.py`'s `_get_connection()`, via
+`snowflake.connector.connect(**kwargs)` with only long-stable keyword arguments
+(`account`/`user`/`database`/`schema`/`warehouse`/`role`/`login_timeout`/`network_timeout`/
+`password`/`authenticator`/`token`) — nothing there changed across the major-version jump, and
+`mypy src` (which has an explicit `ignore_missing_imports` override for `snowflake.*`) stayed
+clean.
+
+### The baseline's own "fixed in 46.0.6/46.0.7" claim turned out to be stale
+
+Bumping `cryptography` to 46.0.7 first — the version the `dependency-scan` job's baseline comment
+named as the fix for all 7 of its cryptography CVEs — and re-running the unfiltered
+`pip-audit -r requirements-locked.txt` locally showed 4 of those 7 still open:
+`PYSEC-2026-3552`/`3553`/`3554` and `GHSA-537c-gmf6-5ccf`, each fixed only in 48.0.1/49.0.0/50.0.0
+per pip-audit's own advisory data — CVEs published against `cryptography` after the baseline
+comment was dated, not a scan error. `cryptography` went to 50.0.1 (current latest on PyPI at scan
+time) instead, which pulled `pyOpenSSL` up to 26.4.0 (the first pyOpenSSL release whose
+`cryptography<51,>=49.0.0` window admits it — 26.0.0 itself caps `cryptography<47`). A second
+unfiltered `pip-audit` re-scan against the fully-updated lock came back clean: **0 known
+vulnerabilities** in the locked, non-dev dependency set, versus the original baseline's 16 CVEs
+across the 3 packages. The lesson worth keeping: an ignore-vuln baseline's "fixed in Y" comment is
+a claim about the world on the day it was written, not a fact that stays true — re-scan after
+bumping rather than trusting the old comment, which is exactly what happened here.
+
+`src/` has no direct `cryptography`/`OpenSSL` imports at all (`grep -rln "cryptography\|OpenSSL"
+src/` — no hits); the only place `cryptography.hazmat.primitives.asymmetric.rsa` is imported is
+three *test* files generating RSA keys for signed-JWT fixtures (`tests/test_oidc.py`,
+`tests/test_persona_derivation.py`, `tests/test_token_revocation.py`), a stable, unaffected API.
+`src/aida/oidc.py`'s only `PyJWT` call site (`jwt.get_unverified_header`, `jwt.PyJWK.from_dict`,
+`jwt.decode`, `jwt.PyJWTError`/`jwt.InvalidTokenError`) is unchanged 2.x API — no source changes
+were needed anywhere for the version bump itself.
+
+### `.github/workflows/ci.yml`
+
+The `dependency-scan` job's `pip-audit -- fail on any unbaselined known vulnerability` step had its
+16-entry `--ignore-vuln` list removed entirely (0 remain after the re-scan above), and its comment
+rewritten to record both the original 2026-08-31 AU-13 baseline and this same-day follow-up that
+cleared it, so a future reader sees why the baseline is currently empty rather than assuming it was
+never populated.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, unchanged from AU-13's original count). Full
+`pytest` suite: exit 0, zero `FAILED`/`ERROR` lines, with one test explicitly deselected —
+`test_doc_claims.py::test_cited_import_linter_contract_name_resolves` — confirmed (by stashing this
+change and re-running just that test against unmodified `origin/feature/snowflake-dbt-lineage-mcp`)
+to already fail identically before this change: it misreads the AU-13 tracker row's own
+backtick-quoted CI job names (`` `dependency-scan` ``, `` `pip-audit` ``, `` `secret-scan` ``,
+`` `docker-build` ``) as import-linter contract-name citations. Pre-existing and out of this
+change's scope; not touched.
+
+### Scope note
+
+`pyproject.toml`, `uv.lock`, and `.github/workflows/ci.yml`'s `dependency-scan` job were the
+intended surface. `snowflake-connector-python`'s version bump in `pyproject.toml`/`uv.lock` was not
+separately requested but was a hard resolver requirement to get a CVE-fixed `pyopenssl` at all (see
+above) — no unrelated `src/` refactoring rode along with it. See tracker row AU-13's follow-up note
+for the version table.
