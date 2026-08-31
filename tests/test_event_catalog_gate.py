@@ -171,9 +171,9 @@ KNOWN_ST14_DRIFT: dict[str, str] = {
 # glossary.link_proposal_approved.v1, glossary.link_proposal_rejected.v1 (stewardship_service.py
 # apply_conflict_resolution/reject_conflict_resolution -- already documented), and
 # ownership.assigned.v1, glossary.term_linked_bulk.v1, glossary.term_deprecated.v1,
-# certification.granted.v1 (stewardship_service.py apply_bulk_operation -- already documented).
-# None of those were new/undocumented, but the gate cannot prove that on its own, hence the
-# permanent warning below.
+# certification.granted.v1, ownership.leaver_reassigned.v1 (stewardship_service.py
+# apply_bulk_operation -- already documented). None of those were new/undocumented, but the gate
+# cannot prove that on its own, hence the permanent warning below.
 EXPECTED_UNRESOLVED_SITE_COUNT = 1
 
 
@@ -259,6 +259,7 @@ def test_catalog_rows_with_no_current_emitter_are_reported_softly() -> None:
         "glossary.term_linked_bulk.v1",
         "glossary.term_deprecated.v1",
         "certification.granted.v1",
+        "ownership.leaver_reassigned.v1",
     }
     unemitted = documented - scan.literals - scan.possible_literals - known_emitted_elsewhere
     if unemitted:

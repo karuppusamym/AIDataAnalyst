@@ -2181,6 +2181,33 @@ class BulkStewardshipOperationRead(ApiModel):
     updated_at: datetime
 
 
+class LeaverReassignmentRequest(ApiModel):
+    """GL-7: reassign every ACTIVE `OwnershipAssignment` a leaving principal
+    holds -- table ownership, glossary-term stewardship, and any other
+    subject_type GL-2's ownership model covers -- to a successor in one
+    governed action. `assignment_ids`, when given, must name only ACTIVE
+    assignments currently owned by `leaving_principal` (an explicit,
+    caller-chosen subset of the portfolio); omitted, the endpoint discovers
+    the leaving principal's whole current portfolio server-side.
+    """
+
+    leaving_principal: str = Field(min_length=1, max_length=255)
+    successor_principal: str = Field(min_length=1, max_length=255)
+    owner_type: Literal["INDIVIDUAL", "GROUP"] = "INDIVIDUAL"
+    assignment_ids: list[UUID] | None = Field(default=None, min_length=1, max_length=500)
+    rationale: str = Field(min_length=10, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_leaver_reassignment(self) -> "LeaverReassignmentRequest":
+        if self.leaving_principal == self.successor_principal:
+            raise ValueError("successor_principal must differ from leaving_principal")
+        if self.assignment_ids is not None and len(set(self.assignment_ids)) != len(
+            self.assignment_ids
+        ):
+            raise ValueError("assignment_ids must be unique")
+        return self
+
+
 class GlossaryConflictCreate(ApiModel):
     term_id: UUID | None = None
     conflict_type: Literal["DEFINITION", "SYNONYM_COLLISION", "SOURCE_DISAGREEMENT"]
