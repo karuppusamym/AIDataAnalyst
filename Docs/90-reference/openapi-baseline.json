@@ -23183,7 +23183,7 @@
   "info": {
     "description": "Governed metadata, semantic intelligence, and analytical control-plane API.",
     "title": "Bank Data Intelligence Platform API",
-    "version": "0.3.0"
+    "version": "1.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
