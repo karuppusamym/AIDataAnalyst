@@ -411,6 +411,11 @@ _COLUMN_NAME_EXEMPTIONS: dict[str, str] = {
     "metadata_business_annotation.suggested_questions": (
         "model- or steward-authored example prompts about a table, not source data"
     ),
+    "studio_eval_result.eval_question_id": (
+        "foreign key to studio_eval_question.id (ST-A8) -- an object reference, never "
+        "raw question or query text; the mined question row itself carries no source "
+        "values either, only object_type/object_id and an evidence edge id"
+    ),
 }
 
 _VALUE_BEARING_COLUMN_FRAGMENTS = (

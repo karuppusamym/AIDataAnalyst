@@ -154,6 +154,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `stewardship.unowned_asset_routed.v1` | Unowned-asset backlog entry routed to a candidate owner | table_id, candidate_owner |
 | `stewardship.unowned_asset_escalated.v1` | Backlog entry escalated (no owner found/accepted) | table_id |
 | `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
+| `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 

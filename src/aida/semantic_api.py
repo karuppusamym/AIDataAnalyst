@@ -11,12 +11,17 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.asset_description_service import (
+    apply_asset_description_draft,
+    reject_asset_description_draft,
+)
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.models import (
     AiAsset,
     AiAssetVersion,
+    AssetDescriptionDraft,
     AssetDocumentationVersion,
     BulkStewardshipOperation,
     ContextProductVersion,
@@ -1407,6 +1412,39 @@ async def _apply_governance_review_decision(
             "cross_boundary_grant_id": str(grant.id),
             "source_data_domain_id": str(grant.source_data_domain_id),
             "target_data_domain_id": str(grant.target_data_domain_id),
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "ASSET_DESCRIPTION_DRAFT":
+        draft = await session.get(AssetDescriptionDraft, UUID(review.object_id))
+        if draft is None or draft.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # GL-9: this is the only call site that publishes a drafted
+            # description onto the asset, and it only runs after the
+            # maker-checker guard above (status PENDING, independent
+            # reviewer) has already passed — no evidence score, however
+            # high, reaches this line without an independent decision.
+            event_type, published_version = await apply_asset_description_draft(
+                session,
+                draft,
+                reviewer=context.principal_id,
+                now=now,
+            )
+            published_version_id: str | None = str(published_version.id)
+        else:
+            event_type = await reject_asset_description_draft(
+                draft,
+                reviewer=context.principal_id,
+                now=now,
+            )
+            published_version_id = None
+        aggregate_type = "asset_description_draft"
+        aggregate_id = str(draft.id)
+        payload = {
+            "draft_id": str(draft.id),
+            "table_id": str(draft.table_id),
+            "overall_score": draft.overall_score,
+            "published_version_id": published_version_id,
             "review_id": str(review.id),
         }
     else:

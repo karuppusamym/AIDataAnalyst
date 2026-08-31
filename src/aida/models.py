@@ -2597,6 +2597,44 @@ class GlossaryLinkProposal(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AssetDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted table description; always routed through review.
+
+    Evidence-scored per GL-9: the score sets review priority, it never skips
+    review. Rejected drafts are retained (not deleted) as negative knowledge so
+    an identical low-value draft is not regenerated on the next run.
+    """
+
+    __tablename__ = "asset_description_draft"
+    __table_args__ = (Index("ix_asset_description_draft_org_status", "organization_id", "status"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("asset_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CoverageSnapshot(Base, TimestampMixin):
     __tablename__ = "coverage_snapshot"
     __table_args__ = (
@@ -3973,6 +4011,97 @@ class StudioTestRun(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class StudioEvalQuestion(Base, TimestampMixin):
+    """A regression question mined from real usage (ST-A8).
+
+    Existence of a row is the evidence: it is only created when a consumption
+    edge or BI dashboard binding shows the referenced metric/tool actually
+    resolved for someone, so "does it still resolve" is the correct regression
+    question to ask of every future change set touching that object. Value-free
+    per ADR-0014 -- `evidence_edge_id` references the source
+    `consumption_record` or `bi_report_metric_edge` row by id; no raw query
+    text or result values are stored.
+    """
+
+    __tablename__ = "studio_eval_question"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "object_type",
+            "object_id",
+            name="uq_studio_eval_question_org_object",
+        ),
+        Index(
+            "ix_studio_eval_question_org_object",
+            "organization_id",
+            "object_type",
+            "object_id",
+        ),
+        CheckConstraint(
+            "evidence_source IN ('CONSUMPTION', 'BI')",
+            name="ck_studio_eval_question_evidence_source",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    object_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    object_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    evidence_source: Mapped[str] = mapped_column(String(30), nullable=False)
+    evidence_edge_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    label: Mapped[str] = mapped_column(String(500), nullable=False)
+    mined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class StudioEvalRun(Base, TimestampMixin):
+    """One regression-gate execution against a change set's mined eval corpus."""
+
+    __tablename__ = "studio_eval_run"
+    __table_args__ = (
+        Index("ix_studio_eval_run_change_set", "change_set_id", "started_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+class StudioEvalResult(Base, TimestampMixin):
+    """Per-question outcome of one eval run -- the regression proof for a
+    single mined question, kept even after the run's aggregate result."""
+
+    __tablename__ = "studio_eval_result"
+    __table_args__ = (Index("ix_studio_eval_result_run", "eval_run_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    eval_run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_eval_run.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    eval_question_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_eval_question.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
 
 
 class ConsumptionRecord(Base):

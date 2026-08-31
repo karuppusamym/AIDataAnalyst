@@ -2232,6 +2232,38 @@ class GlossaryLinkProposalRead(ApiModel):
     updated_at: datetime
 
 
+class AssetDescriptionDraftGenerate(ApiModel):
+    table_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_table_ids(self) -> "AssetDescriptionDraftGenerate":
+        if len(set(self.table_ids)) != len(self.table_ids):
+            raise ValueError("table_ids must be unique")
+        return self
+
+
+class AssetDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    table_name: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    evidence: dict[str, Any]
+    status: str
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CoverageDimensionRead(ApiModel):
     covered: int
     total: int
@@ -2907,6 +2939,46 @@ class StudioTestResultRead(ApiModel):
     evidence: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class StudioEvalQuestionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    object_type: str
+    object_id: str
+    evidence_source: str
+    evidence_edge_id: str
+    label: str
+    mined_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioEvalMiningResult(ApiModel):
+    consumption_edges_scanned: int
+    bi_edges_scanned: int
+    questions_created: int
+    questions_already_mined: int
+    truncated: bool
+
+
+class StudioEvalResultRead(ApiModel):
+    eval_question_id: UUID
+    object_type: str
+    object_id: str
+    label: str
+    passed: bool
+    evidence: dict[str, Any]
+
+
+class StudioEvalRunRead(ApiModel):
+    id: UUID
+    change_set_id: UUID
+    started_at: datetime
+    completed_at: datetime | None
+    passed: bool
+    evidence: dict[str, Any]
+    results: list[StudioEvalResultRead]
 
 
 class HealthResponse(ApiModel):
