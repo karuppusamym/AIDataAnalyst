@@ -4063,3 +4063,92 @@ that gate exists to catch, this time caught before merge rather than after.
 `FAILED` lines) including the full doc-claims gate re-run in isolation to confirm the fix
 (`test_doc_claims.py` — all passing). Docs-only change to `03-tracker.md` plus this log entry; no
 application code touched.
+
+---
+
+## 2026-08-31 — AU-12 (survive a Temporal outage) closed
+
+### The problem
+
+`main.py`'s `lifespan` used to `await Client.connect(settings.temporal_address, ...)` directly, with
+no timeout and no try/except. `temporalio.client.Client.connect` performs a real RPC handshake by
+default (`lazy=False`) with no built-in timeout of its own, so an unreachable or slow-to-respond
+Temporal server hung or raised right there — and since `lifespan` runs before the ASGI server ever
+starts serving traffic, that took the *entire process* down with it, not only the Temporal-dependent
+routes. The end-to-end audit's finding was precise: the readiness probe at `/health/ready` was
+already written to report `temporal: DOWN` correctly (`request.app.state.temporal_client` truthy
+check) — it just could never execute, because the process never survived far enough to bind a port.
+
+### The fix
+
+- **`_connect_temporal(loop_settings) -> Client | None`** (`main.py:130-160`): wraps `Client.connect`
+  in `asyncio.wait_for(..., timeout=settings.temporal_connect_timeout_seconds)` inside try/except.
+  Any failure — timeout, connection refused, DNS failure — becomes a logged `temporal_connect_failed`
+  warning (`exc_info=True`) and a `None` return, never a raised exception. `CancelledError` is left
+  uncaught (it's a `BaseException`, not caught by `except Exception`) so shutdown cancellation is
+  never swallowed.
+- **`lifespan`** (`main.py:206-227`) calls `_connect_temporal` instead of `Client.connect` directly.
+  On failure it logs `temporal_unavailable_at_startup` and starts a background
+  `_temporal_reconnect_loop` task — the app comes up degraded (Temporal-dependent routes
+  unavailable, `/health/ready` reports `temporal: DOWN`) instead of never starting.
+- **`_temporal_reconnect_loop(app, loop_settings)`** (`main.py:163-188`): polls on
+  `settings.temporal_reconnect_interval_seconds` and, once `_connect_temporal` succeeds, publishes
+  the new client onto `app.state.temporal_client` — the same attribute `/health/ready` reads — so
+  readiness flips back to `temporal: UP` on its own, no restart needed. Cancelled at shutdown
+  alongside the existing `archive_task` (`main.py:271-274`), mirroring `_audit_archive_loop`'s
+  (OB-3) started/cancelled-from-`lifespan`, log-and-retry-on-failure, `CancelledError`-re-raised
+  shape — this module's one existing background-task convention, reused rather than reinvented.
+  `worker.py`/`scheduler.py` were checked first per the task brief's instruction and have no
+  reconnection pattern of their own: both are standalone, single-shot-connect processes that rely
+  on their process supervisor (not application code) to restart them on a Temporal outage, so there
+  was nothing to reuse from them — `lifespan`'s in-process background retry is a new pattern here
+  because `main.py` is the one long-lived process among the three that must stay up and serve
+  non-Temporal traffic through an outage.
+- Two new `Settings` fields in `atlas/platform/config.py`: `temporal_connect_timeout_seconds`
+  (default 10.0s) and `temporal_reconnect_interval_seconds` (default 30.0s).
+- The readiness probe itself (`main.py:380-399`) is unchanged — its `temporal` dependency check was
+  already correct, it just needed to actually be reachable.
+
+### Tests
+
+New `tests/test_au12_temporal_outage_resilience.py` (5 tests), driving real ASGI `lifespan` via
+`fastapi.testclient.TestClient` against `aida.main.app` — the same pattern
+`test_observability.py::test_lifespan_wires_tracing_and_metrics_...` already established — with a
+fake class monkeypatched onto `aida.main.Client` standing in for `temporalio.client.Client` (no live
+Temporal server in this environment): `test_temporal_outage_at_startup_does_not_crash_app` (a
+raising fake `connect()` — entering the TestClient's lifespan context does not raise, `/health/live`
+still returns 200); `test_readiness_reports_temporal_down_during_outage` (`/health/ready` genuinely
+reports `dependencies["temporal"] == "DOWN"`); `test_temporal_connect_is_bounded_by_timeout_not_hanging`
+(a fake `connect()` that sleeps 30s against a 0.2s `temporal_connect_timeout_seconds` — startup
+returns in well under 5s, proving the timeout is enforced and not just the try/except); 
+`test_readiness_recovers_to_up_once_reconnect_succeeds` (a fake `connect()` that fails once then
+succeeds — `/health/ready` starts at `DOWN`, then flips to `UP` on its own within a few
+`temporal_reconnect_interval_seconds` cycles, no restart); `test_temporal_reconnect_task_is_cancelled_on_shutdown`
+(the reconnect task is running while the app is up, and is cancelled/done once the TestClient context
+exits — mirrors `_audit_archive_loop`'s existing shutdown-cancellation contract).
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict). Full `pytest` suite: exit code 0, zero
+`FAILED`/`ERROR` lines (confirmed via `grep -c "^FAILED\|^ERROR"` on the captured log, since an
+unrelated OTEL metrics-exporter atexit thread occasionally swallows pytest's own final summary line
+in this sandbox — a pre-existing environment quirk, not a test failure: the isolated run of just the
+new file reports plainly, `5 passed in 5.52s`). One pre-existing, unrelated failure mode was
+investigated rather than ignored: `test_config.py::test_environment_must_be_explicit_outside_tests`
+(AU-3) fails whenever `AIDA_ENVIRONMENT` is present in the ambient shell env at test time, because
+pydantic-settings marks an env-sourced field as "set" the same as an explicitly-passed one, so the
+test's `_running_under_pytest` monkeypatch alone can't reproduce a truly-unset variable once one is
+present in the process environment. Confirmed via `git stash` that this reproduces identically on
+the unmodified branch tip (`fb6fe65`), with or without this change — a latent conflict with
+`.github/workflows/ci.yml`'s workflow-level `AIDA_ENVIRONMENT: "development"` (added under AU-3,
+commit `cf1e65b`, whose own comment says the `tests` job is "exempt via its own pytest detection" —
+true for every other test, but not this one, which deliberately defeats that detection to test the
+non-pytest branch). Left unfixed: out of AU-12's scope (`main.py` Temporal-connect logic, the
+readiness probe, and their tests only), flagged here and in the tracker for whoever picks up AU-3
+next or notices CI go red on it.
+
+### Scope note
+
+Only `main.py`'s Temporal-connect logic in `lifespan`, the background reconnect task, the two new
+`Settings` fields it needs, and their tests were touched — per the task brief, the readiness probe's
+own logic was already correct and needed no change beyond becoming reachable.
