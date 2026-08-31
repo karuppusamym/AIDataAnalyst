@@ -6,13 +6,14 @@ from pydantic import ValidationError
 
 from aida.catalog_bulk_actions import (
     CATALOG_BULK_ACTION_MAX_ITEMS,
+    CatalogBulkItemError,
+    apply_certify_item,
+    apply_classify_item,
+    apply_own_item,
+    apply_tag_item,
     dedupe_preserving_order,
     match_columns_by_pattern,
     match_tables_by_filter,
-    plan_certify,
-    plan_classify,
-    plan_own,
-    plan_tag,
 )
 from aida.main import app
 from aida.models import (
@@ -181,38 +182,57 @@ def test_dedupe_preserving_order() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Partial success reporting: plan_tag / plan_classify / plan_own / plan_certify
+# Partial success reporting: apply_tag_item / apply_classify_item /
+# apply_own_item / apply_certify_item -- the single-item core each bulk
+# endpoint dispatches to, one subject at a time inside its own SAVEPOINT (see
+# tests/test_catalog_bulk_actions_endpoints.py for the SAVEPOINT-isolation and
+# real-DB, real-scale proof; these tests cover the pure precondition logic
+# without a database).
 # ---------------------------------------------------------------------------
 
 
-def test_plan_tag_reports_partial_success_for_missing_and_deprecated_tables() -> None:
-    ok_table = active_table()
-    deprecated_table = active_table(status="DEPRECATED")
-    missing_id = uuid4()
-    subject_ids = [ok_table.id, deprecated_table.id, missing_id]
-    plan = plan_tag(
-        subject_ids,
-        tables={ok_table.id: ok_table, deprecated_table.id: deprecated_table},
+def test_apply_tag_item_creates_a_new_tag_for_an_active_table() -> None:
+    table = active_table()
+    row, is_new = apply_tag_item(
+        table.id,
+        tables={table.id: table},
         existing_tags={},
         organization_id=ORG_ID,
         tag_key="gold-tier",
         tag_value="true",
         applied_by="steward@example.com",
     )
-    assert plan.succeeded_count == 1
-    assert plan.failed_count == 2
-    by_id = {item.subject_id: item for item in plan.results}
-    assert by_id[str(ok_table.id)].status == "SUCCEEDED"
-    assert by_id[str(deprecated_table.id)].status == "FAILED"
-    assert "DEPRECATED" in (by_id[str(deprecated_table.id)].reason or "")
-    assert by_id[str(missing_id)].status == "FAILED"
-    assert "not found" in (by_id[str(missing_id)].reason or "")
-    assert len(plan.new_rows) == 1
-    assert plan.new_rows[0].table_id == ok_table.id
-    assert plan.new_rows[0].tag_key == "gold-tier"
+    assert is_new is True
+    assert row.table_id == table.id
+    assert row.tag_key == "gold-tier"
 
 
-def test_plan_tag_updates_an_existing_tag_in_place_instead_of_duplicating() -> None:
+def test_apply_tag_item_rejects_a_missing_or_deprecated_table() -> None:
+    deprecated_table = active_table(status="DEPRECATED")
+    with pytest.raises(CatalogBulkItemError, match="DEPRECATED"):
+        apply_tag_item(
+            deprecated_table.id,
+            tables={deprecated_table.id: deprecated_table},
+            existing_tags={},
+            organization_id=ORG_ID,
+            tag_key="gold-tier",
+            tag_value="true",
+            applied_by="steward@example.com",
+        )
+    missing_id = uuid4()
+    with pytest.raises(CatalogBulkItemError, match="not found"):
+        apply_tag_item(
+            missing_id,
+            tables={},
+            existing_tags={},
+            organization_id=ORG_ID,
+            tag_key="gold-tier",
+            tag_value="true",
+            applied_by="steward@example.com",
+        )
+
+
+def test_apply_tag_item_updates_an_existing_tag_in_place_instead_of_duplicating() -> None:
     table = active_table()
     existing = AssetTag(
         id=uuid4(),
@@ -222,8 +242,8 @@ def test_plan_tag_updates_an_existing_tag_in_place_instead_of_duplicating() -> N
         tag_value="false",
         applied_by="old-steward@example.com",
     )
-    plan = plan_tag(
-        [table.id],
+    row, is_new = apply_tag_item(
+        table.id,
         tables={table.id: table},
         existing_tags={table.id: existing},
         organization_id=ORG_ID,
@@ -231,13 +251,13 @@ def test_plan_tag_updates_an_existing_tag_in_place_instead_of_duplicating() -> N
         tag_value="true",
         applied_by="new-steward@example.com",
     )
-    assert plan.succeeded_count == 1
-    assert plan.new_rows == []
+    assert is_new is False
+    assert row is existing
     assert existing.tag_value == "true"
     assert existing.applied_by == "new-steward@example.com"
 
 
-def test_plan_classify_reports_partial_success_across_columns() -> None:
+def test_apply_classify_item_reports_precise_failure_reasons() -> None:
     ok_column = active_column()
     ok_table = active_table()
     inactive_column = active_column(status="DEPRECATED")
@@ -250,18 +270,18 @@ def test_plan_classify_reports_partial_success_across_columns() -> None:
         inactive_column.id: (inactive_column, inactive_table),
         orphaned_column.id: (orphaned_column, deprecated_parent_table),
     }
-    subject_ids = [ok_column.id, inactive_column.id, orphaned_column.id, missing_id]
-    plan = plan_classify(subject_ids, columns=columns, classification="PII")
-    assert plan.succeeded_count == 1
-    assert plan.failed_count == 3
+    result = apply_classify_item(ok_column.id, columns=columns, classification="PII")
+    assert result is ok_column
     assert ok_column.classification == "PII"
-    by_id = {item.subject_id: item for item in plan.results}
-    assert "column status" in (by_id[str(inactive_column.id)].reason or "")
-    assert "parent table status" in (by_id[str(orphaned_column.id)].reason or "")
-    assert "not found" in (by_id[str(missing_id)].reason or "")
+    with pytest.raises(CatalogBulkItemError, match="column status"):
+        apply_classify_item(inactive_column.id, columns=columns, classification="PII")
+    with pytest.raises(CatalogBulkItemError, match="parent table status"):
+        apply_classify_item(orphaned_column.id, columns=columns, classification="PII")
+    with pytest.raises(CatalogBulkItemError, match="not found"):
+        apply_classify_item(missing_id, columns=columns, classification="PII")
 
 
-def test_plan_own_creates_and_reactivates_assignments() -> None:
+def test_apply_own_item_creates_and_reactivates_assignments() -> None:
     new_table = active_table()
     existing_table = active_table()
     existing_assignment = OwnershipAssignment(
@@ -275,8 +295,8 @@ def test_plan_own_creates_and_reactivates_assignments() -> None:
         status="INACTIVE",
         assigned_by="prior-run@example.com",
     )
-    plan = plan_own(
-        [new_table.id, existing_table.id],
+    new_row, new_is_new = apply_own_item(
+        new_table.id,
         tables={new_table.id: new_table, existing_table.id: existing_table},
         existing_assignments={existing_table.id: existing_assignment},
         organization_id=ORG_ID,
@@ -284,32 +304,39 @@ def test_plan_own_creates_and_reactivates_assignments() -> None:
         owner_principal="retail-data-stewards",
         assigned_by="steward@example.com",
     )
-    assert plan.succeeded_count == 2
-    assert len(plan.new_rows) == 1
-    assert plan.new_rows[0].subject_id == str(new_table.id)
+    assert new_is_new is True
+    assert new_row.subject_id == str(new_table.id)
+    reactivated_row, reactivated_is_new = apply_own_item(
+        existing_table.id,
+        tables={new_table.id: new_table, existing_table.id: existing_table},
+        existing_assignments={existing_table.id: existing_assignment},
+        organization_id=ORG_ID,
+        owner_type="GROUP",
+        owner_principal="retail-data-stewards",
+        assigned_by="steward@example.com",
+    )
+    assert reactivated_is_new is False
+    assert reactivated_row is existing_assignment
     assert existing_assignment.status == "ACTIVE"
     assert existing_assignment.assigned_by == "steward@example.com"
 
 
-def test_plan_own_fails_deprecated_tables_while_succeeding_active_ones() -> None:
-    active = active_table()
+def test_apply_own_item_rejects_a_deprecated_table() -> None:
     deprecated = active_table(status="DEPRECATED")
-    plan = plan_own(
-        [active.id, deprecated.id],
-        tables={active.id: active, deprecated.id: deprecated},
-        existing_assignments={},
-        organization_id=ORG_ID,
-        owner_type="INDIVIDUAL",
-        owner_principal="jane.steward",
-        assigned_by="admin@example.com",
-    )
-    assert plan.succeeded_count == 1
-    assert plan.failed_count == 1
+    with pytest.raises(CatalogBulkItemError, match="DEPRECATED"):
+        apply_own_item(
+            deprecated.id,
+            tables={deprecated.id: deprecated},
+            existing_assignments={},
+            organization_id=ORG_ID,
+            owner_type="INDIVIDUAL",
+            owner_principal="jane.steward",
+            assigned_by="admin@example.com",
+        )
 
 
-def test_plan_certify_supersedes_prior_certification_and_reports_failures() -> None:
+def test_apply_certify_item_supersedes_prior_certification() -> None:
     certified_table = active_table()
-    deprecated_table = active_table(status="DEPRECATED")
     prior = AssetCertification(
         id=uuid4(),
         organization_id=ORG_ID,
@@ -320,38 +347,49 @@ def test_plan_certify_supersedes_prior_certification_and_reports_failures() -> N
         expires_at=datetime.now(UTC) + timedelta(days=1),
     )
     expires_at = datetime.now(UTC) + timedelta(days=90)
-    plan = plan_certify(
-        [certified_table.id, deprecated_table.id],
-        tables={certified_table.id: certified_table, deprecated_table.id: deprecated_table},
+    new_cert, superseded = apply_certify_item(
+        certified_table.id,
+        tables={certified_table.id: certified_table},
         active_certifications={certified_table.id: [prior]},
         organization_id=ORG_ID,
         rationale="Certified against the approved data contract.",
         expires_at=expires_at,
         certified_by="steward@example.com",
     )
-    assert plan.succeeded_count == 1
-    assert plan.failed_count == 1
+    assert superseded == [prior]
     assert prior.status == "SUPERSEDED"
-    assert len(plan.new_rows) == 1
-    new_cert = plan.new_rows[0]
     assert new_cert.table_id == certified_table.id
     assert new_cert.expires_at == expires_at
-    by_id = {item.subject_id: item for item in plan.results}
-    assert by_id[str(deprecated_table.id)].status == "FAILED"
 
 
-def test_all_four_bulk_actions_share_the_same_result_shape() -> None:
-    table = active_table()
-    tag_plan = plan_tag(
-        [table.id],
-        tables={table.id: table},
-        existing_tags={},
-        organization_id=ORG_ID,
-        tag_key="k",
-        tag_value=None,
-        applied_by="a",
-    )
-    assert {item.status for item in tag_plan.results} <= {"SUCCEEDED", "FAILED"}
-    for item in tag_plan.results:
-        assert isinstance(item.subject_id, str)
-        UUID(item.subject_id)  # subject_id is always a stringified UUID
+def test_apply_certify_item_rejects_a_deprecated_table() -> None:
+    deprecated_table = active_table(status="DEPRECATED")
+    with pytest.raises(CatalogBulkItemError, match="DEPRECATED"):
+        apply_certify_item(
+            deprecated_table.id,
+            tables={deprecated_table.id: deprecated_table},
+            active_certifications={},
+            organization_id=ORG_ID,
+            rationale="Certified against the approved data contract.",
+            expires_at=datetime.now(UTC) + timedelta(days=90),
+            certified_by="steward@example.com",
+        )
+
+
+def test_all_four_bulk_actions_report_subject_id_as_a_stringified_uuid_on_failure() -> None:
+    missing_id = uuid4()
+    with pytest.raises(CatalogBulkItemError):
+        apply_tag_item(
+            missing_id,
+            tables={},
+            existing_tags={},
+            organization_id=ORG_ID,
+            tag_key="k",
+            tag_value=None,
+            applied_by="a",
+        )
+    # The API layer is what turns a raised CatalogBulkItemError into a
+    # BulkItemResult(subject_id=str(subject_id), status="FAILED", reason=...)
+    # -- proven end-to-end (partial success across a whole batch, at scale,
+    # with real SAVEPOINT isolation) in test_catalog_bulk_actions_endpoints.py.
+    UUID(str(missing_id))

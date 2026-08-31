@@ -1,19 +1,30 @@
 """CT-1: bulk catalog stewardship actions (tag, classify, own, certify).
 
-This module implements the *planning* half of each bulk action as small, pure
-functions that operate on already-fetched ORM rows (no session, no I/O). The
-API layer (see ``aida.api``) is responsible for the bounded database fetches
-and for persisting whatever a plan decides to write. Keeping the two apart
-means the partial-success behaviour that CT-1 requires -- "which items
-succeeded, which failed and why" -- is exercised directly in tests without a
-database.
+This module holds one ``apply_<action>_item`` function per action -- the
+*single-item* core each bulk endpoint in ``aida.api`` dispatches to, one
+subject at a time, inside that item's own SAVEPOINT (``session.begin_nested``).
+This mirrors PG-3's ``_apply_governance_review_decision`` pattern exactly: a
+single code path decides whether one subject succeeds or fails, so a
+single-item bulk call and a batched one can never drift, and a failure
+partway through one item's dispatch (an unmet precondition, or a database
+constraint discovered only at flush time) is contained to that item's own
+SAVEPOINT rather than corrupting the batch or leaking into sibling items that
+already committed within the same transaction.
+
+Each ``apply_*_item`` function either mutates an already-fetched, session-
+attached ORM row in place (for an update) and returns it, or returns a
+brand-new, not-yet-``session.add``-ed row for the caller to add and flush; a
+precondition failure (subject not found, not ACTIVE, already in a terminal
+state, ...) raises ``CatalogBulkItemError``, which the API layer catches per
+item to record a FAILED result and move on to the next subject.
 
 Ownership and certification reuse the exact fields and idempotency rules
-already established by ``aida.stewardship_service.apply_bulk_operation``
-(subject_type/subject_id keying, supersede-then-create for certification);
-this module adds an immediate, per-item partial-success execution path next
-to that review-gated workflow, plus the previously-missing tag and classify
-actions described by module 04 (catalog).
+already established by GL-2 (``OwnershipAssignment`` subject_type/subject_id
+keying) and GL-5/CT-5 (``AssetCertification`` supersede-then-create,
+``asset_certification.py``'s active/expiry projection) -- this module adds an
+immediate, per-item partial-success execution path next to those workflows,
+plus the previously-missing tag and classify actions described by module 04
+(catalog).
 """
 
 from collections.abc import Mapping, Sequence
@@ -60,6 +71,13 @@ class BulkItemResult:
 
 @dataclass
 class BulkPlan:
+    """Accumulates the per-item results of a bulk run as the API layer works
+    through ``subject_ids`` one SAVEPOINT at a time. ``new_rows`` is unused by
+    the per-item-SAVEPOINT endpoints (each row is added and flushed inside its
+    own SAVEPOINT as it is decided) and stays only so any caller that still
+    wants a whole-plan-at-once view has somewhere to put one.
+    """
+
     results: list[BulkItemResult] = field(default_factory=list)
     new_rows: list[Any] = field(default_factory=list)
 
@@ -70,6 +88,18 @@ class BulkPlan:
     @property
     def failed_count(self) -> int:
         return sum(1 for item in self.results if item.status == "FAILED")
+
+
+class CatalogBulkItemError(Exception):
+    """Raised by an ``apply_*_item`` function when one subject fails a
+    business-rule precondition (not found, wrong status, ...).
+
+    The API layer catches this per item, inside that item's own SAVEPOINT, to
+    record a FAILED result with ``str(exc)`` as the reason and continue to the
+    next subject -- exactly PG-3's ``HTTPException``-per-item convention,
+    adapted to a plain exception since these functions are ORM-only (no
+    ``HTTPException`` semantics belong this far from the transport layer).
+    """
 
 
 def dedupe_preserving_order(values: Sequence[UUID]) -> list[UUID]:
@@ -128,8 +158,16 @@ def match_columns_by_pattern(
     return matched, truncated
 
 
-def plan_tag(
-    subject_ids: Sequence[UUID],
+def _require_active_table(table: MetadataTable | None) -> MetadataTable:
+    if table is None:
+        raise CatalogBulkItemError("table not found in this organization")
+    if table.status != "ACTIVE":
+        raise CatalogBulkItemError(f"table status is {table.status}, not ACTIVE")
+    return table
+
+
+def apply_tag_item(
+    subject_id: UUID,
     *,
     tables: Mapping[UUID, MetadataTable],
     existing_tags: Mapping[UUID, AssetTag],
@@ -137,79 +175,55 @@ def plan_tag(
     tag_key: str,
     tag_value: str | None,
     applied_by: str,
-) -> BulkPlan:
-    results: list[BulkItemResult] = []
-    new_rows: list[AssetTag] = []
-    for subject_id in subject_ids:
-        table = tables.get(subject_id)
-        if table is None:
-            results.append(
-                BulkItemResult(str(subject_id), "FAILED", "table not found in this organization")
-            )
-            continue
-        if table.status != "ACTIVE":
-            results.append(
-                BulkItemResult(
-                    str(subject_id), "FAILED", f"table status is {table.status}, not ACTIVE"
-                )
-            )
-            continue
-        existing = existing_tags.get(subject_id)
-        if existing is not None:
-            existing.tag_value = tag_value
-            existing.applied_by = applied_by
-        else:
-            new_rows.append(
-                AssetTag(
-                    organization_id=organization_id,
-                    table_id=subject_id,
-                    tag_key=tag_key,
-                    tag_value=tag_value,
-                    applied_by=applied_by,
-                )
-            )
-        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
-    return BulkPlan(results=results, new_rows=new_rows)
+) -> tuple[AssetTag, bool]:
+    """Apply one tag to one table. Returns ``(row, is_new)``: for an existing
+    tag, ``row`` is that same object mutated in place (already session-
+    attached, just needs a flush); for a new tag, ``row`` is a fresh instance
+    the caller must ``session.add`` before flushing. Raises
+    ``CatalogBulkItemError`` if the table is missing or not ACTIVE.
+    """
+    _require_active_table(tables.get(subject_id))
+    existing = existing_tags.get(subject_id)
+    if existing is not None:
+        existing.tag_value = tag_value
+        existing.applied_by = applied_by
+        return existing, False
+    return (
+        AssetTag(
+            organization_id=organization_id,
+            table_id=subject_id,
+            tag_key=tag_key,
+            tag_value=tag_value,
+            applied_by=applied_by,
+        ),
+        True,
+    )
 
 
-def plan_classify(
-    subject_ids: Sequence[UUID],
+def apply_classify_item(
+    subject_id: UUID,
     *,
     columns: Mapping[UUID, tuple[MetadataColumn, MetadataTable]],
     classification: str,
-) -> BulkPlan:
-    results: list[BulkItemResult] = []
-    for subject_id in subject_ids:
-        found = columns.get(subject_id)
-        if found is None:
-            results.append(
-                BulkItemResult(str(subject_id), "FAILED", "column not found in this organization")
-            )
-            continue
-        column, table = found
-        if column.status != "ACTIVE":
-            results.append(
-                BulkItemResult(
-                    str(subject_id), "FAILED", f"column status is {column.status}, not ACTIVE"
-                )
-            )
-            continue
-        if table.status != "ACTIVE":
-            results.append(
-                BulkItemResult(
-                    str(subject_id),
-                    "FAILED",
-                    f"parent table status is {table.status}, not ACTIVE",
-                )
-            )
-            continue
-        column.classification = classification
-        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
-    return BulkPlan(results=results, new_rows=[])
+) -> MetadataColumn:
+    """Apply one classification to one column, mutating it in place (already
+    session-attached). Raises ``CatalogBulkItemError`` if the column is
+    missing, or if the column or its parent table is not ACTIVE.
+    """
+    found = columns.get(subject_id)
+    if found is None:
+        raise CatalogBulkItemError("column not found in this organization")
+    column, table = found
+    if column.status != "ACTIVE":
+        raise CatalogBulkItemError(f"column status is {column.status}, not ACTIVE")
+    if table.status != "ACTIVE":
+        raise CatalogBulkItemError(f"parent table status is {table.status}, not ACTIVE")
+    column.classification = classification
+    return column
 
 
-def plan_own(
-    subject_ids: Sequence[UUID],
+def apply_own_item(
+    subject_id: UUID,
     *,
     tables: Mapping[UUID, MetadataTable],
     existing_assignments: Mapping[UUID, OwnershipAssignment],
@@ -217,45 +231,35 @@ def plan_own(
     owner_type: str,
     owner_principal: str,
     assigned_by: str,
-) -> BulkPlan:
-    results: list[BulkItemResult] = []
-    new_rows: list[OwnershipAssignment] = []
-    for subject_id in subject_ids:
-        table = tables.get(subject_id)
-        if table is None:
-            results.append(
-                BulkItemResult(str(subject_id), "FAILED", "table not found in this organization")
-            )
-            continue
-        if table.status != "ACTIVE":
-            results.append(
-                BulkItemResult(
-                    str(subject_id), "FAILED", f"table status is {table.status}, not ACTIVE"
-                )
-            )
-            continue
-        existing = existing_assignments.get(subject_id)
-        if existing is not None:
-            existing.status = "ACTIVE"
-            existing.assigned_by = assigned_by
-        else:
-            new_rows.append(
-                OwnershipAssignment(
-                    organization_id=organization_id,
-                    subject_type="TABLE",
-                    subject_id=str(subject_id),
-                    owner_type=owner_type,
-                    owner_principal=owner_principal,
-                    assignment_kind="BULK",
-                    assigned_by=assigned_by,
-                )
-            )
-        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
-    return BulkPlan(results=results, new_rows=new_rows)
+) -> tuple[OwnershipAssignment, bool]:
+    """Assign ownership of one table. Returns ``(row, is_new)`` with the same
+    convention as ``apply_tag_item``: an existing (subject, owner) assignment
+    is reactivated in place (GL-2's idempotency rule), otherwise a fresh
+    ``OwnershipAssignment`` is returned for the caller to add. Raises
+    ``CatalogBulkItemError`` if the table is missing or not ACTIVE.
+    """
+    _require_active_table(tables.get(subject_id))
+    existing = existing_assignments.get(subject_id)
+    if existing is not None:
+        existing.status = "ACTIVE"
+        existing.assigned_by = assigned_by
+        return existing, False
+    return (
+        OwnershipAssignment(
+            organization_id=organization_id,
+            subject_type="TABLE",
+            subject_id=str(subject_id),
+            owner_type=owner_type,
+            owner_principal=owner_principal,
+            assignment_kind="BULK",
+            assigned_by=assigned_by,
+        ),
+        True,
+    )
 
 
-def plan_certify(
-    subject_ids: Sequence[UUID],
+def apply_certify_item(
+    subject_id: UUID,
     *,
     tables: Mapping[UUID, MetadataTable],
     active_certifications: Mapping[UUID, Sequence[AssetCertification]],
@@ -263,34 +267,26 @@ def plan_certify(
     rationale: str,
     expires_at: datetime,
     certified_by: str,
-) -> BulkPlan:
-    results: list[BulkItemResult] = []
-    new_rows: list[AssetCertification] = []
-    for subject_id in subject_ids:
-        table = tables.get(subject_id)
-        if table is None:
-            results.append(
-                BulkItemResult(str(subject_id), "FAILED", "table not found in this organization")
-            )
-            continue
-        if table.status != "ACTIVE":
-            results.append(
-                BulkItemResult(
-                    str(subject_id), "FAILED", f"table status is {table.status}, not ACTIVE"
-                )
-            )
-            continue
-        for prior in active_certifications.get(subject_id, ()):
-            prior.status = "SUPERSEDED"
-        new_rows.append(
-            AssetCertification(
-                organization_id=organization_id,
-                table_id=subject_id,
-                asset_type="TABLE",
-                rationale=rationale,
-                certified_by=certified_by,
-                expires_at=expires_at,
-            )
-        )
-        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
-    return BulkPlan(results=results, new_rows=new_rows)
+) -> tuple[AssetCertification, list[AssetCertification]]:
+    """Certify one table. Returns ``(new_certification, superseded_priors)``:
+    ``superseded_priors`` are the table's prior ACTIVE table-level
+    certifications, already mutated to ``status="SUPERSEDED"`` in place (GL-5's
+    supersede-then-create rule) -- the caller must flush both the new row (once
+    added) and every superseded prior together, inside the same SAVEPOINT, so
+    a failure can never leave a table with two simultaneously-ACTIVE table
+    certifications. Raises ``CatalogBulkItemError`` if the table is missing or
+    not ACTIVE.
+    """
+    _require_active_table(tables.get(subject_id))
+    priors = list(active_certifications.get(subject_id, ()))
+    for prior in priors:
+        prior.status = "SUPERSEDED"
+    new_certification = AssetCertification(
+        organization_id=organization_id,
+        table_id=subject_id,
+        asset_type="TABLE",
+        rationale=rationale,
+        certified_by=certified_by,
+        expires_at=expires_at,
+    )
+    return new_certification, priors

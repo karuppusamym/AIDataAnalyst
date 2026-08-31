@@ -25,14 +25,16 @@ from aida.authorization_gate import AuthorizationDenied, gate
 from aida.catalog_bulk_actions import (
     CATALOG_BULK_ACTION_MAX_ITEMS,
     CATALOG_BULK_FILTER_SCAN_CAP,
+    BulkItemResult,
     BulkPlan,
+    CatalogBulkItemError,
+    apply_certify_item,
+    apply_classify_item,
+    apply_own_item,
+    apply_tag_item,
     dedupe_preserving_order,
     match_columns_by_pattern,
     match_tables_by_filter,
-    plan_certify,
-    plan_classify,
-    plan_own,
-    plan_tag,
 )
 from aida.classification import SENSITIVE_CLASSES
 from aida.classification_feed import ExternalClassificationRecord, ingest_classification_feed
@@ -3033,7 +3035,7 @@ async def bulk_tag_tables(
     tables = await _fetch_bulk_tables(
         session, organization_id=organization_id, table_ids=subject_ids
     )
-    existing_tags = (
+    existing_tag_rows = (
         await session.scalars(
             select(AssetTag).where(
                 AssetTag.table_id.in_(subject_ids),
@@ -3041,17 +3043,33 @@ async def bulk_tag_tables(
             )
         )
     ).all()
-    plan = plan_tag(
-        subject_ids,
-        tables=tables,
-        existing_tags={row.table_id: row for row in existing_tags},
-        organization_id=organization_id,
-        tag_key=body.tag_key,
-        tag_value=body.tag_value,
-        applied_by=context.principal_id,
-    )
-    for row in plan.new_rows:
-        session.add(row)
+    existing_tags = {row.table_id: row for row in existing_tag_rows}
+    results: list[BulkItemResult] = []
+    for subject_id in subject_ids:
+        try:
+            async with session.begin_nested():
+                row, is_new = apply_tag_item(
+                    subject_id,
+                    tables=tables,
+                    existing_tags=existing_tags,
+                    organization_id=organization_id,
+                    tag_key=body.tag_key,
+                    tag_value=body.tag_value,
+                    applied_by=context.principal_id,
+                )
+                if is_new:
+                    session.add(row)
+                await session.flush([row])
+        except CatalogBulkItemError as exc:
+            results.append(BulkItemResult(str(subject_id), "FAILED", str(exc)))
+            continue
+        except IntegrityError:
+            results.append(
+                BulkItemResult(str(subject_id), "FAILED", "database constraint violation")
+            )
+            continue
+        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
+    plan = BulkPlan(results=results)
     run = await _persist_catalog_bulk_action_run(
         session,
         context=context,
@@ -3124,11 +3142,24 @@ async def bulk_classify_columns(
         )
     ).all()
     columns = {row[0].id: (row[0], row[1]) for row in rows}
-    plan = plan_classify(
-        subject_ids,
-        columns=columns,
-        classification=body.classification,
-    )
+    results: list[BulkItemResult] = []
+    for subject_id in subject_ids:
+        try:
+            async with session.begin_nested():
+                column = apply_classify_item(
+                    subject_id, columns=columns, classification=body.classification
+                )
+                await session.flush([column])
+        except CatalogBulkItemError as exc:
+            results.append(BulkItemResult(str(subject_id), "FAILED", str(exc)))
+            continue
+        except IntegrityError:
+            results.append(
+                BulkItemResult(str(subject_id), "FAILED", "database constraint violation")
+            )
+            continue
+        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
+    plan = BulkPlan(results=results)
     run = await _persist_catalog_bulk_action_run(
         session,
         context=context,
@@ -3166,7 +3197,7 @@ async def bulk_assign_ownership(
     tables = await _fetch_bulk_tables(
         session, organization_id=organization_id, table_ids=subject_ids
     )
-    existing_assignments = (
+    existing_assignment_rows = (
         await session.scalars(
             select(OwnershipAssignment).where(
                 OwnershipAssignment.organization_id == organization_id,
@@ -3177,17 +3208,33 @@ async def bulk_assign_ownership(
             )
         )
     ).all()
-    plan = plan_own(
-        subject_ids,
-        tables=tables,
-        existing_assignments={UUID(row.subject_id): row for row in existing_assignments},
-        organization_id=organization_id,
-        owner_type=body.owner_type,
-        owner_principal=body.owner_principal,
-        assigned_by=context.principal_id,
-    )
-    for row in plan.new_rows:
-        session.add(row)
+    existing_assignments = {UUID(row.subject_id): row for row in existing_assignment_rows}
+    results: list[BulkItemResult] = []
+    for subject_id in subject_ids:
+        try:
+            async with session.begin_nested():
+                row, is_new = apply_own_item(
+                    subject_id,
+                    tables=tables,
+                    existing_assignments=existing_assignments,
+                    organization_id=organization_id,
+                    owner_type=body.owner_type,
+                    owner_principal=body.owner_principal,
+                    assigned_by=context.principal_id,
+                )
+                if is_new:
+                    session.add(row)
+                await session.flush([row])
+        except CatalogBulkItemError as exc:
+            results.append(BulkItemResult(str(subject_id), "FAILED", str(exc)))
+            continue
+        except IntegrityError:
+            results.append(
+                BulkItemResult(str(subject_id), "FAILED", "database constraint violation")
+            )
+            continue
+        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
+    plan = BulkPlan(results=results)
     run = await _persist_catalog_bulk_action_run(
         session,
         context=context,
@@ -3243,17 +3290,31 @@ async def bulk_certify_tables(
     grouped_certifications: dict[UUID, list[AssetCertification]] = {}
     for row in active_certifications:
         grouped_certifications.setdefault(row.table_id, []).append(row)
-    plan = plan_certify(
-        subject_ids,
-        tables=tables,
-        active_certifications=grouped_certifications,
-        organization_id=organization_id,
-        rationale=body.rationale,
-        expires_at=body.expires_at,
-        certified_by=context.principal_id,
-    )
-    for row in plan.new_rows:
-        session.add(row)
+    results: list[BulkItemResult] = []
+    for subject_id in subject_ids:
+        try:
+            async with session.begin_nested():
+                new_certification, superseded_priors = apply_certify_item(
+                    subject_id,
+                    tables=tables,
+                    active_certifications=grouped_certifications,
+                    organization_id=organization_id,
+                    rationale=body.rationale,
+                    expires_at=body.expires_at,
+                    certified_by=context.principal_id,
+                )
+                session.add(new_certification)
+                await session.flush([new_certification, *superseded_priors])
+        except CatalogBulkItemError as exc:
+            results.append(BulkItemResult(str(subject_id), "FAILED", str(exc)))
+            continue
+        except IntegrityError:
+            results.append(
+                BulkItemResult(str(subject_id), "FAILED", "database constraint violation")
+            )
+            continue
+        results.append(BulkItemResult(str(subject_id), "SUCCEEDED", None))
+    plan = BulkPlan(results=results)
     run = await _persist_catalog_bulk_action_run(
         session,
         context=context,

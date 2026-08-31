@@ -2,7 +2,7 @@
 
 ``AssetCertification`` already existed as GL-5's reviewed bulk table certification
 plumbing, and CT-1 added an immediate per-table bulk certify path
-(``aida.catalog_bulk_actions.plan_certify``). Both left two gaps against module
+(``aida.catalog_bulk_actions.apply_certify_item``). Both left two gaps against module
 04's own public interface (``certify_asset(scope, table_id, decision) ->
 AssetCertification``, ``POST /v1/tables/{id}/certification``):
 

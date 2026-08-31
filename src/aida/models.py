@@ -4896,6 +4896,7 @@ class CatalogBulkActionRun(Base, TimestampMixin):
     succeeded_count: Mapped[int] = mapped_column(Integer, nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 # ---------------------------------------------------------------------------

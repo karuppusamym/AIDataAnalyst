@@ -2087,3 +2087,71 @@ Studio has moved from Pending to Partial in the status matrix.
   delivered by other concurrent sessions by the time that was discovered, so all 8 were stopped
   before any wrote code, and ST-A4 — the one item confirmed still open after re-checking the live
   tracker — was picked up directly instead.
+
+## 2026-08-31 — CT-1 (catalog bulk actions) closed: per-item SAVEPOINT isolation, real-DB tests, and the "no test harness exists" claim was wrong
+
+- CT-1 (bulk tag/classify/own/certify) was already delivered 2026-08-30 with the right shape —
+  filter-or-explicit selection, a 500-item cap, per-item partial-success reporting — but its own
+  tracker row admitted it had never been run against a database: "this repo has no live/fake-DB
+  endpoint-level test harness at all (a pre-existing, systemic gap)". That claim, also repeated
+  verbatim against TL-1/LN-4/ST-A4, is false. `tests/test_bulk_governance_decisions.py` (PG-3) and
+  `tests/test_catalog_pagination.py` (CT-2) already establish exactly that pattern — a real
+  in-memory sqlite engine, `Base.metadata.create_all`, rows seeded through the real ORM, the
+  endpoint function called in-process. Nobody had checked before writing that note down.
+- Following that pattern surfaced a real defect the never-executed code had been carrying since
+  2026-08-30: the `CatalogBulkActionRun` ORM model in `models.py` was missing the `requested_by`
+  column that its own Alembic migration (`b3f7a1c94d62`) creates and that
+  `_persist_catalog_bulk_action_run` unconditionally passes as a constructor kwarg. Every real call
+  to any of the four bulk endpoints would have raised `TypeError` before a run could ever be
+  persisted — a correctness bug invisible to `ruff`/`mypy`/code review, caught on the first test
+  that actually executed a request. Fixed by adding the column to the model; no migration change
+  needed since the table already had it.
+- Separately, and more structurally: the previous implementation's four endpoints computed a whole
+  batch's mutations in memory (`plan_tag`/`plan_classify`/`plan_own`/`plan_certify`, no session I/O)
+  and issued a single `session.commit()` for the entire request. That is not partial-success-safe at
+  the database level — a single DB-level failure anywhere in a 500-item batch (a constraint
+  violation the application-level precondition checks don't catch) would have rolled back every
+  item, not just the one that failed, silently contradicting the "partial success reported" exit
+  condition the moment reality diverged from the happy path. Refactored to mirror PG-3's own
+  pattern exactly: `catalog_bulk_actions.py` now exposes one `apply_<action>_item` function per
+  action — the single-item core, raising `CatalogBulkItemError` on a precondition failure — and each
+  of the four endpoints in `api.py` dispatches to it per subject inside that item's own SAVEPOINT
+  (`async with session.begin_nested(): ... await session.flush([row, ...])`), catching both
+  `CatalogBulkItemError` and a real `IntegrityError` per item.
+- New `tests/test_catalog_bulk_actions_endpoints.py`, following PG-3's and CT-2's real-engine test
+  pattern (not a hand-simulated session), proves:
+  - **Partial success at real scale**: a full 500-item explicit-selection batch (tag: 470
+    ACTIVE + 25 DEPRECATED + 5 never-existed ids; classify: 480 ACTIVE + 20 DEPRECATED columns)
+    reports every item's outcome correctly and persists exactly the succeeded count — no failure
+    dropped a success, no success went unpersisted.
+  - **The cap and `truncated` flag**: filter selection over 5,000 candidate ACTIVE tables caps the
+    processed batch at exactly `CATALOG_BULK_ACTION_MAX_ITEMS` (500) with `truncated=True` recorded
+    in the run's `parameters`, and the database ends up with exactly 500 new `OwnershipAssignment`
+    rows, never more; a 40-row match is correctly reported un-truncated.
+  - **SAVEPOINT isolation actually contains a failure**: a real, table-defined CHECK constraint
+    (`ck_asset_certification_column_consistency`) is tripped on exactly one item's certify dispatch
+    via a `before_insert` listener (this sandbox's sqlite fixture is single-connection, so a genuine
+    concurrent-writer race can't be reproduced deterministically — the constraint violation itself
+    is real, not the trigger mechanism). Proven: the prior certification that item had already
+    superseded in memory reverts to ACTIVE (not stuck SUPERSEDED with no replacement), no partial
+    certification row exists for that table, the item is reported FAILED with the constraint reason,
+    and both sibling items in the same request still commit and read ACTIVE — the outer transaction
+    was never aborted by the contained failure.
+- `tests/test_catalog_bulk_actions.py` (the pure-function unit tests) rewritten from
+  `plan_tag`/`plan_classify`/`plan_own`/`plan_certify` to `apply_tag_item`/`apply_classify_item`/
+  `apply_own_item`/`apply_certify_item`, since the old batch-planner functions no longer exist as a
+  separate code path from what the endpoints actually call — keeping one single-item core per
+  action, exactly PG-3's "single-item and bulk can never drift" property.
+- Verified: `ruff check .` clean; `mypy src` clean (184 files); full `pytest` suite run to
+  completion with exactly 2 failures, both pre-existing and unrelated to this item
+  (`test_doc_claims.py::test_cited_test_path_resolves` on `tests/test_studio.py::TestParameterContractDesigner`,
+  a doc-citation stale since ST-A4's test file was later restructured by other concurrent work —
+  confirmed present at `ca80b14`, the commit this session started from, before any change made
+  here). Every catalog-bulk-action test passes, and no other test in the suite fails.
+- Known limitation, stated plainly rather than glossed: this sandbox has no live Postgres, so the
+  SAVEPOINT-isolation proof above uses sqlite's own CHECK-constraint enforcement (real, but not
+  Postgres) and a single-connection fault-injection listener rather than a genuine concurrent
+  writer race, which sqlite's default in-memory single-connection fixture cannot reproduce
+  deterministically. The mechanism proven (SQLAlchemy `begin_nested()` SAVEPOINT rollback contains
+  a real `IntegrityError`) is dialect-independent, but a live-Postgres run of the same scenario has
+  not been performed in this environment.
