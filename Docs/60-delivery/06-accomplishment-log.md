@@ -3189,7 +3189,8 @@ stack wired into the live orchestration path, not deleted
   lexical scan instead. `retrieval.py:43-52`'s own docstring documented the intended hand-off
   ("Import and call from `agent_intelligence.GovernedRetriever.retrieve()`") that had never been
   made. Confirmed no concurrent session had already closed this gap: `03-tracker.md`'s AU-6 row
-  lists only `abac.py` and `quality_coupling`/`trust_scoring` as its remaining unwired modules.
+  listed only abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `quality_coupling`/`trust_scoring` as its remaining unwired modules at the time.
 - **Decision: wire in, not retire.** `retrieval.py`'s lexical stage (`hybrid_retrieve`) was a
   strict superset of `GovernedRetriever`'s own scan (same object types plus glossary-term
   binding folding, SM-2), and `hybrid_retrieve_enhanced` already orchestrated vector similarity,
@@ -3408,9 +3409,10 @@ of that script, run on every push.
   rebase picked up `676bbf8` ("wire retrieval.py's hybrid/vector/graph/fusion stack into the live
   orchestration path"), closing RT-1/RT-2/RT-3/RT-9/SM-2 — `vector_store.py` alone stayed behind,
   per that commit's own known-limitations note: it's a persisted index the change didn't
-  populate, using live per-query embedding instead. `abac.py` and `ai_decision_lineage.py` are
+  populate, using live per-query embedding instead. abac.py (does not exist any more; deleted
+  2026-08-31 under PG-1/PG-6/PG-8/AU-11) and `ai_decision_lineage.py` were
   **not** on this list and never were:
-  both routers are registered on the live app (`main.py:126-127`), so both modules are
+  both routers were registered on the live app (`main.py:126-127`), so both modules were
   module-reachable — the audit's separate finding that their core *functions* (`record_decision`,
   real ABAC enforcement vs. the `policy_engine.evaluate` duplicate) have no live caller is a
   function-level claim this module-level gate cannot see or contradict; that is explicitly AU-2's
@@ -3428,7 +3430,8 @@ of that script, run on every push.
   second full-suite run.
 - Known limitations: this is a module-level gate only, exactly matching AU-1's exit criterion —
   it proves *something* on a live path imports a module, not that a specific function in it is
-  ever called. `abac.py`/`ai_decision_lineage.py` above are the concrete example of that
+  ever called. abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `ai_decision_lineage.py` above were the concrete example of that
   boundary. Closing that gap is AU-2, already tracked, not reopened here. The allow-list will
   need re-verification again the next time a sibling session wires in one of its remaining 5
   entries — that's expected maintenance, not a defect in the gate, and this session watched it
