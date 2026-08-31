@@ -39,6 +39,7 @@ from aida.notification_api import router as notification_router
 from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
+from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
@@ -136,6 +137,7 @@ app.include_router(table_family_router)
 app.include_router(token_revocation_router)
 app.include_router(detokenization_router)
 app.include_router(asset_description_router)
+app.include_router(policy_native_sync_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

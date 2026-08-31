@@ -115,6 +115,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `profiling_exception_policy.decided.v1` | PR-2: checker approved or rejected the exception | policy_id, datasource_id, classification, status |
 | `profiling_exception_policy.revoked.v1` | PR-2: an approved exception's authority was withdrawn | policy_id, datasource_id, classification |
 | `profiling.value_artifact_purged.v1` | PR-2: a `ColumnValueProfileArtifact` was hard-deleted once its pinned retention expired | artifact_id, column_id, table_id, policy_id |
+| `policy_native_sync.requested.v1` | QG-2: maker froze a preview into a durable, reviewable source-native row/column policy sync request | request_id, datasource_id, schema_name, table_name |
+| `policy_native_sync.decided.v1` | QG-2: checker approved or rejected the request (maker != checker) | request_id, status |
+| `policy_native_sync.applied.v1` | QG-2: an approved request's DDL was executed against the live source | request_id, datasource_id, statements_hash |
 
 ### Relationships — topic `atlas.catalog.v1`
 

@@ -2235,3 +2235,97 @@ Studio has moved from Pending to Partial in the status matrix.
   connector work (CN-1c/CN-2a). Only one value shape is implemented (the digit run of a value);
   `ColumnTokenizationPolicy.value_shape` is left open for a future alphanumeric scheme without a
   schema change, but no such scheme exists yet.
+
+## 2026-08-31 — QG-2 (source-native row/column policy synchronization)
+
+- Built the synchronization path module 16's masking §7 target names but the codebase had not yet
+  shipped: `policy_native_sync.py` translates the platform's existing governed row/column
+  obligations into real source-native DDL, alongside (never instead of) `query_gateway.py`'s
+  application-level masking, which is untouched. Deliberately reused the platform's one policy
+  language rather than inventing a second: obligations come from `policy_engine.PolicyRecord`
+  (loaded via the existing `business_graph.load_policies`) with effect `FILTER` (row) or `MASK`
+  (column) — the same records `query_gateway.py` already builds masking decisions from.
+- The load-bearing design choice: a policy is eligible for native sync only when it is
+  *unconditional on subject* (empty `subject_match`) and its `resource_match` resolves without a
+  business-graph closure query. A native `CREATE POLICY`/`ADD MASKED` construct has no way to see
+  Atlas's roles, purpose, or principal kind, so a subject-scoped policy (e.g. "mask for AGENT
+  principals only") is left to application-level enforcement rather than synced with a silently
+  narrowed meaning — reported by name in `NativeSyncPlan.unsupported`, not dropped quietly. Same
+  treatment for the two connector/obligation combinations with no real native construct today:
+  Postgres column masking (would need the third-party `postgresql_anonymizer` extension) and SQL
+  Server native row-level security (`CREATE SECURITY POLICY` needs a schema-bound predicate
+  function this module does not yet manage) — both documented as future work in the module
+  docstring, matching this codebase's convention of not shipping a source half-supported without
+  saying so.
+- Real, tested DDL for the two connectors with real native pull adapters: PostgreSQL RLS
+  (`ENABLE`/`FORCE ROW LEVEL SECURITY` + `CREATE POLICY ... USING (...)`, idempotent via a leading
+  `DROP POLICY IF EXISTS`) and SQL Server Dynamic Data Masking (`ALTER COLUMN ... ADD MASKED WITH
+  (FUNCTION = ...)`, profile-mapped with a conservative `default()` fallback for an unrecognized
+  profile, matching module 16's existing "default is conservative" masking rule).
+- Row-filter predicates are governance-authored trusted SQL text (the same trust level as a
+  `SourceBinding.masking_profile` or a governed tool's SQL template), but are still round-tripped
+  through `sqlglot` before being concatenated into generated DDL: parsed as a `WHERE` condition,
+  rejected on multiple statements/semicolons, rejected on any DDL/DML/administrative AST node, and
+  re-rendered from the parsed tree rather than passed through raw — the same safety property
+  `query_gateway._run_validation` already relies on. Found a real gap while writing the injection
+  tests: a subquery can hide a call to a dangerous function (`(SELECT 1 FROM pg_sleep(5)) = 1`)
+  past a pure node-type denylist, since the node itself (a comparison) is not forbidden. Closed by
+  additionally walking every function call in the parsed predicate against the same
+  Postgres denylist `sql_guard.SqlGuard` already applies to the read path (`pg_sleep`,
+  `dblink_connect`, `pg_read_file`, etc.), independently duplicated rather than imported (see the
+  module docstring on why this module does not reach into another module's private members) —
+  verified closed by test before and after the fix.
+- `policy_native_sync_api.py`: a dry-run preview (steward-tier role gate, nothing persisted or
+  applied) plus a maker-checker `PolicyNativeSyncRequest` gate modeled directly on
+  `ProfilingExceptionPolicy` — its own denormalized `status`/`requested_by`/`decided_by` fields
+  rather than filing into the shared `governance_review` queue, for the exact reason
+  `ProfilingExceptionPolicy`'s own docstring gives for itself: gating a live external-source write,
+  with generated DDL as the evidence, doesn't fit that queue's existing per-object-type dispatcher
+  without distorting it. `APPROVE` immediately attempts the apply and records the real outcome
+  durably either way (`APPLIED` with an HMAC evidence hash via `aida.signing` — the same evidence
+  mechanism `QueryExecutionGateway` uses for executed SQL — or `APPLY_FAILED` with the exception
+  class only, never the raw driver error text, which could carry source-side values, INV-6);
+  `REJECT` never touches the source. Maker != checker enforced the same way
+  `decide_profiling_exception_policy` enforces it in `api.py`.
+- Apply mode is deliberately a separate execution surface from the query gateway, not an oversight:
+  `aida.connectors.execution_access` (the only source of a `SqlExecutor`) is import-linter-
+  restricted to `aida.query_gateway` alone (INV-2), and `sql_guard.SqlGuard` refuses every
+  DDL/administrative statement outright — `CREATE POLICY`/`ALTER TABLE ... ADD MASKED` could never
+  pass through that read-only pipeline by the same rule that makes it safe for governed reads.
+  `apply_native_sync_plan` therefore opens its own narrowly-scoped administrative connection
+  (`asyncpg`/`pytds`, the same drivers the read connectors use) and executes only the exact
+  statements the checker reviewed, in one transaction. `lint-imports` (4 contracts kept, 0 broken)
+  and `tests/test_tier0_invariants.py::test_no_connector_execution_outside_gateway` both confirm
+  this module never reaches the gateway-restricted surface.
+- 32 tests (`tests/test_policy_native_sync.py`): DDL generation correctness against real RLS/DDM
+  syntax; identifier and string-literal escaping (embedded `"`, `]`, `'` all verified to stay
+  escaped rather than break out of a quoted identifier or literal); injection safety (multi-
+  statement rejection, comment-smuggling neutralized to an inert re-rendered comment, dangerous
+  function inside a subquery rejected, a legitimate subquery still accepted); policy-resolution
+  scoping (subject-conditional and business-node-scoped policies correctly excluded, datasource/
+  schema scoping, priority tie-break); `apply_native_sync_plan` against injected fake connections
+  for both connector types, including a rollback-and-propagate path on failure — never against a
+  real Postgres/SQL Server instance, the same "verified only against a mock" posture QG-5's
+  `VaultTransitSigningProvider` tests already carry in this codebase; and the maker-checker HTTP
+  surface exercised the way `test_profiling_exception_policy.py` exercises its own endpoints
+  (self-approval refused, already-decided refused, reject never attempts apply, a failed apply is
+  recorded durably without raising and without leaking the raw driver error).
+- New table `policy_native_sync_request` (migration `a3f6c9e21b74`, chained onto head
+  `4f730e96ee9b`). New events `policy_native_sync.requested.v1` / `.decided.v1` / `.applied.v1`
+  added to `Docs/30-contracts/04-event-catalog.md` (`test_event_catalog_gate.py` was the gate that
+  caught the omission). New router `policy_native_sync_api.py` mounted in `main.py` rather than
+  added to `api.py`, to keep this change out of the branch's single largest shared file — three new
+  paths confirmed additive-only via `scripts/openapi_diff.py` before regenerating
+  `Docs/90-reference/openapi-baseline.json`.
+- Full suite: 2,796 tests collected, exits with exactly 2 failures, both pre-existing and unrelated
+  (`test_doc_claims.py`'s two citations of `tests/test_studio.py::TestParameterContractDesigner`,
+  a class that does not exist there — a stale citation from the ST-A4 session's own doc edits,
+  present before this session started, not touched here). `ruff check .` and `uv run mypy src`
+  (186 files) both clean; `lint-imports` 4/4 contracts kept.
+- Not yet DONE, stated plainly: apply has never run against a real Postgres/SQL Server instance
+  (mock-verified only — the same standing limitation QG-5, CN-1c, and CN-2a already carry in this
+  tracker); SQL Server native row-level security and Postgres native column masking are explicitly
+  unimplemented, documented as future work rather than faked; and only unconditional policies are
+  synchronized by design, so a subject-scoped masking/filter rule stays application-level-only
+  until a session-variable bridge between Atlas's subject attributes and a source engine's session
+  context exists (also not started).

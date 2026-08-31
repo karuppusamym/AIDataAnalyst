@@ -1190,6 +1190,70 @@ class ProfilingExceptionPolicy(Base, TimestampMixin):
     revocation_reason: Mapped[str | None] = mapped_column(String(2000))
 
 
+class PolicyNativeSyncRequest(Base, TimestampMixin):
+    """QG-2: the maker-checker gate for applying source-native row/column policy DDL.
+
+    `aida.policy_native_sync.build_native_sync_plan` generates the DDL (dry-run,
+    no gate needed -- nothing changes on the source from generation alone); this
+    table is what a *governed apply* of that DDL against a live source looks like.
+    Mirrors `ProfilingExceptionPolicy`'s shape for the same reason its own
+    docstring gives: a different principal must decide than the one who requested
+    (maker != checker), but the object being decided -- a set of generated DDL
+    statements scoped to one table, gating a live write to an external source
+    rather than flipping one row's status -- does not fit the shared
+    `governance_review` queue's existing per-object-type dispatcher
+    (`semantic_api._apply_governance_review_decision`) without distorting it.
+
+    `statements` is the exact, already-generated DDL this decision is about --
+    frozen at request time, not regenerated at apply time, so a checker approves
+    precisely what they read and an apply can never drift from what was reviewed
+    even if the underlying policy set changes between request and decision.
+    """
+
+    __tablename__ = "policy_native_sync_request"
+    __table_args__ = (
+        Index(
+            "ix_policy_native_sync_request_org_status",
+            "organization_id",
+            "status",
+        ),
+        Index(
+            "ix_policy_native_sync_request_scope",
+            "organization_id",
+            "datasource_id",
+            "schema_name",
+            "table_name",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    connector_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    schema_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The generated `NativeStatement.as_dict()` list -- frozen at request time.
+    statements: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
+    row_policy_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    column_policy_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    unsupported: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(255))
+    decision_reason: Mapped[str | None] = mapped_column(String(2000))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Set only on an APPLY_FAILED transition -- the exception class, never the raw
+    # driver error text, which could carry source-side identifiers or values
+    # (INV-6). The statements themselves stay auditable via `statements` above.
+    apply_error: Mapped[str | None] = mapped_column(String(500))
+
+
 class ColumnValueProfileArtifact(Base):
     """PR-2: the value-bearing artifact a `ProfilingExceptionPolicy` unlocks.
 
