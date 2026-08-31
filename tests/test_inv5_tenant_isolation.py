@@ -68,6 +68,10 @@ _TENANT_FREE_ROUTES: dict[str, str] = {
         "pure validation of a caller-supplied artifact; takes no session and "
         "persists nothing"
     ),
+    "POST /v1/studio/parameter-contracts/validate": (
+        "pure validation of a caller-supplied tool parameter contract (ST-A4); "
+        "takes no session and persists nothing"
+    ),
     "POST /v1/organizations": (
         "creates the organization boundary itself, so there is no prior boundary "
         "to check against; gated to PlatformAdmin by require_roles"

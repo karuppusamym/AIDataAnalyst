@@ -69,6 +69,10 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "simulates ABAC policy evaluation over varied attributes; reads "
         "policies and returns results without persisting decisions"
     ),
+    "POST /v1/studio/parameter-contracts/validate": (
+        "validates a caller-supplied tool parameter contract (ST-A4) and returns "
+        "the report; takes no session and persists nothing"
+    ),
 }
 
 # Read endpoints whose only write is the idempotent creation of a per-organization

@@ -19041,6 +19041,80 @@
         "title": "StudioImpactPreview",
         "type": "object"
       },
+      "StudioParameterContractValidateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "dialect": {
+            "default": "postgres",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Dialect",
+            "type": "string"
+          },
+          "parameters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "maxItems": 100,
+            "title": "Parameters",
+            "type": "array"
+          },
+          "sql_template": {
+            "maxLength": 200000,
+            "minLength": 1,
+            "title": "Sql Template",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sql_template"
+        ],
+        "title": "StudioParameterContractValidateRequest",
+        "type": "object"
+      },
+      "StudioParameterContractValidateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "definitions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Definitions",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "sample_rendered_sql": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Rendered Sql"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "errors",
+          "definitions"
+        ],
+        "title": "StudioParameterContractValidateResult",
+        "type": "object"
+      },
       "StudioTestResultRead": {
         "additionalProperties": false,
         "properties": {
@@ -63575,6 +63649,135 @@
           }
         },
         "summary": "List Eval Questions",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/v1/studio/parameter-contracts/validate": {
+      "post": {
+        "description": "Validate a typed, enum-bound tool parameter contract as an author designs it.\n\nStateless: does not require an existing change set or change item. Reuses the\nreal `ToolParameterDefinition` schema and SQL renderer (the same contract module\n14's tool gateway enforces at publish time), cross-checks declared parameters\nagainst the SQL template's actual placeholders, and proves the contract renders\nagainst one representative in-bounds value per parameter. The same check runs\nautomatically as part of the TOOL change-item test gate (`run_test_suite`); this\nendpoint lets an author validate incrementally while still drafting.",
+        "operationId": "validate_parameter_contract_endpoint_v1_studio_parameter_contracts_validate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudioParameterContractValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudioParameterContractValidateResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Parameter Contract Endpoint",
         "tags": [
           "studio"
         ]

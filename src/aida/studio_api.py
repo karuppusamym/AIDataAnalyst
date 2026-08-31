@@ -41,6 +41,8 @@ from aida.schemas import (
     StudioEvalResultRead,
     StudioEvalRunRead,
     StudioImpactPreview,
+    StudioParameterContractValidateRequest,
+    StudioParameterContractValidateResult,
     StudioTestResultRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -50,6 +52,7 @@ from aida.studio import (
     compute_diff,
     compute_impact,
     detect_conflicts,
+    validate_parameter_contract,
 )
 from aida.studio_eval import check_eval_regressions, mine_eval_questions
 from aida.studio_test_harness import run_test_suite
@@ -708,6 +711,42 @@ async def detect_conflicts_endpoint(
         )
         for c in conflicts
     ]
+
+
+# ---------------------------------------------------------------------------
+# ST-A4: parameter-contract designer
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/studio/parameter-contracts/validate",
+    response_model=StudioParameterContractValidateResult,
+)
+async def validate_parameter_contract_endpoint(
+    body: StudioParameterContractValidateRequest,
+    context: SecurityContext = Depends(require_roles(*_STUDIO_READ_ROLES)),
+) -> StudioParameterContractValidateResult:
+    """Validate a typed, enum-bound tool parameter contract as an author designs it.
+
+    Stateless: does not require an existing change set or change item. Reuses the
+    real `ToolParameterDefinition` schema and SQL renderer (the same contract module
+    14's tool gateway enforces at publish time), cross-checks declared parameters
+    against the SQL template's actual placeholders, and proves the contract renders
+    against one representative in-bounds value per parameter. The same check runs
+    automatically as part of the TOOL change-item test gate (`run_test_suite`); this
+    endpoint lets an author validate incrementally while still drafting.
+    """
+    result = validate_parameter_contract(
+        sql_template=body.sql_template,
+        raw_definitions=body.parameters,
+        dialect=body.dialect,
+    )
+    return StudioParameterContractValidateResult(
+        valid=result.valid,
+        errors=result.errors,
+        definitions=result.definitions,
+        sample_rendered_sql=result.sample_rendered_sql,
+    )
 
 
 # ---------------------------------------------------------------------------

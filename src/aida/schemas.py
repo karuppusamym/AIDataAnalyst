@@ -2930,6 +2930,19 @@ class StudioImpactPreview(ApiModel):
     affected_objects: list[dict[str, Any]]
 
 
+class StudioParameterContractValidateRequest(ApiModel):
+    sql_template: str = Field(min_length=1, max_length=200_000)
+    dialect: str = Field(default="postgres", min_length=1, max_length=50)
+    parameters: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+
+
+class StudioParameterContractValidateResult(ApiModel):
+    valid: bool
+    errors: list[str]
+    definitions: list[dict[str, Any]]
+    sample_rendered_sql: str | None = None
+
+
 class StudioTestResultRead(ApiModel):
     id: UUID
     change_set_id: UUID
