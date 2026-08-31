@@ -21,7 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.models import StudioChangeItem, StudioChangeSet, StudioTestRun
+from aida.models import (
+    StudioChangeItem,
+    StudioChangeSet,
+    StudioEvalQuestion,
+    StudioEvalResult,
+    StudioEvalRun,
+    StudioTestRun,
+)
 from aida.schemas import (
     StudioChangeItemCreate,
     StudioChangeItemRead,
@@ -29,6 +36,10 @@ from aida.schemas import (
     StudioChangeSetRead,
     StudioConflict,
     StudioDiffRead,
+    StudioEvalMiningResult,
+    StudioEvalQuestionRead,
+    StudioEvalResultRead,
+    StudioEvalRunRead,
     StudioImpactPreview,
     StudioTestResultRead,
 )
@@ -40,6 +51,7 @@ from aida.studio import (
     compute_impact,
     detect_conflicts,
 )
+from aida.studio_eval import check_eval_regressions, mine_eval_questions
 from aida.studio_test_harness import run_test_suite
 
 router = APIRouter(prefix="/v1", tags=["studio"])
@@ -359,6 +371,17 @@ async def run_tests(
 
     Transitions the change set to TESTING, executes validators, then records
     the result.  All items must pass for the suite to pass.
+
+    Also runs the ST-A8 regression gate: for every changed metric/tool that
+    has a usage-derived `StudioEvalQuestion` (mined from real consumption or
+    BI lineage edges via `POST /v1/studio/eval/mine`), re-checks that it
+    still passes the same validator its own item-level test uses. A mined
+    question that now fails fails the overall suite, exactly like any other
+    failing test -- this is what makes it a *regression* gate rather than a
+    duplicate of the item-level check: it fires even for objects whose own
+    edit would otherwise look shaped correctly, and it is recorded separately
+    (`StudioEvalRun`/`StudioEvalResult`) so the failure is attributable to a
+    specific previously-resolving question, not just "something failed."
     """
     cs = await _load_change_set(session, context, change_set_id)
     if cs.status not in ("DRAFT", "TESTING"):
@@ -377,13 +400,71 @@ async def run_tests(
     for domain_item, db_item in zip(domain_cs.items, db_items, strict=False):
         db_item.test_status = domain_item.test_status
 
+    eval_started_at = datetime.now(UTC)
+    touched_keys = {(item.object_type, item.object_id) for item in domain_cs.items}
+    questions: list[StudioEvalQuestion] = []
+    if touched_keys:
+        questions = list(
+            (
+                await session.scalars(
+                    select(StudioEvalQuestion).where(
+                        StudioEvalQuestion.organization_id == context.organization_id,
+                        StudioEvalQuestion.object_type.in_({k[0] for k in touched_keys}),
+                        StudioEvalQuestion.object_id.in_({k[1] for k in touched_keys}),
+                    )
+                )
+            ).all()
+        )
+        questions = [q for q in questions if (q.object_type, q.object_id) in touched_keys]
+
+    eval_checks = check_eval_regressions(domain_cs.items, questions)
+    eval_failed = [c for c in eval_checks if not c.result.passed]
+    eval_passed = len(eval_failed) == 0
+    eval_completed_at = datetime.now(UTC)
+
+    eval_run = StudioEvalRun(
+        organization_id=context.organization_id,
+        change_set_id=cs.id,
+        started_at=eval_started_at,
+        completed_at=eval_completed_at,
+        passed=eval_passed,
+        evidence={
+            "checked": len(eval_checks),
+            "failed": len(eval_failed),
+            "failed_question_ids": [str(c.question.id) for c in eval_failed],
+        },
+    )
+    session.add(eval_run)
+    await session.flush()
+    for check in eval_checks:
+        session.add(
+            StudioEvalResult(
+                organization_id=context.organization_id,
+                eval_run_id=eval_run.id,
+                eval_question_id=check.question.id,
+                passed=check.result.passed,
+                evidence={
+                    "object_type": check.question.object_type,
+                    "object_id": check.question.object_id,
+                    "label": check.question.label,
+                    "failures": check.result.failures,
+                },
+                run_at=eval_completed_at,
+            )
+        )
+
+    overall_passed = suite_result.passed and eval_passed
+    combined_evidence = dict(suite_result.evidence)
+    combined_evidence["eval_regression_checked"] = len(eval_checks)
+    combined_evidence["eval_regression_failed"] = len(eval_failed)
+
     test_run = StudioTestRun(
         organization_id=context.organization_id,
         change_set_id=cs.id,
         started_at=suite_result.started_at,
         completed_at=suite_result.completed_at or datetime.now(UTC),
-        passed=suite_result.passed,
-        evidence=suite_result.evidence,
+        passed=overall_passed,
+        evidence=combined_evidence,
     )
     session.add(test_run)
     await session.flush()
@@ -394,13 +475,30 @@ async def run_tests(
         action="studio.change_set.test",
         resource_type="StudioChangeSet",
         resource_id=str(cs.id),
-        outcome="SUCCESS" if suite_result.passed else "FAILURE",
+        outcome="SUCCESS" if overall_passed else "FAILURE",
         correlation_id=get_correlation_id(),
         details={
-            "passed": suite_result.passed,
+            "passed": overall_passed,
             "total_items": suite_result.evidence.get("total_items"),
+            "eval_regression_checked": len(eval_checks),
+            "eval_regression_failed": len(eval_failed),
         },
     )
+    if eval_checks:
+        record_audit(
+            session,
+            context,
+            action="studio.eval_run.run",
+            resource_type="StudioEvalRun",
+            resource_id=str(eval_run.id),
+            outcome="SUCCESS" if eval_passed else "FAILURE",
+            correlation_id=get_correlation_id(),
+            details={
+                "checked": len(eval_checks),
+                "failed": len(eval_failed),
+                "failed_question_ids": [str(c.question.id) for c in eval_failed],
+            },
+        )
 
     return StudioTestResultRead.model_validate(test_run)
 
@@ -421,7 +519,11 @@ async def submit_change_set(
 ) -> StudioChangeSetRead:
     """Submit a change set for governance review.
 
-    All items must have passed testing (test gate).
+    All items must have passed testing (test gate), and -- ST-A8 -- the most
+    recent eval-regression run for this change set (if any mined questions
+    were touched) must also have passed. A change set that regresses a
+    usage-derived question is blocked here exactly like a change set with a
+    malformed item, even when its items individually look well-formed.
     """
     cs = await _load_change_set(session, context, change_set_id)
     if cs.status not in ("DRAFT", "TESTING"):
@@ -438,11 +540,27 @@ async def submit_change_set(
             detail="cannot submit an empty change set",
         )
     untested = [i for i in db_items if i.test_status != "PASSED"]
-    if untested:
-        raise HTTPException(
-            status_code=409,
-            detail=f"{len(untested)} item(s) have not passed testing",
+
+    latest_eval_run = (
+        await session.scalars(
+            select(StudioEvalRun)
+            .where(StudioEvalRun.change_set_id == cs.id)
+            .order_by(StudioEvalRun.started_at.desc())
+            .limit(1)
         )
+    ).first()
+
+    reasons: list[str] = []
+    if untested:
+        reasons.append(f"{len(untested)} item(s) have not passed testing")
+    if latest_eval_run is not None and not latest_eval_run.passed:
+        failed_question_ids = latest_eval_run.evidence.get("failed_question_ids", [])
+        reasons.append(
+            f"{len(failed_question_ids)} mined eval question(s) regressed: "
+            f"{failed_question_ids}"
+        )
+    if reasons:
+        raise HTTPException(status_code=409, detail="; ".join(reasons))
 
     cs.status = "SUBMITTED"
     await session.flush()
@@ -590,3 +708,129 @@ async def detect_conflicts_endpoint(
         )
         for c in conflicts
     ]
+
+
+# ---------------------------------------------------------------------------
+# ST-A8: usage-derived eval question suite
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/studio/eval/mine",
+    response_model=StudioEvalMiningResult,
+)
+async def mine_eval_suite(
+    context: SecurityContext = Depends(require_roles(*_STUDIO_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> StudioEvalMiningResult:
+    """Mine recent consumption and BI lineage edges into eval questions.
+
+    Explicit, API-triggered pass rather than a scheduled job for now (no
+    scheduler wiring in this increment) -- idempotent, so calling it
+    repeatedly (by hand, or from a future schedule) never duplicates a
+    question for an object already mined.
+    """
+    organization_id = context.require_organization()
+    result = await mine_eval_questions(session, organization_id=organization_id)
+    await session.flush()
+
+    record_audit(
+        session,
+        context,
+        action="studio.eval.mine",
+        resource_type="StudioEvalQuestion",
+        resource_id=None,
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "consumption_edges_scanned": result.consumption_edges_scanned,
+            "bi_edges_scanned": result.bi_edges_scanned,
+            "questions_created": result.questions_created,
+            "questions_already_mined": result.questions_already_mined,
+            "truncated": result.truncated,
+        },
+    )
+    await session.commit()
+
+    return StudioEvalMiningResult(
+        consumption_edges_scanned=result.consumption_edges_scanned,
+        bi_edges_scanned=result.bi_edges_scanned,
+        questions_created=result.questions_created,
+        questions_already_mined=result.questions_already_mined,
+        truncated=result.truncated,
+    )
+
+
+@router.get(
+    "/studio/eval/questions",
+    response_model=list[StudioEvalQuestionRead],
+)
+async def list_eval_questions(
+    object_type: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*_STUDIO_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> list[StudioEvalQuestionRead]:
+    """List the mined eval question corpus for the organisation."""
+    stmt = (
+        select(StudioEvalQuestion)
+        .where(StudioEvalQuestion.organization_id == context.organization_id)
+        .order_by(StudioEvalQuestion.mined_at.desc())
+    )
+    if object_type:
+        stmt = stmt.where(StudioEvalQuestion.object_type == object_type)
+    stmt = stmt.offset(offset).limit(limit)
+    rows = (await session.scalars(stmt)).all()
+    return [StudioEvalQuestionRead.model_validate(r) for r in rows]
+
+
+@router.get(
+    "/studio/change-sets/{change_set_id}/eval",
+    response_model=StudioEvalRunRead,
+)
+async def get_latest_eval_run(
+    change_set_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_STUDIO_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> StudioEvalRunRead:
+    """Return the most recent eval-regression run for a change set."""
+    cs = await _load_change_set(session, context, change_set_id)
+
+    eval_run = (
+        await session.scalars(
+            select(StudioEvalRun)
+            .where(StudioEvalRun.change_set_id == cs.id)
+            .order_by(StudioEvalRun.started_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if eval_run is None:
+        raise HTTPException(status_code=404, detail="no eval run recorded for this change set")
+
+    result_rows = (
+        await session.scalars(
+            select(StudioEvalResult).where(StudioEvalResult.eval_run_id == eval_run.id)
+        )
+    ).all()
+
+    results = [
+        StudioEvalResultRead(
+            eval_question_id=r.eval_question_id,
+            object_type=str(r.evidence.get("object_type", "")),
+            object_id=str(r.evidence.get("object_id", "")),
+            label=str(r.evidence.get("label", "")),
+            passed=r.passed,
+            evidence=r.evidence,
+        )
+        for r in result_rows
+    ]
+    return StudioEvalRunRead(
+        id=eval_run.id,
+        change_set_id=eval_run.change_set_id,
+        started_at=eval_run.started_at,
+        completed_at=eval_run.completed_at,
+        passed=eval_run.passed,
+        evidence=eval_run.evidence,
+        results=results,
+    )

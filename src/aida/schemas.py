@@ -2941,6 +2941,46 @@ class StudioTestResultRead(ApiModel):
     updated_at: datetime
 
 
+class StudioEvalQuestionRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    object_type: str
+    object_id: str
+    evidence_source: str
+    evidence_edge_id: str
+    label: str
+    mined_at: datetime
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioEvalMiningResult(ApiModel):
+    consumption_edges_scanned: int
+    bi_edges_scanned: int
+    questions_created: int
+    questions_already_mined: int
+    truncated: bool
+
+
+class StudioEvalResultRead(ApiModel):
+    eval_question_id: UUID
+    object_type: str
+    object_id: str
+    label: str
+    passed: bool
+    evidence: dict[str, Any]
+
+
+class StudioEvalRunRead(ApiModel):
+    id: UUID
+    change_set_id: UUID
+    started_at: datetime
+    completed_at: datetime | None
+    passed: bool
+    evidence: dict[str, Any]
+    results: list[StudioEvalResultRead]
+
+
 class HealthResponse(ApiModel):
     status: str
     service: str
