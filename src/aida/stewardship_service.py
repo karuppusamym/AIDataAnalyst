@@ -217,6 +217,71 @@ async def apply_bulk_operation(
             )
             applied += 1
         event_type = "certification.granted.v1"
+    elif operation.operation_type == "REASSIGN_LEAVER":
+        # GL-7: `subject_ids` here are `OwnershipAssignment.id` values (not
+        # bare catalog/glossary ids like every other operation type) --
+        # already-typed rows discovered/validated by
+        # `stewardship_api.request_leaver_reassignment`, which is what lets
+        # one operation span every asset kind the leaver owned (table *and*
+        # term) in a single governed decision.
+        leaving_principal = parameters["leaving_principal"]
+        successor_principal = parameters["successor_principal"]
+        owner_type = parameters["owner_type"]
+        assignment_rows = (
+            await session.scalars(
+                select(OwnershipAssignment).where(OwnershipAssignment.id.in_(subject_ids))
+            )
+        ).all()
+        assignments_by_id = {row.id: row for row in assignment_rows}
+        # Successor rows already active for the same (subject_type,
+        # subject_id, owner_type) are looked up so a reassignment reactivates
+        # an existing co-owner row (GL-2's own idempotency rule) instead of
+        # violating the unique constraint on
+        # (organization_id, subject_type, subject_id, owner_type, owner_principal).
+        successor_lookup = {
+            (row.subject_type, row.subject_id): row
+            for row in (
+                await session.scalars(
+                    select(OwnershipAssignment).where(
+                        OwnershipAssignment.organization_id == operation.organization_id,
+                        OwnershipAssignment.owner_type == owner_type,
+                        OwnershipAssignment.owner_principal == successor_principal,
+                    )
+                )
+            ).all()
+        }
+        for subject_id in subject_ids:
+            assignment = assignments_by_id.get(subject_id)
+            if (
+                assignment is None
+                or assignment.status != "ACTIVE"
+                or assignment.owner_principal != leaving_principal
+            ):
+                # Stale by the time this was decided (already reassigned,
+                # revoked, or vacated between request and decision) --
+                # skipped, not counted, never a hard failure of the whole
+                # governed decision (mirrors the idempotent-skip convention
+                # every other branch above already follows).
+                continue
+            assignment.status = "REASSIGNED"
+            successor_row = successor_lookup.get((assignment.subject_type, assignment.subject_id))
+            if successor_row is not None:
+                successor_row.status = "ACTIVE"
+                successor_row.assigned_by = reviewer
+            else:
+                successor_row = OwnershipAssignment(
+                    organization_id=operation.organization_id,
+                    subject_type=assignment.subject_type,
+                    subject_id=assignment.subject_id,
+                    owner_type=owner_type,
+                    owner_principal=successor_principal,
+                    assignment_kind="REASSIGNED",
+                    assigned_by=reviewer,
+                )
+                session.add(successor_row)
+                successor_lookup[(assignment.subject_type, assignment.subject_id)] = successor_row
+            applied += 1
+        event_type = "ownership.leaver_reassigned.v1"
     else:
         raise HTTPException(status_code=422, detail="unsupported stewardship operation")
     operation.status = "APPLIED"

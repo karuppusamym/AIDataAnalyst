@@ -9324,6 +9324,160 @@
         "title": "DbtProjectRead",
         "type": "object"
       },
+      "DelegationCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "delegate_principal_id": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Delegate Principal Id",
+            "type": "string"
+          },
+          "delegated_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Delegated Roles",
+            "type": "array"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          }
+        },
+        "required": [
+          "delegate_principal_id",
+          "delegated_roles",
+          "reason",
+          "expires_at"
+        ],
+        "title": "DelegationCreate",
+        "type": "object"
+      },
+      "DelegationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "delegate_principal_id": {
+            "title": "Delegate Principal Id",
+            "type": "string"
+          },
+          "delegated_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Delegated Roles",
+            "type": "array"
+          },
+          "delegator_principal_id": {
+            "title": "Delegator Principal Id",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "revoked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked By"
+          },
+          "starts_at": {
+            "format": "date-time",
+            "title": "Starts At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "delegator_principal_id",
+          "delegate_principal_id",
+          "delegated_roles",
+          "reason",
+          "starts_at",
+          "expires_at",
+          "status",
+          "created_by",
+          "revoked_by",
+          "revoked_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DelegationRead",
+        "type": "object"
+      },
       "DetokenizeRead": {
         "additionalProperties": false,
         "properties": {
@@ -12173,6 +12327,63 @@
           "truncated"
         ],
         "title": "KnowledgeGraphRead",
+        "type": "object"
+      },
+      "LeaverReassignmentRequest": {
+        "additionalProperties": false,
+        "description": "GL-7: reassign every ACTIVE `OwnershipAssignment` a leaving principal\nholds -- table ownership, glossary-term stewardship, and any other\nsubject_type GL-2's ownership model covers -- to a successor in one\ngoverned action. `assignment_ids`, when given, must name only ACTIVE\nassignments currently owned by `leaving_principal` (an explicit,\ncaller-chosen subset of the portfolio); omitted, the endpoint discovers\nthe leaving principal's whole current portfolio server-side.",
+        "properties": {
+          "assignment_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assignment Ids"
+          },
+          "leaving_principal": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Leaving Principal",
+            "type": "string"
+          },
+          "owner_type": {
+            "default": "INDIVIDUAL",
+            "enum": [
+              "INDIVIDUAL",
+              "GROUP"
+            ],
+            "title": "Owner Type",
+            "type": "string"
+          },
+          "rationale": {
+            "maxLength": 2000,
+            "minLength": 10,
+            "title": "Rationale",
+            "type": "string"
+          },
+          "successor_principal": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Successor Principal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leaving_principal",
+          "successor_principal",
+          "rationale"
+        ],
+        "title": "LeaverReassignmentRequest",
         "type": "object"
       },
       "LiftSuppressionRequest": {
@@ -43113,6 +43324,134 @@
         ]
       }
     },
+    "/v1/delegations/{delegation_id}/revoke": {
+      "post": {
+        "operationId": "revoke_delegation_v1_delegations__delegation_id__revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "delegation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Delegation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelegationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Delegation",
+        "tags": [
+          "delegation"
+        ]
+      }
+    },
     "/v1/glossary-conflicts/{conflict_id}/resolution": {
       "post": {
         "operationId": "submit_conflict_resolution_v1_glossary_conflicts__conflict_id__resolution_post",
@@ -53391,6 +53730,344 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/delegations": {
+      "get": {
+        "operationId": "list_delegations_v1_organizations__organization_id__delegations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delegate_principal_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Delegate Principal Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "delegator_principal_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Delegator Principal Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Delegations",
+        "tags": [
+          "delegation"
+        ]
+      },
+      "post": {
+        "operationId": "grant_delegation_v1_organizations__organization_id__delegations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DelegationCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelegationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Grant Delegation",
+        "tags": [
+          "delegation"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/fleet-summary": {
       "get": {
         "operationId": "fleet_summary_v1_organizations__organization_id__fleet_summary_get",
@@ -58380,6 +59057,145 @@
           }
         },
         "summary": "Snapshot Stewardship Coverage",
+        "tags": [
+          "glossary-stewardship"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/stewardship/leaver-reassignment": {
+      "post": {
+        "description": "GL-7: reassign a leaving principal's *whole* active ownership\nportfolio -- every ACTIVE `OwnershipAssignment` row it holds, table and\nglossary-term stewardship alike (any subject_type GL-2's ownership model\ncovers) -- to a successor in one governed action, reusing the exact\n`BulkStewardshipOperation` / `GovernanceReview` maker-checker contract\nGL-2/GL-5/GL-8 already established (module 08 SS7) rather than a\nbespoke mechanism: `_apply_governance_review_decision`'s existing\n`BULK_STEWARDSHIP_OPERATION` dispatch (`semantic_api.py`) requires no\nchange at all -- it already calls `apply_bulk_operation` generically for\nwhatever `operation_type` the row carries.\n\nSelection mirrors CT-1's explicit-vs-filter split: an explicit\n`assignment_ids` list must name only ACTIVE assignments currently owned\nby `leaving_principal` (409 otherwise), and is capped at\n`LEAVER_REASSIGNMENT_MAX_ITEMS` by the request schema itself (a 422 over\nthe limit, exactly CT-1's explicit-selection behavior); omitting it\ndiscovers the leaving principal's whole current portfolio server-side,\ncapped at the same limit with `truncated=True` recorded in the\noperation's own parameters -- never silently dropped, CT-1's\nfilter-selection behavior.\n\nA validated `OwnershipAssignment.id` list is exactly what\n`BulkStewardshipOperation.subject_ids` holds here\n(`subject_type=\"OWNERSHIP_ASSIGNMENT\"`), which is what lets one operation\nspan every asset kind the leaver owned -- table *and* term -- in a\nsingle governed decision; the other three operation types this module\ndefines are each constrained to one subject_type per operation because\ntheir subjects are bare catalog/glossary ids, not already-typed\nassignment rows.\n\nCertifications (`AssetCertification.certified_by`) are a historical\nattestation, not an ownership assignment, and are deliberately out of\nscope -- consistent with this module's \"never last-write-wins\"\nretained-evidence principle (module 08 SS6): reassigning who currently\nowns a table must never rewrite the historical record of who certified\nit.",
+        "operationId": "request_leaver_reassignment_v1_organizations__organization_id__stewardship_leaver_reassignment_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeaverReassignmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkStewardshipOperationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Request Leaver Reassignment",
         "tags": [
           "glossary-stewardship"
         ]

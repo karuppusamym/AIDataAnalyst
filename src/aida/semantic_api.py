@@ -65,7 +65,12 @@ from aida.schemas import (
     TermSemanticBindingCreate,
     TermSemanticBindingRead,
 )
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import (
+    SecurityContext,
+    enforce_organization,
+    require_roles,
+    require_roles_or_delegated,
+)
 from aida.semantic_inference import apply_enrichment_proposal
 from aida.stewardship_service import (
     apply_bulk_operation,
@@ -1456,7 +1461,9 @@ async def _apply_governance_review_decision(
 async def decide_governance_review(
     review_id: UUID,
     body: GovernanceDecisionRequest,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
+    context: SecurityContext = Depends(
+        require_roles_or_delegated("PlatformAdmin", "DataSteward", "Reviewer")
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReview:
     review = await session.scalar(
@@ -1468,6 +1475,15 @@ async def decide_governance_review(
     if review.status != "PENDING":
         raise HTTPException(status_code=409, detail="governance review is already decided")
     if review.requested_by == context.principal_id:
+        raise HTTPException(status_code=409, detail="maker-checker separation is required")
+    # PG-4: a delegate deciding this review under a delegated role must not be
+    # able to rubber-stamp something the *delegator* itself proposed -- that
+    # would be self-approval by proxy, defeating INV-8 through the back door
+    # a delegation grant would otherwise open.
+    if (
+        context.active_delegator_principal_id is not None
+        and review.requested_by == context.active_delegator_principal_id
+    ):
         raise HTTPException(status_code=409, detail="maker-checker separation is required")
     now = datetime.now(UTC)
     event_type, aggregate_type, aggregate_id, payload = await _apply_governance_review_decision(
@@ -1487,7 +1503,14 @@ async def decide_governance_review(
         resource_id=str(review.id),
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
-        details={"decision": body.decision, "object_id": review.object_id},
+        details={
+            "decision": body.decision,
+            "object_id": review.object_id,
+            "via_delegation_id": (
+                str(context.active_delegation_id) if context.active_delegation_id else None
+            ),
+            "via_delegator_principal_id": context.active_delegator_principal_id,
+        },
     )
     record_outbox(
         session,
@@ -1564,7 +1587,9 @@ async def _resolve_governance_review_bulk_subjects(
 )
 async def bulk_decide_governance_reviews(
     body: GovernanceReviewBulkDecisionRequest,
-    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataSteward", "Reviewer")),
+    context: SecurityContext = Depends(
+        require_roles_or_delegated("PlatformAdmin", "DataSteward", "Reviewer")
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> GovernanceReviewBulkDecisionResultRead:
     """PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING
@@ -1636,7 +1661,10 @@ async def bulk_decide_governance_reviews(
                 )
             )
             continue
-        if review.requested_by == context.principal_id:
+        if review.requested_by == context.principal_id or (
+            context.active_delegator_principal_id is not None
+            and review.requested_by == context.active_delegator_principal_id
+        ):
             results.append(
                 GovernanceReviewBulkDecisionItemRead(
                     review_id=str(review_id),
@@ -1709,6 +1737,10 @@ async def bulk_decide_governance_reviews(
             "succeeded_count": succeeded,
             "failed_count": failed,
             "truncated": truncated,
+            "via_delegation_id": (
+                str(context.active_delegation_id) if context.active_delegation_id else None
+            ),
+            "via_delegator_principal_id": context.active_delegator_principal_id,
         },
     )
     try:

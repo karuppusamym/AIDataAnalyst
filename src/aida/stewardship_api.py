@@ -51,6 +51,7 @@ from aida.schemas import (
     GlossaryLinkProposalRead,
     GlossaryTermDeprecationRequest,
     GovernanceReviewRead,
+    LeaverReassignmentRequest,
     OwnershipAssignmentRead,
     OwnershipRuleCreate,
     OwnershipRuleRead,
@@ -375,6 +376,170 @@ async def list_bulk_stewardship_operations(
         offset=offset,
         total=total or 0,
     )
+
+
+# GL-7: matches the 500-item cap every other bulk stewardship contract in
+# this module already enforces (`BulkStewardshipOperationCreate.subject_ids`,
+# CT-1's own `CATALOG_BULK_ACTION_MAX_ITEMS`).
+LEAVER_REASSIGNMENT_MAX_ITEMS = 500
+
+
+@router.post(
+    "/organizations/{organization_id}/stewardship/leaver-reassignment",
+    response_model=BulkStewardshipOperationRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_leaver_reassignment(
+    organization_id: UUID,
+    body: LeaverReassignmentRequest,
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> BulkStewardshipOperation:
+    """GL-7: reassign a leaving principal's *whole* active ownership
+    portfolio -- every ACTIVE `OwnershipAssignment` row it holds, table and
+    glossary-term stewardship alike (any subject_type GL-2's ownership model
+    covers) -- to a successor in one governed action, reusing the exact
+    `BulkStewardshipOperation` / `GovernanceReview` maker-checker contract
+    GL-2/GL-5/GL-8 already established (module 08 SS7) rather than a
+    bespoke mechanism: `_apply_governance_review_decision`'s existing
+    `BULK_STEWARDSHIP_OPERATION` dispatch (`semantic_api.py`) requires no
+    change at all -- it already calls `apply_bulk_operation` generically for
+    whatever `operation_type` the row carries.
+
+    Selection mirrors CT-1's explicit-vs-filter split: an explicit
+    `assignment_ids` list must name only ACTIVE assignments currently owned
+    by `leaving_principal` (409 otherwise), and is capped at
+    `LEAVER_REASSIGNMENT_MAX_ITEMS` by the request schema itself (a 422 over
+    the limit, exactly CT-1's explicit-selection behavior); omitting it
+    discovers the leaving principal's whole current portfolio server-side,
+    capped at the same limit with `truncated=True` recorded in the
+    operation's own parameters -- never silently dropped, CT-1's
+    filter-selection behavior.
+
+    A validated `OwnershipAssignment.id` list is exactly what
+    `BulkStewardshipOperation.subject_ids` holds here
+    (`subject_type="OWNERSHIP_ASSIGNMENT"`), which is what lets one operation
+    span every asset kind the leaver owned -- table *and* term -- in a
+    single governed decision; the other three operation types this module
+    defines are each constrained to one subject_type per operation because
+    their subjects are bare catalog/glossary ids, not already-typed
+    assignment rows.
+
+    Certifications (`AssetCertification.certified_by`) are a historical
+    attestation, not an ownership assignment, and are deliberately out of
+    scope -- consistent with this module's "never last-write-wins"
+    retained-evidence principle (module 08 SS6): reassigning who currently
+    owns a table must never rewrite the historical record of who certified
+    it.
+    """
+    enforce_organization(context, organization_id)
+    if body.assignment_ids is not None:
+        rows = (
+            await session.scalars(
+                select(OwnershipAssignment).where(
+                    OwnershipAssignment.organization_id == organization_id,
+                    OwnershipAssignment.id.in_(body.assignment_ids),
+                    OwnershipAssignment.owner_type == body.owner_type,
+                    OwnershipAssignment.owner_principal == body.leaving_principal,
+                    OwnershipAssignment.status == "ACTIVE",
+                )
+            )
+        ).all()
+        found_ids = {row.id for row in rows}
+        missing = set(body.assignment_ids) - found_ids
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "one or more assignment_ids are not active ownership assignments "
+                    "currently held by leaving_principal"
+                ),
+            )
+        subject_ids = [row.id for row in rows]
+        selection_mode = "EXPLICIT"
+        truncated = False
+    else:
+        candidate_ids = (
+            await session.scalars(
+                select(OwnershipAssignment.id)
+                .where(
+                    OwnershipAssignment.organization_id == organization_id,
+                    OwnershipAssignment.owner_type == body.owner_type,
+                    OwnershipAssignment.owner_principal == body.leaving_principal,
+                    OwnershipAssignment.status == "ACTIVE",
+                )
+                .order_by(OwnershipAssignment.id)
+                .limit(LEAVER_REASSIGNMENT_MAX_ITEMS + 1)
+            )
+        ).all()
+        truncated = len(candidate_ids) > LEAVER_REASSIGNMENT_MAX_ITEMS
+        subject_ids = list(candidate_ids[:LEAVER_REASSIGNMENT_MAX_ITEMS])
+        selection_mode = "FILTER"
+        if not subject_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="leaving_principal has no active ownership assignments to reassign",
+            )
+
+    review = GovernanceReview(
+        organization_id=organization_id,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id="pending",
+        requested_action="REASSIGN_LEAVER",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    operation = BulkStewardshipOperation(
+        organization_id=organization_id,
+        operation_type="REASSIGN_LEAVER",
+        subject_type="OWNERSHIP_ASSIGNMENT",
+        subject_ids=[str(value) for value in subject_ids],
+        parameters={
+            "leaving_principal": body.leaving_principal,
+            "successor_principal": body.successor_principal,
+            "owner_type": body.owner_type,
+            "rationale": body.rationale,
+            "selection_mode": selection_mode,
+            "selection_truncated": truncated,
+        },
+        governance_review_id=review.id,
+        requested_by=context.principal_id,
+    )
+    session.add(operation)
+    await session.flush()
+    review.object_id = str(operation.id)
+    record_audit(
+        session,
+        _audit_context(context, organization_id),
+        action="stewardship.leaver_reassignment.request",
+        resource_type="bulk_stewardship_operation",
+        resource_id=str(operation.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "leaving_principal": body.leaving_principal,
+            "successor_principal": body.successor_principal,
+            "subject_count": len(subject_ids),
+            "selection_mode": selection_mode,
+            "selection_truncated": truncated,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": str(operation.id),
+            "requested_action": "REASSIGN_LEAVER",
+        },
+    )
+    await session.commit()
+    return operation
 
 
 @router.post(

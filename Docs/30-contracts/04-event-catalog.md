@@ -152,6 +152,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `glossary.term_linked_bulk.v1` | Approved bulk term links applied | operation_id, term_id, applied_count |
 | `glossary.term_deprecated.v1` | Approved term deprecation applied | operation_id, applied_count |
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
+| `ownership.leaver_reassigned.v1` | Approved leaver-reassignment bulk operation applied | operation_id, applied_count |
 | `stewardship.bulk_operation_rejected.v1` | Checker rejected a bulk stewardship request | operation_id, review_id |
 | `stewardship.coverage_computed.v1` | Coverage snapshot persisted | snapshot_id, scope, overall_score |
 | `stewardship.unowned_asset_routed.v1` | Unowned-asset backlog entry routed to a candidate owner | table_id, candidate_owner |

@@ -3944,6 +3944,49 @@ class AbacDecisionRecord(Base):
     )
 
 
+class Delegation(Base, TimestampMixin):
+    """PG-4: time-bounded, audited delegation of governance-review approval
+    authority from one principal (the delegator) to another (the delegate) --
+    e.g. a steward or reviewer going on leave delegates their decision
+    authority to a covering colleague for a bounded window.
+
+    ``delegated_roles`` must be a subset of the roles the delegator actually
+    asserted at grant time (``aida.delegation.validate_delegated_roles`` --
+    enforced by ``delegation_api.grant_delegation``, not by a database
+    constraint, since role membership itself is claims-based, not a stored
+    directory) -- a principal can only hand off authority it actually holds,
+    never more. Active only within ``[starts_at, expires_at)`` and while
+    ``status == "ACTIVE"``; ``aida.delegation.is_delegation_active`` is the
+    single query-time projection every enforcement call site uses, mirroring
+    ``aida.asset_certification.asset_certification_is_active``'s
+    supersede-by-projection pattern -- a delegation past its ``expires_at``
+    keeps its row as audited history, it simply stops being honored (never
+    deleted, never silently extended).
+    """
+
+    __tablename__ = "delegation"
+    __table_args__ = (
+        Index("ix_delegation_org_delegate", "organization_id", "delegate_principal_id"),
+        Index("ix_delegation_org_delegator", "organization_id", "delegator_principal_id"),
+        CheckConstraint("expires_at > starts_at", name="ck_delegation_window_ordered"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    delegator_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    delegate_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    delegated_roles: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AiDecisionRecord(Base):
     """First-class AI decision edge for the lineage graph."""
 
