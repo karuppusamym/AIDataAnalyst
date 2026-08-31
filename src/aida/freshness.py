@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from aida.timeutil import as_utc
+
 
 @dataclass(frozen=True, slots=True)
 class WatermarkConfig:
@@ -94,7 +96,11 @@ def evaluate_freshness(
             },
         )
 
-    age_minutes = (now - latest_watermark).total_seconds() / 60.0
+    # `as_utc`: a watermark read back from SQLite loses its tzinfo (every other
+    # backend round-trips it aware), and a naive/aware subtraction raises rather
+    # than compares -- the same fix `workspace_service._expired` and
+    # `asset_certification.asset_certification_is_active` already needed.
+    age_minutes = (as_utc(now) - as_utc(latest_watermark)).total_seconds() / 60.0
     is_fresh = age_minutes <= config.threshold_minutes
 
     return FreshnessResult(

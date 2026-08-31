@@ -21,9 +21,9 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
-    AbacDecisionRecord,
     AgentRun,
     AiDecisionRecord,
+    AuditEvent,
     CompliancePackRecord,
     ContractViolationRecord,
     DataQualityObservation,
@@ -258,26 +258,41 @@ async def _generate_access_review(
     period_start: datetime,
     period_end: datetime,
 ) -> list[ComplianceSection]:
-    """ACCESS_REVIEW: who accessed what, policy decisions, role assignments."""
+    """ACCESS_REVIEW: who accessed what, policy decisions, role assignments.
+
+    Sourced from `AuditEvent`, the audit trail `query_gateway.validate`/`execute`
+    write around every `authorization_gate.gate()` decision on the query path
+    (`aida.query_gateway.QueryExecutionGateway.validate`/`.execute`) -- not the
+    orphaned `abac_decision` table, which nothing has written to since `abac.py`
+    was deleted as dead code (PG-1/PG-6/AU-11, `Docs/60-delivery/03-tracker.md`):
+    real enforcement runs through `aida.policy_engine.evaluate`, reached via
+    `aida.workspace_service.authorize_enforced`, and its decisions are recorded
+    on the general audit trail rather than a second, policy-specific log --
+    `authorization_shadow_record` already carries shadow-mode divergences
+    (`aida.workspace_service.record_divergence`/`record_divergence_durably`)
+    without duplicating every agreement at request volume.
+    """
     sections: list[ComplianceSection] = []
 
-    # ABAC decisions
-    stmt = select(func.count()).select_from(AbacDecisionRecord).where(
+    gateway_actions = ("query.validate.gateway", "query.execute.requested")
+    stmt = select(func.count()).select_from(AuditEvent).where(
         and_(
-            AbacDecisionRecord.organization_id == org_id,
-            AbacDecisionRecord.evaluated_at >= period_start,
-            AbacDecisionRecord.evaluated_at <= period_end,
+            AuditEvent.organization_id == org_id,
+            AuditEvent.action.in_(gateway_actions),
+            AuditEvent.occurred_at >= period_start,
+            AuditEvent.occurred_at <= period_end,
         )
     )
     result = await session.execute(stmt)
     total_decisions = result.scalar() or 0
 
-    stmt_deny = select(func.count()).select_from(AbacDecisionRecord).where(
+    stmt_deny = select(func.count()).select_from(AuditEvent).where(
         and_(
-            AbacDecisionRecord.organization_id == org_id,
-            AbacDecisionRecord.decision == "DENY",
-            AbacDecisionRecord.evaluated_at >= period_start,
-            AbacDecisionRecord.evaluated_at <= period_end,
+            AuditEvent.organization_id == org_id,
+            AuditEvent.action.in_(gateway_actions),
+            AuditEvent.outcome == "DENIED",
+            AuditEvent.occurred_at >= period_start,
+            AuditEvent.occurred_at <= period_end,
         )
     )
     result = await session.execute(stmt_deny)
@@ -289,7 +304,7 @@ async def _generate_access_review(
             control_id="AR-001",
             evidence=[
                 EvidenceItem(
-                    source="abac_decision",
+                    source="audit_event",
                     count=total_decisions,
                     summary=f"{total_decisions} access decisions ({denied_count} denied)",
                     details={"denied_count": denied_count},

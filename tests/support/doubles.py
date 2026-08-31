@@ -16,7 +16,16 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from aida.connectors.base import ConnectorCapabilities, QueryEstimate, QueryResult
-from aida.models import SourceBinding
+from aida.models import (
+    AssetCertification,
+    DataQualityIncident,
+    DataQualityObservation,
+    FreshnessObservation,
+    FreshnessWatermarkConfig,
+    MetadataColumn,
+    MetadataTable,
+    SourceBinding,
+)
 from aida.security_types import SecurityContext
 
 
@@ -254,6 +263,12 @@ def security_context(
     )
 
 
+def _selected_name(statement: Any) -> str | None:
+    """The attribute name of a statement's first selected column, or None."""
+    descriptions = getattr(statement, "column_descriptions", ()) or ()
+    return descriptions[0].get("name") if descriptions else None  # type: ignore[no-any-return]
+
+
 class CatalogSession(RecordingSession):
     """Answers the query gateway's catalog lookups by statement *shape*.
 
@@ -264,13 +279,21 @@ class CatalogSession(RecordingSession):
     invariant test down with it for a reason that has nothing to do with the
     invariant.
 
-    Four lookups exist on the path, and their SELECT lists distinguish them
-    unambiguously: three columns (catalog, schema, table) is the authorised-table
-    lookup, four columns (…, column) is the column-resolution lookup, two columns
-    (value_shape, column name) is the QG-6 tokenization-policy lookup, and the
-    single-column `scalars` call is the sensitive-classification lookup. Anything
-    else raises, so a genuinely new lookup fails loudly here instead of silently
-    receiving an empty result the assertions would then "pass" on.
+    Lookups are distinguished by their SELECT list, checking the first selected
+    column's `(entity, name)` before falling back to raw column count for the
+    older lookups that project columns from more than one entity (so entity
+    alone would not disambiguate them): three columns (catalog, schema, table)
+    is the authorised-table lookup, four columns (…, column) is the
+    column-resolution lookup, two columns (value_shape, column name) is the
+    QG-6 tokenization-policy lookup. `(SourceBinding, ...)` is the workspace
+    binding lookup, `(MetadataColumn, "name")` the sensitive-classification
+    lookup, `(MetadataColumn, "classification")` and `(MetadataTable, "id")`
+    the AU-11 classification/table-resolution lookups, `(AssetCertification,
+    ...)`, `(DataQualityIncident, "severity")`, `(DataQualityObservation, ...)`
+    and `(FreshnessObservation, ...)`/`(FreshnessWatermarkConfig, ...)` the
+    AU-11 certification/quality/freshness lookups. Anything else raises, so a
+    genuinely new lookup fails loudly here instead of silently receiving an
+    empty result the assertions would then "pass" on.
     """
 
     def __init__(
@@ -281,6 +304,13 @@ class CatalogSession(RecordingSession):
         sensitive_columns: list[str],
         bindings: list[SourceBinding] | None = None,
         tokenized_columns: list[tuple[str, str]] | None = None,
+        referenced_table_ids: list[UUID] | None = None,
+        classifications: list[str] | None = None,
+        certifications: list[AssetCertification] | None = None,
+        quality_incident_severities: list[str] | None = None,
+        quality_observations: list[tuple[UUID, str]] | None = None,
+        freshness_configs: list[FreshnessWatermarkConfig] | None = None,
+        freshness_observations: list[tuple[UUID, Any]] | None = None,
     ) -> None:
         super().__init__()
         self._tables = tables
@@ -296,9 +326,29 @@ class CatalogSession(RecordingSession):
         # (value_shape, column_name) pairs, matching `_tokenized_output_names`'
         # SELECT list.
         self._tokenized_columns = tokenized_columns or []
+        # AU-11: no referenced tables resolve, no certification/quality/freshness
+        # evidence exists, by default -- the same "honest empty default" as
+        # bindings/tokenized_columns above, not an invented CERTIFIED/HEALTHY/
+        # FRESH state a test never asked for.
+        self._referenced_table_ids = referenced_table_ids or []
+        self._classifications = classifications or []
+        self._certifications = certifications or []
+        self._quality_incident_severities = quality_incident_severities or []
+        self._quality_observations = quality_observations or []
+        self._freshness_configs = freshness_configs or []
+        self._freshness_observations = freshness_observations or []
 
     async def execute(self, statement: Any) -> ScriptedResult:
+        entity = selected_entity(statement)
         width = len(getattr(statement, "column_descriptions", ()) or ())
+        if entity is AssetCertification:
+            return ScriptedResult(list(self._certifications))
+        if entity is FreshnessWatermarkConfig:
+            return ScriptedResult(list(self._freshness_configs))
+        if entity is DataQualityObservation and width == 2:
+            return ScriptedResult(list(self._quality_observations))
+        if entity is FreshnessObservation and width == 2:
+            return ScriptedResult(list(self._freshness_observations))
         if width == 2:
             return ScriptedResult(list(self._tokenized_columns))
         if width == 3:
@@ -306,14 +356,29 @@ class CatalogSession(RecordingSession):
         if width == 4:
             return ScriptedResult(list(self._columns))
         raise AssertionError(
-            f"CatalogSession received an unrecognised {width}-column statement; the "
-            "gateway grew a catalog lookup this double does not model"
+            f"CatalogSession received an unrecognised {width}-column statement "
+            f"(entity={entity!r}); the gateway grew a catalog lookup this double "
+            "does not model"
         )
 
     async def scalars(self, statement: Any) -> ScriptedResult:
-        if selected_entity(statement) is SourceBinding:
+        entity = selected_entity(statement)
+        name = _selected_name(statement)
+        if entity is SourceBinding:
             return ScriptedResult(list(self._bindings))
-        return ScriptedResult(list(self._sensitive))
+        if entity is MetadataTable and name == "id":
+            return ScriptedResult(list(self._referenced_table_ids))
+        if entity is MetadataColumn and name == "classification":
+            return ScriptedResult(list(self._classifications))
+        if entity is MetadataColumn and name == "name":
+            return ScriptedResult(list(self._sensitive))
+        if entity is DataQualityIncident and name == "severity":
+            return ScriptedResult(list(self._quality_incident_severities))
+        raise AssertionError(
+            f"CatalogSession received an unrecognised scalars() statement "
+            f"(entity={entity!r}, name={name!r}); the gateway grew a catalog "
+            "lookup this double does not model"
+        )
 
     async def get(self, _model: type, _identity: Any) -> Any:  # pragma: no cover - unused
         return None

@@ -301,3 +301,25 @@ def evaluate(
         row_filters=tuple(filters),
         evaluated_policy_ids=evaluated_ids,
     )
+
+
+def simulate(
+    policies: tuple[PolicyRecord, ...],
+    subjects: tuple[Subject, ...],
+    resource: Resource,
+    action: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[PolicyDecision, ...]:
+    """"Who could see this?" (PG-8) -- one resource, many hypothetical subjects.
+
+    Pure and deterministic like `evaluate`, which it is built directly on: one
+    decision per entry in `subjects`, in the same order, against the same
+    policy set, resource and moment in time. No I/O, so a caller varying
+    principal_kind or role combinations to answer an access review's question
+    pays only the cost of the evaluations themselves -- the real, wired engine
+    (`aida.workspace_service.load_policies` loads `policies`; a caller
+    resolves `resource`'s classification closure the same way `authorize`
+    does) rather than a second, disconnected evaluator.
+    """
+    return tuple(evaluate(policies, subject, resource, action, now=now) for subject in subjects)

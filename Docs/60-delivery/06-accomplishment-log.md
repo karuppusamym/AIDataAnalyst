@@ -1893,7 +1893,10 @@ Hybrid retrieval has moved from Partial to Implemented in the status matrix.
 #### Security and access control (SEC-1 through SEC-4)
 
 - **ABAC engine** (SEC-1): Policy evaluation, agent-vs-human gating, simulation mode.
-  `abac.py`, `abac_api.py`. Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
+  `abac.py` (does not exist any more) and `abac_api.py` (does not exist any more) -- both deleted 2026-08-31 under
+  PG-1/PG-6/PG-8/AU-11: that engine was never wired into the money path, `policy_engine.py` was,
+  and PG-8's simulation mode was ported to `aida.policy_engine.simulate` rather than lost (see
+  those tracker rows). Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
 - **Indirect injection defense** (SEC-2): Pattern detection, multilingual, encoding-aware
   corpus. `injection_defense.py`, `injection_corpus.py`. Closes tracker AG-1, AG-2, TS-6,
   and the gap-register P0 indirect prompt injection gap.
@@ -2343,7 +2346,7 @@ Studio has moved from Pending to Partial in the status matrix.
   in-process hot paths rather than any invented benchmark: `SqlGuard.validate()` over every case in
   QG-1's own adversarial SQL corpus (`tests/fixtures/adversarial_sql_corpus/*.json`, all 5 certified
   dialects); `abac.evaluate()` over 500 policies, the exact scenario PG-1's own
-  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises, reused here rather than
+  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises at the time (that file does not exist any more -- `abac.py`/`tests/test_abac.py` deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11, the benchmark retargeted to `aida.policy_engine.evaluate`), reused here rather than
   reimplemented; `fuse_results()`, hybrid retrieval's reciprocal-rank-fusion combiner, over a
   synthetic 500-candidate catalog; and `app.openapi()` — TS-4's own gate input — with FastAPI's
   schema cache cleared every iteration so it is genuinely regenerated, not cached.
@@ -2363,7 +2366,9 @@ Studio has moved from Pending to Partial in the status matrix.
 - 16 tests (`tests/test_perf_baseline_gate.py`): pure `find_regressions()` coverage of the threshold
   boundary and edge cases (exactly-at-threshold passes, missing-on-either-side entries are
   informational only, a zero baseline doesn't divide by zero), plus — per this item's own definition
-  of done — `aida.abac.evaluate` wrapped with an artificial `time.sleep` to prove the gate actually
+  of done — aida.abac.evaluate (retargeted 2026-08-31 to `aida.policy_engine.evaluate` when
+  `abac.py` was deleted under PG-1/PG-6/PG-8/AU-11; aida.abac.evaluate does not exist any more)
+  wrapped with an artificial `time.sleep` to prove the gate actually
   flags a regression in a real benchmarked function (not just a synthetic fixture), and the same
   unmodified benchmark proven not to be flagged.
 - Found and fixed two false positives of its own in the same edit: the tracker row's prose cited the
@@ -3623,3 +3628,140 @@ of that script, run on every push.
   that never matched the question at all is not distinguishable from one deliberately excluded.
   `UX-13`'s asset-evidence endpoint (still TODO) is the natural place for a future reader to surface
   this per-asset, once it lands.
+
+## 2026-08-31 — PG-1/PG-6/PG-8/AU-11 (ABAC engine decision, real query-path wiring) closed
+
+### The decision: `policy_engine.py`, not abac.py
+
+Two contradictory claims sat in the tracker at once: PG-1's own DONE text (2026-08-30) called
+abac.py "supersedes earlier `policy_engine.py` partial", while the same-day end-to-end audit
+(`04-end-to-end-audit-2026-08-30.md` §2) said the opposite — "Real enforcement runs through
+`policy_engine.evaluate`. abac.py is imported only by its own router and its own test." Both
+files were read in full before deciding, not just the tracker row that was read first:
+
+- **abac.py** (187 lines): a pure in-memory function — `evaluate(subject_attrs, resource_attrs,
+  env_attrs, policies)` over dict-shaped attributes, deny-overrides, a generic condition matcher
+  (scalar/list/range operators), plus a genuinely nice `simulate(..., vary_subject_attrs)`. No
+  policy persistence, no workspace/membership/binding integration, no business-node classification
+  closure. Its only consumer was its own router, abac_api.py (mounted in `main.py`, so live but
+  reachable from nowhere else), which read/wrote `AbacPolicyRecord`/`AbacDecisionRecord` — and the
+  decision record stored raw subject/resource/environment attribute dicts, an INV-6 value-freedom
+  violation the query path's own decision log never had.
+- **`policy_engine.py`** (303 lines): `evaluate(policies: tuple[PolicyRecord, ...], subject:
+  Subject, resource: Resource, action, *, now)` — DB-backed `PolicyRecord` loaded from
+  `access_policy` (`aida.business_graph.load_policies`), `Resource` already carrying
+  `classifications`/`business_node_ids`/`certification`/`datasource_id`/`schema_name`/
+  `quality_state`/`freshness_state` as first-class typed attributes (exactly AU-11's four axes,
+  already modeled — the gap was never in the engine), DENY as a hard ceiling evaluated first and
+  unconditional, default-deny (INV-4), MASK/FILTER obligation accumulation, `principal_kind` as a
+  first-class subject attribute, and value-freedom by construction (`PolicyDecision` carries reason
+  codes and policy ids only). It was already reached from the real query-execution path — not by
+  this session, but by prior ADR-0018 rollout work (`aida.authorization_gate.gate` →
+  `aida.workspace_service.authorize_enforced` → `aida.policy_engine.evaluate`, wired into both
+  `QueryExecutionGateway.validate` and `.execute`) — proven by the pre-existing
+  `tests/test_inv4_authorization_wiring.py`, both its static reachability scan and its behavioural
+  half (SHADOW proceeds and records, ENFORCE denies, an unresolved workspace is its own state).
+
+`policy_engine.py` is the surviving engine: richer, DB-integrated, value-free, and already the one
+production traffic reaches. abac.py/abac_api.py were dead weight duplicating a decision the
+platform had already made elsewhere, and were deleted rather than wired in — wiring in a second,
+weaker, disconnected evaluator alongside the one already carrying real traffic would have made the
+system's authorization story less honest, not more complete.
+
+### What was built
+
+- **Deleted**: src/aida/abac.py, src/aida/abac_api.py, tests/test_abac.py, the `abac_router`
+  mount in `main.py`, and the now-orphaned `POST /v1/abac/{policies,evaluate,simulate}` /
+  `GET /v1/abac/{policies,decisions}` routes. `AbacPolicyRecord`/`AbacDecisionRecord` ORM models
+  left in `models.py` (unused, harmless) rather than migrated away — dropping the underlying
+  `abac_policy`/`abac_decision` tables needs an Alembic migration, judged out of scope for this
+  item and flagged separately rather than bundled in silently.
+- **PG-6 (decision logging) kept honest**: abac.py's decision log was the value-freedom violation
+  above, so it was not "ported" — the real path's existing logging (`record_audit` around every
+  `authorization_gate.gate()` call on the query path, into `AuditEvent`; `record_divergence`/
+  `record_divergence_durably` into `AuthorizationShadowRecord` for SHADOW-mode divergences) was
+  confirmed as the actual, value-free decision log. `compliance_packs.py`'s ACCESS_REVIEW section
+  queried the now-dead `AbacDecisionRecord` (would have silently reported zero decisions and zero
+  denials forever, in a *compliance report*) — repointed to `AuditEvent` filtered on
+  `query.validate.gateway`/`query.execute.requested`.
+- **PG-8 (simulation) ported, not lost**: abac.py's `simulate(..., vary_subject_attrs)` had no
+  real equivalent on `policy_engine.py` or its callers — the existing `POST /v1/authorization-probes`
+  endpoint only answers "would *I* (the calling context) be allowed", never "who could see this"
+  across hypothetical subjects. Added `aida.policy_engine.simulate(policies, subjects, resource,
+  action, *, now)` — `evaluate` run once per subject, built directly on it rather than a second
+  implementation — and a new endpoint, `POST /v1/workspaces/{workspace_id}/authorization-simulations`
+  (`workspace_api.py`), which loads the organization's real `access_policy` rows
+  (`aida.business_graph.load_policies`) and the resource's real business-node classification closure
+  (`aida.business_graph.classification_scope`), then evaluates every caller-supplied hypothetical
+  `{principal_kind, roles, purpose}` against them. Also extended `AuthorizationProbeRequest` to
+  accept `quality_state`/`freshness_state` (it already took `classifications`/`certification` but
+  not the other two AU-11 axes) so the probe can answer against all four.
+- **AU-11 (real attributes on the gate call)**: `validate`/`execute` used to call `gate()` with no
+  `classifications`/`certification`/`quality_state`/`freshness_state` at all (defaulting to
+  `frozenset()`/`None`), so every policy rule keyed on those axes — even though `policy_engine.py`
+  already modeled them — was structurally unreachable. New module `policy_resource_attributes.py`
+  resolves one worst-case value per axis from the query's actual referenced tables (parsed once via
+  `self.guard.validate` *before* gating, threaded into `_run_validation` rather than re-parsed):
+  classification is the union of `MetadataColumn.classification` (module 05); certification is
+  `CERTIFIED` only if every referenced table has a currently-active `AssetCertification` (GL-5/CT-5,
+  via `aida.asset_certification.current_asset_certification`), else `UNCERTIFIED`; quality_state
+  prefers an open `DataQualityIncident` (module 11) and falls back to the latest
+  `DataQualityObservation.status`; freshness_state runs `aida.freshness.evaluate_freshness` (DQ-2,
+  ADR-0016: scan age is never presented as freshness) per table against its
+  `FreshnessWatermarkConfig`/`FreshnessObservation` and takes the worst. All four values now reach
+  both gate calls in `query_gateway.py`.
+- **Two pre-existing latent bugs surfaced and fixed**, both only reachable once a real end-to-end
+  DB test actually exercised this path (nothing had before): `AuditEvent.id`'s `BigInteger` primary
+  key did not autoincrement under SQLite (`.with_variant(Integer, "sqlite")` in `models.py` — the
+  same fix pattern UX-12's entry above independently hit for `asset_certification_is_active`, one
+  entry up in this log); and `asset_certification.py`/`freshness.py` compared an aware `now` against
+  a SQLite-naive stored timestamp with a raw `>`/`-` instead of through `aida.timeutil.as_utc`/
+  `is_live`, the same fix `workspace_service._expired` already needed and the fix UX-12 applied
+  locally in `catalog_read_model.py` rather than at the source — this time fixed at the source
+  (`asset_certification.py` itself), since AU-11's new caller does not pre-normalize the way
+  `catalog_read_model.py` does.
+
+### Tests
+
+New `tests/test_au11_policy_resource_attributes.py` (11 tests): 7 resolver unit tests against a
+real (sqlite) database — no referenced tables resolves to every axis's empty default; classification
+is the union across a table's columns; certification is `UNCERTIFIED` if any referenced table lacks
+an active certification and `CERTIFIED` once all do, with expiry re-falling-back to `UNCERTIFIED`;
+quality_state prefers an open CRITICAL incident over a healthy observation and falls back to the
+latest observation status; freshness_state takes the worst (`STALE`) across a stale/fresh table
+pair — plus 4 end-to-end tests driving a real `QueryExecutionGateway.execute` call (real sqlite DB,
+`FakeSqlExecutor` standing in for the warehouse connector) with a real `AccessPolicy` row: a DENY
+keyed on `classifications ∋ PII` rejects a query touching the PII column and allows the same query
+once the column is dropped; an ALLOW suppressed by `condition.deny_when_quality_state_in` (the
+shape `_matches_state_condition` and the pre-existing `test_quality_state_can_gate_access` establish
+— the condition suppresses the ALLOW while the state matches, and default-deny takes over) rejects
+a query against a table with an open CRITICAL incident and allows the same query once there is
+none. `tests/test_policy_engine.py` gained 3 tests for `simulate()` (varies HUMAN/AGENT/SERVICE
+against a classification-keyed DENY; empty-subjects returns no decisions; equivalence to calling
+`evaluate` per subject). `tests/support/doubles.py`'s `CatalogSession` extended (entity+name-aware
+routing rather than raw column-count alone, since two of the new lookups are 1- and 2-column selects
+that collided with existing shapes) to model the five new catalog lookups AU-11 added, with honest
+empty defaults matching its existing convention for bindings/tokenized-columns.
+`tests/test_inv7_attributability.py`'s `_READ_ONLY_POST_ROUTES` swapped its `POST /v1/abac/simulate`
+entry for the new simulation endpoint. `scripts/perf_baseline.py`'s benchmark and
+`tests/test_perf_baseline_gate.py` retargeted from `abac.evaluate()` to `policy_engine.evaluate()`
+(same 500-policy, 50-call-per-iteration shape); `Docs/90-reference/perf-baseline.json` and
+`Docs/90-reference/openapi-baseline.json` regenerated via each script's own `--accept-baseline`.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4 contracts kept (no new
+contract needed — `policy_resource_attributes.py` is a plain leaf-ward addition). Full `pytest`
+suite green (exit 0, zero failures) after the doc-claims gate (`test_doc_claims.py`) was brought
+current: every stale abac.py/abac_api.py/aida.abac.evaluate citation across `03-tracker.md`,
+`04-end-to-end-audit-2026-08-30.md`, this log, and two `Docs/review-2026-08/atlan-context/`
+research notes annotated "does not exist any more" (or de-backticked where the dotted-module
+collector has no such exemption) rather than silently left to rot into false claims.
+
+### Scope note
+
+`quality_coupling.py`/`trust_scoring.py` wiring (DQ-3/RT-7/AG-6/TL-3) and the retrieval-stack work
+the end-to-end audit also flagged are explicitly out of scope for this item — concurrent sibling
+work per the task brief. `AU-11`'s quality_state resolution reads `DataQualityIncident`/
+`DataQualityObservation` directly rather than through `quality_coupling.py`'s not-yet-wired gating
+API, so it does not depend on that sibling work landing first.

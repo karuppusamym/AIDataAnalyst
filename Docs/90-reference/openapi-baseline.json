@@ -1,266 +1,6 @@
 {
   "components": {
     "schemas": {
-      "AbacEvaluateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "environment_attributes": {
-            "additionalProperties": true,
-            "title": "Environment Attributes",
-            "type": "object"
-          },
-          "resource_attributes": {
-            "additionalProperties": true,
-            "title": "Resource Attributes",
-            "type": "object"
-          },
-          "subject_attributes": {
-            "additionalProperties": true,
-            "title": "Subject Attributes",
-            "type": "object"
-          }
-        },
-        "required": [
-          "subject_attributes",
-          "resource_attributes"
-        ],
-        "title": "AbacEvaluateRequest",
-        "type": "object"
-      },
-      "AbacEvaluateResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "contributing_policies": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Contributing Policies",
-            "type": "array"
-          },
-          "decision": {
-            "title": "Decision",
-            "type": "string"
-          },
-          "evaluation_time_ms": {
-            "title": "Evaluation Time Ms",
-            "type": "number"
-          },
-          "policy_version": {
-            "title": "Policy Version",
-            "type": "string"
-          },
-          "reasons": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Reasons",
-            "type": "array"
-          }
-        },
-        "required": [
-          "decision",
-          "reasons",
-          "contributing_policies",
-          "evaluation_time_ms",
-          "policy_version"
-        ],
-        "title": "AbacEvaluateResponse",
-        "type": "object"
-      },
-      "AbacPolicyCreate": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "maxLength": 4000,
-            "minLength": 3,
-            "title": "Description",
-            "type": "string"
-          },
-          "effect": {
-            "enum": [
-              "PERMIT",
-              "DENY"
-            ],
-            "title": "Effect",
-            "type": "string"
-          },
-          "environment_conditions": {
-            "additionalProperties": true,
-            "title": "Environment Conditions",
-            "type": "object"
-          },
-          "name": {
-            "maxLength": 200,
-            "minLength": 2,
-            "title": "Name",
-            "type": "string"
-          },
-          "policy_key": {
-            "pattern": "^[a-z][a-z0-9_-]{1,99}$",
-            "title": "Policy Key",
-            "type": "string"
-          },
-          "priority": {
-            "default": 100,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Priority",
-            "type": "integer"
-          },
-          "resource_conditions": {
-            "additionalProperties": true,
-            "title": "Resource Conditions",
-            "type": "object"
-          },
-          "subject_conditions": {
-            "additionalProperties": true,
-            "title": "Subject Conditions",
-            "type": "object"
-          }
-        },
-        "required": [
-          "policy_key",
-          "name",
-          "description",
-          "effect"
-        ],
-        "title": "AbacPolicyCreate",
-        "type": "object"
-      },
-      "AbacPolicyRead": {
-        "additionalProperties": false,
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "created_by": {
-            "title": "Created By",
-            "type": "string"
-          },
-          "description": {
-            "maxLength": 4000,
-            "minLength": 3,
-            "title": "Description",
-            "type": "string"
-          },
-          "effect": {
-            "enum": [
-              "PERMIT",
-              "DENY"
-            ],
-            "title": "Effect",
-            "type": "string"
-          },
-          "environment_conditions": {
-            "additionalProperties": true,
-            "title": "Environment Conditions",
-            "type": "object"
-          },
-          "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "name": {
-            "maxLength": 200,
-            "minLength": 2,
-            "title": "Name",
-            "type": "string"
-          },
-          "organization_id": {
-            "format": "uuid",
-            "title": "Organization Id",
-            "type": "string"
-          },
-          "policy_key": {
-            "pattern": "^[a-z][a-z0-9_-]{1,99}$",
-            "title": "Policy Key",
-            "type": "string"
-          },
-          "priority": {
-            "default": 100,
-            "maximum": 1000.0,
-            "minimum": 0.0,
-            "title": "Priority",
-            "type": "integer"
-          },
-          "resource_conditions": {
-            "additionalProperties": true,
-            "title": "Resource Conditions",
-            "type": "object"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "subject_conditions": {
-            "additionalProperties": true,
-            "title": "Subject Conditions",
-            "type": "object"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "version": {
-            "title": "Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "policy_key",
-          "name",
-          "description",
-          "effect",
-          "id",
-          "organization_id",
-          "version",
-          "status",
-          "created_by",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "AbacPolicyRead",
-        "type": "object"
-      },
-      "AbacSimulateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "environment_attributes": {
-            "additionalProperties": true,
-            "title": "Environment Attributes",
-            "type": "object"
-          },
-          "resource_attributes": {
-            "additionalProperties": true,
-            "title": "Resource Attributes",
-            "type": "object"
-          },
-          "subject_attributes": {
-            "additionalProperties": true,
-            "title": "Subject Attributes",
-            "type": "object"
-          },
-          "vary_subject_attributes": {
-            "items": {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            "maxItems": 100,
-            "title": "Vary Subject Attributes",
-            "type": "array"
-          }
-        },
-        "required": [
-          "subject_attributes",
-          "resource_attributes"
-        ],
-        "title": "AbacSimulateRequest",
-        "type": "object"
-      },
       "AccessPolicyCreate": {
         "additionalProperties": false,
         "properties": {
@@ -2870,6 +2610,18 @@
             ],
             "title": "Datasource Id"
           },
+          "freshness_state": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freshness State"
+          },
           "principal_kind": {
             "default": "HUMAN",
             "enum": [
@@ -2879,6 +2631,18 @@
             ],
             "title": "Principal Kind",
             "type": "string"
+          },
+          "quality_state": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality State"
           },
           "resource_id": {
             "anyOf": [
@@ -2922,6 +2686,156 @@
           "resource_type"
         ],
         "title": "AuthorizationProbeRequest",
+        "type": "object"
+      },
+      "AuthorizationSimulationRead": {
+        "additionalProperties": false,
+        "properties": {
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/SimulatedDecision"
+            },
+            "title": "Decisions",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "decisions"
+        ],
+        "title": "AuthorizationSimulationRead",
+        "type": "object"
+      },
+      "AuthorizationSimulationRequest": {
+        "additionalProperties": false,
+        "description": "\"Who could see this?\" -- one resource, several hypothetical subjects.\n\nUnlike `AuthorizationProbeRequest`, which answers for the calling\nprincipal's own real membership, this varies `subjects` directly against\nthe ABAC policy layer (`aida.policy_engine.simulate`) -- the same engine\n`authorization-probes` and the query-execution path both use -- so an\naccess review can ask \"would a Steward see this? An Agent?\" without those\nprincipals needing to exist yet.",
+        "properties": {
+          "action": {
+            "enum": [
+              "READ_METADATA",
+              "READ_DATA",
+              "PROPOSE",
+              "APPROVE",
+              "EXECUTE_TOOL",
+              "CONSUME_CONTEXT",
+              "EXPORT"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "certification": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certification"
+          },
+          "classifications": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Classifications",
+            "type": "array"
+          },
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "freshness_state": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freshness State"
+          },
+          "quality_state": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality State"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Id"
+          },
+          "resource_type": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "schema_name": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schema Name"
+          },
+          "subjects": {
+            "items": {
+              "$ref": "#/components/schemas/SimulatedSubject"
+            },
+            "maxItems": 25,
+            "minItems": 1,
+            "title": "Subjects",
+            "type": "array"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "action",
+          "resource_type",
+          "subjects"
+        ],
+        "title": "AuthorizationSimulationRequest",
         "type": "object"
       },
       "BiArtifactImportRead": {
@@ -18481,6 +18395,109 @@
         "title": "SemanticModelVersionRead",
         "type": "object"
       },
+      "SimulatedDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed": {
+            "title": "Allowed",
+            "type": "boolean"
+          },
+          "masked_classifications": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Masked Classifications",
+            "type": "array"
+          },
+          "matched_policy_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matched Policy Code"
+          },
+          "principal_kind": {
+            "enum": [
+              "HUMAN",
+              "AGENT",
+              "SERVICE"
+            ],
+            "title": "Principal Kind",
+            "type": "string"
+          },
+          "reason_code": {
+            "title": "Reason Code",
+            "type": "string"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Roles",
+            "type": "array"
+          },
+          "row_filters": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Row Filters",
+            "type": "array"
+          }
+        },
+        "required": [
+          "principal_kind",
+          "roles",
+          "allowed",
+          "reason_code",
+          "matched_policy_code",
+          "masked_classifications",
+          "row_filters"
+        ],
+        "title": "SimulatedDecision",
+        "type": "object"
+      },
+      "SimulatedSubject": {
+        "additionalProperties": false,
+        "description": "One hypothetical \"what if this principal asked\" case (PG-8).",
+        "properties": {
+          "principal_kind": {
+            "default": "HUMAN",
+            "enum": [
+              "HUMAN",
+              "AGENT",
+              "SERVICE"
+            ],
+            "title": "Principal Kind",
+            "type": "string"
+          },
+          "purpose": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Purpose"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Roles",
+            "type": "array"
+          }
+        },
+        "title": "SimulatedSubject",
+        "type": "object"
+      },
       "SlaStatusResponse": {
         "additionalProperties": false,
         "properties": {
@@ -22921,694 +22938,6 @@
         "summary": "MCP JSON-RPC 2.0 endpoint",
         "tags": [
           "mcp"
-        ]
-      }
-    },
-    "/v1/abac/decisions": {
-      "get": {
-        "operationId": "list_decisions_v1_abac_decisions_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "organization_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Organization Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "minimum": 0,
-              "title": "Offset",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Principal-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Type",
-            "required": false,
-            "schema": {
-              "default": "USER",
-              "title": "X-Principal-Type",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Organization-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Organization-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Roles",
-            "required": false,
-            "schema": {
-              "default": "Viewer",
-              "title": "X-Roles",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Business-Purpose",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Business-Purpose"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Page"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Audit trail of ABAC decisions",
-        "tags": [
-          "abac"
-        ]
-      }
-    },
-    "/v1/abac/evaluate": {
-      "post": {
-        "operationId": "evaluate_access_v1_abac_evaluate_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "X-Principal-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Principal-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Type",
-            "required": false,
-            "schema": {
-              "default": "USER",
-              "title": "X-Principal-Type",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Organization-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Organization-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Roles",
-            "required": false,
-            "schema": {
-              "default": "Viewer",
-              "title": "X-Roles",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Business-Purpose",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Business-Purpose"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AbacEvaluateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AbacEvaluateResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Evaluate an ABAC access decision",
-        "tags": [
-          "abac"
-        ]
-      }
-    },
-    "/v1/abac/policies": {
-      "get": {
-        "operationId": "list_policies_v1_abac_policies_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "organization_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Organization Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
-            "name": "limit",
-            "required": false,
-            "schema": {
-              "default": 50,
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limit",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "query",
-            "name": "offset",
-            "required": false,
-            "schema": {
-              "default": 0,
-              "minimum": 0,
-              "title": "Offset",
-              "type": "integer"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Principal-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Type",
-            "required": false,
-            "schema": {
-              "default": "USER",
-              "title": "X-Principal-Type",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Organization-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Organization-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Roles",
-            "required": false,
-            "schema": {
-              "default": "Viewer",
-              "title": "X-Roles",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Business-Purpose",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Business-Purpose"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Page"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List ABAC policies for an organization",
-        "tags": [
-          "abac"
-        ]
-      },
-      "post": {
-        "operationId": "create_policy_v1_abac_policies_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "X-Principal-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Principal-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Type",
-            "required": false,
-            "schema": {
-              "default": "USER",
-              "title": "X-Principal-Type",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Organization-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Organization-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Roles",
-            "required": false,
-            "schema": {
-              "default": "Viewer",
-              "title": "X-Roles",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Business-Purpose",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Business-Purpose"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AbacPolicyCreate"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AbacPolicyRead"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create an ABAC policy",
-        "tags": [
-          "abac"
-        ]
-      }
-    },
-    "/v1/abac/simulate": {
-      "post": {
-        "operationId": "simulate_access_v1_abac_simulate_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "X-Principal-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Principal-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Principal-Type",
-            "required": false,
-            "schema": {
-              "default": "USER",
-              "title": "X-Principal-Type",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Organization-Id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "format": "uuid",
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Organization-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Roles",
-            "required": false,
-            "schema": {
-              "default": "Viewer",
-              "title": "X-Roles",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Authorization"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Business-Purpose",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Business-Purpose"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AbacSimulateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AbacEvaluateResponse"
-                  },
-                  "title": "Response Simulate Access V1 Abac Simulate Post",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Simulate ABAC policy evaluation",
-        "tags": [
-          "abac"
         ]
       }
     },
@@ -69664,6 +68993,145 @@
         "summary": "Get Tool Certification Status",
         "tags": [
           "governed-tools"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}/authorization-simulations": {
+      "post": {
+        "description": "\"Who could see this?\" (PG-8) -- one resource, several hypothetical subjects.\n\nDeliberately built on `aida.policy_engine.simulate`, the same pure engine\n`authorization-probes` and the query-execution path (`query_gateway.py`)\nboth evaluate through -- not a second, disconnected evaluator -- so this\nanswers with the policies actually enforced rather than a simulation that\ncould drift from them. Read-only and value-free (INV-6): reason codes and\npolicy codes, never data, and the hypothetical subjects a caller supplies\ndo not need to exist as real principals or workspace members.",
+        "operationId": "simulate_authorization_v1_workspaces__workspace_id__authorization_simulations_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizationSimulationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationSimulationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Simulate Authorization",
+        "tags": [
+          "workspaces"
         ]
       }
     },

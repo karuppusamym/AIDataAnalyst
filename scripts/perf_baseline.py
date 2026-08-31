@@ -55,9 +55,11 @@ just to have something to time):
   - ``sql_guard_validate_adversarial_corpus`` -- ``SqlGuard.validate()``, the
     query gateway's deterministic guard pipeline (QG-1's own adversarial SQL
     corpus, ``tests/fixtures/adversarial_sql_corpus/*.json``, is the input).
-  - ``abac_evaluate_500_policies`` -- ``abac.evaluate()`` over 500 policies,
-    the exact scenario PG-1's own ``test_evaluation_under_50ms_with_500_
-    policies`` p95 test already exercises.
+  - ``policy_engine_evaluate_500_policies`` -- ``policy_engine.evaluate()`` over
+    500 policies, the engine actually wired into the query-execution path
+    (``aida.authorization_gate.gate`` -> ``aida.workspace_service.authorize`` ->
+    ``aida.policy_engine.evaluate``), the same p95<50ms target scenario PG-1
+    names.
   - ``fusion_ranking_rrf_500_candidates`` -- ``fuse_results()``, hybrid
     retrieval's reciprocal-rank-fusion combiner, over a synthetic
     500-candidate catalog.
@@ -160,35 +162,44 @@ def _make_sql_guard_benchmark() -> Benchmark:
     )
 
 
-def _make_abac_benchmark() -> Benchmark:
-    import aida.abac as abac_module
+def _make_policy_engine_benchmark() -> Benchmark:
+    import uuid
 
-    policies = [
-        abac_module.AbacPolicy(
-            id=f"p{i}",
-            policy_key="perf-baseline",
+    import aida.policy_engine as policy_engine_module
+
+    policies = tuple(
+        policy_engine_module.PolicyRecord(
+            id=uuid.uuid5(uuid.NAMESPACE_URL, f"perf-baseline-policy-{i}"),
+            code=f"perf-baseline-policy-{i}",
             version=1,
-            name=f"perf baseline policy {i}",
-            effect="PERMIT" if i % 2 == 0 else "DENY",
-            subject_conditions={"role": f"role_{i}"},
-            resource_conditions={"classification": f"class_{i}"},
-            environment_conditions={},
+            effect="ALLOW" if i % 2 == 0 else "DENY",
             priority=i,
+            subject_match={"roles": [f"role_{i}"]},
+            resource_match={"classifications": [f"class_{i}"]},
+            action_match=("READ_DATA",),
         )
         for i in range(500)
-    ]
+    )
+    subject = policy_engine_module.Subject(
+        principal_id="perf-baseline-subject",
+        principal_kind="HUMAN",
+        roles=frozenset({"role_250"}),
+    )
+    resource = policy_engine_module.Resource(
+        resource_type="datasource",
+        resource_id="perf-baseline-resource",
+        classifications=frozenset({"class_250"}),
+    )
 
     def run_iteration() -> None:
         for _ in range(50):
-            abac_module.evaluate(
-                {"role": "role_250"}, {"classification": "class_250"}, {}, policies
-            )
+            policy_engine_module.evaluate(policies, subject, resource, "READ_DATA")
 
     return Benchmark(
-        name="abac_evaluate_500_policies",
+        name="policy_engine_evaluate_500_policies",
         description=(
-            "abac.evaluate() over 500 policies -- PG-1's own p95<50ms target scenario "
-            "(tests/test_abac.py::TestPerformance) -- 50 calls per measured iteration."
+            "policy_engine.evaluate() over 500 policies -- the engine actually wired "
+            "into the query-execution path -- 50 calls per measured iteration."
         ),
         run_iteration=run_iteration,
         iterations=20,
@@ -273,7 +284,7 @@ def all_benchmarks() -> list[Benchmark]:
     `find_regressions` don't pay for importing the full application."""
     return [
         _make_sql_guard_benchmark(),
-        _make_abac_benchmark(),
+        _make_policy_engine_benchmark(),
         _make_fusion_ranking_benchmark(),
         _make_openapi_generation_benchmark(),
     ]

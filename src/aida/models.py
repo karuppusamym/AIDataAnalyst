@@ -4419,7 +4419,15 @@ class AuditEvent(Base):
         Index("ix_audit_correlation", "correlation_id"),
     )
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # `.with_variant(Integer, "sqlite")`: SQLite only rowid-aliases a primary key
+    # column declared literally `INTEGER PRIMARY KEY`, so a bare `BigInteger` compiles
+    # to `BIGINT` there and SQLAlchemy stops treating the column as autoincrementing
+    # (every insert then supplies a NULL `id` and SQLite's NOT NULL constraint fires).
+    # PostgreSQL is unaffected -- the variant only changes what SQLite's DDL compiler
+    # emits, not the production `BIGINT`/`BIGSERIAL` column.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
+    )
     organization_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), index=True
     )

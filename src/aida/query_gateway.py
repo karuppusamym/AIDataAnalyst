@@ -25,6 +25,10 @@ from aida.models import (
     MetadataTable,
     QueryExecution,
 )
+from aida.policy_resource_attributes import (
+    resolve_referenced_table_ids,
+    resolve_resource_attributes,
+)
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext
 
@@ -33,7 +37,7 @@ from aida.security import SecurityContext
 # tests and `sql_redaction.py`'s docstring reference it as `query_gateway.audit_sql_hash`.
 from aida.signing import audit_sql_hash as audit_sql_hash
 from aida.signing import resolve_signing_provider
-from aida.sql_guard import SqlGuard
+from aida.sql_guard import SqlGuard, SqlValidationResult
 from aida.sql_redaction import redact_sql_literals as _redact_sql_literals
 from aida.sql_validation import (
     EstimateOutcome,
@@ -324,8 +328,8 @@ class QueryExecutionGateway:
         session: AsyncSession,
         *,
         datasource: DataSource,
-        sql: str,
         requested_limit: int | None,
+        guard_result: SqlValidationResult,
     ) -> _ValidationOutcome:
         """The one deterministic validation pipeline (review item N14).
 
@@ -341,9 +345,16 @@ class QueryExecutionGateway:
 
         INV-2: the only connector call reachable from here is
         `estimate_read_query`. Execution stays in `execute`.
+
+        `guard_result` is the caller's own `self.guard.validate(...)` call
+        (AU-11), not one computed fresh here: both `validate` and `execute`
+        need the parsed statement's `referenced_tables` *before* they gate --
+        to resolve the query's real classification/certification/quality/
+        freshness attributes onto the gate call (`policy_resource_attributes`)
+        -- so the parse happens once, before authorization, and its result is
+        threaded through rather than re-parsed after the fact.
         """
         dialect = datasource.dialect
-        guard_result = self.guard.validate(sql, dialect=dialect, requested_limit=requested_limit)
         findings: list[SqlFinding] = findings_from_guard(guard_result)
         limit_finding = row_limit_finding(
             guard_result,
@@ -459,6 +470,17 @@ class QueryExecutionGateway:
         exactly the principal who should be allowed to find out that a statement is
         wrong without being allowed to run it.
         """
+        # Parsed once, before authorization (AU-11): the gate needs the statement's
+        # real referenced tables to resolve classification/certification/quality/
+        # freshness onto the decision, and `_run_validation` reuses this same
+        # `guard_result` rather than re-parsing.
+        guard_result = self.guard.validate(
+            sql, dialect=datasource.dialect, requested_limit=requested_limit
+        )
+        table_ids = await resolve_referenced_table_ids(
+            session, datasource, guard_result.referenced_tables
+        )
+        resource_attributes = await resolve_resource_attributes(session, datasource, table_ids)
         try:
             await gate(
                 session,
@@ -469,6 +491,10 @@ class QueryExecutionGateway:
                 resource_id=str(datasource.id),
                 workspace_id=workspace_id,
                 datasource_id=datasource.id,
+                classifications=resource_attributes.classifications,
+                certification=resource_attributes.certification,
+                quality_state=resource_attributes.quality_state,
+                freshness_state=resource_attributes.freshness_state,
             )
         except AuthorizationDenied as exc:
             record_audit(
@@ -488,8 +514,8 @@ class QueryExecutionGateway:
         outcome = await self._run_validation(
             session,
             datasource=datasource,
-            sql=sql,
             requested_limit=requested_limit,
+            guard_result=guard_result,
         )
         report = outcome.report
         sql_hash = await self._sign_sql(sql)
@@ -625,7 +651,20 @@ class QueryExecutionGateway:
             # REJECTED row naming who asked and why it was refused, which is the
             # evidence an investigation needs and which gating before the record would
             # throw away. Nothing has left the platform at this point -- the connector
-            # is opened inside `_run_validation`, below.
+            # is opened inside `_run_validation`, below. Parsing the statement here
+            # (AU-11) is safe ahead of that same rule: sqlglot parsing is local and
+            # touches no connector, so it can resolve the gate's real
+            # classification/certification/quality/freshness attributes before
+            # authorization without moving the connector-opening line at all.
+            guard_result = self.guard.validate(
+                sql, dialect=datasource.dialect, requested_limit=requested_limit
+            )
+            table_ids = await resolve_referenced_table_ids(
+                session, datasource, guard_result.referenced_tables
+            )
+            resource_attributes = await resolve_resource_attributes(
+                session, datasource, table_ids
+            )
             try:
                 await gate(
                     session,
@@ -636,6 +675,10 @@ class QueryExecutionGateway:
                     resource_id=str(datasource.id),
                     workspace_id=workspace_id,
                     datasource_id=datasource.id,
+                    classifications=resource_attributes.classifications,
+                    certification=resource_attributes.certification,
+                    quality_state=resource_attributes.quality_state,
+                    freshness_state=resource_attributes.freshness_state,
                 )
             except AuthorizationDenied as exc:
                 raise AuthorizationRejected(
@@ -648,8 +691,8 @@ class QueryExecutionGateway:
             outcome = await self._run_validation(
                 session,
                 datasource=datasource,
-                sql=sql,
                 requested_limit=requested_limit,
+                guard_result=guard_result,
             )
             report = outcome.report
             execution.normalized_sql = report.normalized_sql

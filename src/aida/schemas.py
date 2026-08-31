@@ -3308,6 +3308,8 @@ class AuthorizationProbeRequest(ApiModel):
     schema_name: str | None = Field(default=None, max_length=200)
     classifications: list[str] = Field(default_factory=list, max_length=20)
     certification: str | None = Field(default=None, max_length=40)
+    quality_state: str | None = Field(default=None, max_length=40)
+    freshness_state: str | None = Field(default=None, max_length=40)
     principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
 
 
@@ -3320,6 +3322,61 @@ class AuthorizationProbeRead(ApiModel):
     masked_classifications: list[str]
     row_filters: list[str]
     evaluated_policy_count: int
+
+
+class SimulatedSubject(ApiModel):
+    """One hypothetical "what if this principal asked" case (PG-8)."""
+
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
+    roles: list[str] = Field(default_factory=list, max_length=20)
+    purpose: str | None = Field(default=None, max_length=100)
+
+
+class AuthorizationSimulationRequest(ApiModel):
+    """"Who could see this?" -- one resource, several hypothetical subjects.
+
+    Unlike `AuthorizationProbeRequest`, which answers for the calling
+    principal's own real membership, this varies `subjects` directly against
+    the ABAC policy layer (`aida.policy_engine.simulate`) -- the same engine
+    `authorization-probes` and the query-execution path both use -- so an
+    access review can ask "would a Steward see this? An Agent?" without those
+    principals needing to exist yet.
+    """
+
+    workspace_id: UUID
+    action: Literal[
+        "READ_METADATA",
+        "READ_DATA",
+        "PROPOSE",
+        "APPROVE",
+        "EXECUTE_TOOL",
+        "CONSUME_CONTEXT",
+        "EXPORT",
+    ]
+    resource_type: str = Field(min_length=1, max_length=40)
+    resource_id: str | None = Field(default=None, max_length=120)
+    datasource_id: UUID | None = None
+    schema_name: str | None = Field(default=None, max_length=200)
+    classifications: list[str] = Field(default_factory=list, max_length=20)
+    certification: str | None = Field(default=None, max_length=40)
+    quality_state: str | None = Field(default=None, max_length=40)
+    freshness_state: str | None = Field(default=None, max_length=40)
+    subjects: list[SimulatedSubject] = Field(min_length=1, max_length=25)
+
+
+class SimulatedDecision(ApiModel):
+    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"]
+    roles: list[str]
+    allowed: bool
+    reason_code: str
+    matched_policy_code: str | None
+    masked_classifications: list[str]
+    row_filters: list[str]
+
+
+class AuthorizationSimulationRead(ApiModel):
+    workspace_id: UUID
+    decisions: list[SimulatedDecision]
 
 
 # --- DQ-1: Notification and Escalation Routing --------------------------------

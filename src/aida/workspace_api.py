@@ -16,8 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.business_graph import (
     assign,
     build_hierarchy,
+    classification_scope,
     descendants_count,
     extend_closure_for_new_node,
+    load_policies,
     rollup,
     rollup_freshness,
     tree,
@@ -34,17 +36,22 @@ from aida.models import (
     Workspace,
     WorkspaceMembership,
 )
+from aida.policy_engine import Resource, Subject
+from aida.policy_engine import simulate as simulate_policy
 from aida.schemas import (
     AccessPolicyCreate,
     AccessPolicyRead,
     AuthorizationProbeRead,
     AuthorizationProbeRequest,
+    AuthorizationSimulationRead,
+    AuthorizationSimulationRequest,
     BusinessAssignmentCreate,
     BusinessAssignmentRead,
     BusinessNodeCreate,
     BusinessNodeRead,
     BusinessNodeRollupRead,
     Page,
+    SimulatedDecision,
     SourceBindingCreate,
     SourceBindingDecision,
     SourceBindingRead,
@@ -593,6 +600,8 @@ async def probe_authorization(
         schema_name=body.schema_name,
         classifications=frozenset(body.classifications),
         certification=body.certification,
+        quality_state=body.quality_state,
+        freshness_state=body.freshness_state,
         principal_kind=body.principal_kind,
     )
     decision = result.decision
@@ -605,4 +614,78 @@ async def probe_authorization(
         masked_classifications=sorted(decision.masked_classifications) if decision else [],
         row_filters=list(decision.row_filters) if decision else [],
         evaluated_policy_count=len(decision.evaluated_policy_ids) if decision else 0,
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/authorization-simulations",
+    response_model=AuthorizationSimulationRead,
+)
+async def simulate_authorization(
+    workspace_id: UUID,
+    body: AuthorizationSimulationRequest,
+    context: SecurityContext = Depends(require_roles(*_ANY_MEMBER)),
+    session: AsyncSession = Depends(get_session),
+) -> AuthorizationSimulationRead:
+    """"Who could see this?" (PG-8) -- one resource, several hypothetical subjects.
+
+    Deliberately built on `aida.policy_engine.simulate`, the same pure engine
+    `authorization-probes` and the query-execution path (`query_gateway.py`)
+    both evaluate through -- not a second, disconnected evaluator -- so this
+    answers with the policies actually enforced rather than a simulation that
+    could drift from them. Read-only and value-free (INV-6): reason codes and
+    policy codes, never data, and the hypothetical subjects a caller supplies
+    do not need to exist as real principals or workspace members.
+    """
+    if body.workspace_id != workspace_id:
+        raise HTTPException(status_code=422, detail="workspace_id mismatch between path and body")
+    workspace = await session.get(Workspace, workspace_id)
+    if workspace is None or workspace.organization_id != context.organization_id:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    node_scope: frozenset[UUID] = frozenset()
+    if body.resource_id is not None:
+        node_scope = await classification_scope(
+            session, workspace.organization_id, body.resource_type, body.resource_id
+        )
+
+    resource = Resource(
+        resource_type=body.resource_type,
+        resource_id=body.resource_id,
+        classifications=frozenset(body.classifications),
+        business_node_ids=node_scope,
+        certification=body.certification,
+        datasource_id=body.datasource_id,
+        schema_name=body.schema_name,
+        quality_state=body.quality_state,
+        freshness_state=body.freshness_state,
+    )
+    subjects = tuple(
+        Subject(
+            principal_id=f"simulated-{index}",
+            principal_kind=simulated.principal_kind,
+            roles=frozenset(simulated.roles),
+            workspace_id=workspace_id,
+            purpose=simulated.purpose,
+            isolation_boundary_id=workspace.isolation_boundary_id,
+        )
+        for index, simulated in enumerate(body.subjects)
+    )
+    policies = await load_policies(session, workspace.organization_id)
+    decisions = simulate_policy(policies, subjects, resource, body.action)
+
+    return AuthorizationSimulationRead(
+        workspace_id=workspace_id,
+        decisions=[
+            SimulatedDecision(
+                principal_kind=simulated.principal_kind,
+                roles=simulated.roles,
+                allowed=decision.allowed,
+                reason_code=decision.reason_code,
+                matched_policy_code=decision.matched_policy_code,
+                masked_classifications=sorted(decision.masked_classifications),
+                row_filters=list(decision.row_filters),
+            )
+            for simulated, decision in zip(body.subjects, decisions, strict=True)
+        ],
     )
