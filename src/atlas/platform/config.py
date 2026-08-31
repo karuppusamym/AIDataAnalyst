@@ -6,6 +6,9 @@ for backward compatibility; new code should import from this module
 directly.
 """
 
+import difflib
+import os
+import sys
 from functools import lru_cache
 from typing import Literal
 
@@ -13,11 +16,32 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _running_under_pytest() -> bool:
+    """Whether the current process is a pytest run.
+
+    `PYTEST_VERSION` is set by pytest itself for the entire session, from
+    collection onward -- including module-level `Settings()`/`get_settings()`
+    calls at import time, unlike `PYTEST_CURRENT_TEST`, which is only set
+    during an individual test's own run phase and would miss those imports.
+    `sys.modules` is a belt-and-suspenders fallback for older pytest or
+    invocations that skip the env var.
+    """
+    return "PYTEST_VERSION" in os.environ or "pytest" in sys.modules
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="AIDA_",
         env_file_encoding="utf-8",
-        extra="ignore",
+        # C1 (2026-08-30 audit): a misspelled *value* (e.g. an invalid Literal)
+        # already fails closed; a misspelled *name* used to be silently
+        # discarded. "forbid" makes an unrecognized key passed directly to
+        # Settings(**kwargs) -- or read from a non-env source, e.g. a secrets
+        # file -- a loud error instead. It does NOT by itself catch a
+        # misspelled *env var* name (pydantic-settings' env source drops
+        # anything that doesn't match a known field before this ever sees it);
+        # `reject_unrecognized_aida_env_vars` below covers that gap.
+        extra="forbid",
     )
 
     service_name: str = "aida-control-plane"
@@ -280,6 +304,74 @@ class Settings(BaseSettings):
     @property
     def max_query_estimate_bytes(self) -> float:
         return float(self.max_bigquery_dry_run_bytes)
+
+    @classmethod
+    def _known_env_names(cls) -> set[str]:
+        """Every environment-variable name pydantic-settings will actually bind
+        to a field on this model, upper-cased for case-insensitive comparison.
+        `AIDA_`-prefixed for ordinary fields; unprefixed for the couple of
+        fields (the model-provider API keys) that use an explicit
+        `validation_alias` to match an external SDK's own env var name.
+        """
+        names: set[str] = set()
+        for field_name, field in cls.model_fields.items():
+            alias = field.validation_alias
+            if isinstance(alias, str):
+                names.add(alias.upper())
+            else:
+                names.add(f"AIDA_{field_name}".upper())
+        return names
+
+    @model_validator(mode="after")
+    def reject_unrecognized_aida_env_vars(self) -> "Settings":
+        # C1 (2026-08-30 audit): pydantic-settings' env source silently drops any
+        # env var whose name doesn't match a known field *before* validation ever
+        # sees it, so `extra="forbid"` above -- correct as far as it goes -- can't
+        # by itself catch a misspelled *name* like `AIDA_ENVIRONMNET`. This walks
+        # the real process environment instead.
+        #
+        # A blanket "any unrecognized AIDA_*-prefixed var is an error" would break
+        # a second, unrelated, and entirely legitimate use of the same prefix:
+        # `credential_reference="env://AIDA_SOME_DATASOURCE_DSN"` (aida.secrets)
+        # resolves arbitrary operator-chosen env var names this model has never
+        # heard of and never will -- see AIDA_SAMPLE_SOURCE_DSN in
+        # .env.example/compose.yaml. So this only flags a var whose name is a
+        # *close* (fuzzy, not exact) match of a real field's env var name: close
+        # enough to be almost certainly a typo of a known setting, not an
+        # intentionally-named credential reference.
+        known = self._known_env_names()
+        suspects: list[str] = []
+        for raw_name in os.environ:
+            name = raw_name.upper()
+            if not name.startswith("AIDA_") or name in known:
+                continue
+            match = difflib.get_close_matches(name, known, n=1, cutoff=0.84)
+            if match:
+                suspects.append(f"{raw_name} (did you mean {match[0]}?)")
+        if suspects:
+            raise ValueError(
+                "unrecognized AIDA_* environment variable name(s), likely typo'd: "
+                + "; ".join(sorted(suspects))
+            )
+        return self
+
+    @model_validator(mode="after")
+    def reject_implicit_environment_outside_tests(self) -> "Settings":
+        # C1 (2026-08-30 audit): `environment` defaulting to "development" is
+        # exactly how a missing or mistyped `AIDA_ENVIRONMENT` used to boot every
+        # production guard disabled -- no error, no log line. Requiring it
+        # explicitly everywhere except under pytest closes that hole. The shipped
+        # bootstrap paths (.env.example, compose.yaml) already set it explicitly,
+        # so this is a no-op for them; only a truly unconfigured process (or a
+        # unit test that doesn't care about `environment`) is affected, and the
+        # latter is exempted so the existing test suite keeps constructing bare
+        # `Settings(...)` without having to name it.
+        if "environment" not in self.model_fields_set and not _running_under_pytest():
+            raise ValueError(
+                "AIDA_ENVIRONMENT must be set explicitly; it no longer defaults "
+                "silently to 'development' outside of tests"
+            )
+        return self
 
     @model_validator(mode="after")
     def reject_insecure_production_configuration(self) -> "Settings":

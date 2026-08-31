@@ -3283,3 +3283,65 @@ stack wired into the live orchestration path, not deleted
   real graph coverage. (3) The vector stage requires an org to configure an approved embedding
   model route — with none configured (the default) it fails closed and the pipeline runs
   lexical + graph + fusion only, same posture as before this change.
+
+## 2026-08-31 — AU-3 (config fails closed on unknown/missing `AIDA_*` variables) closed
+
+- The audit's C1: `environment` defaulted to `"development"` and every production guard gated on
+  `self.environment == "production"`, while `model_config.extra = "ignore"` meant a misspelled env
+  var *name* (`AIDA_ENVIRONMNET=production`) was silently discarded — the process booted with every
+  guard disabled, no error, no log line. A mistyped *value* already failed closed; a mistyped *name*
+  failed open.
+- Flipped `extra` to `"forbid"` in `atlas/platform/config.py`'s `Settings.model_config`, as the audit
+  suggested. Then verified experimentally (a plain pydantic-settings 2.15 repro, independent of this
+  codebase) that `extra="forbid"` **does not by itself** catch a misspelled env var name:
+  `EnvSettingsSource.get_field_value` only ever looks up known field names against `os.environ` —
+  an unmatched key like `AIDA_ENVIRONMNET` never becomes part of the dict handed to model
+  validation, so there is nothing for `extra="forbid"` to reject. The audit's literal fix closes the
+  kwargs/non-env-source half of the gap (a stray keyword arg to `Settings(...)`, or an unrecognized
+  key from a future JSON/secrets source) but not the env-var-typo case it actually opens with. Filed
+  this as a real finding rather than shipping a fix that only looks like it works.
+- Closed the actual gap with a `model_validator(mode="after")`
+  (`reject_unrecognized_aida_env_vars`) that scans the real process environment for `AIDA_`-prefixed
+  names and flags any that `difflib.get_close_matches` (cutoff 0.84) resolves to a near-miss of a
+  known field's env name — `AIDA_ENVIRONMNET` → "did you mean AIDA_ENVIRONMENT?". Deliberately
+  narrower than "any unrecognized `AIDA_*` var is an error": `aida.secrets` already has a second,
+  legitimate, open-ended use of the same prefix — `credential_reference="env://AIDA_SOME_DSN"`
+  resolves an arbitrary operator-named env var this model was never meant to know about (see
+  `AIDA_SAMPLE_SOURCE_DSN`/`AIDA_SAMPLE_ORACLE_SOURCE_DSN`/`AIDA_SAMPLE_MSSQL_SOURCE_DSN` in
+  `.env.example`/`compose.yaml`, and `AIDA_LOCAL_MODEL_KEY`/`AIDA_TEST_SECRET`/
+  `AIDA_TEST_DATASOURCE_SECRET` used the same way across several test files). A blanket check would
+  have broken that mechanism on every real deployment the moment it named a fresh datasource
+  credential; a fuzzy near-miss check catches the actual documented failure mode (a typo of a real
+  setting name) without touching the open namespace. Confirmed none of the credential-reference names
+  actually in the repo trigger a false positive.
+- Added a second validator, `reject_implicit_environment_outside_tests`: `environment` must now be
+  present in `model_fields_set` (explicitly supplied by *some* source — env var, `.env` file, or init
+  kwarg — not just defaulted) everywhere except under pytest, detected via `"PYTEST_VERSION" in
+  os.environ or "pytest" in sys.modules` — checked at *import* time (not per-test), since several
+  test files do `from aida.main import ...` at module scope during collection, before
+  `PYTEST_CURRENT_TEST` would ever be set for an individual test. The shipped bootstrap paths
+  (`.env.example`, `compose.yaml`) both already set `AIDA_ENVIRONMENT` explicitly, so this is a
+  no-op for every real deployment path that exists today; only a truly unconfigured process (or a
+  test that doesn't care about `environment`, exempted) is affected.
+- Tests added to `tests/test_config.py` (8 new, all real — construct `Settings()` and assert):
+  the audit's exact repro raises; a second near-miss name (`AIDA_LOG_LEVL`) raises with the right
+  suggestion; the `AIDA_SAMPLE_SOURCE_DSN`-shaped credential-reference vars do *not* raise (the
+  regression test for the design decision above); leaving `environment` unset raises when
+  `_running_under_pytest` is monkeypatched false, and passes when `environment` is supplied under
+  the same monkeypatch; and a construction of `Settings()` from the literal, unmodified
+  `.env.example` file content (parsed and set via `monkeypatch.setenv`) succeeds end to end.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files, strict). Full `pytest` suite:
+  **3125 passed, 5 skipped, 1 xfailed** — one unrelated flaky wall-clock timing test
+  (`test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`,
+  no reference to `Settings`/`AIDA_` anywhere in the file) failed once under load and passed cleanly
+  on immediate rerun in isolation and in a second full-suite run; not touched by this change. No
+  other test file, fixture, `conftest.py` (none exist in this repo), `.env.example` entry, or
+  `compose.yaml` entry needed changing — the stricter config was already compatible with every
+  legitimate caller once the credential-reference exemption above was in place.
+- Known limitation, stated plainly rather than glossed over: the near-miss scan reads
+  `os.environ` directly, not the `.env` file `get_settings()` also merges in via
+  `Settings(_env_file=".env")` — a typo confined to a local `.env` file that is never exported as a
+  real environment variable would not be caught. Every deployment path that exists today
+  (`compose.yaml`, the AU-9 k8s manifests) injects real env vars, not a `.env` file, so this covers
+  the actual threat surface named in the audit; extending the same scan to a parsed dotenv file is a
+  small, well-scoped follow-up if a `.env`-based deployment path is ever added.
