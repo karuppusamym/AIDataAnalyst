@@ -2411,6 +2411,31 @@ class ModelRouteConfigurationRead(ApiModel):
     updated_at: datetime
 
 
+class KillSwitchEngageRequest(ApiModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    route_key: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
+
+
+class KillSwitchReleaseRequest(ApiModel):
+    reason: str = Field(min_length=3, max_length=2000)
+    route_key: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9._-]{2,99}$")
+
+
+class KillSwitchStateRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    route_key: str
+    scope: Literal["ORGANIZATION", "ROUTE"]
+    engaged: bool
+    reason: str | None
+    engaged_by: str | None
+    engaged_at: datetime | None
+    released_by: str | None
+    released_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class OpenLineageIngestRequest(ApiModel):
     datasource_id: UUID
     event: dict[str, Any]

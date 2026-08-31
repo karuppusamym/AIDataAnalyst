@@ -455,6 +455,8 @@ class GovernedAgentOrchestrator:
                     retrieval_hits=retrieval_hits,
                 )
                 output, model_evidence = await self.model_gateway.structured_completion(
+                    session=session,
+                    organization_id=datasource.organization_id,
                     route=approved_route,
                     system_instruction=(
                         "Return exactly one read-only SQL SELECT statement for the supplied "

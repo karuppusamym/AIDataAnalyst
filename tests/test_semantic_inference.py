@@ -1,9 +1,14 @@
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from aida.config import Settings
+from aida.db import Base
 from aida.main import app
 from aida.model_gateway import (
     ApprovedModelRoute,
@@ -18,6 +23,19 @@ from aida.semantic_inference import (
     model_input,
     validate_model_suggestion,
 )
+
+
+@pytest_asyncio.fixture
+async def session() -> AsyncIterator[AsyncSession]:
+    """In-memory sqlite session for `model_enrich_batch`'s DB-backed kill-switch
+    check (MG-2) -- same real-engine pattern as `test_bulk_governance_decisions.py`."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as active:
+        yield active
+    await engine.dispose()
 
 
 def _table(name: str) -> MetadataTable:
@@ -131,7 +149,9 @@ def test_business_semantics_api_contracts_are_exposed() -> None:
     assert "/v1/metadata-enrichment-proposals/{proposal_id}/promote-tool" in paths
 
 
-async def test_approved_model_batch_uses_strict_metadata_contract() -> None:
+async def test_approved_model_batch_uses_strict_metadata_contract(
+    session: AsyncSession,
+) -> None:
     table = _table("customer_accounts")
     columns = [_column(table, "account_id", 1, "UNCLASSIFIED")]
     baseline = infer_table_semantics(
@@ -163,6 +183,8 @@ async def test_approved_model_batch_uses_strict_metadata_contract() -> None:
     )
 
     suggestions, evidence = await model_enrich_batch(
+        session=session,
+        organization_id=uuid4(),
         gateway=gateway,
         route=route,
         inputs=[

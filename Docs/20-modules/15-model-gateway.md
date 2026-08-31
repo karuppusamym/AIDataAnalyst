@@ -120,7 +120,7 @@ Databricks' **Unity AI Gateway** — model/MCP/agent/skill registration, context
 | Adapters | Implemented — OpenAI Responses, Gemini GenerateContent, structured output, bounded retries/timeouts | Private endpoint adapters |
 | Evidence | Implemented — non-content | Unchanged |
 | Evaluations | Implemented — durable control evaluations | Bank model-risk corpus |
-| Kill switch | **Designed, not drilled** | Drilled quarterly with retained evidence |
+| Kill switch | Implemented and drilled once (MG-2, 2026-08-31) — `KillSwitchState` + governed `engage_kill_switch`/`release_kill_switch` endpoints (`ai_governance_api.py`), checked first in `ProviderNeutralModelGateway.structured_completion` ahead of every other activation condition, org-wide or per-route scope, audited both directions. Drill is in-process/local only so far (`tests/test_kill_switch_drill.py`) | Drilled quarterly against a deployed gateway, with retained evidence |
 | Credentials | `env://` for development; production rejects it | Workload identity, private routing |
 | Monitoring | Not connected | Spend, latency, refusal-rate, drift monitoring |
 
@@ -129,7 +129,7 @@ Databricks' **Unity AI Gateway** — model/MCP/agent/skill registration, context
 | ID | Item | Priority |
 |---|---|---|
 | MG-1 | Rotate development credentials; move to workload identity | P0 |
-| MG-2 | Kill-switch drill with retained evidence | P0 |
+| MG-2 | Kill-switch drill with retained evidence — **done in-process (2026-08-31); a timed run against a deployed gateway is not** | P0 |
 | MG-3 | Private routing (bank-approved route selection itself is implemented — see §14) | P0 |
 | MG-4 | Residency and retention contract certification | P0 |
 | MG-5 | Model-risk evaluation corpus | P0 |

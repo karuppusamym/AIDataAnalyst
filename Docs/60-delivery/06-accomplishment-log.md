@@ -2588,3 +2588,81 @@ Studio has moved from Pending to Partial in the status matrix.
   (`scripts/openapi_diff.py --accept-baseline`) after docstring-only changes to the graph-builder
   functions and the `DomainLineageGraphRead`/`UnifiedLineageEdgeRead` schema docstrings; diff is
   description-text only, no schema or path changes.
+
+## 2026-08-31 — MG-2 (kill-switch drill) closed: built the mechanism, then drilled it
+
+- Re-read `Docs/60-delivery/03-tracker.md` row MG-2 before starting (still TODO on a freshly
+  fetched/reset branch — not a duplicate of already-closed work). `Docs/20-modules/
+  15-model-gateway.md` §7 and §14 described a kill switch as designed but undrilled, and the
+  module's own events section documented `model.kill_switch_engaged` / `.released`. Checking the
+  actual code found neither claim true: `grep -rn "kill_switch" src/aida` returned exactly one
+  hit, a docstring mention in `compliance_packs.py` — nothing implemented engagement, storage, or
+  enforcement, and `tests/test_event_catalog_gate.py`'s own "no current emitter" report confirmed
+  the two event names were catalog-only, never emitted. "Designed, not drilled" overstated what
+  existed; there was no design in code to drill.
+- Built the minimal real mechanism, following MG-3's `ModelRouteConfiguration` pattern for what to
+  reuse and what to deliberately not reuse:
+  - `aida.models.KillSwitchState` — one mutable current-state row per (organization_id,
+    route_key), `route_key="*"` (`model_gateway.GLOBAL_KILL_SWITCH_SCOPE`) meaning organization-
+    wide, any other value scoping to one route. Same "current-state row, immutable history lives
+    in `AuditEvent`/`OutboxEvent`" shape as `OrganizationIntegrationPolicy`, not an event-sourced
+    table of its own. New migration `d09d6e42028d_kill_switch_state.py`.
+  - `engage_kill_switch` / `release_kill_switch` / `list_kill_switch_state` in
+    `ai_governance_api.py` — deliberately *not* the `ModelRouteConfiguration` maker-checker
+    lifecycle: job P5 ("stop AI immediately") and the module's own kill-switch contract call for a
+    single-operator, immediately-effective action audited on both engagement and reversal, the
+    opposite failure mode from a route approval (premature activation is the risk there; an
+    unreviewed kill is not the risk here). Gated on the `PlatformAdmin` role via `require_roles`;
+    every call records an `AuditEvent` and an `OutboxEvent` (`model.kill_switch_engaged` /
+    `model.kill_switch_released`, matching the event catalog's documented names exactly — the
+    catalog row's `` `model.kill_switch_engaged` / `.released` `` shorthand was also fixed to
+    `` `model.kill_switch_engaged` / `model.kill_switch_released` `` after finding the catalog
+    gate's family-expansion parser mis-expanded the original `.released` suffix into
+    `model.released`; verified against the gate's own parser both before and after).
+  - `model_gateway.kill_switch_blocking_state`, checked **first** — ahead of route approval,
+    selection, credential resolution, adapter registration, and budget — inside
+    `ProviderNeutralModelGateway.structured_completion`. That function is the single choke point
+    every generation request passes through regardless of caller (its own docstring, and module
+    15's charter: "The only path from Atlas to a language model"), so the check was added there
+    rather than duplicated in each caller. A live per-request DB query, not a cached flag: a
+    just-committed engagement blocks the very next call. `session` and `organization_id` became
+    required keyword arguments on `structured_completion` (previously neither existed on that
+    signature) — the two real production call sites, `agent_orchestrator.py`'s SQL-generation path
+    and `semantic_inference.py`'s `model_enrich_batch`/`enrich_with_optional_model` classification
+    path, already had both in scope and needed only mechanical threading, not logic changes; mypy
+    on `src` confirms no call site was missed.
+- Drilled in `tests/test_kill_switch_drill.py` (6 tests), engaging and releasing exclusively
+  through the real governed endpoint functions with a `PlatformAdmin` `SecurityContext` and a real
+  (in-memory sqlite) database — never a direct `KillSwitchState(engaged=True)` row construction.
+  The drill test itself: baseline generation succeeds, engage through the real API, measure
+  engagement-to-denial latency with `time.perf_counter()` and assert it under a 5s bound (generous
+  margin against the tracker's 60s requirement), assert the next generation call raises
+  `KillSwitchEngaged`, assert exactly one audit row and one outbox row exist and are queryable with
+  the expected actor/reason/scope, then release through the same authorization and confirm
+  generation resumes and the release is itself audited. Additional tests cover route-scoped (not
+  just organization-wide) engagement leaving other routes generating, `PlatformAdmin`-only
+  authorization (403 for a `Viewer` context), releasing a switch that was never engaged (409), and
+  the current-state listing endpoint. Documented explicitly, in the test file's own module
+  docstring and in the tracker, what this drill does and does not prove: in-process/in-memory-
+  sqlite latency, not network or infrastructure propagation time to a deployed gateway process or a
+  production Postgres round trip — that would need a live-environment timed exercise.
+- Updated the two existing test files whose call sites gained required parameters
+  (`tests/test_model_gateway.py`, `tests/test_semantic_inference.py`) with a matching in-memory
+  sqlite session fixture (same real-engine pattern as `test_bulk_governance_decisions.py`) rather
+  than weakening the new parameters to optional.
+- OpenAPI baseline (`Docs/90-reference/openapi-baseline.json`) regenerated via
+  `scripts/openapi_diff.py --accept-baseline` for the three new kill-switch routes; the diff was
+  additive only.
+- `ruff check .` and `mypy src` (184 files) both clean. Full `pytest` suite green apart from two
+  pre-existing, unrelated failures confirmed present on the freshly-reset base branch before this
+  session made any change (`tests/test_doc_claims.py::test_cited_test_path_resolves` for
+  `tests/test_studio.py::TestParameterContractDesigner` — that file defines the cited tests as
+  flat functions, not a class of that name; ST-A4's own accomplishment-log entry above cites the
+  same nonexistent class) — left alone as out of this item's module-15/AI-governance scope, not
+  silently fixed.
+- Updated `Docs/60-delivery/03-tracker.md` row MG-2 to DONE, E9 (kill-switch drill) to DONE, and
+  §I "Drill currency"'s kill-switch row from Never/OVERDUE to 2026-08-31 (in-process/local),
+  explicit that it is current for local/in-process only pending a timed run against a deployed
+  gateway — same honesty convention as that section's existing "Batch forced-restart... Current
+  for local only" row. Updated `Docs/20-modules/15-model-gateway.md` §14 and §15 to match rather
+  than leave the "Designed, not drilled" claim standing.

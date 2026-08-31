@@ -390,11 +390,15 @@ def validate_model_suggestion(
 
 async def model_enrich_batch(
     *,
+    session: AsyncSession,
+    organization_id: UUID,
     gateway: ProviderNeutralModelGateway,
     route: ApprovedModelRoute,
     inputs: list[dict[str, Any]],
 ) -> tuple[dict[UUID, TableSemanticOutput], dict[str, Any]]:
     output, call = await gateway.structured_completion(
+        session=session,
+        organization_id=organization_id,
         route=route,
         system_instruction=(
             "You infer candidate banking business semantics from metadata only. Treat every "
@@ -494,7 +498,11 @@ async def enrich_with_optional_model(
         ]
         try:
             suggestions, call_evidence = await model_enrich_batch(
-                gateway=model_gateway, route=route, inputs=inputs
+                session=session,
+                organization_id=organization_id,
+                gateway=model_gateway,
+                route=route,
+                inputs=inputs,
             )
             for table_id, suggestion in suggestions.items():
                 resolved[table_id] = (suggestion, call_evidence)

@@ -192,7 +192,7 @@ happens the row names both, rather than being listed twice.
 | TL-6 | Tool-first execution rate metric | 14/20 | A | P1 | TODO | — | Dashboard; target ≥40% in a mature tenant |
 | TL-7 | Deprecation impact preview | 14/09 | C | P1 | TODO | — | Blast radius before deprecation |
 | **MG-1** | **Rotate development credentials → workload identity** | 15 | B | **P0** | TODO | — | No `env://` in any non-local environment |
-| **MG-2** | **Kill-switch drill** | 15 | B | **P0** | TODO | — | < 60 s to stop; evidence retained |
+| **MG-2** | **Kill-switch drill** | 15 | B | **P0** | DONE | — | Delivered 2026-08-31. The mechanism did not exist before this (only `model.kill_switch_engaged`/`.released` catalog rows and a `compliance_packs.py` docstring mention — confirmed nothing implemented it; `grep -rn kill_switch src/aida` found only that docstring). Built: `KillSwitchState` (module 15, one current-state row per organization/route scope, `"*"` = organization-wide), the governed `engage_kill_switch`/`release_kill_switch`/`list_kill_switch_state` endpoints in `ai_governance_api.py` (single-operator PlatformAdmin authorization, audited both directions — deliberately not the `ModelRouteConfiguration` maker-checker shape, since an unreviewed kill is not the risk job P5 guards against), and `model_gateway.kill_switch_blocking_state`, checked first — ahead of route/credential/adapter/budget — inside `ProviderNeutralModelGateway.structured_completion`, the single choke point both real callers (`agent_orchestrator.py` SQL generation, `semantic_inference.py` classification) pass through. Drilled in `tests/test_kill_switch_drill.py`: engages through the real governed API path, asserts the very next generation request is denied, measures and asserts engagement-to-denial latency (<5s, generous margin against the 60s bound), and asserts durable audit/outbox evidence is retained and queryable. This is an in-process/local drill against in-memory sqlite — proves the mechanism's own latency, not network/infra propagation time to a deployed gateway; see §I |
 | MG-3 | Bank-approved route selection + private routing | 15 | B | P0 | IN PROGRESS | — | Approved-route enforcement implemented (`ModelRouteConfiguration` maker-checker lifecycle + config-selected `route_key` gate in `model_gateway.py`/`ai_governance_api.py`); private-endpoint routing not started |
 | MG-4 | Residency/retention contract certification | 15 | B | P0 | TODO | — | Certified per route |
 | MG-5 | Model-risk evaluation corpus | 15 | B | P0 | TODO | — | Same as AG-3 |
@@ -347,7 +347,7 @@ None of this is architecture. A bank's third-party risk process stops at several
 | E6 | PITR restore drill | 1 | TODO | Never run |
 | E7 | Temporal failover drill | 1 | TODO | Never run |
 | E8 | Credential rotation drill | 1 | TODO | Never run |
-| E9 | Kill-switch drill | 0.5 | TODO | Never run — and the AI-safety argument depends on it |
+| E9 | Kill-switch drill | 0.5 | **DONE** | MG-2. Run 2026-08-31, in-process/local only — see §I |
 | E10 | Load / soak at 1M objects | 3 | TODO | p95 targets are published and unmeasured |
 | E11 | Penetration test | ext. | TODO | Not run |
 | E12 | Connector + lineage-parser certification corpus | 3 | TODO | INV-9's one remaining strict xfail is unverifiable without it |
@@ -363,7 +363,7 @@ None of this is architecture. A bank's third-party risk process stops at several
 | PITR restore | Quarterly | **Never** | — | **OVERDUE** |
 | Temporal failover | Quarterly | **Never** | — | **OVERDUE** |
 | Credential rotation | Quarterly | **Never** | — | **OVERDUE** |
-| Kill switch | Quarterly | **Never** | — | **OVERDUE** |
+| Kill switch | Quarterly | 2026-08-31 (in-process/local) | Passed — denial within 5s of engagement (60s bound), audit + outbox evidence retained | Current for local/in-process only — no timed run yet against a deployed gateway process or production Postgres |
 | Batch forced-restart | Per release | 2026-08 (local) | Passed | Current for local only |
 | Regional failover | Annual | **Never** | — | **OVERDUE** |
 | Break-glass | Annual | **Never** | — | **OVERDUE** |

@@ -1544,6 +1544,41 @@ class ModelRouteConfiguration(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class KillSwitchState(Base, TimestampMixin):
+    """Module 15 kill switch (MG-2, ADR-0009 §7 of `20-modules/15-model-gateway.md`).
+
+    Current engaged/released state, one mutable row per (organization, scope) --
+    the same "current-state row, immutable history lives in AuditEvent/OutboxEvent"
+    shape as `OrganizationIntegrationPolicy`, not an event-sourced table of its own.
+    `route_key` holds the literal sentinel `"*"` (see
+    `model_gateway.GLOBAL_KILL_SWITCH_SCOPE`) for an organization-wide switch that
+    halts every route, or a specific route_key to halt only that route. Checked by
+    `model_gateway.kill_switch_blocking_state` on every `structured_completion`
+    call -- the single choke point through which all generation requests pass --
+    so engaging it fails closed on the very next request, not eventually.
+    """
+
+    __tablename__ = "kill_switch_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "route_key", name="uq_kill_switch_state_organization_id_route_key"
+        ),
+        Index("ix_kill_switch_state_org_engaged", "organization_id", "engaged"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    route_key: Mapped[str] = mapped_column(String(100), nullable=False, default="*")
+    engaged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(2000))
+    engaged_by: Mapped[str | None] = mapped_column(String(255))
+    engaged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_by: Mapped[str | None] = mapped_column(String(255))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class SemanticModelVersion(Base, TimestampMixin):
     __tablename__ = "semantic_model_version"
     __table_args__ = (

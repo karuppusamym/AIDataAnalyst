@@ -1,6 +1,7 @@
 import hashlib
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -12,10 +13,13 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.model_gateway import route_adapter_available
-from aida.models import GovernanceReview, ModelRouteConfiguration, Organization
+from aida.model_gateway import GLOBAL_KILL_SWITCH_SCOPE, route_adapter_available
+from aida.models import GovernanceReview, KillSwitchState, ModelRouteConfiguration, Organization
 from aida.schemas import (
     GovernanceReviewRead,
+    KillSwitchEngageRequest,
+    KillSwitchReleaseRequest,
+    KillSwitchStateRead,
     ModelRouteConfigurationCreate,
     ModelRouteConfigurationRead,
     Page,
@@ -247,3 +251,181 @@ async def submit_model_route(
     )
     await session.commit()
     return review
+
+
+# --- Kill switch (MG-2) -----------------------------------------------------------
+#
+# Deliberately NOT the ModelRouteConfiguration maker-checker lifecycle: job P5
+# ("stop AI immediately") and the module-15 kill-switch contract (`20-modules/
+# 15-model-gateway.md` §7) call for a single-operator, immediately-effective action,
+# audited rather than dual-controlled -- the opposite failure mode from a route
+# approval (where premature activation is the risk to guard against, an unreviewed
+# kill is not). Reversal requires the same PlatformAdmin authorization and is
+# audited identically.
+
+
+def _kill_switch_scope(route_key: str | None) -> str:
+    return route_key or GLOBAL_KILL_SWITCH_SCOPE
+
+
+def _kill_switch_read(state: KillSwitchState) -> KillSwitchStateRead:
+    return KillSwitchStateRead(
+        id=state.id,
+        organization_id=state.organization_id,
+        route_key=state.route_key,
+        scope="ORGANIZATION" if state.route_key == GLOBAL_KILL_SWITCH_SCOPE else "ROUTE",
+        engaged=state.engaged,
+        reason=state.reason,
+        engaged_by=state.engaged_by,
+        engaged_at=state.engaged_at,
+        released_by=state.released_by,
+        released_at=state.released_at,
+        created_at=state.created_at,
+        updated_at=state.updated_at,
+    )
+
+
+async def _get_or_create_kill_switch_state(
+    session: AsyncSession, organization_id: UUID, route_key: str
+) -> KillSwitchState:
+    state = await session.scalar(
+        select(KillSwitchState).where(
+            KillSwitchState.organization_id == organization_id,
+            KillSwitchState.route_key == route_key,
+        )
+    )
+    if state is None:
+        state = KillSwitchState(organization_id=organization_id, route_key=route_key)
+        session.add(state)
+        await session.flush()
+    return state
+
+
+@router.post(
+    "/organizations/{organization_id}/kill-switch/engage",
+    response_model=KillSwitchStateRead,
+)
+async def engage_kill_switch(
+    organization_id: UUID,
+    body: KillSwitchEngageRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin")),
+    session: AsyncSession = Depends(get_session),
+) -> KillSwitchStateRead:
+    enforce_organization(context, organization_id)
+    if await session.get(Organization, organization_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    scope = _kill_switch_scope(body.route_key)
+    state = await _get_or_create_kill_switch_state(session, organization_id, scope)
+    now = datetime.now(UTC)
+    state.engaged = True
+    state.reason = body.reason
+    state.engaged_by = context.principal_id
+    state.engaged_at = now
+    state.released_by = None
+    state.released_at = None
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="model.kill_switch_engage",
+        resource_type="kill_switch_state",
+        resource_id=str(state.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"scope": scope, "route_key": body.route_key, "reason": body.reason},
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="kill_switch_state",
+        aggregate_id=str(state.id),
+        event_type="model.kill_switch_engaged",
+        payload={
+            "scope": scope,
+            "route_key": body.route_key,
+            "actor": context.principal_id,
+            "reason": body.reason,
+            "engaged_at": now.isoformat(),
+        },
+    )
+    await session.commit()
+    return _kill_switch_read(state)
+
+
+@router.post(
+    "/organizations/{organization_id}/kill-switch/release",
+    response_model=KillSwitchStateRead,
+)
+async def release_kill_switch(
+    organization_id: UUID,
+    body: KillSwitchReleaseRequest,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin")),
+    session: AsyncSession = Depends(get_session),
+) -> KillSwitchStateRead:
+    enforce_organization(context, organization_id)
+    if await session.get(Organization, organization_id) is None:
+        raise HTTPException(status_code=404, detail="organization not found")
+    scope = _kill_switch_scope(body.route_key)
+    state = await session.scalar(
+        select(KillSwitchState).where(
+            KillSwitchState.organization_id == organization_id,
+            KillSwitchState.route_key == scope,
+        )
+    )
+    if state is None or not state.engaged:
+        raise HTTPException(status_code=409, detail="kill switch is not currently engaged")
+    now = datetime.now(UTC)
+    state.engaged = False
+    state.released_by = context.principal_id
+    state.released_at = now
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="model.kill_switch_release",
+        resource_type="kill_switch_state",
+        resource_id=str(state.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"scope": scope, "route_key": body.route_key, "reason": body.reason},
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="kill_switch_state",
+        aggregate_id=str(state.id),
+        event_type="model.kill_switch_released",
+        payload={
+            "scope": scope,
+            "route_key": body.route_key,
+            "actor": context.principal_id,
+            "reason": body.reason,
+            "released_at": now.isoformat(),
+        },
+    )
+    await session.commit()
+    return _kill_switch_read(state)
+
+
+@router.get(
+    "/organizations/{organization_id}/kill-switch",
+    response_model=list[KillSwitchStateRead],
+)
+async def list_kill_switch_state(
+    organization_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "AgentDeveloper", "DataSteward", "Reviewer", "Auditor", "Viewer"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> list[KillSwitchStateRead]:
+    enforce_organization(context, organization_id)
+    states = (
+        await session.scalars(
+            select(KillSwitchState)
+            .where(KillSwitchState.organization_id == organization_id)
+            .order_by(KillSwitchState.route_key)
+        )
+    ).all()
+    return [_kill_switch_read(state) for state in states]

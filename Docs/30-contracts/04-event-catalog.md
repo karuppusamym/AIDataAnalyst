@@ -199,7 +199,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `model.route_version_created` / `.approved` | Route lifecycle | route_id, version |
 | `model.generation_denied` | Generation blocked | route_key, reason_code |
 | `model.budget_exceeded` | Budget hit | route_key, period |
-| `model.kill_switch_engaged` / `.released` | Kill switch | scope, actor, reason |
+| `model.kill_switch_engaged` / `model.kill_switch_released` | Kill switch | scope, actor, reason |
 | `execution.requested` / `.denied` / `.completed` / `.cancelled` | Execution lifecycle | execution_id, datasource_id, denial_reason_code |
 | `execution.cost_exceeded` | Cost ceiling hit | execution_id, estimate, ceiling |
 | `execution.masking_applied` | Masking applied | execution_id, masked_column_count |
