@@ -4,16 +4,12 @@ Revision ID: 2c7ea84c000f
 Revises: 3683caa58f58, da74c4fd9def
 Create Date: 2026-08-31 07:52:52.863216
 """
-from typing import Sequence, Union
-
-from alembic import op
-import sqlalchemy as sa
-
+from collections.abc import Sequence
 
 revision: str = '2c7ea84c000f'
-down_revision: Union[str, Sequence[str], None] = ('3683caa58f58', 'da74c4fd9def')
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | Sequence[str] | None = ('3683caa58f58', 'da74c4fd9def')
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
