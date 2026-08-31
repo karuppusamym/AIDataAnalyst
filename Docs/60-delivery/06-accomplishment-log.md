@@ -4281,3 +4281,108 @@ locally). `.github/workflows/ci.yml` gained the `migration-drift` job (Postgres 
 container, `POSTGRES_USER=aida`/`POSTGRES_PASSWORD=aida-local-only`/`POSTGRES_DB=aida_migration
 _drift_test` matching `AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL`) so this keeps running against a real
 database on every push, not just in this sandbox.
+
+## 2026-08-31 — RT-7 (quality trust factor in ranking) closed for real; DQ-3's third and last leg lands
+
+This item's own tracker row (see the `2026-08-31 — DQ-3 / TL-3 / AG-6 wired for real; RT-7 honestly
+deferred` entry above) explicitly deferred RT-7 rather than guess at it, because at that time
+`retrieval.py::hybrid_retrieve`/`fusion_ranking.py` had no live caller — wiring the trust factor
+into a ranking implementation nothing called would not have satisfied the exit criterion ("Part of
+DQ-3"). Re-checked before starting, per the task brief's own instruction: `retrieval.py`'s
+`hybrid_retrieve_enhanced` (Stage 4, fusion) is now genuinely reachable from
+`agent_intelligence.GovernedRetriever.retrieve()`, itself called from
+`GovernedAgentOrchestrator.run()` — confirmed by re-reading the RT-1/RT-2/RT-3 wiring entry above
+and the current `agent_intelligence.py`, not assumed. That was this row's own stated blocking
+precondition, now satisfied.
+
+### What was built
+
+- `retrieval.py::hybrid_retrieve_enhanced`'s Stage 4 (`retrieval.py:923` on) no longer appends the
+  hardcoded `SignalScore(signal="quality_trust", raw_score=0.5)` placeholder to every candidate.
+  Instead:
+  1. Every candidate is resolved to the `MetadataTable` id(s) it actually touches. TABLE, COLUMN,
+     BUSINESS_ANNOTATION, DBT_RESOURCE, and SEMANTIC_METRIC candidates already carry a
+     `table_id`/`source_table_id` UUID string in their metadata from Stage 1 — read directly.
+     GOVERNED_TOOL candidates instead carry `referenced_tables` (SQL-qualified table-name strings,
+     the tool version's own declared dependencies) — resolved to this datasource's table ids via
+     `quality_coupling.resolve_table_ids`, the exact same helper TL-3's tool gate already resolves
+     the same field through, so a tool's ranking-time trust factor and its gating-time trust factor
+     can never disagree about which table it depends on.
+  2. All resolved table ids across every candidate are batched into one
+     `quality_coupling.fetch_open_incidents` call (not one query per candidate) to fetch the real
+     OPEN/ACKNOWLEDGED `DataQualityIncident` rows.
+  3. Each candidate's `quality_trust` signal is `min(demote_in_retrieval(table_id, incidents) for
+     table_id in candidate's tables)` — the worst-case table wins, same "worst factor" convention
+     AG-6's trust-score computation already uses for the same helper.
+  4. A demoted candidate additionally gets `metadata["quality_trust_demotion"]` (`retrieval.py:1002`)
+     — `{"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids": [...], "worst_factor": <score>}` —
+     so the *reason* for a lower rank is visible on the hit itself, not just a bare number in the
+     fusion breakdown. The numeric factor was already going to be inspectable for free (RT-3's
+     `build_evidence` puts every signal's `raw_score`/`weight`/`weighted_score` into
+     `retrieval_evidence.factors` regardless of which signal it is); this closes the "which table,
+     why" gap the numeric-only view leaves.
+  5. A candidate with no resolvable table (e.g. a bare GLOSSARY_TERM hit with no bound semantic
+     object) gets the neutral 1.0, matching `demote_in_retrieval`'s own "no active incidents" return
+     rather than inventing a different default.
+- `quality_coupling.py` itself is unchanged — no signature adjustment was needed. `demote_in_retrieval`
+  already took a bare `asset_id: str` + `incidents: list[IncidentSummary]`, which is exactly what the
+  retrieval-side resolution above produces per candidate.
+
+### Tests
+
+New `tests/test_rt7_quality_trust_ranking.py` (3 tests), same in-memory-sqlite-via-aiosqlite,
+ORM-seeded `_Scenario` pattern `test_agent_orchestrator_retrieval_wiring.py` (RT-1/RT-2/RT-3) and
+`test_quality_runtime_coupling.py` (TL-3/AG-6) both established — driven through the real live
+retrieval entry point, `agent_intelligence.GovernedRetriever.retrieve()`, **not** a direct call into
+`quality_coupling.demote_in_retrieval` or `hybrid_retrieve_enhanced` in isolation. That
+direct-unit-test-only shape is the exact failure mode `04-end-to-end-audit-2026-08-30.md` found
+across this codebase (real, tested modules with zero live callers) and the standard this wave's
+wiring work has held itself to throughout.
+
+- `test_governed_retriever_demotes_table_with_open_critical_incident`: two tables
+  (`widgets_flagged`, `widgets_clean`) score identically on every lexical signal (same token overlap,
+  same exact-phrase bonus) — the only difference is an OPEN CRITICAL `DataQualityIncident` on
+  `widgets_flagged`. Asserts the flagged table's `quality_trust` factor is `0.3` vs. the clean
+  table's `1.0`, its `weighted_score` is lower, its overall fused `final_score` is measurably lower
+  than the clean table's (DoD #1: "a candidate touching a table with an open quality incident gets
+  measurably demoted relative to an identical candidate on a clean table"), and its evidence carries
+  `metadata["quality_trust_demotion"] == {"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids":
+  [...], "worst_factor": 0.3}` while the clean table's metadata carries no such key.
+- `test_governed_retriever_does_not_demote_on_resolved_incident`: a RESOLVED incident does not
+  gate/demote — only OPEN/ACKNOWLEDGED do, matching `demote_in_retrieval`'s own filter and TL-3/AG-6's
+  existing behaviour for the same status check.
+- `test_governed_retriever_demotes_governed_tool_via_referenced_tables`: a GOVERNED_TOOL candidate
+  (no `table_id`/`source_table_id` of its own, only `referenced_tables`) whose one referenced table
+  carries an open CRITICAL incident is demoted the same way (`quality_trust` factor `0.3`,
+  `quality_trust_demotion` naming the resolved table id) — proving the tool-shaped candidate branch
+  isn't silently skipped because its metadata shape differs from a bare table/column hit.
+
+### Tracker
+
+RT-7 moved TODO → **DONE** with the real exit evidence above (file:line citations, real test names,
+not reference-only text). DQ-3 moved IN PROGRESS → **DONE** — RT-7 was its last of three wiring legs
+(TL-3 tool gating and AG-6 answer trust warnings already closed for real in the entry above); all
+three now resolve incidents through the same `quality_coupling.resolve_table_ids`/
+`fetch_open_incidents` helpers.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, no new files added to the checked set). Full
+`pytest` suite run foreground: exit code 0, progress output at 100% with no `F`/`E` markers anywhere
+in the run (a background OpenTelemetry metrics-exporter thread throws `ValueError: I/O operation on
+closed file` during interpreter teardown in `test_observability.py`'s span-export test, printed to
+stderr after the run itself completes — a pre-existing, unrelated background-thread teardown quirk,
+not a test failure; it also swallowed the final `N passed in Ys` summary line from the captured
+log, hence citing exit code + zero-failure-marker dot output as the pass evidence instead of quoting
+that line directly).
+
+### Scope discipline
+
+Touched only `retrieval.py` (Stage 4 of `hybrid_retrieve_enhanced`) and its new test file, per the
+task brief. `quality_coupling.py` needed no signature change — `demote_in_retrieval`'s existing
+`(asset_id, incidents)` shape was already sufficient, so TL-3/AG-6's call sites are untouched and
+unaffected. `fusion_ranking.py`/`vector_retrieval.py`/`graph_retrieval.py` (RT-1/RT-2/RT-3/RT-9/SM-2's
+own files) were not modified — the fusion mechanics they own already treat `quality_trust` as an
+ordinary named signal; only the raw score fed into it needed to become real. RT-6 (usage/popularity
+ranking factor, the other Stage-4 placeholder) is untouched and still `raw_score=0.5` — a separate
+tracker row, not this one's scope.

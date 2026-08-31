@@ -87,6 +87,11 @@ from aida.models import (
     SemanticMetricVersion,
     TermSemanticBinding,
 )
+from aida.quality_coupling import (
+    demote_in_retrieval,
+    fetch_open_incidents,
+    resolve_table_ids,
+)
 from aida.secrets import SecretResolver
 
 # ---------------------------------------------------------------------------
@@ -915,14 +920,92 @@ async def hybrid_retrieve_enhanced(
                 )
 
     # ------------------------------------------------------------------
-    # Stage 4: Add placeholder signals (quality_trust, usage_popularity)
+    # Stage 4: Quality-trust demotion (RT-7/DQ-3) + usage placeholder
     # ------------------------------------------------------------------
+    # Real trust-based demotion, not a placeholder. Every candidate is resolved
+    # to the underlying `MetadataTable` row(s) it touches and scored against
+    # real OPEN/ACKNOWLEDGED `DataQualityIncident` rows via the same
+    # `quality_coupling.resolve_table_ids` / `fetch_open_incidents` /
+    # `demote_in_retrieval` helpers TL-3 (tool gating) and AG-6 (answer trust
+    # warnings) already wire into live paths -- gating, warning, and ranking
+    # cannot silently disagree about which incidents are active.
+    #
+    # TABLE/COLUMN/BUSINESS_ANNOTATION/DBT_RESOURCE/SEMANTIC_METRIC candidates
+    # already carry a `table_id`/`source_table_id` UUID string in their
+    # metadata (set in Stage 1 above). GOVERNED_TOOL candidates instead carry
+    # `referenced_tables`, a list of SQL-qualified table-name strings (the
+    # tool version's own declared dependencies, same shape TL-3 resolves) --
+    # `resolve_table_ids` turns those into this datasource's table ids the
+    # same way. A candidate with no resolvable table (e.g. a bare
+    # GLOSSARY_TERM hit) gets the neutral no-demotion score, matching
+    # `demote_in_retrieval`'s own "no active incidents" return of 1.0.
+    candidate_table_ids: list[set[UUID]] = []
+    tool_table_names: set[str] = set()
     for candidate in candidates.values():
-        # Quality trust placeholder -- will be populated by DQ-3 coupling
-        candidate.signals.append(
-            SignalScore(signal="quality_trust", raw_score=0.5)
+        table_ids: set[UUID] = set()
+        for meta_key in ("table_id", "source_table_id"):
+            raw = candidate.metadata.get(meta_key)
+            if raw:
+                table_ids.add(UUID(str(raw)))
+        if candidate.object_type == "GOVERNED_TOOL":
+            tool_table_names.update(candidate.metadata.get("referenced_tables") or [])
+        candidate_table_ids.append(table_ids)
+
+    resolved_tool_tables: dict[str, UUID] = {}
+    if tool_table_names:
+        resolved_tool_tables = await resolve_table_ids(
+            session, datasource=datasource, table_names=sorted(tool_table_names)
         )
-        # Usage popularity placeholder
+
+    all_table_ids: set[UUID] = set(resolved_tool_tables.values())
+    for ids in candidate_table_ids:
+        all_table_ids.update(ids)
+
+    quality_incidents = (
+        await fetch_open_incidents(session, datasource=datasource, table_ids=list(all_table_ids))
+        if all_table_ids
+        else []
+    )
+
+    for candidate, base_table_ids in zip(
+        candidates.values(), candidate_table_ids, strict=True
+    ):
+        table_ids = set(base_table_ids)
+        if candidate.object_type == "GOVERNED_TOOL":
+            for name in candidate.metadata.get("referenced_tables") or []:
+                resolved = resolved_tool_tables.get(name)
+                if resolved is not None:
+                    table_ids.add(resolved)
+
+        if table_ids:
+            per_table_scores = {
+                str(table_id): demote_in_retrieval(str(table_id), quality_incidents)
+                for table_id in table_ids
+            }
+            trust_score = min(per_table_scores.values())
+        else:
+            trust_score = 1.0
+            per_table_scores = {}
+
+        candidate.signals.append(
+            SignalScore(signal="quality_trust", raw_score=trust_score)
+        )
+        # The evidence convention (RT-3): every factor visible, not folded away.
+        # A demotion shows up in `factors` (via the `quality_trust` signal's
+        # `raw_score`/`weighted_score`) automatically; this adds the *reason*
+        # -- which table(s) and why -- to the hit's own metadata so it is not
+        # just a number nobody can explain.
+        demoted = {
+            table_id: score for table_id, score in per_table_scores.items() if score < 1.0
+        }
+        if demoted:
+            candidate.metadata["quality_trust_demotion"] = {
+                "reason": "OPEN_QUALITY_INCIDENT",
+                "demoted_table_ids": sorted(demoted),
+                "worst_factor": trust_score,
+            }
+
+        # Usage popularity placeholder -- RT-6, out of this row's scope.
         candidate.signals.append(
             SignalScore(signal="usage_popularity", raw_score=0.5)
         )
