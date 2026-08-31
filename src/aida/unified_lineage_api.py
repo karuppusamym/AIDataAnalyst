@@ -4,13 +4,18 @@ Milestone 1 of the Collibra-parity lineage plan (see
 `Docs/competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` and
 `Docs/20-modules/09-lineage.md`): one canonical graph that merges declared
 foreign keys, human-approved/candidate column relationships, dbt manifest
-dependency edges, and OpenLineage table edges, plus transitive
-upstream/downstream impact traversal in place of direct-reference counting.
+dependency edges, OpenLineage table edges, and SQL-parsed view/procedure
+lineage edges (LN-2, folded in for LN-7 -- table pairs resolved to the
+catalog on both ends only), plus transitive, cross-kind, bounded
+upstream/downstream impact traversal (`traverse` in `aida.unified_lineage`)
+in place of direct-reference counting.
 
 This intentionally does not yet cover: authoritative column-level mappings
 (dbt UI still matches columns by name -- see `transformation-workbench.js`),
-view/stored-procedure lineage, BI/report nodes, or export. Those remain
-tracked as EA.9, EC.6+ in `Docs/60-delivery/02-epic-backlog.md`.
+unmatched (free-text) view/procedure table names, BI/report nodes, AI
+decision edges, or export. Those remain tracked as LN-3, LN-4, LN-10, LN-12
+in `Docs/20-modules/09-lineage.md` and EA.9, EC.6+ in
+`Docs/60-delivery/02-epic-backlog.md`.
 """
 
 from collections import Counter
@@ -42,7 +47,9 @@ from aida.models import (
     MetadataTable,
     OpenLineageRunEvent,
     OpenLineageTableEdge,
+    ProcedureLineageEdge,
     RelationshipCandidate,
+    ViewLineageEdge,
 )
 from aida.schemas import (
     DomainLineageGraphRead,
@@ -85,6 +92,13 @@ _DBT_NODE_KIND_BY_RESOURCE_TYPE = {
     "SNAPSHOT": "DBT_SNAPSHOT",
 }
 
+# `ViewLineageEdge.confidence` / `ProcedureLineageEdge.confidence` store
+# `aida.sql_lineage_parser.Confidence`'s string value (FULL/PARTIAL/LOW), not
+# a float -- map it onto the same 0..1 scale every other unified-lineage edge
+# kind reports confidence on. An unrecognised value degrades to LOW rather
+# than raising, matching the parser's own fail-open posture.
+_DEFINITION_LINEAGE_CONFIDENCE = {"FULL": 1.0, "PARTIAL": 0.6, "LOW": 0.3}
+
 
 @dataclass(slots=True)
 class _NodeInfo:
@@ -120,6 +134,8 @@ async def _build_unified_graph(
         "SUGGESTED_RELATIONSHIP": 0,
         "DBT_DEPENDENCY": 0,
         "OPENLINEAGE_ETL": 0,
+        "VIEW_DEFINITION": 0,
+        "PROCEDURE_DEFINITION": 0,
     }
 
     def register_node(info: _NodeInfo) -> bool:
@@ -207,6 +223,91 @@ async def _build_unified_graph(
         )
     if len(constraints) >= edge_limit:
         truncation_reasons.append("EDGE_LIMIT")
+
+    # --- View and stored-procedure SQL-parsed lineage (LN-2) ---
+    # `view_lineage_api.py` persists one row per *column* pair
+    # (source_table/source_column -> target_table/target_column, where target
+    # is the view or procedure output). Only rows the parser matched to a
+    # real catalog table on both ends are foldable into this table-level
+    # graph -- an unmatched free-text table name (source_table_id is NULL)
+    # cannot be safely deduplicated against a real MetadataTable without
+    # risking a false merge across schemas that share a table name, so those
+    # rows are left for the dedicated `/view-lineage` / `/procedure-lineage`
+    # list endpoints instead of silently guessed here. Multiple column-level
+    # rows between the same two tables collapse into one edge, exactly like
+    # the dbt COLUMN_DEPENDS_ON rows above. `register_definition_edges` takes
+    # each model concretely (rather than as a `type[X | Y]` parameter) so the
+    # ORM row type stays precise for the type checker.
+    def register_definition_edges(
+        rows: Sequence[ViewLineageEdge] | Sequence[ProcedureLineageEdge],
+        edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
+    ) -> None:
+        grouped: dict[tuple[UUID, UUID], list[ViewLineageEdge | ProcedureLineageEdge]] = {}
+        for row in rows:
+            if row.source_table_id is None or row.target_table_id is None:
+                continue
+            if row.source_table_id == row.target_table_id:
+                continue
+            grouped.setdefault((row.source_table_id, row.target_table_id), []).append(row)
+        for (source_table_id, target_table_id), edges in grouped.items():
+            # The view/procedure (target_table_id) is the dependent node; the
+            # base table it selects from (source_table_id) is what it depends
+            # on -- same source-depends-on-target convention as FOREIGN_KEY
+            # and DBT_DEPENDENCY above.
+            register_link(
+                UnifiedLink(
+                    edge_id=f"{edge_source.lower()}:{edges[0].id}",
+                    source_id=str(target_table_id),
+                    target_id=str(source_table_id),
+                    edge_source=edge_source,
+                    status="ACTIVE",
+                    confidence=min(
+                        _DEFINITION_LINEAGE_CONFIDENCE.get(edge.confidence, 0.3)
+                        for edge in edges
+                    ),
+                    source_columns=tuple(sorted({edge.target_column for edge in edges})),
+                    target_columns=tuple(sorted({edge.source_column for edge in edges})),
+                    evidence={
+                        "source": edge_source,
+                        "dialect": edges[0].dialect,
+                        "sql_hash": edges[0].sql_hash,
+                        "column_edge_count": len(edges),
+                    },
+                )
+            )
+
+    if table_ids:
+        view_rows = (
+            await session.scalars(
+                select(ViewLineageEdge)
+                .where(
+                    ViewLineageEdge.datasource_id == datasource.id,
+                    ViewLineageEdge.source_table_id.in_(table_ids),
+                    ViewLineageEdge.target_table_id.in_(table_ids),
+                )
+                .order_by(ViewLineageEdge.id)
+                .limit(edge_limit)
+            )
+        ).all()
+        if len(view_rows) >= edge_limit:
+            truncation_reasons.append("EDGE_LIMIT")
+        register_definition_edges(view_rows, "VIEW_DEFINITION")
+
+        procedure_rows = (
+            await session.scalars(
+                select(ProcedureLineageEdge)
+                .where(
+                    ProcedureLineageEdge.datasource_id == datasource.id,
+                    ProcedureLineageEdge.source_table_id.in_(table_ids),
+                    ProcedureLineageEdge.target_table_id.in_(table_ids),
+                )
+                .order_by(ProcedureLineageEdge.id)
+                .limit(edge_limit)
+            )
+        ).all()
+        if len(procedure_rows) >= edge_limit:
+            truncation_reasons.append("EDGE_LIMIT")
+        register_definition_edges(procedure_rows, "PROCEDURE_DEFINITION")
 
     # --- Suggested / approved column relationships ---
     candidates: Sequence[RelationshipCandidate] = []
@@ -449,7 +550,8 @@ async def build_unified_lineage_graph_payload(
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
     settings: Settings | None = None,
 ) -> UnifiedLineageGraphRead:
-    """Build the merged FK + suggested + dbt + OpenLineage graph for one datasource.
+    """Build the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one
+    datasource.
 
     Pulled out of the REST route so the exact same graph can also be served as
     a native MCP tool (`atlas__get_lineage_graph` in `mcp_server.py`) without
@@ -990,7 +1092,8 @@ async def get_unified_lineage_graph(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> UnifiedLineageGraphRead:
-    """Return the merged FK + suggested + dbt + OpenLineage graph for one datasource.
+    """Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one
+    datasource.
 
     This is the canonical lineage graph called for in the Collibra-parity
     plan: one node/edge set spanning every lineage source instead of
@@ -1060,7 +1163,7 @@ async def get_domain_unified_lineage_graph(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> DomainLineageGraphRead:
-    """Return the merged FK + suggested + dbt + OpenLineage graph across every
+    """Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph across every
     datasource in one data_domain (ADR-0017 SS3) -- the domain-scoped
     traversal endpoint closing KG-2/RL-5's "cross-source traversal" gap for
     sources sharing a governance boundary, without opening an unbounded

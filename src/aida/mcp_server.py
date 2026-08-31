@@ -157,9 +157,10 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "slug": "get_lineage_graph",
         "description": (
             "Return the unified lineage graph for a datasource: declared foreign keys, "
-            "approved/candidate relationship suggestions, dbt manifest dependencies, and "
-            "OpenLineage table edges merged into one node/edge set. Read-only and "
-            "value-free -- table, column, and dbt-resource names only, never row values."
+            "approved/candidate relationship suggestions, dbt manifest dependencies, "
+            "OpenLineage table edges, and SQL-parsed view/procedure lineage edges "
+            "merged into one node/edge set. Read-only and value-free -- table, column, "
+            "and dbt-resource names only, never row values."
         ),
         "inputSchema": {
             "type": "object",

@@ -140,7 +140,7 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | ETL / OpenLineage | Partial — `POST /v1/lineage/openlineage` ingests RunEvents, extracts column-lineage edges from the `columnLineage` facet, matches against the catalog, and persists idempotently (`openlineage.py`, `openlineage_api.py`); **zero test coverage**, and no Airflow-sourced event has ever been verified producing real edges | Test coverage; live Airflow e2e evidence |
 | BI | **Not implemented** | Entry-ticket gap |
 | AI_DECISION | Partial — traces exist; not modelled as lineage edges | **Differentiator — model as first-class edges** |
-| Impact | Implemented (direct) — physical table to metrics, tools, relationships. **Transitive impact delivered 2026-08-29** — `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` does bounded upstream/downstream BFS over a graph merged from FK + suggested + dbt + OpenLineage edges (`unified_lineage.py`, `unified_lineage_api.py`) | Column-level edges; view/procedure and BI edges folded in (LN-2, LN-4, LN-11) |
+| Impact | Implemented (direct) — physical table to metrics, tools, relationships. **Transitive impact delivered 2026-08-29** — `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` does bounded upstream/downstream BFS over a graph merged from FK + suggested + dbt + OpenLineage edges (`unified_lineage.py`, `unified_lineage_api.py`). **2026-08-31 (LN-7):** view/procedure SQL-parsed lineage (LN-2) folded into the same traversal as `VIEW_DEFINITION`/`PROCEDURE_DEFINITION` edges, for table pairs resolved to the catalog on both ends | Column-level edges; BI edges folded in (LN-4/LN-11 — still needs new `BI_REPORT`/`BI_METRIC` node kinds, not just an edge fold like view/procedure); unmatched view/procedure table names |
 
 ## 13. Open work
 
@@ -152,11 +152,11 @@ Emits `lineage.edge_created`, `lineage.artifact_ingested`, `lineage.impact_compu
 | LN-4 | BI tool lineage (Tableau, Power BI, Looker) | P1 |
 | LN-5 | Column-level dbt manifest lineage | P1 |
 | LN-6 | dbt `run_results.json` operational evidence | P1 |
-| LN-7 | Transitive cross-kind impact traversal | **Delivered 2026-08-29** (table-level; see LN-10/LN-11 for the remaining edge kinds) |
+| LN-7 | Transitive cross-kind impact traversal | **Delivered 2026-08-29, extended 2026-08-31** (table-level; view/procedure edges folded in 2026-08-31 — see LN-10/LN-11 for the remaining edge kinds: BI node kinds, authoritative column mapping) |
 | LN-8 | Large-DAG virtualization | P1 |
 | LN-9 | One canonical graph merging FK + suggested + dbt + OpenLineage edges | **Delivered 2026-08-29** — `unified_lineage_api.py` |
 | LN-10 | Authoritative column-to-column mapping (replace dbt's identical-name matching) | P1 |
-| LN-11 | View/stored-procedure/BI nodes folded into the unified graph | P1, depends on LN-2/LN-4 |
+| LN-11 | BI report/metric node kinds folded into the unified graph (view/procedure table-pair edges already folded in as part of LN-7) | P1, depends on LN-4 |
 | LN-12 | Unified graph export: SVG, PNG, PDF, CSV | P2 |
 
 ### 13.1 Runtime scaling controls

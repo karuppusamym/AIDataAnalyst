@@ -9240,7 +9240,7 @@
       },
       "DomainLineageGraphRead": {
         "additionalProperties": false,
-        "description": "Same merged FK + suggested + dbt + OpenLineage graph as\nUnifiedLineageGraphRead, federated across every datasource in one\ndata_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.\n\nThis is a federated bounded view, not a global graph query: each\ncontributing datasource's graph is built and capped by the existing,\nunchanged single-datasource builder, then merged under the domain's\ncombined node_limit/edge_limit -- ADR-0010's bounded/lazy/value-free\ncontract holds at this wider scope exactly as it does at the narrower\none. Node and edge ids are prefixed per-datasource to guarantee no\nfalse merge between two different datasources' same-named synthetic\n(unmatched dbt/OpenLineage) nodes.\n\nA candidate relationship reaching across a data_domain boundary only\never renders as an edge here when an ACTIVE cross_boundary_grant permits\nthis domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-\ndefault, never inherited) -- `withheld_cross_boundary_domain_ids` names\nany domain that has such a candidate but no covering grant, reported\nrather than silently dropped, mirroring the withheld:\"no_grant\"\ntransparency this ADR requires everywhere it applies.",
+        "description": "Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as\nUnifiedLineageGraphRead, federated across every datasource in one\ndata_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.\n\nThis is a federated bounded view, not a global graph query: each\ncontributing datasource's graph is built and capped by the existing,\nunchanged single-datasource builder, then merged under the domain's\ncombined node_limit/edge_limit -- ADR-0010's bounded/lazy/value-free\ncontract holds at this wider scope exactly as it does at the narrower\none. Node and edge ids are prefixed per-datasource to guarantee no\nfalse merge between two different datasources' same-named synthetic\n(unmatched dbt/OpenLineage) nodes.\n\nA candidate relationship reaching across a data_domain boundary only\never renders as an edge here when an ACTIVE cross_boundary_grant permits\nthis domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-\ndefault, never inherited) -- `withheld_cross_boundary_domain_ids` names\nany domain that has such a candidate but no covering grant, reported\nrather than silently dropped, mirroring the withheld:\"no_grant\"\ntransparency this ADR requires everywhere it applies.",
         "properties": {
           "counts_by_source": {
             "additionalProperties": {
@@ -20974,7 +20974,7 @@
       },
       "UnifiedLineageEdgeRead": {
         "additionalProperties": false,
-        "description": "One typed edge merged from declared FKs, approved/candidate column\nrelationships, dbt manifest dependencies, or OpenLineage table edges.",
+        "description": "One typed edge merged from declared FKs, approved/candidate column\nrelationships, dbt manifest dependencies, OpenLineage table edges, or\nSQL-parsed view/procedure definition edges (LN-2).",
         "properties": {
           "confidence": {
             "title": "Confidence",
@@ -31658,7 +31658,7 @@
     },
     "/v1/data-domains/{domain_id}/unified-lineage/graph": {
       "get": {
-        "description": "Return the merged FK + suggested + dbt + OpenLineage graph across every\ndatasource in one data_domain (ADR-0017 SS3) -- the domain-scoped\ntraversal endpoint closing KG-2/RL-5's \"cross-source traversal\" gap for\nsources sharing a governance boundary, without opening an unbounded\norg-wide graph (ADR-0010's bounded/lazy/value-free contract still\napplies at this wider scope; see build_domain_unified_lineage_graph_payload).",
+        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph across every\ndatasource in one data_domain (ADR-0017 SS3) -- the domain-scoped\ntraversal endpoint closing KG-2/RL-5's \"cross-source traversal\" gap for\nsources sharing a governance boundary, without opening an unbounded\norg-wide graph (ADR-0010's bounded/lazy/value-free contract still\napplies at this wider scope; see build_domain_unified_lineage_graph_payload).",
         "operationId": "get_domain_unified_lineage_graph_v1_data_domains__domain_id__unified_lineage_graph_get",
         "parameters": [
           {
@@ -40606,7 +40606,7 @@
     },
     "/v1/datasources/{datasource_id}/unified-lineage/graph": {
       "get": {
-        "description": "Return the merged FK + suggested + dbt + OpenLineage graph for one datasource.\n\nThis is the canonical lineage graph called for in the Collibra-parity\nplan: one node/edge set spanning every lineage source instead of\nseparate, unlinked workbenches. Also served as the native MCP tool\n`atlas__get_lineage_graph` (`mcp_server.py`).",
+        "description": "Return the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one\ndatasource.\n\nThis is the canonical lineage graph called for in the Collibra-parity\nplan: one node/edge set spanning every lineage source instead of\nseparate, unlinked workbenches. Also served as the native MCP tool\n`atlas__get_lineage_graph` (`mcp_server.py`).",
         "operationId": "get_unified_lineage_graph_v1_datasources__datasource_id__unified_lineage_graph_get",
         "parameters": [
           {

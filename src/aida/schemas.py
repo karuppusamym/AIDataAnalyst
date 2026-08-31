@@ -1799,7 +1799,8 @@ class UnifiedLineageNodeRead(ApiModel):
 
 class UnifiedLineageEdgeRead(ApiModel):
     """One typed edge merged from declared FKs, approved/candidate column
-    relationships, dbt manifest dependencies, or OpenLineage table edges."""
+    relationships, dbt manifest dependencies, OpenLineage table edges, or
+    SQL-parsed view/procedure definition edges (LN-2)."""
 
     id: str
     edge_source: UnifiedLineageEdgeSource
@@ -1828,7 +1829,7 @@ class UnifiedLineageGraphRead(ApiModel):
 
 
 class DomainLineageGraphRead(ApiModel):
-    """Same merged FK + suggested + dbt + OpenLineage graph as
+    """Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as
     UnifiedLineageGraphRead, federated across every datasource in one
     data_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.
 

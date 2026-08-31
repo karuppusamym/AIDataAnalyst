@@ -2538,3 +2538,53 @@ Studio has moved from Pending to Partial in the status matrix.
   identity); FK discovery is best-effort against a Unity Catalog surface newer than PK/UNIQUE and
   unverified live; no certification run or version fixtures yet (CN-3 remains open for every
   adapter, not specific to this one).
+## 2026-08-31 — LN-7 (transitive cross-kind impact traversal) closed
+
+- On re-checking the live tracker before starting, most of LN-7's exit criterion — "bounded
+  traversal across all edge kinds" — turned out to already be delivered: `traverse`/
+  `expand_frontier` in `unified_lineage.py` is a real, unit-tested, breadth-first, depth- and
+  node-bounded traversal wired into `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`
+  and the MCP tool `atlas__get_lineage_impact`, already merging FOREIGN_KEY, SUGGESTED_RELATIONSHIP,
+  and DBT_DEPENDENCY/OPENLINEAGE_ETL edges with per-node hop-depth and contributing-edge-kind
+  evidence, policy-scoped by organization and RBAC role. `Docs/20-modules/09-lineage.md` §12 had
+  already recorded this as "Transitive impact delivered 2026-08-29", but `03-tracker.md` row LN-7
+  and the `00-status.md` "Impact analysis" row had never been updated to match — a doc-sync gap,
+  not missing code.
+- What was genuinely still missing: `schemas.py`'s `UnifiedLineageEdgeSource` literal already
+  reserved `VIEW_DEFINITION`/`PROCEDURE_DEFINITION` labels (evidently anticipating this), but
+  `unified_lineage_api.py::_build_unified_graph` never populated them — the view/stored-procedure
+  SQL-parsed lineage edges landed by a concurrent session's LN-2 work (`view_lineage_api.py`,
+  `ViewLineageEdge`/`ProcedureLineageEdge` in `models.py`) were persisted but invisible to the
+  unified traversal, so a chain like `raw_table -> view -> downstream_table_via_FK` could not be
+  surfaced as transitive impact even though every individual edge existed. Closed by folding both
+  edge tables into `_build_unified_graph`, following the same source-depends-on-target convention
+  as the existing FOREIGN_KEY/DBT_DEPENDENCY sections: the view/procedure is the dependent node
+  (`target_table_id`), the base table it reads from is what it depends on (`source_table_id`).
+  Only rows the SQL parser matched to a real catalog table on *both* ends are folded in — an
+  unmatched free-text table name is left to the dedicated `/view-lineage`/`/procedure-lineage`
+  list endpoints rather than guessed at, to avoid a false cross-schema merge on a shared table
+  name. Multiple column-level rows between the same table pair collapse into one edge (same
+  dedup the dbt `COLUMN_DEPENDS_ON` rows already needed).
+- BI lineage (LN-4, Tableau/Power BI now real per the tracker) is deliberately **not** folded in
+  here: `BiReportNode`/`BiMetricNode` are new node kinds with their own hierarchy
+  (`BiReportMetricEdge`, `BiMetricColumnEdge`), a materially bigger lift than the two-column
+  table-pair edges added above, and already tracked separately as LN-11 (now scoped down to just
+  the BI half, since the view/procedure half is done here). Left open rather than rushed.
+- Tests added to `tests/test_unified_lineage.py` (13 total in the file now, up from 6): a real
+  2-hop chain across two different edge kinds end to end against an in-memory SQLite database
+  (`raw_orders --VIEW_DEFINITION--> vw_orders --FOREIGN_KEY--> fct_orders`, asserting depth and
+  contributing-edge-kind evidence at each hop); the same chain with `node_limit` too small to
+  reach the second hop, asserting the bound stops traversal and self-reports `truncated`; a
+  cross-datasource containment test proving a `ViewLineageEdge` whose matched `target_table_id`
+  points at a table in a *different* datasource never surfaces as a node (policy containment,
+  independent of the org/RBAC check); and a direct HTTP-route-level cross-organization denial test
+  complementing the codebase-wide INV-5 structural sweep. `ruff check .` and `mypy src`
+  (188 files) both clean; full `pytest` suite green with no failures after rebasing onto latest
+  origin — `67cf3ae` landed mid-session and cleaned up the last stale
+  `TestParameterContractDesigner`-class doc citations the CT-1/QG-2 entries above this one had
+  independently reintroduced (this paragraph deliberately does not itself fence
+  "tests/test_studio.py" and that class name together inside one pair of backticks, for the same
+  reason those entries tripped `test_doc_claims.py` in the first place). OpenAPI baseline regenerated
+  (`scripts/openapi_diff.py --accept-baseline`) after docstring-only changes to the graph-builder
+  functions and the `DomainLineageGraphRead`/`UnifiedLineageEdgeRead` schema docstrings; diff is
+  description-text only, no schema or path changes.
