@@ -62,6 +62,27 @@ _SENSITIVE_KEY_TOKENS = frozenset(
     }
 )
 
+# AU-4 / C3 (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`): defense in
+# depth for INV-6 value-freedom, not just secrets. `_SENSITIVE_KEY_TOKENS`
+# above is a *secret*-shaped denylist -- `exception`, `error_message`, `sql`,
+# `parameters` and `row` all evaluate non-sensitive under it, so a raw source
+# exception or a SQL echo passed to a log call (even after the call sites in
+# `workflows/activities.py` were fixed to stop persisting them) would still
+# reach a rendered log line un-redacted. These are matched by *exact*
+# normalized key, not by substring like `_SENSITIVE_KEY_TOKENS` -- "row"
+# must not also redact "row_count", a plain non-sensitive integer.
+_VALUE_SHAPED_KEY_NAMES = frozenset(
+    {
+        "exception",
+        "errormessage",
+        "sql",
+        "parameter",
+        "parameters",
+        "row",
+        "rows",
+    }
+)
+
 _VALUE_PATTERNS = [
     re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{10,}=*"),
@@ -72,6 +93,8 @@ _VALUE_PATTERNS = [
 
 def _key_is_sensitive(key: str) -> bool:
     normalized = re.sub(r"[^a-z]", "", key.lower())
+    if normalized in _VALUE_SHAPED_KEY_NAMES:
+        return True
     return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
 
 

@@ -33,6 +33,11 @@ engine = create_async_engine(
     pool_pre_ping=True,
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
+    # INV-6 / ADR-0014: without this, SQLAlchemy appends `[SQL: ...]
+    # [parameters: (...)]` -- real bound values -- to any exception raised
+    # during statement execution, and driver errors routinely quote row
+    # data on top of that. Never disable this.
+    hide_parameters=True,
 )
 session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 

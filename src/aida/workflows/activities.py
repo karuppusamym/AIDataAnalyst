@@ -1036,7 +1036,11 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             if run is not None:
                 run.status = "FAILED"
                 run.error_class = type(exc).__name__
-                run.error_message = str(exc)[:4000]
+                # INV-6 / ADR-0014: never persist str(exc) here -- it can carry
+                # source-connector-returned row data, SQL fragments, or
+                # credentials-adjacent text. See query_gateway.py's matching
+                # except-Exception block for the pattern this mirrors.
+                run.error_message = "datasource discovery failed"
                 await session.commit()
         await finish_task(
             analysis_run_id=run_uuid,
@@ -1044,7 +1048,7 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             table_id=None,
             outcome="ERROR",
             error_class=type(exc).__name__,
-            error_message=str(exc)[:4000],
+            error_message="datasource discovery failed",
         )
         raise
 
@@ -1251,7 +1255,9 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
             if run is not None:
                 run.status = "FAILED"
                 run.error_class = type(exc).__name__
-                run.error_message = str(exc)[:4000]
+                # INV-6 / ADR-0014: never persist str(exc) here -- see the
+                # matching comment in discover_datasource above.
+                run.error_message = "datasource profiling failed"
                 await session.commit()
         await finish_task(
             analysis_run_id=run_uuid,
@@ -1259,7 +1265,7 @@ async def profile_datasource(run_id: str) -> dict[str, Any]:
             table_id=None,
             outcome="ERROR",
             error_class=type(exc).__name__,
-            error_message=str(exc)[:4000],
+            error_message="datasource profiling failed",
         )
         raise
 
@@ -1366,13 +1372,15 @@ async def plan_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
             # which would hand the workflow one pointless extra empty page.
             rows = list(await session.scalars(statement.limit(effective_page_size + 1)))
         except Exception as exc:
+            # INV-6 / ADR-0014: never persist str(exc) here -- see the
+            # matching comment in discover_datasource above.
             await finish_task(
                 analysis_run_id=run_uuid,
                 task_type=TASK_TYPE_PLAN_PROFILE_TASKS,
                 table_id=None,
                 outcome="ERROR",
                 error_class=type(exc).__name__,
-                error_message=str(exc)[:4000],
+                error_message="profile task planning failed",
             )
             raise
         has_more = len(rows) > effective_page_size
@@ -1645,7 +1653,11 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
             if failed_run is not None:
                 failed_run.status = "FAILED"
                 failed_run.error_class = type(exc).__name__
-                failed_run.error_message = str(exc)[:4000]
+                # INV-6 / ADR-0014: never persist str(exc) here -- this
+                # activity runs source-connector queries directly, so raw
+                # driver exceptions routinely quote row data. See the
+                # matching comment in discover_datasource above.
+                failed_run.error_message = "table profiling failed"
                 await session.commit()
         await finish_task(
             analysis_run_id=run_uuid,
@@ -1653,7 +1665,7 @@ async def profile_table_task(payload: dict[str, str]) -> dict[str, int]:
             table_id=table_uuid,
             outcome="ERROR",
             error_class=type(exc).__name__,
-            error_message=str(exc)[:4000],
+            error_message="table profiling failed",
         )
         raise
 
@@ -1724,13 +1736,15 @@ async def finalize_profile_tasks(payload: dict[str, Any]) -> dict[str, Any]:
             )
             await session.commit()
         except Exception as exc:
+            # INV-6 / ADR-0014: never persist str(exc) here -- see the
+            # matching comment in discover_datasource above.
             await finish_task(
                 analysis_run_id=run_uuid,
                 task_type=TASK_TYPE_FINALIZE_PROFILE_TASKS,
                 table_id=None,
                 outcome="ERROR",
                 error_class=type(exc).__name__,
-                error_message=str(exc)[:4000],
+                error_message="profile finalization failed",
             )
             raise
     await finish_task(

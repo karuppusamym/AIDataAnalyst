@@ -90,6 +90,51 @@ def test_redacts_whole_container_when_container_key_is_itself_sensitive() -> Non
     assert result["credentials"] == "[REDACTED]"
 
 
+def test_redacts_value_shaped_keys() -> None:
+    """AU-4 / C3 (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`): defense
+    in depth for INV-6, not just secrets -- a raw source exception or SQL echo
+    reaching a log call must not survive rendering even if the call site that put
+    it there was missed. `exception`, `error_message`, `sql`, `parameters` and
+    `row` are exactly the field names the audit found evaluating non-sensitive
+    under the secret-shaped denylist.
+    """
+    event = {
+        "event": "table profiling failed",
+        "exception": f"Traceback ...\nKey (account_no)=({_SENTINEL}) already exists",
+        "error_message": _SENTINEL,
+        "sql": f"SELECT * FROM t WHERE account_no = '{_SENTINEL}'",  # noqa: S608
+        "parameters": {"account_no": _SENTINEL},
+        "row": {"account_no": _SENTINEL},
+    }
+
+    result = redact_sensitive_data(None, "info", event)
+
+    for key in event:
+        if key == "event":
+            continue
+        assert result[key] == "[REDACTED]", key
+    assert result["event"] == "table profiling failed"
+
+
+def test_value_shaped_redaction_does_not_over_match_similar_keys() -> None:
+    """The value-shaped set matches by exact key name, not substring -- unlike
+    `_SENSITIVE_KEY_TOKENS`, which intentionally over-matches for secrets. `row`
+    must not also redact `row_count`, a plain non-sensitive integer, and
+    `error_class` (the safe half of the pattern this fix uses everywhere) must
+    stay untouched.
+    """
+    event = {
+        "event": "ingested table",
+        "row_count": 42,
+        "error_class": "RuntimeError",
+        "sql_dialect": "postgres",
+    }
+
+    result = redact_sensitive_data(None, "info", event)
+
+    assert result == event
+
+
 def test_redacts_secret_shaped_values_in_free_text() -> None:
     jwt = f"eyJhbGciOiJIUzI1NiJ9.{_SENTINEL}.signaturepart"
     dsn = f"postgresql://svc:{_SENTINEL}@db.internal:5432/atlas"

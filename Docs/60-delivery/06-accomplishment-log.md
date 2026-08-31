@@ -2992,3 +2992,103 @@ that first manifest.
   `VaultTransformTokenizationProvider`, and the connector work (CN-1c/CN-2a). No production
   deployment artifact configures `secrets_vault_url`/`secrets_vault_token` yet — that is AU-9's
   scope, not this item's.
+
+## 2026-08-31 — AU-4 (source error text leaking into the value-free control plane, ADR-0014 / INV-6) closed
+
+### Completed
+
+- Per `04-end-to-end-audit-2026-08-30.md` §4 C3: the worker persisted whatever a source connector
+  raised, verbatim, into `analysis_run.error_message` (a value-free control-plane column) — driver
+  errors routinely quote the offending row (`Key (account_no)=(...) already exists`), and the
+  engine had no `hide_parameters=True`, so a raised `StatementError` would also have appended real
+  bound values as `[SQL: ...] [parameters: (...)]`.
+- Added `hide_parameters=True` to the engine construction in `src/atlas/platform/db.py:31` (the
+  canonical location per ST-04's `platform/` extraction; `aida.db` re-exports it unchanged).
+- Found 8 `str(exc)[:4000]` call sites across 5 `except Exception` blocks in
+  `src/aida/workflows/activities.py` (the audit's "seven more sites" undercounted slightly —
+  `run.error_message = str(exc)` direct assignments and `finish_task(error_message=str(exc)...)`
+  keyword calls are two different sub-patterns feeding the same leak, both counted here): every one
+  replaced with `error_class = type(exc).__name__` plus a bounded, per-activity generic string
+  (`"datasource discovery failed"`, `"datasource profiling failed"`, `"profile task planning
+  failed"`, `"table profiling failed"`, `"profile finalization failed"`) — the exact pattern
+  already used in `query_gateway.py`'s `except Exception` block (audit cited it at line 708; it has
+  since shifted to ~798 from unrelated edits, same shape). Sites: `discover_datasource`
+  (`activities.py:1039`→now the constant at `:1043`, and `:1047`→`:1051`), `profile_datasource`
+  (was `:1254`/`:1262`, now `:1260`/`:1268`), `plan_profile_tasks` (`:1375`→`:1383`),
+  `profile_table_task` — the activity that talks to source connectors directly and is the one this
+  branch's test drives — (was `:1648`/`:1656`, now `:1660`/`:1668`), `finalize_profile_tasks`
+  (`:1733`→`:1747`). `error_class` (already safe, already separate) was left untouched everywhere.
+- Extended `redact_sensitive_data` in `src/atlas/platform/logging.py` as defense in depth, reusing
+  OB-8's existing `_redact_mapping`/`_key_is_sensitive` machinery rather than duplicating it: added
+  a second frozenset, `_VALUE_SHAPED_KEY_NAMES` (`exception`, `error_message`/`errormessage`,
+  `sql`, `parameter`/`parameters`, `row`/`rows`), matched by *exact* normalized key rather than the
+  existing denylist's substring match — `_SENSITIVE_KEY_TOKENS`'s substring matching is
+  intentional for secrets (over-matching is the safe default there), but the same approach on `row`
+  would also redact `row_count`, a plain non-sensitive integer already asserted safe by
+  `test_preserves_non_sensitive_fields`, so this set needed a different match rule to coexist with
+  it. This is genuinely a second layer, not cosmetic: `logger.exception(...)` calls elsewhere in
+  `activities.py` go through `structlog.processors.format_exc_info`, which renders the full
+  traceback (including the exception's own `str()`) under an `exception` key regardless of what the
+  seven call sites above now store — this is exactly the vector the new key catches.
+- Load-bearing test added to `tests/test_inv6_value_freedom.py`:
+  `test_source_connector_exception_never_reaches_analysis_run_error_message` drives the real
+  `profile_table_task` end to end (real sqlite-backed session, real `start_task`/`finish_task`
+  bookkeeping, a real Temporal activity context installed the same way
+  `test_profiling_exception_policy.py` does) against a `_RaisingConnector` whose `profile_table`
+  raises a `RuntimeError` shaped like an actual Postgres constraint-violation message carrying a
+  sentinel (`ZZQ-SENTINEL-DRIVERDETAIL-71ae`), then re-reads the persisted `AnalysisRun` and asserts
+  the sentinel never reached `error_message` while `error_class == "RuntimeError"` did get stored.
+  Verified load-bearing, not just present: temporarily reverted the `profile_table_task` fix back to
+  `str(exc)[:4000]`, reran the test, watched it fail with the sentinel found in the assertion
+  message, then restored the fix and reran green.
+  `test_the_worker_scan_would_notice_a_leak` is the negative control (mirroring
+  `test_the_control_plane_scan_would_notice_a_leak`'s intent): proves the fixture's exception
+  actually carries the sentinel, so the positive test's absence-assertion means something rather
+  than passing vacuously against an already-clean fixture. It does not re-run the full activity
+  with the fix disabled, unlike that existing control — this fix removed the `str(exc)` call
+  outright rather than gating it behind a patchable flag, so there is nothing left in production
+  code to toggle back on.
+- `tests/test_log_scrubbing.py` gained `test_redacts_value_shaped_keys` (all five new key names
+  redact) and `test_value_shaped_redaction_does_not_over_match_similar_keys` (`row_count`,
+  `error_class`, `sql_dialect` all pass through unchanged).
+- Tracker `AU-4` updated to DONE with the file:line evidence above.
+
+### Verification evidence
+
+- `uv sync --frozen --extra dev` (the `dev` optional-dependency group, not installed by a bare
+  `uv sync`) needed once in this worktree before `pytest`/`ruff`/`mypy` were importable at all.
+- `uv run --extra dev ruff check .`: clean.
+- `uv run --extra dev mypy src`: clean, no issues in 190 source files.
+- `uv run --extra dev pytest -q` (full suite, foreground, run twice): first run had one failure,
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  (a linear-vs-quadratic timing assertion); reran it alone and it passed in 27s, reran the full
+  suite a second time and it passed clean with no failures at all — a pre-existing, load-sensitive
+  flake unrelated to this change (touches bulk governance decisions, not the files this item
+  modified). Both `tests/test_inv6_value_freedom.py` (33 tests, including the 2 new) and
+  `tests/test_log_scrubbing.py` (8 tests, including the 2 new) pass on their own and inside the full
+  run.
+- `grep -rn "create_async_engine\|create_engine(" src/`: confirmed exactly one engine construction
+  site in `src/`, so `hide_parameters=True` covers every engine the process builds.
+- `grep -n "str(exc)" src/aida/workflows/activities.py`: zero matches outside the explanatory
+  comments left at each fixed site.
+
+### Current limitations
+
+- The bounded generic messages (`"table profiling failed"`, etc.) are per-activity constants, not
+  parameterized with any safe identifying detail (e.g. a correlation id) — an operator debugging a
+  failed run has `error_class` and the run id to go on, and needs the correlation id / structured
+  logs (already scrubbed by the redactor above) for anything deeper. This mirrors
+  `query_gateway.py`'s existing `"source query execution failed"` constant exactly, so it is
+  consistent with the established pattern rather than a new gap.
+- The `_VALUE_SHAPED_KEY_NAMES` denylist, like `_SENSITIVE_KEY_TOKENS` before it, is a fixed list
+  sourced from the audit's named fields, not derived from a schema — a differently-named field
+  carrying the same class of leak (e.g. a vendor connector's own `detail` or `hint` key) would not
+  be caught by name and would only be caught by the value patterns already in place, or not at all.
+  Extending the list as new field names are found is expected maintenance, same caveat OB-8 recorded
+  for its own denylist.
+- Scope was held to exactly what AU-4 named: the engine construction, the seven-call-site pattern in
+  `activities.py`, and the log redactor's denylist. `query_gateway.py`'s own `except QueryRejected`
+  branch (a different block from the `except Exception` one this item mirrors) still does
+  `execution.error_message = str(exc)[:1000]` — out of scope here because `QueryRejected` is raised
+  internally with a curated reason string, not a raw source-connector exception, but worth a second
+  look if that assumption ever stops holding.

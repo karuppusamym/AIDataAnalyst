@@ -554,3 +554,243 @@ def test_numeric_literals_are_redacted_too() -> None:
     assert prepared is not None
     assert prepared.redacted is not None
     assert "998877665544" not in prepared.redacted
+
+
+# --- AU-4 / C3: the worker path (activities.py), driven with a raising connector -----
+#
+# `04-end-to-end-audit-2026-08-30.md` §4 C3: every path above drives
+# `QueryExecutionGateway`, which was already careful. `profile_table_task` talks to
+# the source connector directly, and its exception handler used to do
+# `run.error_message = str(exc)[:4000]` -- whatever the connector raised, verbatim,
+# into a value-free control-plane column. A real driver error routinely quotes the
+# offending row ("Key (account_no)=(...) already exists"), so this was as real a
+# leak as an un-redacted SQL literal.
+
+SENTINEL_DRIVER_DETAIL = "ZZQ-SENTINEL-DRIVERDETAIL-71ae"
+
+
+class _RaisingConnector:
+    """Stands in for a source connector whose driver raised mid-profile.
+
+    The message shape mirrors what real drivers actually emit -- a constraint
+    violation quoting the offending column and value -- rather than a generic
+    `Exception("boom")`, so the test proves something about the leak this branch
+    fixes, not just about `str(exc)` in the abstract.
+    """
+
+    async def profile_table(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            'duplicate key value violates unique constraint "accounts_pkey" '
+            f"DETAIL:  Key (account_no)=({SENTINEL_DRIVER_DETAIL}) already exists."
+        )
+
+
+async def _seed_run_for_profile_table_task(
+    session: Any, *, credential_env_var: str
+) -> tuple[Any, Any]:
+    """Minimal fixture graph `profile_table_task` needs to reach the connector
+    call: an org chain, a datasource, and one active table/column. Mirrors
+    `test_profiling_exception_policy.py`'s `_seed_table_with_column`, trimmed to
+    what this test touches.
+    """
+    from aida.models import (
+        AnalysisRun,
+        DataDomain,
+        DataSource,
+        LineOfBusiness,
+        MetadataCatalog,
+        MetadataColumn,
+        MetadataSchema,
+        MetadataTable,
+        Organization,
+        Project,
+    )
+
+    org = Organization(id=uuid4(), name="Bank", slug=f"bank-{uuid4().hex[:8]}")
+    lob = LineOfBusiness(
+        id=uuid4(), organization_id=org.id, name="Retail", code=f"RTL{uuid4().hex[:6]}"
+    )
+    domain = DataDomain(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        name="Ungoverned",
+        code=f"UNG{uuid4().hex[:6]}",
+    )
+    project = Project(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        data_domain_id=domain.id,
+        name="Warehouse",
+        slug=f"wh-{uuid4().hex[:8]}",
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        data_domain_id=domain.id,
+        project_id=project.id,
+        name="primary",
+        connector_type="postgres",
+        dialect="postgres",
+        environment="PROD",
+        network_zone="default",
+        credential_reference=f"env://{credential_env_var}",
+        capabilities={},
+        status="ACTIVE",
+    )
+    catalog = MetadataCatalog(
+        id=uuid4(),
+        organization_id=org.id,
+        datasource_id=datasource.id,
+        name="bank",
+        fingerprint="fp",
+    )
+    session.add_all([org, lob, domain, project, datasource, catalog])
+    await session.flush()
+    schema = MetadataSchema(
+        id=uuid4(), organization_id=org.id, catalog_id=catalog.id, name="public", fingerprint="fp"
+    )
+    session.add(schema)
+    await session.flush()
+    table = MetadataTable(
+        id=uuid4(),
+        organization_id=org.id,
+        datasource_id=datasource.id,
+        schema_id=schema.id,
+        name="accounts",
+        object_type="BASE_TABLE",
+        fingerprint="fp",
+    )
+    session.add(table)
+    await session.flush()
+    column = MetadataColumn(
+        id=uuid4(),
+        organization_id=org.id,
+        table_id=table.id,
+        name="account_no",
+        ordinal_position=1,
+        physical_type="text",
+        nullable=True,
+        classification="PII",
+        fingerprint="fp",
+    )
+    session.add(column)
+    run = AnalysisRun(
+        id=uuid4(), organization_id=org.id, datasource_id=datasource.id, status="RUNNING"
+    )
+    session.add(run)
+    await session.commit()
+    return run, table
+
+
+def _install_fake_temporal_activity_context() -> Any:
+    """`profile_table_task` calls `activity.is_cancelled()` / `activity.heartbeat()`,
+    which require a live Temporal activity context. Installs a minimal but real
+    one, exactly as `test_profiling_exception_policy.py`'s `_fake_activity_context`
+    fixture does, and returns the reset token so the caller can tear it down.
+    """
+    import threading
+
+    from temporalio import activity
+    from temporalio.common import _CompositeEvent
+    from temporalio.converter import PayloadConverter
+
+    context = activity._Context(
+        info=lambda: (_ for _ in ()).throw(RuntimeError("activity.info() unused by this test")),
+        heartbeat=lambda *details: None,
+        cancelled_event=_CompositeEvent(thread_event=threading.Event(), async_event=None),
+        worker_shutdown_event=_CompositeEvent(thread_event=threading.Event(), async_event=None),
+        shield_thread_cancel_exception=None,
+        payload_converter_class_or_instance=PayloadConverter,
+        runtime_metric_meter=None,
+        client=None,
+        cancellation_details=activity._ActivityCancellationDetailsHolder(),
+    )
+    return activity._Context.set(context)
+
+
+async def test_source_connector_exception_never_reaches_analysis_run_error_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AU-4 / C3: `profile_table_task`'s exception handler must never persist
+    `str(exc)` into `analysis_run.error_message`.
+
+    Drives the real activity end to end (real sqlite-backed session, real
+    `finish_task`/`start_task` bookkeeping) against a connector that raises an
+    exception carrying a sentinel value shaped like a driver's constraint-violation
+    detail, then re-reads the persisted run and asserts the sentinel never reached
+    it -- only the exception's class name and a bounded, generic message did.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+    from temporalio import activity
+
+    import aida.task_tracking as task_tracking
+    import aida.workflows.activities as activities
+    from aida.db import Base
+    from aida.models import AnalysisRun
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    token = _install_fake_temporal_activity_context()
+    try:
+        async with session_factory() as session:
+            run, table = await _seed_run_for_profile_table_task(
+                session, credential_env_var="TEST_DSN_AU4_POSITIVE"
+            )
+            run_id, table_id = run.id, table.id
+
+            monkeypatch.setattr(activities, "session_factory", lambda: session)
+            monkeypatch.setattr(task_tracking, "session_factory", lambda: session)
+            monkeypatch.setenv("TEST_DSN_AU4_POSITIVE", "postgresql://test")
+            monkeypatch.setattr(
+                activities.connector_registry, "create", lambda *a, **k: _RaisingConnector()
+            )
+
+            with pytest.raises(RuntimeError, match="accounts_pkey"):
+                await activities.profile_table_task(
+                    {"run_id": str(run_id), "table_id": str(table_id)}
+                )
+
+            failed_run = await session.get(AnalysisRun, run_id)
+            assert failed_run is not None
+            assert failed_run.status == "FAILED"
+            assert failed_run.error_class == "RuntimeError"
+            assert failed_run.error_message is not None
+            assert SENTINEL_DRIVER_DETAIL not in failed_run.error_message, (
+                "the source connector's raw exception text reached the value-free "
+                "control plane"
+            )
+    finally:
+        activity._Context.reset(token)
+        await engine.dispose()
+
+
+async def test_the_worker_scan_would_notice_a_leak() -> None:
+    """Negative control for the test above, in the spirit of
+    `test_the_control_plane_scan_would_notice_a_leak`: proves the fixture actually
+    manufactures a value-bearing exception, so the absence of the sentinel in the
+    positive test's assertion means something. Without this, a fixture that
+    accidentally raised a value-free exception would leave the positive test
+    passing forever while proving nothing about the fix.
+
+    This does not re-run the full activity with the fix disabled -- after AU-4
+    there is no longer a `str(exc)` call in `profile_table_task` left to
+    monkeypatch back in; the fix is the absence of that call, not a flag that
+    guards it. Proving the raw material the activity receives is value-bearing is
+    the honest version of that check for a fix shaped this way.
+    """
+    with pytest.raises(RuntimeError) as excinfo:
+        await _RaisingConnector().profile_table()
+
+    assert SENTINEL_DRIVER_DETAIL in str(excinfo.value), (
+        "the fixture connector's exception does not even carry the sentinel; the "
+        "positive test above would pass regardless of whether the fix works"
+    )
