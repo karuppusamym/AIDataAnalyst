@@ -2232,6 +2232,38 @@ class GlossaryLinkProposalRead(ApiModel):
     updated_at: datetime
 
 
+class AssetDescriptionDraftGenerate(ApiModel):
+    table_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_table_ids(self) -> "AssetDescriptionDraftGenerate":
+        if len(set(self.table_ids)) != len(self.table_ids):
+            raise ValueError("table_ids must be unique")
+        return self
+
+
+class AssetDescriptionDraftRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    table_id: UUID
+    table_name: str
+    drafted_text: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    evidence: dict[str, Any]
+    status: str
+    governance_review_id: UUID | None
+    published_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CoverageDimensionRead(ApiModel):
     covered: int
     total: int

@@ -2597,6 +2597,44 @@ class GlossaryLinkProposal(Base, TimestampMixin):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AssetDescriptionDraft(Base, TimestampMixin):
+    """Deterministically drafted table description; always routed through review.
+
+    Evidence-scored per GL-9: the score sets review priority, it never skips
+    review. Rejected drafts are retained (not deleted) as negative knowledge so
+    an identical low-value draft is not regenerated on the next run.
+    """
+
+    __tablename__ = "asset_description_draft"
+    __table_args__ = (Index("ix_asset_description_draft_org_status", "organization_id", "status"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    drafted_text: Mapped[str] = mapped_column(Text, nullable=False)
+    text_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    accuracy_score: Mapped[float] = mapped_column(Float, nullable=False)
+    clarity_score: Mapped[float] = mapped_column(Float, nullable=False)
+    style_score: Mapped[float] = mapped_column(Float, nullable=False)
+    completeness_score: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("asset_documentation_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CoverageSnapshot(Base, TimestampMixin):
     __tablename__ = "coverage_snapshot"
     __table_args__ = (

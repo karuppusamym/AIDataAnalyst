@@ -1,7 +1,7 @@
 """openlineage run events
 
 Revision ID: 8a7f3c1d4b22
-Revises: d81e6c0f2a14
+Revises: 6f4c1d2e9a10
 Create Date: 2026-08-28 10:30:00
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "8a7f3c1d4b22"
-down_revision: str | Sequence[str] | None = "d81e6c0f2a14"
+down_revision: str | Sequence[str] | None = "6f4c1d2e9a10"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -119,16 +119,22 @@ def upgrade() -> None:
         ),
     )
     op.create_index(
-        op.f("ix_openlineage_dataset_organization_id"), "openlineage_dataset", ["organization_id"]
+        op.f("ix_openlineage_dataset_organization_id"),
+        "openlineage_dataset",
+        ["organization_id"],
     )
     op.create_index(
         op.f("ix_openlineage_dataset_run_event_id"), "openlineage_dataset", ["run_event_id"]
     )
     op.create_index(
-        op.f("ix_openlineage_dataset_matched_table_id"), "openlineage_dataset", ["matched_table_id"]
+        op.f("ix_openlineage_dataset_matched_table_id"),
+        "openlineage_dataset",
+        ["matched_table_id"],
     )
     op.create_index(
-        "ix_openlineage_dataset_run_direction", "openlineage_dataset", ["run_event_id", "direction"]
+        "ix_openlineage_dataset_run_direction",
+        "openlineage_dataset",
+        ["run_event_id", "direction"],
     )
 
     op.create_table(
@@ -185,7 +191,9 @@ def upgrade() -> None:
         ["organization_id"],
     )
     op.create_index(
-        op.f("ix_openlineage_table_edge_run_event_id"), "openlineage_table_edge", ["run_event_id"]
+        op.f("ix_openlineage_table_edge_run_event_id"),
+        "openlineage_table_edge",
+        ["run_event_id"],
     )
     op.create_index(
         op.f("ix_openlineage_table_edge_input_table_id"),
@@ -197,7 +205,9 @@ def upgrade() -> None:
         "openlineage_table_edge",
         ["output_table_id"],
     )
-    op.create_index("ix_openlineage_table_edge_run", "openlineage_table_edge", ["run_event_id"])
+    op.create_index(
+        "ix_openlineage_table_edge_run", "openlineage_table_edge", ["run_event_id"]
+    )
 
     op.create_table(
         "openlineage_column_edge",
@@ -259,7 +269,9 @@ def upgrade() -> None:
         ["organization_id"],
     )
     op.create_index(
-        op.f("ix_openlineage_column_edge_run_event_id"), "openlineage_column_edge", ["run_event_id"]
+        op.f("ix_openlineage_column_edge_run_event_id"),
+        "openlineage_column_edge",
+        ["run_event_id"],
     )
     op.create_index(
         op.f("ix_openlineage_column_edge_input_table_id"),
@@ -271,13 +283,16 @@ def upgrade() -> None:
         "openlineage_column_edge",
         ["output_table_id"],
     )
-    op.create_index("ix_openlineage_column_edge_run", "openlineage_column_edge", ["run_event_id"])
+    op.create_index(
+        "ix_openlineage_column_edge_run", "openlineage_column_edge", ["run_event_id"]
+    )
 
 
 def downgrade() -> None:
     op.drop_index("ix_openlineage_column_edge_run", table_name="openlineage_column_edge")
     op.drop_index(
-        op.f("ix_openlineage_column_edge_output_table_id"), table_name="openlineage_column_edge"
+        op.f("ix_openlineage_column_edge_output_table_id"),
+        table_name="openlineage_column_edge",
     )
     op.drop_index(
         op.f("ix_openlineage_column_edge_input_table_id"), table_name="openlineage_column_edge"
@@ -286,7 +301,8 @@ def downgrade() -> None:
         op.f("ix_openlineage_column_edge_run_event_id"), table_name="openlineage_column_edge"
     )
     op.drop_index(
-        op.f("ix_openlineage_column_edge_organization_id"), table_name="openlineage_column_edge"
+        op.f("ix_openlineage_column_edge_organization_id"),
+        table_name="openlineage_column_edge",
     )
     op.drop_table("openlineage_column_edge")
 
@@ -306,7 +322,9 @@ def downgrade() -> None:
     op.drop_table("openlineage_table_edge")
 
     op.drop_index("ix_openlineage_dataset_run_direction", table_name="openlineage_dataset")
-    op.drop_index(op.f("ix_openlineage_dataset_matched_table_id"), table_name="openlineage_dataset")
+    op.drop_index(
+        op.f("ix_openlineage_dataset_matched_table_id"), table_name="openlineage_dataset"
+    )
     op.drop_index(op.f("ix_openlineage_dataset_run_event_id"), table_name="openlineage_dataset")
     op.drop_index(op.f("ix_openlineage_dataset_organization_id"), table_name="openlineage_dataset")
     op.drop_table("openlineage_dataset")
