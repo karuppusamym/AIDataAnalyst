@@ -34,6 +34,16 @@ class Settings(BaseSettings):
     oidc_principal_type_claim: str = "principal_type"
     oidc_business_purpose_claim: str = "business_purpose"
     oidc_role_mappings: dict[str, list[str]] = Field(default_factory=dict)
+    # UX-1: the shell's persona-oriented nav (module 21 SS5) is derived from the same
+    # verified OIDC groups claim used for role mapping, via a configurable claim path
+    # and mapping dict -- never a browser-selectable value in production. A principal
+    # can belong to several groups; the first one (in claim order) with a mapping to a
+    # recognized persona wins, so the bank's group contract controls priority simply by
+    # how groups are ordered in the token. `oidc_default_persona` is the landing
+    # persona for a principal whose groups map to none of the configured personas.
+    oidc_groups_claim: str = "groups"
+    oidc_persona_mappings: dict[str, str] = Field(default_factory=dict)
+    oidc_default_persona: str | None = None
     oidc_jwks_cache_seconds: int = Field(default=300, ge=30, le=86_400)
     oidc_clock_skew_seconds: int = Field(default=30, ge=0, le=300)
     credential_provider: Literal["env", "vault", "cyberark", "aws-sm", "azure-kv", "gcp-sm"] = "env"

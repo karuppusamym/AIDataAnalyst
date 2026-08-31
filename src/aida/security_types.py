@@ -12,6 +12,11 @@ class SecurityContext:
     roles: frozenset[str]
     source_ip: str | None = None
     business_purpose: str | None = None
+    # UX-1: the shell's persona-oriented navigation mode, derived server-side from the
+    # OIDC groups claim (see `oidc.context_from_claims`). `None` when the identity
+    # provider is the development one, or when an OIDC principal's groups map to no
+    # configured persona and no default is set -- either way, never client-selected.
+    persona: str | None = None
 
     def require_organization(self) -> UUID:
         if self.organization_id is None:

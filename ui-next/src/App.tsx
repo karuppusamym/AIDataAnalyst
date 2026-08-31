@@ -1,17 +1,23 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
-import type { Persona } from "./lib/types";
+import { PersonaNav } from "./components/PersonaNav";
+import { fetchMe } from "./lib/api";
+import type { MeRead, Persona } from "./lib/types";
 import "./App.css";
 
 /* ---------------------------------------------------------------------------
    The shell.
 
-   Module 21 §5: in production the persona is DERIVED from OIDC group claims.
-   The selector below is explicitly a development convenience and is labelled
-   as one in the UI — a persona a user can pick grants nothing, so anything
-   gated on it would be a fake control. It stays visible during the strangle
-   migration precisely so nobody mistakes it for an entitlement.
+   Module 21 §5: in production the persona is DERIVED from OIDC group claims,
+   via `GET /v1/me` (persona_api.py), which itself derives it from
+   `oidc.context_from_claims` -- the same configurable claim-path mechanism
+   module 01 already uses for role mapping, extended to groups. The switcher
+   in `PersonaNav` is a development convenience, gated by the identity
+   provider `/v1/me` reports (module 01's existing prod-vs-dev-identity
+   switch): it renders only under the development identity provider, and
+   never under OIDC, where persona is not a user-selectable value. See
+   `PersonaNav.tsx` for the enforcement point itself.
 
    Nav marked "legacy" still renders from ui/ (the existing portal). This is
    the strangle seam: the new shell owns routing and chrome from day one, and
@@ -34,11 +40,27 @@ const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
   { id: "operations", label: "Operations", group: "Operate" },
 ];
 
-const PERSONAS: Persona[] = ["Analyst", "Steward", "Reviewer", "Operator", "Auditor"];
-
 export default function App() {
   const [view, setView] = useState("catalog");
-  const [persona, setPersona] = useState<Persona>("Steward");
+  const [me, setMe] = useState<MeRead | null>(null);
+  // The dev switcher's own choice. Irrelevant, and never read, once `me` reports
+  // OIDC -- PersonaNav ignores `onPersonaChange` in that mode -- but kept as
+  // state (rather than derived) so a dev's selection survives re-renders.
+  const [devPersona, setDevPersona] = useState<Persona>("Steward");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchMe(controller.signal)
+      .then(setMe)
+      .catch(() => {
+        // Fail closed (module 01 INV-4): an unreachable /v1/me leaves `me` null,
+        // which PersonaNav renders as nothing rather than guessing a mode.
+      });
+    return () => controller.abort();
+  }, []);
+
+  const identityProvider = me?.identity_provider ?? null;
+  const persona = identityProvider === "OIDC" ? (me?.persona ?? null) : devPersona;
 
   const groups = [...new Set(NAV.map((n) => n.group))];
   const current = NAV.find((n) => n.id === view);
@@ -51,19 +73,11 @@ export default function App() {
           <span className="snav__name">Atlas</span>
         </div>
 
-        <div className="snav__persona">
-          <label className="snav__plabel" htmlFor="persona">Persona</label>
-          <select
-            id="persona"
-            value={persona}
-            onChange={(e) => setPersona(e.target.value as Persona)}
-          >
-            {PERSONAS.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-          <span className="snav__pnote">Dev only — derived from OIDC in production</span>
-        </div>
+        <PersonaNav
+          identityProvider={identityProvider}
+          persona={persona}
+          onPersonaChange={setDevPersona}
+        />
 
         {groups.map((g) => (
           <div key={g} className="snav__group">

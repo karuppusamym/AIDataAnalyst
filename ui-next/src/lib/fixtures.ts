@@ -3,6 +3,7 @@ import type {
   CatalogRowRead,
   CertificationStatus,
   CursorPage,
+  MeRead,
   QualityState,
 } from "./types";
 import type { CatalogQuery } from "./api";
@@ -295,5 +296,23 @@ export async function fetchReviewBatch(): Promise<ReviewBatch> {
         evidence: "term appears in 23 queries and 4 dashboards · no conflicting binding",
       },
     ],
+  };
+}
+
+/**
+ * UX-1: fixture mode has no backend behind it, so it can only ever stand in for
+ * the *development* identity provider — never for OIDC, which requires a real
+ * verified token to produce a real derived persona. `persona: null` here means
+ * "the switcher decides", exactly as an unmapped OIDC principal's `null` means
+ * "no persona was derived" — the shell renders both the same way, correctly.
+ */
+export function makeFixtureMe(): MeRead {
+  return {
+    principal_id: "dev-fixture-user",
+    principal_type: "USER",
+    organization_id: null,
+    roles: ["Analyst", "DataSteward", "Viewer"],
+    persona: null,
+    identity_provider: "DEVELOPMENT",
   };
 }

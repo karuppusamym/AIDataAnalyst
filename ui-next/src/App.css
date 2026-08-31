@@ -7,6 +7,7 @@
 .snav__persona{padding:0 18px 14px;border-bottom:1px solid var(--line-soft);display:flex;flex-direction:column;gap:4px}
 .snav__plabel{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
 .snav__persona select{font:inherit;font-size:13px;padding:5px 8px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--ink)}
+.snav__pvalue{font-size:13px;font-weight:500;color:var(--ink)}
 .snav__pnote{font-size:10px;color:var(--ink-3);line-height:1.4;margin-top:2px}
 
 .snav__group{padding:12px 0 0}

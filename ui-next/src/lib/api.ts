@@ -2,9 +2,10 @@ import type {
   CatalogRowRead,
   CatalogAssetEvidence,
   CursorPage,
+  MeRead,
   MetadataTableRead,
 } from "./types";
-import { makeFixtureCatalog, makeFixtureEvidence } from "./fixtures";
+import { makeFixtureCatalog, makeFixtureEvidence, makeFixtureMe } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
    One fetch wrapper for the whole app.
@@ -114,4 +115,21 @@ export async function fetchAssetEvidence(
 ): Promise<CatalogAssetEvidence> {
   if (USE_FIXTURES) return makeFixtureEvidence(tableId);
   return get<CatalogAssetEvidence>(`/v1/metadata/tables/${tableId}/evidence`, signal);
+}
+
+/**
+ * UX-1 / module 21 §5: the one call that decides whether the shell may offer a
+ * persona picker at all. `identity_provider` is the server's own prod/dev gate
+ * (`Settings.identity_provider`, `aida.security.get_security_context`) — the shell
+ * defers to it rather than inferring its own, and in `OIDC` mode `persona` is the
+ * only persona the UI is allowed to use, never a client-selected value.
+ *
+ * `GET /v1/me` exists today (unlike the read-model calls above), so flip
+ * `VITE_USE_FIXTURES=0` to see the real thing; fixture mode reports `DEVELOPMENT`
+ * with no persona so the manual switcher below still works for pure-frontend
+ * iteration with no backend running.
+ */
+export async function fetchMe(signal?: AbortSignal): Promise<MeRead> {
+  if (USE_FIXTURES) return makeFixtureMe();
+  return get<MeRead>("/v1/me", signal);
 }

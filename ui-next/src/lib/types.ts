@@ -90,3 +90,18 @@ export type Persona =
   | "Reviewer"
   | "Operator"
   | "Auditor";
+
+/** `MeRead` — persona_api.py. Module 21 §5: in production this is the ONLY source of
+ *  persona — the client never picks it. `identity_provider` is the exact prod/dev gate
+ *  `aida.security.get_security_context` already branches on (`Settings.identity_provider`),
+ *  echoed here so the shell checks the one flag the server itself checks rather than
+ *  inferring its own. `persona` is null under the development identity provider, and
+ *  also under OIDC when the principal's groups map to no configured persona. */
+export interface MeRead {
+  principal_id: string;
+  principal_type: string;
+  organization_id: string | null;
+  roles: string[];
+  persona: Persona | null;
+  identity_provider: "OIDC" | "DEVELOPMENT";
+}

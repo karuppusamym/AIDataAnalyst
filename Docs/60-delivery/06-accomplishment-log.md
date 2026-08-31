@@ -2399,3 +2399,65 @@ Studio has moved from Pending to Partial in the status matrix.
   `origin/feature/snowflake-dbt-lineage-mcp`; `tests/test_studio.py` has no such class, only flat
   test functions). Out of scope for PF-3 (neither the tracker's ST-A4 row nor another session's
   accomplishment-log entry is this item's to edit) and left for whoever owns ST-A4 to fix.
+
+## 2026-08-31 — UX-1 (persona navigation from OIDC groups) closed
+
+- Module 21 §5's rule — "a persona that a user can select is a persona that grants nothing, so any
+  capability gated on it would be a fake control" — was true but unenforced: `ui-next`'s shell
+  (UX-10) already labelled its persona `<select>` "Dev only — derived from OIDC in production," but
+  nothing behind that label actually gated it. The switcher rendered unconditionally, in every mode.
+- Closed by extending module 01's existing claims-to-roles pipeline rather than building a parallel
+  one. `aida.oidc.context_from_claims` already turns a verified OIDC roles claim into platform roles
+  via a configurable claim path (`Settings.oidc_roles_claim`) plus a mapping dict
+  (`Settings.oidc_role_mappings`). Added the same shape for groups: `oidc_groups_claim` (default
+  `"groups"`) and `oidc_persona_mappings` (group name -> persona), plus `oidc_default_persona` for a
+  principal whose groups map to none of the configured personas. `_persona_from_groups` picks the
+  first group, in claim order, with a recognized mapping — deterministic per token, and the bank's
+  own group ordering controls priority with no extra config. `SecurityContext` gained
+  `persona: str | None`. Refactored the roles/groups claim-parsing duplication in `oidc.py` into one
+  `_string_list_claim` helper used by both, rather than copy-pasting the groups parser.
+- New `GET /v1/me` (`src/aida/persona_api.py`, following the existing single-purpose-router pattern
+  of `token_revocation_api.py`) is the seam the shell actually reads: it returns the current
+  principal's roles, its server-derived `persona`, and `identity_provider` —
+  `Settings.identity_provider.upper()`, the exact `"development" | "oidc"` value
+  `aida.security.get_security_context` already branches its whole auth flow on. The shell defers to
+  that one flag instead of inventing its own prod/dev signal.
+- `ui-next`: extracted the persona `<select>` out of `App.tsx` into a standalone `PersonaNav`
+  component (`ui-next/src/components/PersonaNav.tsx`) with three render branches keyed on one prop,
+  `identityProvider`: `"OIDC"` renders read-only persona text and **no `<select>` in the DOM at
+  all** (not disabled — absent); `"DEVELOPMENT"` renders the pre-existing manual switcher,
+  unchanged; `null` (mode not yet resolved) renders nothing, matching module 01 INV-4's fail-closed
+  default rather than guessing a mode while `/v1/me` is still in flight. `App.tsx` fetches `/v1/me`
+  once on mount and passes the result straight through — no new state machine beyond what the fetch
+  itself already models.
+- `ui-next` had no test runner at all before this (`package.json` had no `test` script). Added
+  `vitest` + `@testing-library/react` + `jsdom` as devDependencies (exact-pinned, matching this
+  repo's convention) and a minimal `vitest.config.ts`/`ui-next/src/test/setup.ts` (the latter also stubs
+  `ResizeObserver`, which jsdom lacks and `@tanstack/react-virtual`'s `CatalogTable`, UX-11, needs
+  just to mount). `PersonaNav.test.tsx` (9 cases) asserts the rendered DOM directly per mode —
+  `queryByRole("combobox")`/`queryByTestId("persona-select")` absent under OIDC (including the
+  no-persona-mapped case), present under development, `onPersonaChange` never firing when there is
+  no control to fire it. `App.test.tsx` (3 cases, `fetchMe` mocked) proves the same gating holds
+  through the actual shell, not just the isolated component.
+- Tests (`tests/test_persona_derivation.py`, 17 cases): a principal in a mapped group derives the
+  configured persona; different groups derive different personas; the first mapped group wins when
+  several are present, in claim order; an unmapped principal derives `None`, or the configured
+  default when one is set; an out-of-catalog persona name is ignored whether it comes from a group
+  mapping or from the default; the groups claim honors a custom dotted claim path exactly like the
+  roles claim does; comma-separated and malformed groups claims are handled the same way roles
+  claims already are; the full derivation survives real RS256 sign-and-verify, not just unit-level
+  claim parsing; and `GET /v1/me` reports the right `persona`/`identity_provider` pair in both modes
+  (called directly against a hand-built `SecurityContext`, no DB — the existing "no live-DB harness"
+  gap already named for several other endpoints in this tracker, e.g. this file's ST-A4 entry
+  above).
+- `uv run ruff check .` / `uv run mypy src` (185 files) / `uv run lint-imports` (4 contracts kept) /
+  `uv run alembic heads` (single head, no migration — no new tables) / `uv run pytest` all green,
+  with the same one pre-existing, unrelated failure already logged in this file and in the CX-9
+  tracker row: test_doc_claims.py's citation check for ST-A4's TestParameterContractDesigner
+  test-path citation, reproduced identically on the unmodified branch (`git stash` confirmed).
+  `ui-next`: `npm run typecheck`, `npm test` (12/12), `npm run
+  build` all green. OpenAPI baseline regenerated (`scripts/openapi_diff.py --accept-baseline`):
+  `GET /v1/me` is a new, additive path — the diff gate confirmed no breaking changes before the
+  baseline was accepted.
+- Also removed `ui-next/vite.config.ts.timestamp-*.mjs`, a stray Vite build artifact that had been
+  committed by an earlier session; harmless but not something that belongs in the tree.
