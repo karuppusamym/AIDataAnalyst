@@ -4152,3 +4152,132 @@ next or notices CI go red on it.
 Only `main.py`'s Temporal-connect logic in `lifespan`, the background reconnect task, the two new
 `Settings` fields it needs, and their tests were touched — per the task brief, the readiness probe's
 own logic was already correct and needed no change beyond becoming reachable.
+
+## 2026-08-31 — AU-8 (migration↔ORM drift gate) closed: found and fixed real drift on the first run
+
+`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` Section 5: "84 migrations, zero tests apply
+them. All 19 DB-backed test files build schema from the ORM, so ORM↔migration drift is
+structurally invisible. The tracker records this bug firing once already (DQ-1) — the instance was
+fixed, no gate was added." This closes that gap with the gate the tracker's exit criterion
+describes verbatim, and — because nothing had ever checked this before, on a branch multiple
+concurrent sessions push migrations and ORM changes to all day — it found real drift on its first
+real run, before it had even landed.
+
+### The gate
+
+New `tests/test_migration_orm_drift.py`, deliberately **not** folded into the shared fixture path
+every other DB-backed test uses (`Base.metadata.create_all` against an in-memory SQLite engine —
+see `tests/test_tier0_invariants.py:298-300` for the pattern all 19 files share): it resets a real
+Postgres database's `public` schema to genuinely empty (`DROP SCHEMA public CASCADE; CREATE SCHEMA
+public` — chosen over `CREATEDB` because it works for any role that merely owns the target
+database, which is the common case for both a local dev Postgres and a CI service container's
+default user, without needing superuser or database-creation grants), runs `alembic upgrade head`
+through Alembic's own Python API (`alembic.command.upgrade`, not a subprocess), then reflects the
+result and diffs it against `Base.metadata` with `alembic.autogenerate.compare_metadata` — the same
+machinery `alembic revision --autogenerate` uses, run in the opposite direction. Any diff fails the
+test with every difference rendered in the failure message.
+
+Two real mechanical obstacles, both worth recording since they'd trip up the next person who tries
+this: (1) `migrations/env.py` calls `get_settings().database_url` itself and overwrites whatever URL
+the `alembic.config.Config` object was given, so pointing a real `alembic upgrade` at a scratch
+database requires setting `AIDA_DATABASE_URL` in the process environment *and* clearing
+`get_settings`'s `@lru_cache` before and after (`atlas/platform/config.py:459`) — the test does both,
+restoring each in a `finally`. (2) `alembic.command.upgrade` drives Alembic's own
+`asyncio.run(run_async_migrations())` internally (`migrations/env.py:78`), so it cannot be called
+from inside a coroutine that is itself already running inside an `asyncio.run()` — the test's schema
+reset, the migration run, and the post-migration diff are three separate top-level calls for exactly
+this reason, not one `async def` wrapping all three.
+
+Postgres, not SQLite: `Settings.database_url` defaults to `postgresql+asyncpg://...`
+(`atlas/platform/config.py:92`) and several migrations use Postgres-only DDL (`CREATE EXTENSION
+pg_trgm`, `USING gin (... gin_trgm_ops)` in `f9a2b3c4d5e6_catalog_scale_indexes.py`) with no SQLite
+equivalent, so a real migration run needs a real Postgres. **A real Postgres 16 instance was
+available in this sandbox** (`service postgresql start`; a pre-existing non-superuser `aida` role and
+database were already provisioned) and the gate ran against it for real throughout this work — this
+was not a "skip and hope CI catches it" delivery. If Postgres genuinely isn't reachable the test
+skips with the connection error as the reason (`pytest.skip`, verified by pointing it at a closed
+port) rather than failing CI on infrastructure absence; a new `migration-drift` job in
+`.github/workflows/ci.yml` provides a real one there via a `postgres:16` service container — the only
+CI job that needs one, which is why it's split out from `tests` rather than added to it (folding a
+~10-second real-Postgres migration run into the shared fast fixture path was explicitly the thing
+DQ-1/this row's exit criterion said not to do). Verified both directions before landing: passes
+clean at HEAD, and fails with the exact diagnostic expected when drift exists — confirmed by
+temporarily adding an ORM column with no migration, watching the test fail and name it, then
+reverting.
+
+### Real drift found and fixed (not synthetic)
+
+1. **8 ORM tables with no migration at all**: `consumption_record`, `negative_assertion`,
+   `search_index`, `vector_embedding`, `freshness_observation`, `freshness_watermark_config`,
+   `procedure_lineage_edge`, `view_lineage_edge` — all real, in-use ORM classes in `src/aida/
+   models.py` that some concurrent session on this branch added without an accompanying migration.
+2. **`composite_key_candidate` missing 5 columns**: `table_profile_id`, `column_names`,
+   `column_count`, `key_fingerprint`, `estimated_distinctness_ratio` (plus the FK and index
+   `table_profile_id` needs) — present in the ORM, absent from the table's original migration
+   (`6500275e1d36_composite_key_candidate.py`), added later without a follow-up migration.
+3. **`data_quality_incident.latest_observation_id` was live-broken in the database**: migration
+   `1b7e4c9a62d0_durable_data_quality.py` created it `NOT NULL` with `ON DELETE CASCADE` against
+   `data_quality_observation`, while the ORM (`models.py:1399-1401`) correctly declares it nullable
+   with `ON DELETE SET NULL`. `NOT NULL` plus `ON DELETE SET NULL` is self-contradictory — deleting a
+   referenced observation would have raised a Postgres constraint violation instead of nulling the
+   pointer, the first time anyone actually exercised that path against a real database. Fixed to
+   match the ORM, which is what the code elsewhere assumes ("latest observation" is documented and
+   used as optional).
+4. **3 columns migrated as `postgresql.JSONB` against house style**: `ai_remediation
+   .resolution_evidence`, `ai_trust_snapshot.factors`/`blockers` (`c8a4d3e91f02_production_control
+   _evidence.py`) — 43 other migrations in this repo use plain `sa.JSON` (matching the ORM's own
+   `mapped_column(JSON, ...)` convention, used 132 times in `models.py` with zero prior uses of
+   `JSONB`); this migration was the one outlier. Altered to `sa.JSON` to match.
+5. **`audit_archive_record`'s unique constraint had the wrong name**: created via raw SQL inline
+   `UNIQUE` (`e8f1a2b3c4d5_completed_control_plane_tables.py`), which Postgres auto-named
+   `audit_archive_record_archive_id_key`, instead of this repo's naming convention
+   (`uq_audit_archive_record_archive_id`, from `NAMING_CONVENTION` in `atlas/platform/db.py:17-23`).
+   Renamed to match.
+
+All five landed in one new migration, `migrations/versions/09be3ab5b008_au8_reconcile_orm_migration
+_drift.py` — generated with `alembic revision --autogenerate` (after the env.py fix below made the
+diff accurate) and hand-corrected in two places autogenerate got wrong: it double-applied the naming
+convention to `consumption_record`'s already-explicitly-named `CheckConstraint` through a redundant
+`op.f()` wrap, and the raw generated file used `typing.Union`/`from typing import Sequence` instead
+of this repo's `X | Y` / `from collections.abc import Sequence` convention every other migration in
+`migrations/versions/` follows — both fixed, then `ruff format`/`ruff check --fix` run over the file.
+
+### One real root cause, and one real ORM bug, both found along the way
+
+- **`migrations/env.py` imported `aida.models` but never `aida.envelope_models`**
+  (`envelope_models.py` defines `MetadataViewDefinition`, `MetadataRoutine`,
+  `MetadataRoutineParameter`, `MetadataObjectDescription`, `MetadataSourceGrant` — all real, already
+  correctly migrated tables), so those five tables were invisible to `Base.metadata` for *every*
+  Alembic autogenerate run, not just this test's first one. Concretely: they showed up as spurious
+  `remove_table` diffs the first time this test ran, before the fix — Base.metadata was incomplete,
+  not the database. Fixed by importing `envelope_models` alongside `models` in `migrations/env.py`, which also
+  means any future `alembic revision --autogenerate` will finally see that module.
+- **Three FK columns had a redundant, unused second index**: `NotificationEventRecord.incident_id`,
+  `StudioEvalRun.change_set_id`, `CompositeKeyCandidate.table_id` each declared `index=True` on the
+  column in addition to an already-covering named `Index` in `__table_args__` (e.g.
+  `ix_notification_event_incident` already covers `incident_id`; `index=True` would add a second,
+  differently-named index over the exact same column). No migration had ever created the redundant
+  second index for any of the three — confirmed this is drift, not an intentional pattern, against
+  `StudioTestRun.change_set_id`, which has the identical shape in the ORM but *does* have both
+  indexes in its migration, and was correctly left untouched. `index=True` removed from the three
+  real cases (fixing the ORM, not adding a wasteful duplicate-index migration) since a second index
+  covering an already-indexed single column serves no purpose.
+- **Deliberately not "fixed"**: three raw-SQL trigram/expression indexes on `metadata_table`
+  (`ix_metadata_table_catalog_page`, `ix_metadata_table_name_trgm`,
+  `ix_metadata_table_description_trgm`, all from `f9a2b3c4d5e6_catalog_scale_indexes.py`'s
+  `USING gin (lower(name) gin_trgm_ops)`-shaped DDL) have no clean SQLAlchemy `Index()` equivalent
+  and are absent from `Base.metadata` by design. Excluded from comparison via an `include_object`
+  filter added to both `migrations/env.py` (so real autogenerate runs don't propose dropping them
+  either) and `test_migration_orm_drift.py`, each carrying the same named set with a comment
+  requiring the two stay in sync.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict — `migrations/` and `tests/` are outside
+its scope, matching the `quality` CI job). `alembic heads` confirms exactly one head (`09be3ab5b008`)
+after landing — the `migrations` CI job's own gate. Full `pytest` suite: 3,415 passed, 5 skipped, 1
+xfailed, run against the same real local Postgres instance the drift gate itself used (not skipped
+locally). `.github/workflows/ci.yml` gained the `migration-drift` job (Postgres 16 service
+container, `POSTGRES_USER=aida`/`POSTGRES_PASSWORD=aida-local-only`/`POSTGRES_DB=aida_migration
+_drift_test` matching `AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL`) so this keeps running against a real
+database on every push, not just in this sandbox.

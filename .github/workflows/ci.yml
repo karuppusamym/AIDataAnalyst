@@ -29,6 +29,17 @@
 #                    spike testing tracked separately (PF-1/PF-2/PF-4/PF-7,
 #                    TS-7). See `scripts/perf_baseline.py`.
 #   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
+#   migration-drift -- tracker AU-8: Docs/60-delivery/04-end-to-end-audit-2026-08-30.md
+#                    Section 5 found that every DB-backed test builds schema from the ORM
+#                    (`Base.metadata.create_all` against in-memory SQLite), never by running
+#                    the 94+ real Alembic migrations, so ORM<->migration drift was
+#                    structurally invisible -- and had already fired once (DQ-1) with no
+#                    gate added. tests/test_migration_orm_drift.py applies every migration
+#                    to an empty Postgres database and diffs the result against
+#                    `Base.metadata`; it needs a real Postgres (migrations use
+#                    Postgres-only DDL), provided here by a service container -- the only
+#                    job that needs one, which is why it's split from `tests` rather than
+#                    added to it.
 #   reachability  -- tracker AU-1: Docs/60-delivery/04-end-to-end-audit-2026-08-30.md found
 #                    ~4,600 lines behind 17 DONE rows importable from no running process --
 #                    fully unit-tested, zero live callers, invisible to every gate above.
@@ -200,6 +211,43 @@ jobs:
 
       - name: Every src/aida module reachable from a real entry point, or allow-listed
         run: uv run python -m pytest tests/test_reachability_gate.py -v
+
+  migration-drift:
+    name: Migration/ORM drift gate (AU-8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: aida
+          POSTGRES_PASSWORD: aida-local-only
+          POSTGRES_DB: aida_migration_drift_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL: "postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida_migration_drift_test"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Apply every migration to an empty database and diff against Base.metadata
+        run: uv run python -m pytest tests/test_migration_orm_drift.py -v
 
   tests:
     name: Tests
