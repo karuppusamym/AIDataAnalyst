@@ -31,9 +31,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from itertools import count
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -50,6 +51,7 @@ from aida.models import (
     AnalysisRun,
     AuditEvent,
     DataDomain,
+    DataQualityIncident,
     DataSource,
     GovernedTool,
     GovernedToolVersion,
@@ -60,6 +62,7 @@ from aida.models import (
     MetadataTable,
     Organization,
     Project,
+    QueryExecution,
 )
 from tests.support.doubles import security_context
 
@@ -350,3 +353,193 @@ async def test_orchestrator_run_surfaces_graph_and_vector_evidence_from_real_ret
     fact_orders_signals = fact_orders_hit["metadata"]["retrieval_evidence"]["source_signals"]
     assert "lexical" in fact_orders_signals
     assert "vector" in fact_orders_signals
+
+
+# ---------------------------------------------------------------------------
+# RT-6 / RT-7: quality_trust and usage_popularity are real ranking factors,
+# not the raw_score=0.5 placeholder both carried in `hybrid_retrieve_enhanced`
+# Stage 4 before this wave.
+# ---------------------------------------------------------------------------
+
+
+async def _run_to_clarification(
+    orchestrator: GovernedAgentOrchestrator, scenario: _Scenario, *, correlation_id: str
+) -> None:
+    """Drives one `GovernedAgentOrchestrator.run()` call through to its
+    CLARIFICATION rejection -- retrieval and planning have already completed
+    and `agent_run.retrieval_evidence` is persisted by the time this raises,
+    same shape as `test_orchestrator_run_surfaces_graph_and_vector_evidence_
+    from_real_retrieval` above.
+    """
+    with pytest.raises(AgentClarificationRequired):
+        await orchestrator.run(
+            scenario.db,
+            datasource=scenario.datasource,
+            context=scenario.steward(),
+            correlation_id=correlation_id,
+            question="orders",
+            candidate_sql=None,
+            preferred_tool_version_id=scenario.tool_version.id,
+            tool_parameters={},
+            requested_limit=None,
+        )
+
+
+async def _latest_fact_orders_hit(
+    scenario: _Scenario, seen_run_ids: set[UUID]
+) -> dict[str, Any]:
+    """Returns the `fact_orders` retrieval-evidence hit from whichever
+    `AgentRun` was created since the last call -- lets a test drive multiple
+    real `orchestrator.run()` calls against the same datasource and compare
+    the *same table's* fused score/factors across them.
+    """
+    rows = (
+        await scenario.db.execute(
+            select(AgentRun).where(AgentRun.datasource_id == scenario.datasource.id)
+        )
+    ).scalars().all()
+    fresh = [row for row in rows if row.id not in seen_run_ids]
+    assert len(fresh) == 1, "expected exactly one new AgentRun since the last check"
+    seen_run_ids.add(fresh[0].id)
+    hits_by_id = {hit["object_id"]: hit for hit in fresh[0].retrieval_evidence}
+    return hits_by_id[str(scenario.fact_orders.id)]
+
+
+async def test_orchestrator_run_demotes_table_with_open_quality_incident(
+    scenario: _Scenario,
+) -> None:
+    """RT-7: `quality_coupling.demote_in_retrieval` -- already real, tested, and
+    reachable from TL-3's tool gate and AG-6's answer trust warning
+    (`tests/test_quality_runtime_coupling.py`) -- now also feeds
+    `fusion_ranking`'s `quality_trust` signal for real, through the live
+    `GovernedAgentOrchestrator.run()` path RT-1/RT-2/RT-3 wired up. Before this
+    change, `hybrid_retrieve_enhanced` Stage 4 gave every candidate a hardcoded
+    `raw_score=0.5` for `quality_trust` regardless of its actual incidents.
+
+    Same table (`fact_orders`), same question, same everything else across two
+    real `run()` calls -- no embedding provider configured, so the vector
+    stage is skipped and doesn't confound the comparison (mirrors
+    `test_quality_runtime_coupling.py`'s use of a bare `Settings()`). The only
+    variable between the two calls is whether `fact_orders` carries an OPEN
+    CRITICAL `DataQualityIncident`.
+    """
+    orchestrator = GovernedAgentOrchestrator(Settings())
+    seen_run_ids: set[UUID] = set()
+
+    await _run_to_clarification(orchestrator, scenario, correlation_id="corr-rt7-baseline")
+    baseline_hit = await _latest_fact_orders_hit(scenario, seen_run_ids)
+    baseline_factors = {
+        f["signal"]: f for f in baseline_hit["metadata"]["retrieval_evidence"]["factors"]
+    }
+    assert baseline_factors["quality_trust"]["raw_score"] == 1.0
+
+    incident = DataQualityIncident(
+        organization_id=scenario.organization.id,
+        datasource_id=scenario.datasource.id,
+        table_id=scenario.fact_orders.id,
+        fingerprint="fp-rt7-incident",
+        anomaly_type="NULL_RATE_SHIFT",
+        severity="CRITICAL",
+        status="OPEN",
+        summary="Null rate spiked outside the governed baseline.",
+        first_observed_at=datetime.now(UTC),
+        last_observed_at=datetime.now(UTC),
+    )
+    scenario.db.add(incident)
+    await scenario.db.flush()
+
+    await _run_to_clarification(orchestrator, scenario, correlation_id="corr-rt7-demoted")
+    demoted_hit = await _latest_fact_orders_hit(scenario, seen_run_ids)
+    demoted_factors = {
+        f["signal"]: f for f in demoted_hit["metadata"]["retrieval_evidence"]["factors"]
+    }
+    # An OPEN CRITICAL incident demotes to 0.3 (quality_coupling.demote_in_retrieval).
+    assert demoted_factors["quality_trust"]["raw_score"] == 0.3
+
+    # Every other signal for `fact_orders` against this question is unaffected by
+    # adding the incident (lexical/graph scoring never reads `DataQualityIncident`),
+    # so the fused score drop is attributable to the quality_trust demotion alone.
+    for signal in ("lexical", "usage_popularity"):
+        if signal in baseline_factors and signal in demoted_factors:
+            assert (
+                baseline_factors[signal]["raw_score"] == demoted_factors[signal]["raw_score"]
+            )
+    assert demoted_hit["score"] < baseline_hit["score"], (
+        "fact_orders' fused rank should drop once it carries an open CRITICAL "
+        "quality incident -- quality_trust is a real signal now, not a fixed 0.5"
+    )
+
+
+async def test_orchestrator_run_promotes_table_with_real_execution_history(
+    scenario: _Scenario,
+) -> None:
+    """RT-6: usage/popularity is now a real ranking factor derived from
+    `QueryExecution.referenced_tables` -- genuine, already-persisted execution
+    history (the same rows AG-6 reads off `gateway_result.execution.
+    referenced_tables` once a query finishes), not a new tracking mechanism
+    and not the hardcoded `raw_score=0.5` `hybrid_retrieve_enhanced` Stage 4
+    gave every candidate before this change.
+
+    Same table (`fact_orders`), same question, same everything else across two
+    real `GovernedAgentOrchestrator.run()` calls; the only variable is whether
+    a handful of completed `QueryExecution` rows already reference
+    `fact_orders` by the time retrieval runs.
+
+    `dim_customer` (also a retrieval candidate here, via graph expansion) is
+    seeded with a *fixed* 2 completed executions before either `run()` call --
+    a stable middle popularity value (0.2) both runs see unchanged. Without
+    it, `fact_orders` and every other 0-execution candidate tie for
+    usage_popularity in the baseline run, and ties can resolve in
+    `fact_orders`'s favour by pure insertion-order luck, making a fused-score
+    comparison prove nothing. With `dim_customer` fixed at 0.2, `fact_orders`
+    starts ranked *below* it (0.0 < 0.2) and must rank *above* it (0.5 > 0.2)
+    once its own execution history lands -- a real rank crossing, not a
+    coin flip.
+    """
+    orchestrator = GovernedAgentOrchestrator(Settings())
+    seen_run_ids: set[UUID] = set()
+
+    async def _add_completed_executions(table_name: str, count: int, *, prefix: str) -> None:
+        for i in range(count):
+            scenario.db.add(
+                QueryExecution(
+                    organization_id=scenario.organization.id,
+                    datasource_id=scenario.datasource.id,
+                    principal_id="analyst-1",
+                    status="COMPLETED",
+                    dialect=scenario.datasource.dialect,
+                    sql_hash=f"fake-sql-hash-{prefix}-{i}",
+                    referenced_tables=[table_name],
+                )
+            )
+        await scenario.db.flush()
+
+    await _add_completed_executions("dim_customer", 2, prefix="dim-customer-fixed")
+
+    await _run_to_clarification(orchestrator, scenario, correlation_id="corr-rt6-baseline")
+    baseline_hit = await _latest_fact_orders_hit(scenario, seen_run_ids)
+    baseline_factors = {
+        f["signal"]: f for f in baseline_hit["metadata"]["retrieval_evidence"]["factors"]
+    }
+    assert baseline_factors["usage_popularity"]["raw_score"] == 0.0
+
+    await _add_completed_executions("fact_orders", 5, prefix="fact-orders")
+
+    await _run_to_clarification(orchestrator, scenario, correlation_id="corr-rt6-popular")
+    popular_hit = await _latest_fact_orders_hit(scenario, seen_run_ids)
+    popular_factors = {
+        f["signal"]: f for f in popular_hit["metadata"]["retrieval_evidence"]["factors"]
+    }
+    # 5 completed executions / a saturation point of 10 -> 0.5 (retrieval.py's
+    # `_USAGE_POPULARITY_SATURATION`).
+    assert popular_factors["usage_popularity"]["raw_score"] == 0.5
+
+    for signal in ("lexical", "quality_trust"):
+        if signal in baseline_factors and signal in popular_factors:
+            assert (
+                baseline_factors[signal]["raw_score"] == popular_factors[signal]["raw_score"]
+            )
+    assert popular_hit["score"] > baseline_hit["score"], (
+        "fact_orders' fused rank should rise once real execution history "
+        "references it -- usage_popularity is a real signal now, not a fixed 0.5"
+    )

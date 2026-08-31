@@ -83,10 +83,12 @@ from aida.models import (
     MetadataColumn,
     MetadataConstraint,
     MetadataTable,
+    QueryExecution,
     SemanticMetric,
     SemanticMetricVersion,
     TermSemanticBinding,
 )
+from aida.quality_coupling import demote_in_retrieval, fetch_open_incidents, resolve_table_ids
 from aida.secrets import SecretResolver
 
 # ---------------------------------------------------------------------------
@@ -667,6 +669,73 @@ class RetrievalEvidence:
     metadata: dict[str, Any]
 
 
+# RT-6: the number of recorded executions against a table beyond which its
+# usage_popularity raw_score saturates at 1.0. 10 real executions is a small,
+# deliberately conservative bar -- enough to separate "never queried" from
+# "actually used" without requiring warehouse-scale traffic to move at all.
+_USAGE_POPULARITY_SATURATION = 10
+
+
+async def _table_execution_counts(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    table_ids: set[UUID],
+    scan_limit: int,
+) -> dict[UUID, int]:
+    """RT-6: how many of this datasource's recent completed `QueryExecution`
+    rows referenced each of ``table_ids`` -- a real, already-persisted usage
+    signal (the same rows AG-6 reads via ``gateway_result.execution.referenced_tables``
+    once a query finishes), not a new tracking mechanism.
+
+    `QueryExecution.referenced_tables` stores SQL-qualified name strings, not
+    ids, so names are resolved back to `MetadataTable` ids with the same
+    `quality_coupling.resolve_table_ids` helper TL-3/AG-6 use for the same
+    name-shape ambiguity, keeping one canonical resolution path rather than a
+    second hand-rolled one here.
+    """
+    if not table_ids:
+        return {}
+    rows = (
+        await session.scalars(
+            select(QueryExecution.referenced_tables)
+            .where(
+                QueryExecution.datasource_id == datasource.id,
+                QueryExecution.organization_id == datasource.organization_id,
+                QueryExecution.status == "COMPLETED",
+            )
+            .order_by(QueryExecution.created_at.desc())
+            .limit(scan_limit)
+        )
+    ).all()
+    if not rows:
+        return {}
+
+    all_names: set[str] = set()
+    for referenced_tables in rows:
+        all_names.update(referenced_tables or [])
+    if not all_names:
+        return {}
+
+    name_to_id = await resolve_table_ids(
+        session, datasource=datasource, table_names=sorted(all_names)
+    )
+
+    counts: dict[UUID, int] = {}
+    for referenced_tables in rows:
+        # A table referenced twice in one query counts once for that execution --
+        # this measures how many past *queries* touched the table, not raw
+        # token-occurrence count.
+        touched = {
+            table_id
+            for name in (referenced_tables or [])
+            if (table_id := name_to_id.get(name)) is not None and table_id in table_ids
+        }
+        for table_id in touched:
+            counts[table_id] = counts.get(table_id, 0) + 1
+    return counts
+
+
 async def hybrid_retrieve_enhanced(
     session: AsyncSession,
     *,
@@ -915,16 +984,79 @@ async def hybrid_retrieve_enhanced(
                 )
 
     # ------------------------------------------------------------------
-    # Stage 4: Add placeholder signals (quality_trust, usage_popularity)
+    # Stage 4: Quality-trust demotion (RT-7 / DQ-3) and usage-popularity
+    # (RT-6) -- both real signals derived from persisted data, replacing
+    # the raw_score=0.5 placeholder every candidate used to carry
+    # regardless of its actual quality or usage history.
     # ------------------------------------------------------------------
-    for candidate in candidates.values():
-        # Quality trust placeholder -- will be populated by DQ-3 coupling
-        candidate.signals.append(
-            SignalScore(signal="quality_trust", raw_score=0.5)
+    candidate_table_ids: dict[str, set[UUID]] = {}
+    tool_name_pool: set[str] = set()
+    for key, candidate in candidates.items():
+        ids: set[UUID] = set()
+        if candidate.object_type == "TABLE":
+            # A TABLE candidate's object_id IS the MetadataTable id, whether it
+            # arrived via the lexical scan or FK graph expansion (Stage 3 unwraps
+            # `GraphHit.object_id` back to the raw table id for exactly this reason).
+            ids.add(UUID(candidate.object_id))
+        else:
+            for field_name in ("table_id", "source_table_id"):
+                raw = candidate.metadata.get(field_name)
+                if raw:
+                    ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
+            if candidate.object_type == "GOVERNED_TOOL":
+                # Governed tools carry SQL-qualified table *names*, not ids -- the
+                # same shape `resolve_table_ids` already resolves for TL-3/AG-6.
+                tool_name_pool.update(candidate.metadata.get("referenced_tables") or [])
+        candidate_table_ids[key] = ids
+
+    if tool_name_pool:
+        tool_table_ids = await resolve_table_ids(
+            session, datasource=datasource, table_names=sorted(tool_name_pool)
         )
-        # Usage popularity placeholder
+        for key, candidate in candidates.items():
+            if candidate.object_type != "GOVERNED_TOOL":
+                continue
+            for name in candidate.metadata.get("referenced_tables") or []:
+                resolved = tool_table_ids.get(name)
+                if resolved is not None:
+                    candidate_table_ids[key].add(resolved)
+
+    all_table_ids: set[UUID] = set()
+    for ids in candidate_table_ids.values():
+        all_table_ids.update(ids)
+
+    # One shared incident fetch and one shared execution-history fetch for every
+    # candidate in this call, rather than a per-candidate round trip -- the same
+    # batching discipline the vector stage above already follows.
+    incidents = await fetch_open_incidents(
+        session, datasource=datasource, table_ids=list(all_table_ids)
+    )
+    usage_counts = await _table_execution_counts(
+        session,
+        datasource=datasource,
+        table_ids=all_table_ids,
+        scan_limit=settings.agent_retrieval_scan_limit,
+    )
+
+    for key, candidate in candidates.items():
+        ids = candidate_table_ids.get(key) or set()
+        if ids:
+            # Worst-of, mirroring AG-6's `worst_factor` -- a candidate touching
+            # several tables is only as trustworthy/popular as its weakest one.
+            quality_trust_score = min(demote_in_retrieval(str(tid), incidents) for tid in ids)
+            popularity_count = max(usage_counts.get(tid, 0) for tid in ids)
+        else:
+            # No resolvable table -- e.g. a GLOSSARY_TERM with no bound semantic
+            # object's table. No basis to demote or promote: neutral trust,
+            # zero measured popularity.
+            quality_trust_score = 1.0
+            popularity_count = 0
+        usage_popularity_score = min(1.0, popularity_count / _USAGE_POPULARITY_SATURATION)
         candidate.signals.append(
-            SignalScore(signal="usage_popularity", raw_score=0.5)
+            SignalScore(signal="quality_trust", raw_score=round(quality_trust_score, 4))
+        )
+        candidate.signals.append(
+            SignalScore(signal="usage_popularity", raw_score=round(usage_popularity_score, 4))
         )
 
     # ------------------------------------------------------------------

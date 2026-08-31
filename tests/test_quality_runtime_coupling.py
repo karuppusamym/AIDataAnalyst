@@ -32,15 +32,17 @@ a real (in-memory sqlite) database seeded through the ORM, so this proves the
 actual SQL joins line up with `DataQualityIncident.table_id`, not a
 hand-simulated approximation of them.
 
-RT-7 (ranking factor) is intentionally not exercised here: the live
-retrieval/ranking path the orchestrator actually uses is
-`agent_intelligence.GovernedRetriever` (simple lexical scoring wired into
-`GovernedAgentOrchestrator.retriever`), not `retrieval.py::hybrid_retrieve` /
-`fusion_ranking.py` -- confirmed by grepping `src/aida` for real (non-test,
-non-docstring) callers of either and finding none outside their own modules.
-Wiring the trust factor into a ranking path nothing actually calls would not
-satisfy RT-7's exit criterion ("part of DQ-3"); see the tracker row and
-`quality_coupling.py`'s module docstring for the deferral note.
+RT-7 (ranking factor) is intentionally not exercised here: it is covered by
+`tests/test_agent_orchestrator_retrieval_wiring.py` instead, which proves
+`quality_coupling.demote_in_retrieval` folding into `fusion_ranking.py`'s
+`quality_trust` signal through the real `GovernedAgentOrchestrator.run()` ->
+`agent_intelligence.GovernedRetriever.retrieve()` ->
+`retrieval.hybrid_retrieve_enhanced` hand-off (RT-1/RT-2/RT-3 wired that
+hand-off; RT-7 is the demotion signal riding it). At the time this file was
+first written, `GovernedRetriever` still ran its own hand-rolled lexical scan
+and `retrieval.py`/`fusion_ranking.py` had zero non-test callers -- that gap
+is what RT-1/RT-2/RT-3 closed, so the note above no longer describes the
+live path.
 """
 
 from collections.abc import AsyncIterator

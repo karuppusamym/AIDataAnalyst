@@ -6,8 +6,12 @@ Combines scores from lexical (BM25/full-text), vector (cosine similarity),
 and graph (proximity) signals using Reciprocal Rank Fusion (RRF) or
 weighted linear combination.
 
-Every factor is inspectable in the evidence payload.  Quality trust and
-usage/popularity are placeholder signals for DQ-3 coupling.
+Every factor is inspectable in the evidence payload.  ``quality_trust`` and
+``usage_popularity`` are real signals (RT-7, RT-6): the former is derived
+from `quality_coupling.demote_in_retrieval` against a candidate's real open
+`DataQualityIncident` rows, the latter from a candidate's real historical
+`QueryExecution.referenced_tables` hit count -- both computed in
+`retrieval.py::hybrid_retrieve_enhanced`'s Stage 4, not hardcoded here.
 
 Architecture
 ------------
@@ -37,11 +41,14 @@ class FusionConfig:
 
     method: str = "rrf"  # 'rrf' or 'weighted_linear'
     rrf_k: int = 60  # RRF constant (standard value)
-    lexical_weight: float = 0.35
-    vector_weight: float = 0.35
+    lexical_weight: float = 0.30
+    vector_weight: float = 0.30
     graph_weight: float = 0.20
-    quality_trust_weight: float = 0.05  # Placeholder for DQ-3
-    usage_popularity_weight: float = 0.05  # Placeholder
+    # RT-7 / RT-6: real signals (quality-incident demotion, execution-history
+    # popularity), weighted enough to move ranking -- not the inert 0.05
+    # placeholders these carried while both were hardcoded raw_score=0.5.
+    quality_trust_weight: float = 0.10
+    usage_popularity_weight: float = 0.10
 
 
 # ---------------------------------------------------------------------------
