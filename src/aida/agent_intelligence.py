@@ -66,6 +66,7 @@ class AgentPlan:
     required_parameters: list[str]
     retrieval_object_ids: list[str]
     prompt_risk: dict[str, object] = field(default_factory=dict)
+    tool_decisions: list[dict[str, str]] = field(default_factory=list)
 
     def evidence(self) -> dict[str, Any]:
         return asdict(self)
@@ -98,11 +99,65 @@ class GovernedRetriever:
         question: str,
         preferred_tool_version_id: UUID | None = None,
     ) -> list[RetrievalHit]:
+        """The bounded, read-only retrieval path: every scored candidate, capped
+        at ``agent_retrieval_limit``. Never writes -- used by the retrieval-preview
+        endpoint and the control-evaluation suite as well as the live orchestrator.
+        """
         hits = await hybrid_retrieve_enhanced(
             session,
             datasource=datasource,
             question=question,
             settings=self.settings,
+            preferred_tool_version_id=preferred_tool_version_id,
+        )
+        return [
+            RetrievalHit(
+                object_type=hit.object_type,
+                object_id=hit.object_id,
+                display_name=hit.display_name,
+                score=hit.score,
+                reason_codes=hit.reason_codes,
+                metadata=hit.metadata,
+            )
+            for hit in hits
+        ]
+
+    async def score_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        question: str,
+        preferred_tool_version_id: UUID | None = None,
+    ) -> list[RetrievalHit]:
+        """Every candidate the fusion stage ranked, unbounded -- also read-only.
+
+        AU-5: the live orchestrator calls this directly (rather than ``retrieve``)
+        so it can see the candidates ``retrieve``'s ``agent_retrieval_limit`` cap
+        would otherwise discard, and record them as ``RETRIEVAL_REJECTED``
+        decision edges itself. Recording lives in the orchestrator, not here, so
+        this module -- also used by the read-only retrieval-preview endpoint --
+        stays free of any write the INV-7 read-only-route gate would trip on.
+
+        `hybrid_retrieve_enhanced` takes no result-limit override of its own --
+        every stage (the lexical scan, the fusion cut) reads
+        ``settings.agent_retrieval_limit`` directly -- so rather than adding one
+        to `retrieval.py` (owned by RT-1/RT-2/RT-3/RT-9/SM-2, landed the same day
+        as this change), a `Settings` copy with `agent_retrieval_limit` widened to
+        `agent_retrieval_scan_limit` (the same bound `hybrid_retrieve`'s own
+        per-object-type candidate fetch already uses) is passed in its place, so
+        nothing the fusion stage ranked is silently dropped before the
+        orchestrator gets a chance to record it as rejected. Every other setting
+        (embedding provider, secrets, fusion weights) is untouched.
+        """
+        widened_settings = self.settings.model_copy(
+            update={"agent_retrieval_limit": self.settings.agent_retrieval_scan_limit}
+        )
+        hits = await hybrid_retrieve_enhanced(
+            session,
+            datasource=datasource,
+            question=question,
+            settings=widened_settings,
             preferred_tool_version_id=preferred_tool_version_id,
         )
         return [
@@ -145,15 +200,43 @@ class GovernedPlanner:
             )
         tools = [hit for hit in retrieval_hits if hit.object_type == "GOVERNED_TOOL"]
         eligible: list[RetrievalHit] = []
+        tool_decisions: list[dict[str, str]] = []
         for hit in tools:
             allowed = set(hit.metadata["allowed_roles"])
             role_allowed = "PlatformAdmin" in roles or not roles.isdisjoint(allowed)
             explicitly_selected = str(preferred_tool_version_id) == hit.object_id
-            if role_allowed and (
+            meets_threshold = (
                 explicitly_selected or hit.score >= self.settings.agent_tool_match_threshold
-            ):
+            )
+            if role_allowed and meets_threshold:
                 eligible.append(hit)
+            else:
+                reason = (
+                    "role not in tool allowed_roles"
+                    if not role_allowed
+                    else "score below the governed-tool match threshold"
+                )
+                tool_decisions.append(
+                    {"tool_version_id": hit.object_id, "decision": "REJECTED", "reason": reason}
+                )
         selected = eligible[0] if eligible else None
+        for hit in eligible:
+            if selected is not None and hit.object_id == selected.object_id:
+                tool_decisions.append(
+                    {
+                        "tool_version_id": hit.object_id,
+                        "decision": "SELECTED",
+                        "reason": "highest-ranked eligible governed tool for this question",
+                    }
+                )
+            else:
+                tool_decisions.append(
+                    {
+                        "tool_version_id": hit.object_id,
+                        "decision": "REJECTED",
+                        "reason": "eligible but ranked below the selected governed tool",
+                    }
+                )
         if selected:
             required = list(selected.metadata["required_parameters"])
             missing = sorted(set(required) - set(tool_parameters))
@@ -166,6 +249,7 @@ class GovernedPlanner:
                     [],
                     [hit.object_id for hit in retrieval_hits],
                     risk_evidence,
+                    tool_decisions,
                 )
             if not candidate_sql_available or preferred_tool_version_id:
                 return AgentPlan(
@@ -176,6 +260,7 @@ class GovernedPlanner:
                     missing,
                     [hit.object_id for hit in retrieval_hits],
                     risk_evidence,
+                    tool_decisions,
                 )
         if candidate_sql_available:
             return AgentPlan(
@@ -186,6 +271,7 @@ class GovernedPlanner:
                 [],
                 [hit.object_id for hit in retrieval_hits],
                 risk_evidence,
+                tool_decisions,
             )
         return AgentPlan(
             "MODEL_GENERATION",
@@ -195,4 +281,5 @@ class GovernedPlanner:
             [],
             [hit.object_id for hit in retrieval_hits],
             risk_evidence,
+            tool_decisions,
         )

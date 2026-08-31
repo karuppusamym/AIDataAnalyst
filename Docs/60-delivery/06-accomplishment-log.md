@@ -3508,3 +3508,118 @@ of that script, run on every push.
   audit-event emission points wired to SIEM), `atlas/platform/config.py` (new settings), and their
   tests — per the task's explicit scope, since parallel sessions were working other tracker items
   concurrently in sibling worktrees.
+
+## 2026-08-31 — AU-5 (AI decision lineage wired into the orchestrator) closed; AG-5/LN-3 re-verified DONE
+
+- The 2026-08-30 end-to-end audit's single most commercially important finding: `Docs/60-delivery/
+  04-end-to-end-audit-2026-08-30.md` SS2 found `ai_decision_lineage.record_decision` had **zero
+  callers** anywhere in `src/`. The writer, the `AiDecisionRecord` table and the read API
+  (`get_decisions_for_run`/`get_decisions_for_asset`/`get_refusals`, and the `list_refusals`
+  endpoint) were all real, correct, unit-tested code — but nothing ever called the writer, so
+  `list_refusals` queried a permanently empty table and none of the five `DecisionType` values was
+  ever set. SS§L's competitive positioning (the refusal record as the differentiator Atlan
+  structurally cannot copy) was, as the audit put it, "currently unsupported by the product." This
+  entry is the wiring, not a new module — `ai_decision_lineage.py` and `ai_decision_lineage_api.py`
+  are byte-for-byte unchanged.
+- Found the live orchestration path first: `agent_orchestrator.GovernedAgentOrchestrator.run`, the
+  handler behind `POST /v1/datasources/{id}/agent-analyses`, is where all three decision-point
+  categories actually happen — true both before and after the retrieval-stack rewiring below,
+  since that landed on `GovernedRetriever.retrieve`, which `run` already called.
+- **Rebase note, because it changed the shape of this section:** while this item was in flight, a
+  sibling session landed RT-1/RT-2/RT-3/RT-9/SM-2 (entry above) — replacing
+  `agent_intelligence.GovernedRetriever`'s ~300-line hand-rolled lexical scan with a delegation to
+  `retrieval.hybrid_retrieve_enhanced` (BM25 + vector + graph + RRF fusion). That is the version
+  actually shipped; the retrieval-selection design below was re-adapted onto it during the rebase,
+  not built against the hand-rolled scan.
+- **Retrieval selected/rejected.** `agent_intelligence.GovernedRetriever` gained a new
+  `score_candidates` method, a thin sibling of `retrieve`: both call `hybrid_retrieve_enhanced` and
+  translate its `HybridRetrievalHit`s back to `RetrievalHit`, but `score_candidates` passes a
+  `Settings.model_copy` with `agent_retrieval_limit` widened to `agent_retrieval_scan_limit` (the
+  bound `hybrid_retrieve`'s own per-object-type candidate fetch already uses) — `retrieval.py`
+  exposes no result-limit override of its own, and it is owned by the sibling work landed the same
+  day, so widening the settings object passed in rather than adding a new parameter to that module
+  keeps this change out of it entirely; every other setting (embedding provider, secrets, fusion
+  weights) is untouched. `retrieve` itself, and its callers
+  (`api.py::preview_agent_retrieval`, `agent_evals.py`,
+  `tests/test_retrieval_ranking.py`/`tests/test_agent_orchestrator_retrieval_wiring.py`'s coverage),
+  are unaffected. `agent_orchestrator.py::run` calls `score_candidates` directly instead of
+  `retrieve`, splits the result at `agent_retrieval_limit` itself, and passes both halves to a new
+  module-level `_record_retrieval_decisions` helper: `RETRIEVAL_SELECTED` for each hit handed to the
+  planner (with its rank and score as evidence), `RETRIEVAL_REJECTED` for each candidate ranked
+  below the cut (with the limit and its score as the reason).
+- **Tool selected/rejected.** `agent_intelligence.GovernedPlanner.plan` gained an additive
+  `tool_decisions: list[dict[str, str]]` field on the returned `AgentPlan` (default `[]`, so no
+  existing caller's positional-argument construction elsewhere breaks): for every governed-tool
+  candidate the planner considers, `{"tool_version_id", "decision": "SELECTED"|"REJECTED", "reason"}`
+  — `"role not in tool allowed_roles"`, `"score below the governed-tool match threshold"`, or (for an
+  eligible tool that simply wasn't ranked first) `"eligible but ranked below the selected governed
+  tool"`. `agent_orchestrator.py::run` records `TOOL_SELECTED`/`TOOL_REJECTED` from this list
+  immediately after `plan()` returns, before rendering or executing anything.
+- **Refusal**, at the two real decline points, both already existing exception handlers, now each
+  also calling `record_decision` with `decision_type="REFUSAL"`:
+  - `agent_orchestrator.py::_persist_rejection` — the shared sink already used by every
+    upstream-of-execution rejection (prompt-risk `BLOCK`, no completed metadata analysis, a planned
+    governed tool that is no longer published, invalid tool parameters, development-SQL override
+    disabled, model route not configured). One call site now covers all of them.
+  - the `QueryRejected` except-block in `agent_orchestrator.py::run` — the real
+    `QueryExecutionGateway.execute` denial path (SqlGuard, catalog allow-list, cost gate), which the
+    tracker's exit criterion names explicitly ("a query the gateway declined").
+- **Why the recording calls live in `agent_orchestrator.py` and not in `agent_intelligence.py`,
+  despite `agent_intelligence.py` being where the candidates and tool decisions are computed:** a
+  first pass put `record_decisions` inside `GovernedRetriever.retrieve` itself, gated by optional
+  `organization_id`/`run_id` parameters the live orchestrator would pass and the preview endpoint
+  wouldn't. That broke `tests/test_inv7_attributability.py::test_the_read_only_post_list_stays_closed`
+  — its `reaches_session_write` check walks the *static* call graph, not runtime branches, so
+  `POST /v1/datasources/{id}/agent-retrieval-preview` (which also calls `GovernedRetriever.retrieve`,
+  intentionally read-only, and is on the route's own `_READ_ONLY_POST_ROUTES` exemption list) was
+  now flagged as reaching a write regardless of the guard never firing at runtime. Moving the actual
+  `record_decisions`/`record_decision` calls out of `agent_intelligence.py` entirely and into
+  `agent_orchestrator.py` (which the preview endpoint never calls) fixed it correctly rather than by
+  weakening the gate: `agent_intelligence.py` stays a pure, side-effect-free module, and only the
+  real orchestration path writes.
+- Every evidence payload is value-free per the existing `AiDecisionEdge`/`AiDecisionRecord` contract:
+  identifiers (`table:<id>`, `governed_tool:<id>`, `tool:<id>`), scores, reason codes and ranks —
+  never the question text or matched row/column content.
+- Tests: new `tests/test_agent_orchestrator_decision_lineage.py`. Three real
+  `GovernedAgentOrchestrator.run` calls against a real in-memory SQLite database built the same way
+  `tests/test_catalog_rows_read_model.py` documents (`Base.metadata.create_all`, so retrieval's ORM
+  queries and the query gateway's catalog lookups run for real, not against a hand-scripted double),
+  with `tests/support/doubles.FakeSqlExecutor` standing in only for the external data-source
+  connector — the same substitution `tests/test_inv6_value_freedom.py` uses for the gateway's own
+  end-to-end test — and the `AuditEvent.id` sqlite/`BigInteger`-autoincrement workaround
+  `tests/test_token_revocation.py` already established (`before_insert` event listener assigning ids
+  by hand; sqlite only auto-populates a bare `INTEGER PRIMARY KEY`, and `BigInteger` doesn't compile
+  to that):
+  1. A governed-tool question (two published tool versions and one weakly-matching table seeded,
+     `agent_retrieval_limit=2`) that runs end to end to `status == "COMPLETED"` — proving the
+     pipeline still works, not just that it produces edges — and asserts `RETRIEVAL_SELECTED`×2,
+     `RETRIEVAL_REJECTED`×1, `TOOL_SELECTED`×1 (the matching tool) and `TOOL_REJECTED`×1 (the
+     other tool, either below the match threshold or simply ranked second depending on the live
+     scorer's exact values, only the identity and a real non-empty reason are pinned, not the
+     wording) all come back from `get_decisions_for_run` with the right `target_node`s and reasons,
+     scoped to the run and organization, with no row value anywhere in `evidence` or `reason`.
+  2. A prompt-risk `BLOCK` question, asserting exactly one `REFUSAL` row with
+     `source_node="governed_agent_orchestrator"` and `reason="PROMPT_POLICY_DENIED"`.
+  3. A `candidate_sql="SELECT * FROM ..."` (SqlGuard's wildcard-select denial) that reaches a real
+     `QueryExecutionGateway.execute` call and raises `QueryRejected`, asserting a `REFUSAL` row with
+     `source_node="query_execution_gateway"`, then confirming it two more ways: `get_refusals`
+     returns it, and the actual `ai_decision_lineage_api.list_refusals` handler — called directly,
+     the same pattern `test_catalog_rows_read_model.py` uses for `list_catalog_rows` — returns it in
+     `page.items` with `page.total >= 1`. This is the tracker's exit criterion made concrete:
+     `list_refusals` now returns a real row for a query the gateway actually declined, not a
+     permanently empty table.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green — no
+  failures, no errors, 3,128 collected tests.
+- Tracker: AU-5 moved TODO → DONE with the call sites above as exit evidence. AG-5 and LN-3 — marked
+  DONE on 2026-08-30 on the writer's existence alone, then audit-corrected in section N once the
+  audit found zero callers — are re-verified DONE on this same evidence rather than left in the
+  audit-corrected state, since the gap the audit found (written but unreachable) is now closed.
+- Known limitations: retrieval decisions are recorded per scored candidate above zero relevance,
+  which on a datasource with a very large matching catalog could mean a proportionally large number
+  of `RETRIEVAL_REJECTED` rows per run (bounded by `agent_retrieval_scan_limit` per object type,
+  same bound the underlying queries already use, so not unbounded — but not yet load-tested at
+  bank-scale catalog sizes). Tool-selection evidence only records governed-tool candidates the
+  planner actually considers (i.e. that scored above zero and were returned by retrieval); a tool
+  that never matched the question at all is not distinguishable from one deliberately excluded.
+  `UX-13`'s asset-evidence endpoint (still TODO) is the natural place for a future reader to surface
+  this per-asset, once it lands.

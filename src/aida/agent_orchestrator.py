@@ -8,8 +8,14 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
+from aida.agent_intelligence import GovernedPlanner, GovernedRetriever, RetrievalHit
 from aida.agent_runtime import RuntimeStage, RuntimeState
+from aida.ai_decision_lineage import (
+    DECISION_LINEAGE_VERSION,
+    AiDecisionEdge,
+    record_decision,
+    record_decisions,
+)
 from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.model_gateway import (
@@ -75,6 +81,55 @@ def _trace(
     if details:
         trace["details"] = details
     return trace
+
+
+def _record_retrieval_decisions(
+    session: AsyncSession,
+    organization_id: UUID,
+    run_id: UUID,
+    selected: list[RetrievalHit],
+    rejected: list[RetrievalHit],
+) -> None:
+    """AU-5: RETRIEVAL_SELECTED for the hits handed to the planner, RETRIEVAL_REJECTED
+    for candidates ranked below ``agent_retrieval_limit``. Value-free: identifiers,
+    scores and reason codes only, never the question or matched content.
+    """
+    total = len(selected) + len(rejected)
+    edges = [
+        AiDecisionEdge(
+            run_id=run_id,
+            decision_type="RETRIEVAL_SELECTED",
+            source_node="governed_retriever",
+            target_node=f"{hit.object_type.lower()}:{hit.object_id}",
+            reason=f"ranked #{rank} of {total} candidates (score={hit.score})",
+            evidence={
+                "score": hit.score,
+                "reason_codes": hit.reason_codes,
+                "object_type": hit.object_type,
+                "rank": rank,
+            },
+            control_version=DECISION_LINEAGE_VERSION,
+        )
+        for rank, hit in enumerate(selected, start=1)
+    ]
+    edges.extend(
+        AiDecisionEdge(
+            run_id=run_id,
+            decision_type="RETRIEVAL_REJECTED",
+            source_node="governed_retriever",
+            target_node=f"{hit.object_type.lower()}:{hit.object_id}",
+            reason=f"ranked below the retrieval limit ({len(selected)}); score={hit.score}",
+            evidence={
+                "score": hit.score,
+                "reason_codes": hit.reason_codes,
+                "object_type": hit.object_type,
+            },
+            control_version=DECISION_LINEAGE_VERSION,
+        )
+        for hit in rejected
+    )
+    if edges:
+        record_decisions(session, organization_id, edges)
 
 
 class GovernedAgentOrchestrator:
@@ -312,11 +367,26 @@ class GovernedAgentOrchestrator:
             else f"technical-metadata:{latest_analysis.id}"
         )
         agent_run.semantic_version = semantic_version
-        retrieval_hits = await self.retriever.retrieve(
+        # `score_candidates` (unbounded, sorted, read-only) rather than `retrieve`
+        # (its bounded public wrapper) so the candidates the `agent_retrieval_limit`
+        # cap discards are visible here too, as RETRIEVAL_REJECTED evidence -- the
+        # recording itself lives here, not in `agent_intelligence.py`, so that
+        # module (also used by the read-only retrieval-preview endpoint) stays free
+        # of any write the INV-7 read-only-route gate would trip on.
+        scored_candidates = await self.retriever.score_candidates(
             session,
             datasource=datasource,
             question=question,
             preferred_tool_version_id=preferred_tool_version_id,
+        )
+        retrieval_hits = scored_candidates[: self.settings.agent_retrieval_limit]
+        rejected_candidates = scored_candidates[self.settings.agent_retrieval_limit :]
+        _record_retrieval_decisions(
+            session,
+            datasource.organization_id,
+            agent_run.id,
+            retrieval_hits,
+            rejected_candidates,
         )
         retrieval_evidence = [hit.evidence() for hit in retrieval_hits]
         agent_run.retrieval_evidence = retrieval_evidence
@@ -342,6 +412,26 @@ class GovernedAgentOrchestrator:
         )
         plan_evidence = plan.evidence()
         agent_run.plan_evidence = plan_evidence
+        if plan.tool_decisions:
+            record_decisions(
+                session,
+                datasource.organization_id,
+                [
+                    AiDecisionEdge(
+                        run_id=agent_run.id,
+                        decision_type=(
+                            "TOOL_SELECTED"
+                            if decision["decision"] == "SELECTED"
+                            else "TOOL_REJECTED"
+                        ),
+                        source_node="governed_planner",
+                        target_node=f"tool:{decision['tool_version_id']}",
+                        reason=decision["reason"],
+                        control_version=DECISION_LINEAGE_VERSION,
+                    )
+                    for decision in plan.tool_decisions
+                ],
+            )
         agent_run.recommended_tool_version_id = (
             UUID(plan.selected_tool_version_id) if plan.selected_tool_version_id else None
         )
@@ -535,6 +625,26 @@ class GovernedAgentOrchestrator:
                 tool_execution.status = "REJECTED"
                 tool_execution.query_execution_id = exc.execution_id
                 tool_execution.error_message = str(exc)[:1000]
+            record_decision(
+                session,
+                agent_run.organization_id,
+                AiDecisionEdge(
+                    run_id=agent_run.id,
+                    decision_type="REFUSAL",
+                    source_node="query_execution_gateway",
+                    target_node=f"agent_run:{agent_run.id}",
+                    reason=str(exc)[:1000] or "QUERY_GATEWAY_DENIED",
+                    evidence={
+                        "stage": state.stage.value,
+                        "correlation_id": correlation_id,
+                        "datasource_id": str(agent_run.datasource_id),
+                        "query_execution_id": (
+                            str(exc.execution_id) if exc.execution_id else None
+                        ),
+                    },
+                    control_version=DECISION_LINEAGE_VERSION,
+                ),
+            )
             await session.commit()
             raise
 
@@ -660,6 +770,23 @@ class GovernedAgentOrchestrator:
         agent_run.status = state.stage.value
         agent_run.failure_reason = reason
         agent_run.step_trace = trace
+        record_decision(
+            session,
+            agent_run.organization_id,
+            AiDecisionEdge(
+                run_id=agent_run.id,
+                decision_type="REFUSAL",
+                source_node="governed_agent_orchestrator",
+                target_node=f"agent_run:{agent_run.id}",
+                reason=reason,
+                evidence={
+                    "stage": state.stage.value,
+                    "correlation_id": correlation_id,
+                    "datasource_id": str(agent_run.datasource_id),
+                },
+                control_version=DECISION_LINEAGE_VERSION,
+            ),
+        )
         record_audit(
             session,
             context,
