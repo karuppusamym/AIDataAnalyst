@@ -1,0 +1,32 @@
+.prop{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);overflow:hidden;display:flex;flex-direction:column}
+.prop--needs_review{border-left:3px solid var(--warn)}
+.prop--auto_applied{border-left:3px solid var(--ok)}
+.prop--approved{border-left:3px solid var(--ok);opacity:.75}
+.prop--rejected{border-left:3px solid var(--line);opacity:.65}
+
+.prop__head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:13px 15px 11px}
+.prop__lead{min-width:0}
+.prop__badges{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px}
+.prop__title{font-size:14.5px;font-weight:600;margin:0;letter-spacing:-.008em}
+.prop__subject{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:3px}
+
+.conf{display:flex;align-items:center;gap:7px;flex:none}
+.conf__bar{width:64px;height:5px;border-radius:3px;background:var(--sunk);overflow:hidden;display:block}
+.conf__fill{display:block;height:100%;border-radius:3px}
+.conf__fill--ok{background:var(--ok)} .conf__fill--warn{background:var(--warn)} .conf__fill--bad{background:var(--bad)}
+.conf__n{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
+
+.prop__diff{margin:0 15px;border:1px solid var(--line-soft);border-radius:var(--radius-sm);overflow-x:auto;background:var(--sunk)}
+.dl{display:flex;gap:8px;font-family:var(--mono);font-size:11.5px;line-height:1.75;padding:0 9px;white-space:pre}
+.dl__g{flex:none;width:8px;color:var(--ink-3);text-align:center}
+.dl--add{background:var(--ok-soft);color:var(--ok)}
+.dl--remove{background:var(--bad-soft);color:var(--bad)}
+.dl--context{color:var(--ink-3)}
+
+.prop__why{display:flex;gap:11px;padding:12px 15px 4px}
+.prop__whyk{flex:none;font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);padding-top:3px;width:30px}
+.prop__whyt{font-size:13px;color:var(--ink);margin:0;line-height:1.5}
+.prop__ev{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin:4px 0 0;line-height:1.5}
+
+.prop__act{display:flex;align-items:center;gap:8px;padding:13px 15px;margin-top:8px;border-top:1px solid var(--line-soft);background:var(--sunk)}
+.prop__done{font-size:12px;color:var(--ink-3);flex:1}

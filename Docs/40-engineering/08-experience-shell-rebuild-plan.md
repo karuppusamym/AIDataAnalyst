@@ -123,3 +123,149 @@ module reads — the read model must never widen what a principal can see.
 - It does not change any API contract. The read model is additive.
 - It does not move business rules into the client. Module 21 §4 holds: a UI that
   decides is a UI that can be bypassed.
+
+---
+
+# Revision — 2026-08-30, after `Docs/Atlan-context.docx`
+
+A 43-screen capture of Atlan's actual product UI (not marketing crops) changes parts of
+this plan. What follows is what changed, what did not, and one thing the earlier
+analysis got wrong.
+
+## 7. What the earlier analysis got wrong
+
+It claimed Atlan has "no equivalent at all" to AI decision lineage. It does: a **Trace
+Explorer** capturing every agent interaction with its context-retrieval path, the
+semantic object and version resolved, and a correct/flagged status — plus a loop where
+a user marking an answer wrong generates a suggested context fix, and marking it right
+promotes it to a regression test.
+
+What is absent from all 43 screens is a **refusal**. Every trace is an answer that was
+given. None is an answer declined, with the control that declined it named. The
+differentiator is therefore narrower than stated and still real: they trace what was
+used; LN-3 also records what was refused. Do not position on "they have nothing here."
+
+## 8. Patterns worth adopting, and what each changes
+
+Ordered by how much they change. Each is a design decision, not a feature request.
+
+### 8.1 A proposal is a diff + confidence + a reason — **implemented**
+
+Their review surfaces never show a proposed change without a rendered diff, a numeric
+confidence, and a **"Why:"** line citing the evidence it was derived from ("9 of 12
+churn queries reference enterprise accounts only; the SMB exclusion is implicit in your
+dashboards"), then symmetric Approve / Reject.
+
+This is what ADR-0001 requires and the old portal never expressed. A model-proposed
+change with no rationale is not reviewable — the reviewer is being asked to
+rubber-stamp. Now a shell primitive (`ProposalCard`) where `rationale` and `evidence`
+are **required fields on the type**, for the same reason `esc()` should never have been
+optional: the one that gets skipped is the one that mattered.
+
+### 8.2 The review queue is a run report, not a table — **implemented**
+
+Their queue opens by stating what a run did: *44 passed · 8 applied automatically ·
+3 need your review*, then shows only what needs judgment, with the auto-applied set one
+click away.
+
+A table of pending rows makes the reviewer reconstruct that themselves. Rebuilt
+(`ReviewQueueScreen`), with one deliberate difference: the count of auto-applied changes
+is as prominent as the count needing review, because a steward who cannot see what was
+applied without them cannot audit the threshold that let it through. Counts are derived
+from the list, never carried beside it.
+
+### 8.3 Propagation states its mechanism — **implemented**
+
+When quality or a classification spreads along lineage, they render a **propagation
+log** where every hop names how it travelled: "Downstream impact detected: revenue_agg
+depends on raw_sales *via column lineage*."
+
+ADR-0016 has quality fail closed, so a tool call can be refused because of a check three
+hops upstream. "Affected" is a claim; "affected via column lineage from raw_sales" is an
+argument. Now a primitive (`PropagationLog`), and the review queue uses it to show the
+chain from a failed rule to a refused tool call.
+
+### 8.4 Lineage is agent-narrated, not panned — changes 2.3
+
+Their Lineage Agent answers "why did revenue drop 12%" by streaming its traversal on the
+left — each hop with the evidence found ("847 nulls in net_revenue since Jan 8") ending
+at a root cause — while the graph highlights the path on the right and marks the culprit
+node red.
+
+This is the answer to LN-8 (large-DAG virtualization): for the common case you do not
+render the DAG at all. Rebuild 2.3 as narrated traversal with the graph as the
+supporting view, not a canvas the user pans. Atlas can narrate one thing they cannot —
+the hop where the agent declined.
+
+### 8.5 Blast radius is always visible on the artifact — changes 2.4
+
+Every context object shows who consumes it: `consumed_by: 6 agents` inline in the
+artifact, a "Consuming this repo — all on v3.1.2" footer, and a deploy view listing each
+consumer with the protocol it uses and its synced version.
+
+Atlas has this data in `consumption_lineage.py` (CX-4) and shows it nowhere. Editing a
+semantic object without seeing what depends on it is the single most consequential blind
+spot in the current portal. Add a consumer footer to every semantic and context-product
+surface — this is a small change with a large effect and it should not wait for 2.4.
+
+### 8.6 Plain-language layer beside the generated artifact — changes ST-A4
+
+Their authoring screen is split: **HUMAN LAYER — PLAIN LANGUAGE** (labelled fields, each
+with a `+ AI` button) beside **MACHINE LAYER — AUTO-GENERATED YAML** that updates live,
+with AI-inferred lines marked inline (`# + AI inferred`) and a footer naming what can
+parse it.
+
+Better than the form ST-A4 currently implies: domain experts never write YAML, but the
+artifact stays visible and the machine-written parts are marked. Adopt this shape for
+the parameter-contract designer.
+
+### 8.7 Agents publish their method, not just their name — changes the roster
+
+Each agent has a screen with **PURPOSE**, a numbered **TASK PLAN** ("Scan SQL query
+history → Identify top-queried assets → Rank by usage score → Auto-apply or route to
+steward"), and live results.
+
+The earlier advice was "name the pipelines." That was too weak. The task plan makes the
+agent's method inspectable *before* you trust its output, which is a governance
+affordance, not branding. Several plans end with "auto-apply or route to steward" — the
+graduated-autonomy rule stated as part of the method.
+
+### 8.8 Composite confidence has named dimensions — changes AG/TL scoring
+
+They score every output on **accuracy, clarity, style and completeness** and composite
+those. A single opaque number cannot be argued with; four can be tuned.
+
+### 8.9 Conflicting definitions get a screen — new
+
+Their Sage agent renders two definitions of the same metric side by side with both
+formulas, states the risk ("agents querying MRR return different numbers depending on
+which definition they hit"), and routes to **both** named stewards.
+
+Atlas has maker-checker but no concept of "two domains disagree, and both owners must
+sign." Worth a tracker row; the review queue now carries a worked example.
+
+### 8.10 Evals are organised by persona — changes ST-A2
+
+Their suite groups tests by who asks (Data Analyst / CEO / Analytics Engineer) and each
+test carries provenance back to the dashboard or query it was mined from.
+
+ST-A2 tests semantic correctness. Grouping by persona is a better frame for a steward
+deciding whether the layer is ready, and the provenance chip makes a failing test
+arguable.
+
+### 8.11 Schedules are built, not typed — changes AT-1
+
+Frequency + run time + timezone + day-of-week toggle pills. No cron string. The playbook
+object (AT-1) should expose this, not a crontab field, and the connector wizard should
+keep "Test authentication" as an explicit step before anything runs.
+
+## 9. What does not change
+
+The Catalog pattern in §3 holds — nothing in the capture contradicts it, and their grids
+are less information-dense than ours. The stack decision (ADR-0021) is unaffected. The
+read model (UX-12) is more clearly right than before: every screen here composes facts
+from many modules into one view, which is exactly what 501 requests per page cannot do.
+
+And the strategic read is unchanged. Six of the seven concepts remain packaging problems
+where Atlas has the capability and no surface. This capture mostly shows, in detail, what
+those surfaces should look like.

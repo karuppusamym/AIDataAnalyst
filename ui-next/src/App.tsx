@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CatalogScreen } from "./screens/CatalogScreen";
+import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
 import type { Persona } from "./lib/types";
 import "./App.css";
 
@@ -26,7 +27,7 @@ const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
   { id: "lineage", label: "Lineage", group: "Understand" },
   { id: "semantics", label: "Semantics", group: "Understand" },
   { id: "meaning", label: "Business meaning", group: "Understand" },
-  { id: "governance", label: "Review queue", group: "Govern" },
+  { id: "governance", label: "Review queue", group: "Govern", ready: true },
   { id: "quality", label: "Quality", group: "Govern" },
   { id: "audit", label: "Audit ledger", group: "Govern" },
   { id: "sources", label: "Sources", group: "Operate" },
@@ -71,6 +72,7 @@ export default function App() {
               <button
                 key={n.id}
                 className="snav__item"
+                data-nav={n.id}
                 aria-current={n.id === view ? "page" : undefined}
                 onClick={() => setView(n.id)}
               >
@@ -85,6 +87,8 @@ export default function App() {
       <main className="smain">
         {view === "catalog" ? (
           <CatalogScreen />
+        ) : view === "governance" ? (
+          <ReviewQueueScreen />
         ) : (
           <div className="stub">
             <h1>{current?.label}</h1>

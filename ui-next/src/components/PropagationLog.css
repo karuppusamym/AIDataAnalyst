@@ -1,0 +1,12 @@
+.plog{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:12px 14px}
+.plog__h{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:0 0 9px;font-weight:500}
+.plog__l{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.ps{display:flex;gap:9px;align-items:flex-start}
+.ps__g{flex:none;width:12px;text-align:center;font-size:11px;line-height:1.5;color:var(--ink-3)}
+.ps--origin .ps__g{color:var(--info)}
+.ps--blocked .ps__g{color:var(--bad)}
+.ps--hop .ps__g{color:var(--warn)}
+.ps__b{min-width:0}
+.ps__t{display:block;font-size:12.5px;color:var(--ink);line-height:1.45}
+.ps__m{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px}
+.ps--blocked .ps__t{color:var(--bad)}

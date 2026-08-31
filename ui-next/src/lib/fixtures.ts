@@ -203,3 +203,97 @@ export async function makeFixtureEvidence(tableId: string): Promise<CatalogAsset
 
   return { table_id: tableId, items };
 }
+
+/* ---------------------------------------------------------------------------
+   Review-queue fixtures. Same standing as the catalog ones: they stand in for
+   a read model that composes GovernanceReview items with the evidence behind
+   each proposal (tracker UX-17).
+--------------------------------------------------------------------------- */
+
+import type { Proposal } from "../components/ProposalCard";
+
+export interface ReviewBatch {
+  /** The agent run these proposals came out of. */
+  runLabel: string;
+  finishedAgo: string;
+  passed: number;
+  /** Counts of proposals are DERIVED from `proposals` in the screen, never
+   *  carried alongside it — a summary that can disagree with the list it
+   *  summarises is worse than no summary. */
+  threshold: number;
+  proposals: Proposal[];
+}
+
+export async function fetchReviewBatch(): Promise<ReviewBatch> {
+  await new Promise((r) => setTimeout(r, 110));
+  return {
+    runLabel: "finance-revenue · semantic validation",
+    finishedAgo: "9 minutes ago",
+    passed: 44,
+    threshold: 0.9,
+    proposals: [
+      {
+        id: "p_4181",
+        title: "Exclude intercompany transfers from net revenue",
+        subject: "metric revenue · v3.1.1 → v3.1.2 · module 18",
+        proposedBy: { kind: "agent", name: "semantic inference" },
+        confidence: 0.87,
+        state: "needs_review",
+        diff: [
+          { kind: "context", text: "metric: revenue" },
+          { kind: "remove", text: "  filter: status != 'void'" },
+          { kind: "add", text: "  filter: status NOT IN ('void','reversed')" },
+          { kind: "add", text: "  exclude: [intercompany_transfers]" },
+        ],
+        rationale:
+          "Three regression tests fail on the current filter: intercompany transfers inflate Q4 revenue by about 4%. The proposed filter matches how Finance actually closed Q3.",
+        evidence:
+          "tests ST-A2/q4-intercompany, q4-close-parity, revenue-grain · Q3 close workpaper referenced by 9 of 12 revenue queries",
+      },
+      {
+        id: "p_4182",
+        title: "Two definitions of MRR are both live",
+        subject: "metric mrr · finance vs sales · module 18",
+        proposedBy: { kind: "agent", name: "semantic inference" },
+        confidence: 0.71,
+        state: "needs_review",
+        diff: [
+          { kind: "context", text: "finance.mrr = SUM(net_new_arr) WHERE contract_type='new'" },
+          { kind: "context", text: "sales.mrr   = SUM(new_bookings) + SUM(committed_arr)" },
+          { kind: "add", text: "  → proposal: scope both, block the unqualified name 'mrr'" },
+        ],
+        rationale:
+          "Same name, different formula. A tool resolving an unqualified 'mrr' returns a different number depending on which definition it reaches. Scoping both and refusing the bare name is the only resolution that cannot silently pick a winner.",
+        evidence:
+          "detected across 2 domains · 14 tools would resolve ambiguously · needs sign-off from both domain owners",
+      },
+      {
+        id: "p_4183",
+        title: "Certify orders_raw as Gold",
+        subject: "table analytics.orders_raw · module 08",
+        proposedBy: { kind: "human", name: "@priya" },
+        confidence: 0.94,
+        state: "needs_review",
+        diff: [
+          { kind: "remove", text: "certification: NONE" },
+          { kind: "add", text: "certification: CERTIFIED  expires: 2027-02-28" },
+        ],
+        rationale:
+          "Maker-checker requires a second approver. The asset passes all 15 quality checks and has a named owner, so the certification lifecycle can accept it once a checker other than the maker signs.",
+        evidence: "GL-5 certification lifecycle · maker @priya · checker must differ",
+      },
+      {
+        id: "p_4179",
+        title: "Add synonym “topline” to net revenue",
+        subject: "metric revenue · module 18",
+        proposedBy: { kind: "agent", name: "semantic inference" },
+        confidence: 0.96,
+        state: "auto_applied",
+        diff: [{ kind: "add", text: "  synonyms: [net sales, topline]" }],
+        rationale:
+          "Above this tenant's auto-apply threshold, so it was applied and recorded rather than queued. A synonym cannot change what a metric computes — only what resolves to it.",
+        evidence: "term appears in 23 queries and 4 dashboards · no conflicting binding",
+      },
+    ],
+  };
+}
