@@ -1,11 +1,15 @@
 from datetime import UTC, datetime
 
+import pytest
+
+import aida.observability as observability_module
 from aida.main import app
 from aida.observability import (
     MetricsConfig,
     TracingConfig,
     configure_metrics,
     configure_tracing,
+    record_counter,
     traced,
 )
 from aida.schemas import ArchiveStatusRead, SloBudgetRead, SloDefinitionCreate
@@ -70,6 +74,79 @@ def test_traced_decorator_async() -> None:
 
     result = asyncio.run(add_async(2, 3))
     assert result == 5
+
+
+def test_configure_tracing_console_default_actually_activates() -> None:
+    """The audit's OB-1 finding: `configure_tracing` was never called, and
+    even if it had been, its only exporter (OTLP gRPC) is not an installed
+    dependency in this environment -- so it would have returned False every
+    time. `exporter="console"` needs only `opentelemetry-sdk` (already
+    pinned), so this must genuinely succeed with zero extra configuration.
+    """
+    config = TracingConfig(enabled=True, exporter="console")
+    assert configure_tracing(config) is True
+
+
+def test_configure_metrics_console_default_actually_activates() -> None:
+    config = MetricsConfig(enabled=True, exporter="console")
+    assert configure_metrics(config) is True
+
+
+def test_record_counter_is_a_noop_when_metrics_are_not_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(observability_module, "_meter_configured", False)
+    # Must not raise even though no meter provider was ever configured --
+    # mirrors @traced's graceful degradation.
+    record_counter("test_ob1_noop_counter", method="GET")
+
+
+def test_record_counter_records_a_real_counter_once_configured() -> None:
+    assert configure_metrics(MetricsConfig(enabled=True, exporter="console")) is True
+    # Must not raise, and increments a real OTEL counter via the meter
+    # provider `configure_metrics` just installed.
+    record_counter("test_ob1_configured_counter", method="GET", path="/x", status="200")
+
+
+def test_lifespan_wires_tracing_and_metrics_and_a_real_request_produces_a_real_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OB-1's actual gap: not that `configure_tracing`/`configure_metrics`
+    were broken, but that nothing in `aida.main` ever called them. This
+    drives real application startup (`aida.main.lifespan`, via the ASGI
+    lifespan protocol) and a real HTTP request through it, and observes a
+    real span produced by the real global TracerProvider the startup call
+    configured -- proving the call happens, independent of exporter choice
+    (DoD: "even against a no-op exporter -- the point is the call happens").
+    """
+    from fastapi.testclient import TestClient
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    from aida import main as main_module
+
+    # Avoid requiring a live Temporal server for this unit test.
+    monkeypatch.setattr(main_module.settings, "temporal_enabled", False)
+
+    with TestClient(main_module.app) as client:
+        assert observability_module._tracer_configured is True
+        assert observability_module._meter_configured is True
+
+        # Attach a second processor to the *same* global provider `lifespan`
+        # just configured, purely to observe spans in this test -- the
+        # console export the app itself performs is unaffected.
+        exporter = InMemorySpanExporter()
+        trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+
+        response = client.get("/health/live")
+        assert response.status_code == 200
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) >= 1
+    assert any("_traced_dispatch" in span.name for span in spans)
 
 
 # --- OB-2: SIEM routing ---

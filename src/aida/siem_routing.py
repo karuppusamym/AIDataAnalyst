@@ -21,7 +21,7 @@ class SecurityEvent:
     """Security event to be routed to SIEM."""
 
     event_type: str  # AUTH_FAILURE, POLICY_VIOLATION, INJECTION_DETECTED,
-    # CROSS_TENANT_ATTEMPT, PRIVILEGE_ESCALATION
+    # CROSS_TENANT_ATTEMPT, PRIVILEGE_ESCALATION, SECURITY_CONTROL_CHANGE
     severity: str  # LOW, MEDIUM, HIGH, CRITICAL
     source: str
     details: dict[str, Any] = field(default_factory=dict)
@@ -54,6 +54,9 @@ EVENT_TYPE_IDS: dict[str, int] = {
     "INJECTION_DETECTED": 300,
     "CROSS_TENANT_ATTEMPT": 400,
     "PRIVILEGE_ESCALATION": 500,
+    # Admin/security-control changes that are not attacks but still SOC-
+    # notable (kill-switch engagement, token revocation): OB-2.
+    "SECURITY_CONTROL_CHANGE": 600,
 }
 
 

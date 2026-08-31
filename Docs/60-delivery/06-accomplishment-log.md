@@ -3428,3 +3428,83 @@ of that script, run on every push.
   need re-verification again the next time a sibling session wires in one of its remaining 5
   entries — that's expected maintenance, not a defect in the gate, and this session watched it
   happen three separate times while finishing this very item.
+
+## 2026-08-31 — OB-1/OB-2/OB-3 (tracing, SIEM routing, WORM archive) closed: three false-DONE claims corrected
+
+- `04-end-to-end-audit-2026-08-30.md` Sec.2 found the same-day 2026-08-30 tracker DONE claims for
+  OB-1/OB-2/OB-3 were false: all three modules (`observability.py`, `siem_routing.py`,
+  `worm_archive.py`) existed, were fully unit-tested in isolation, and had **zero real call sites**.
+  `configure_tracing` was never called anywhere in `src/`; `siem_routing.route_to_siem` had zero
+  callers so no security event ever reached a SOC; and nothing ever wrote an `AuditArchiveRecord`,
+  so `GET /observability/archive/status` silently returned zeros forever while reporting `HEALTHY`-
+  adjacent looking output. Investigated and wired each separately rather than trusting the prior
+  entry.
+- **OB-1**: `main.lifespan` now calls `configure_tracing`/`configure_metrics` at real process
+  startup (`main.py:143-163`), settings-driven via new `AIDA_OTEL_*` config (`atlas/platform/
+  config.py`). Also fixed a latent problem the audit didn't catch: `pyproject.toml` pins
+  `opentelemetry-api`/`opentelemetry-sdk` but never `opentelemetry-exporter-otlp-proto-grpc` —
+  so even a call to the old OTLP-only `configure_tracing` would have hit `ImportError` and
+  returned `False` on every request, forever, in this environment. `observability.py` now supports
+  `exporter="console"` (`ConsoleSpanExporter`/`ConsoleMetricExporter`, both shipped inside the
+  already-pinned `opentelemetry-sdk`) as the default, alongside the original `"otlp"` path for a
+  real collector. Every request is dispatched through a new `@traced _traced_dispatch` wrapper
+  (`main.py:180-190`) so a real span is produced from process start, and a new `record_counter`
+  helper emits a parallel OTEL metric alongside the existing Prometheus `REQUEST_COUNT`.
+- **OB-2**: wired at the two places security-relevant events already exist. (1)
+  `aida.events.record_audit` — the single funnel every audit event in the platform passes through,
+  DENIED policy checks, kill-switch engagement, and token revocation included — now classifies
+  DENIED/FAILED/REJECTED outcomes as `POLICY_VIOLATION` and three specific SUCCESS-outcome actions
+  (`model.kill_switch_engage`, `model.kill_switch_release`, `token.revoked`) as a new
+  `SECURITY_CONTROL_CHANGE` event type (added to `siem_routing.EVENT_TYPE_IDS`), then calls the
+  real `route_to_siem`. (2) `aida.security.get_security_context`'s three OIDC-rejection branches
+  call a new `_route_auth_failure` helper directly with `AUTH_FAILURE`/`HIGH`, since token
+  verification fails *before* a `SecurityContext` (and therefore `record_audit`) exists. New
+  `AIDA_SIEM_*` settings, enabled by default — safe because `route_to_siem` only formats a
+  CEF/webhook payload and logs it (see its own docstring: "this is a synchronous routing stub"),
+  it never opens a network connection itself.
+- **OB-3**: new `worm_archive.archive_pending_audit_events` reads real unarchived `AuditEvent`
+  rows per organization (incremental — each org's cutoff is its own last
+  `AuditArchiveRecord.event_range_end`, so a cycle never re-archives the same rows), calls the
+  pre-existing pure `archive_audit_events`, and persists a real `AuditArchiveRecord`. Triggered by
+  a new background task (`main._audit_archive_loop`) started from `main.lifespan` and cancelled
+  cleanly on shutdown, sweeping every `AIDA_AUDIT_ARCHIVE_INTERVAL_SECONDS` (default 3600s) across
+  every organization, `AIDA_AUDIT_ARCHIVE_*`-configurable, enabled by default.
+- Tests: `tests/test_observability.py` gained an OB-1 integration test that drives the real ASGI
+  lifespan (`fastapi.testclient.TestClient(aida.main.app)`, Temporal connect avoided via
+  `monkeypatch.setattr(main.settings, "temporal_enabled", False)`) and attaches an
+  `InMemorySpanExporter` to the *same* global `TracerProvider` the startup call configured, then
+  asserts a real span was produced by a real `/health/live` request — plus unit coverage for the
+  new console-exporter default and `record_counter`'s configured/no-op paths. New
+  `tests/test_siem_wiring.py` (9 tests, real SQLite-backed `AsyncSession`, same pattern as
+  `test_detokenization_api.py`/`test_token_revocation.py`): a policy denial is both audited and
+  reaches the real `route_to_siem` (spied to assert the exact `SecurityEvent` payload) with
+  `POLICY_VIOLATION`; all three kill-switch/token-revocation actions reach it as
+  `SECURITY_CONTROL_CHANGE` despite a `SUCCESS` outcome; a routine `SUCCESS` audit event is
+  confirmed *not* routed; and a real missing-bearer-token 401 through `get_security_context`
+  reaches the SIEM router as `AUTH_FAILURE`. New `tests/test_worm_archive_wiring.py` (6 tests):
+  a real archive cycle persists a real `AuditArchiveRecord` with the right `event_count`/checksum;
+  a second cycle is a genuine no-op when nothing new exists, then picks up exactly one new event
+  on a third cycle (proving the incremental cutoff, not a re-archive); legal hold is reflected on
+  the persisted record; and — the exact gap the audit named —
+  `test_archive_status_endpoint_reflects_a_real_non_zero_count` calls the real `GET
+  /observability/archive/status` handler directly, asserting `0`/`NO_ARCHIVES` before any archive
+  cycle and `5`/`HEALTHY` with the matching `archive_id`/checksum after one.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green —
+  3142 tests, 0 failures, 0 errors, 6 skipped (`--junitxml` summary; `-q`'s own final summary line
+  was obscured in this environment by a cosmetic `opentelemetry` background-thread stack trace at
+  interpreter shutdown, see below — the junitxml result is the authoritative one).
+- Known limitation / cosmetic noise: the OTEL SDK's `PeriodicExportingMetricReader` starts a
+  background export thread the moment a `MeterProvider` is constructed, independent of whether
+  `metrics.set_meter_provider` actually became the process-global one (OTEL only honors the first
+  call per process). Several tests in this change call `configure_metrics(enabled=True)`, so more
+  than one such thread is created; the orphaned ones print `ValueError: I/O operation on closed
+  file` to stderr at interpreter shutdown when they wake up after pytest has already torn down
+  captured stdout. This is pytest-process noise only — confirmed via `--junitxml` and exit code 0
+  across three separate full-suite runs that it fails nothing — not a defect in the request path,
+  but worth a follow-up if it turns out to be more than cosmetic (e.g. adding explicit
+  `provider.shutdown()` calls in the affected tests).
+- Scope discipline: touched only `observability.py`, `siem_routing.py`, `worm_archive.py`,
+  `main.py` (startup wiring + the per-request middleware), `events.py` and `security.py` (the two
+  audit-event emission points wired to SIEM), `atlas/platform/config.py` (new settings), and their
+  tests — per the task's explicit scope, since parallel sessions were working other tracker items
+  concurrently in sibling worktrees.

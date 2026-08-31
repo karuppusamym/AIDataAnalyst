@@ -297,6 +297,44 @@ class Settings(BaseSettings):
     tokenization_vault_token_reference: str = Field(default="", max_length=500)
     tokenization_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
 
+    # --- OB-1: OpenTelemetry tracing/metrics (aida.observability) -----------
+    # `console` is the zero-dependency default -- ConsoleSpanExporter and
+    # ConsoleMetricExporter ship inside opentelemetry-sdk (already a pinned
+    # dependency), so tracing/metrics are genuinely active from process
+    # start in every environment without requiring a live collector or the
+    # separate opentelemetry-exporter-otlp-proto-grpc package. Point
+    # `otel_exporter` at "otlp" (and install that exporter package) to ship
+    # to a real collector in production.
+    otel_tracing_enabled: bool = True
+    otel_metrics_enabled: bool = True
+    otel_exporter: Literal["console", "otlp"] = "console"
+    otel_endpoint: str = "http://localhost:4317"
+    otel_insecure: bool = True
+    otel_metrics_export_interval_millis: int = Field(default=60_000, ge=1_000, le=600_000)
+
+    # --- OB-2: SIEM routing (aida.siem_routing) ------------------------------
+    # `route_to_siem` formats and logs a structured event (see its docstring)
+    # rather than opening a network connection itself, so enabling it by
+    # default carries no network risk -- the existing structlog pipeline is
+    # its transport to a log-shipping SOC integration. Point `siem_endpoint`
+    # at a real webhook/syslog collector to layer an actual transport on top.
+    siem_enabled: bool = True
+    siem_transport: Literal["syslog", "webhook"] = "webhook"
+    siem_endpoint: str = "internal://security-log-pipeline"
+    siem_include_details: bool = True
+
+    # --- OB-3: WORM audit archive (aida.worm_archive) ------------------------
+    audit_archive_enabled: bool = True
+    audit_archive_interval_seconds: int = Field(default=3600, ge=60, le=86_400)
+    audit_archive_batch_size: int = Field(default=1_000, ge=1, le=10_000)
+    audit_archive_retention_days: int = Field(default=2555, ge=1, le=10_950)
+    audit_archive_storage_backend: Literal["s3", "gcs", "azure_blob"] = "s3"
+    audit_archive_bucket_name: str = "audit-archive"
+    audit_archive_legal_hold_enabled: bool = False
+    audit_archive_classification: Literal[
+        "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"
+    ] = "CONFIDENTIAL"
+
     @property
     def max_query_estimate_cost(self) -> float:
         return self.max_postgres_plan_cost

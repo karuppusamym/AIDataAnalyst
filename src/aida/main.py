@@ -1,3 +1,5 @@
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from time import perf_counter
@@ -7,7 +9,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from temporalio.client import Client
 
 from aida import __version__
@@ -20,7 +22,7 @@ from aida.asset_description_api import router as asset_description_router
 from aida.bi_api import router as bi_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
-from aida.config import get_settings
+from aida.config import Settings, get_settings
 from aida.consumption_lineage_api import router as consumption_lineage_router
 from aida.context import correlation_id_var
 from aida.context_compiler_api import router as context_compiler_router
@@ -34,8 +36,17 @@ from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
+from aida.models import Organization
 from aida.negative_knowledge_api import router as negative_knowledge_router
 from aida.notification_api import router as notification_router
+from aida.observability import (
+    MetricsConfig,
+    TracingConfig,
+    configure_metrics,
+    configure_tracing,
+    record_counter,
+    traced,
+)
 from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
@@ -58,6 +69,7 @@ from aida.tool_plans_api import router as tool_plans_router
 from aida.unified_lineage_api import router as unified_lineage_router
 from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
+from aida.worm_archive import ArchiveConfig, archive_pending_audit_events
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -75,6 +87,61 @@ REQUEST_LATENCY = Histogram(
 )
 
 
+async def _audit_archive_loop(loop_settings: Settings) -> None:
+    """OB-3: periodically sweep unarchived `AuditEvent` rows into an
+    immutable `AuditArchiveRecord` per organization, via
+    `aida.worm_archive.archive_pending_audit_events`.
+
+    Started/cancelled from `lifespan`; runs for the life of the process. A
+    failed cycle logs and retries on the next interval instead of crashing
+    the task -- archival lagging behind is recoverable, an unhandled task
+    exception silently killing the sweep forever is the OB-3 failure mode
+    the audit found (an endpoint that reports zeros while looking healthy).
+    """
+    config = ArchiveConfig(
+        retention_days=loop_settings.audit_archive_retention_days,
+        storage_backend=loop_settings.audit_archive_storage_backend,
+        bucket_name=loop_settings.audit_archive_bucket_name,
+        legal_hold_enabled=loop_settings.audit_archive_legal_hold_enabled,
+        classification=loop_settings.audit_archive_classification,
+    )
+    while True:
+        await asyncio.sleep(loop_settings.audit_archive_interval_seconds)
+        try:
+            async with session_factory() as session:
+                org_ids = (await session.scalars(select(Organization.id))).all()
+                archived_any = False
+                for org_id in org_ids:
+                    result = await archive_pending_audit_events(
+                        session,
+                        org_id,
+                        config,
+                        batch_size=loop_settings.audit_archive_batch_size,
+                    )
+                    if result is not None:
+                        archived_any = True
+                if archived_any:
+                    await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("audit_archive_cycle_failed")
+
+
+@traced
+async def _traced_dispatch(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Response]],
+    *,
+    correlation_id: str,
+) -> Response:
+    """OB-1: every request is dispatched through this @traced call so a real
+    span (and, once metrics are configured, a real OTEL metric) is produced
+    from process start -- not only when some future caller opts in.
+    """
+    return await call_next(request)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.temporal_client = None
@@ -83,6 +150,38 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             settings.temporal_address,
             namespace=settings.temporal_namespace,
         )
+
+    tracing_active = configure_tracing(
+        TracingConfig(
+            endpoint=settings.otel_endpoint,
+            service_name=settings.service_name,
+            insecure=settings.otel_insecure,
+            enabled=settings.otel_tracing_enabled,
+            exporter=settings.otel_exporter,
+        )
+    )
+    metrics_active = configure_metrics(
+        MetricsConfig(
+            endpoint=settings.otel_endpoint,
+            service_name=settings.service_name,
+            insecure=settings.otel_insecure,
+            enabled=settings.otel_metrics_enabled,
+            exporter=settings.otel_exporter,
+            export_interval_millis=settings.otel_metrics_export_interval_millis,
+        )
+    )
+    logger.info(
+        "observability_configured",
+        tracing=tracing_active,
+        metrics=metrics_active,
+        exporter=settings.otel_exporter,
+    )
+
+    archive_task: asyncio.Task[None] | None = None
+    if settings.audit_archive_enabled:
+        archive_task = asyncio.create_task(_audit_archive_loop(settings))
+    app.state.audit_archive_task = archive_task
+
     logger.info(
         "service_started",
         service=settings.service_name,
@@ -90,6 +189,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         version=__version__,
     )
     yield
+    if archive_task is not None:
+        archive_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await archive_task
     logger.info("service_stopped", service=settings.service_name)
 
 
@@ -153,7 +256,7 @@ async def request_context(
     token = correlation_id_var.set(correlation_id)
     started = perf_counter()
     try:
-        response = await call_next(request)
+        response = await _traced_dispatch(request, call_next, correlation_id=correlation_id)
     except Exception:
         logger.exception(
             "unhandled_request_error",
@@ -178,6 +281,15 @@ async def request_context(
     path_template = getattr(route, "path", request.url.path)
     REQUEST_COUNT.labels(request.method, path_template, str(response.status_code)).inc()
     REQUEST_LATENCY.labels(request.method, path_template).observe(elapsed)
+    # OB-1: OTEL-native counterpart to REQUEST_COUNT above -- a no-op unless
+    # configure_metrics succeeded (see lifespan), so this never adds request
+    # latency or a hard dependency on the OTLP SDK being installed.
+    record_counter(
+        "aida_http_requests_total",
+        method=request.method,
+        path=path_template,
+        status=str(response.status_code),
+    )
     response.headers["X-Correlation-Id"] = correlation_id
     return response
 

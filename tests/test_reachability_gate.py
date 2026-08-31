@@ -70,17 +70,11 @@ ENTRY_POINTS: dict[str, str] = {
 # backlog record, not a way to hide it.
 ALLOWLIST: dict[str, str] = {
     # --- Observability (§20, all P0) ---
-    "aida.observability": (
-        "OB-1: configure_tracing() is never called from main/worker/scheduler startup; "
-        "opentelemetry appears nowhere else in src/. Known gap, not yet wired."
-    ),
-    "aida.siem_routing": (
-        "OB-2: zero call sites; no security event is ever routed to a SOC. Known gap."
-    ),
-    "aida.worm_archive": (
-        "OB-3: zero call sites; nothing writes AuditArchiveRecord, so the archive-status "
-        "endpoint reads a permanently empty table. Known gap."
-    ),
+    # observability.py, siem_routing.py and worm_archive.py were wired into the live
+    # startup/request/audit path after the audit was written (OB-1/OB-2/OB-3 closed:
+    # main.lifespan now calls configure_tracing/configure_metrics and starts the WORM
+    # archive sweep; aida.events.record_audit and aida.security.get_security_context now
+    # call route_to_siem), so they are correctly no longer on this list.
     # --- Retrieval stack (§12, P0 family) ---
     # retrieval.py, fusion_ranking.py, graph_retrieval.py, embedding_provider.py and
     # vector_retrieval.py were wired into the live orchestration path after the audit was

@@ -5,12 +5,39 @@ from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
+from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.oidc import OidcVerificationError, OidcVerifier, context_from_claims
 from aida.security_types import SecurityContext as SecurityContext
+from aida.siem_routing import SecurityEvent, SiemConfig, route_to_siem
 from aida.token_revocation import TokenRevokedError, enforce_not_revoked
 
 _oidc_verifiers: dict[tuple[str, str, str, str], OidcVerifier] = {}
+
+
+def _route_auth_failure(settings: Settings, reason: str) -> None:
+    """OB-2: every rejected bearer-token attempt is a SOC-notable
+    AUTH_FAILURE. This runs before a `SecurityContext` exists, so it cannot
+    go through `aida.events.record_audit` like every other security event in
+    this codebase (that funnel is what routes DENIED/kill-switch/revocation
+    events) -- it calls `route_to_siem` directly instead, at the exact point
+    authentication itself is refused.
+    """
+    route_to_siem(
+        SecurityEvent(
+            event_type="AUTH_FAILURE",
+            severity="HIGH",
+            source="oidc-gateway",
+            correlation_id=get_correlation_id(),
+            details={"reason": reason},
+        ),
+        SiemConfig(
+            transport=settings.siem_transport,
+            endpoint=settings.siem_endpoint,
+            enabled=settings.siem_enabled,
+            include_details=settings.siem_include_details,
+        ),
+    )
 
 
 def _oidc_verifier(settings: Settings) -> OidcVerifier:
@@ -39,12 +66,14 @@ async def get_security_context(
 ) -> SecurityContext:
     if settings.identity_provider == "oidc":
         if not authorization or not authorization.startswith("Bearer "):
+            _route_auth_failure(settings, "missing bearer token")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="a bearer token is required",
             )
         token = authorization.removeprefix("Bearer ").strip()
         if not token:
+            _route_auth_failure(settings, "empty bearer token")
             raise HTTPException(status_code=401, detail="a bearer token is required")
         try:
             claims = await _oidc_verifier(settings).verify(token)
@@ -54,6 +83,7 @@ async def get_security_context(
             await enforce_not_revoked(session, claims)
             return context_from_claims(claims, settings)
         except (OidcVerificationError, TokenRevokedError) as exc:
+            _route_auth_failure(settings, str(exc))
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="bearer token verification failed",
