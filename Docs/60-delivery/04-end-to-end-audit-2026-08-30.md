@@ -60,7 +60,7 @@ points, no `getattr` module lookup anywhere in `src/`).
 | `retrieval.py` + `fusion_ranking` + `vector_store` + `embedding_provider` + `graph_retrieval` + `vector_retrieval` | ~2,320 | **RT-1, RT-2, RT-3, RT-9, SM-2** | The live retrieval path is a different implementation (`agent_intelligence.GovernedRetriever`). `retrieval.py:43-52` even documents the hand-off that was never performed. Nothing embeds the catalogue. |
 | `injection_defense.py`, `injection_corpus.py` | 726 | **AG-1, AG-2, TS-6** | Live screening is a different, 86-line module (`ingest_screening.py`). Note the *live* path does work — but `is_eligible_for_model_context`, whose docstring calls it "the one question every model-context builder must ask", has zero callers. |
 | `abac.py` | — | **PG-1, PG-6, PG-8** | Real enforcement runs through `policy_engine.evaluate`. `abac.py` is imported only by its own router and its own test. |
-| `data_contracts.py` | 272 | — | Orphaned duplicate of the live `runtime_contracts.py`. Zero importers, zero tests. |
+| data_contracts.py (deleted 2026-08-31, AU-6) | 272 | — | Orphaned duplicate of the live `runtime_contracts.py`. Zero importers, zero tests. |
 
 **The one that matters most commercially.** The competitive analysis in §L positions the
 **refusal record** as the differentiator Atlan structurally cannot copy. It is never written.
@@ -178,8 +178,9 @@ graph.** Until a DONE row requires proof of reachability, this will recur.
    branches. This is the commercial differentiator and it is a small change — the writer, the
    table and the read API all exist.
 6. Wire the remaining dead modules **or delete them and reopen the tracker rows.** Either is
-   honest; leaving them is not. Recommend deleting `data_contracts.py` and `abac.py` outright
-   (live duplicates exist) and wiring `quality_coupling`/`trust_scoring` (their rows are
+   honest; leaving them is not. data_contracts.py deleted 2026-08-31 under AU-6 (no tracker row
+   cited it, so none needed reopening); `abac.py` still recommended for deletion outright (live
+   duplicate exists), and `quality_coupling`/`trust_scoring` still need wiring (their rows are
    load-bearing for the product story).
 7. **Behavioural authz tests**: a table-driven suite asserting the expected role set per route,
    generated from the live app so it cannot drift.
@@ -211,5 +212,5 @@ opened each handler and followed its calls rather than inferring from endpoint e
 Two findings carry an explicit confidence caveat, recorded so they are not over-trusted:
 `MetadataTable.superseded_by_table_id` being write-only could not be fully ruled out (a
 SQLAlchemy `relationship()` with `remote_side` under a different attribute name would not
-appear in a name-based grep), and the `data_contracts.py` orphan status assumes no runtime
-configuration selects it.
+appear in a name-based grep), and the data_contracts.py orphan status (moot since its 2026-08-31
+deletion) assumed no runtime configuration selected it.

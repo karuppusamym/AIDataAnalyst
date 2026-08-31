@@ -60,7 +60,7 @@ Collibra's platform page reframes the product away from "catalog" toward **prepa
 | AI assessments and Trust Scores | **Implemented foundation 2026-08-29**; managed templates, remediation, retirement, and history remain |
 | Governed context compiler (semantic models → Snowflake Semantic Views / Databricks Metric Views / OSI / ODCS / YAML) | **Implemented foundation 2026-08-29**; external validators and file delivery remain |
 | Data product registry | **Implemented foundation 2026-08-29** |
-| Data contract registry (products, schemas, SLAs, versions, producers/consumers — distinct from `data_contracts.py`'s ingestion-contract validation) | **Implemented foundation 2026-08-29** |
+| Data contract registry (products, schemas, SLAs, versions, producers/consumers — distinct from the now-deleted data_contracts.py's ingestion-contract validation) | **Implemented foundation 2026-08-29** |
 | Data marketplace and access requests | **Implemented foundation 2026-08-29**; entitlement-provider fulfillment remains |
 | Workflow designer | Missing — workflows are fixed application processes |
 

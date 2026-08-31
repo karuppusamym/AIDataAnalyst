@@ -417,8 +417,9 @@ view/procedure/BI nodes (LN-11), and graph export (LN-12).
 
 Delivers CP-2 and CP-3 from `20-modules/19-context-products-and-mcp.md` §15.2: versioned data
 products with owners/ports/lifecycle/certification, and a data contract registry (schema,
-quality, freshness, SLA, producer/consumer, ODCS-compatible) distinct from
-`data_contracts.py`'s ingestion-envelope validation.
+quality, freshness, SLA, producer/consumer, ODCS-compatible) distinct from the
+now-deleted src/aida/data_contracts.py's ingestion-envelope validation (orphaned duplicate of
+runtime_contracts.py, removed 2026-08-31 under AU-6).
 
 **Acceptance**
 - Candidate → active → retired product lifecycle with maker-checker on publish (`DataProduct`,
