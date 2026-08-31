@@ -2329,3 +2329,71 @@ Studio has moved from Pending to Partial in the status matrix.
   synchronized by design, so a subject-scoped masking/filter rule stays application-level-only
   until a session-variable bridge between Atlas's subject attributes and a source engine's session
   context exists (also not started).
+
+## 2026-08-31 — PF-3 (CI performance regression gates) closed
+
+- Scope, stated plainly: this closes the CI-runner regression-gate *mechanism*, not bank-scale
+  load/soak/spike testing. PF-1 (1M-object benchmark corpus), PF-2 (published performance
+  dashboards), PF-4 (projection rebuild timing) and TS-7 remain open, infra-dependent items this
+  work does not touch.
+- Added `scripts/perf_baseline.py`, following the same committed-baseline ratchet pattern as ST-02's
+  import-linter gate and TS-4's `scripts/openapi_diff.py`. It times four real, already-tested,
+  in-process hot paths rather than any invented benchmark: `SqlGuard.validate()` over every case in
+  QG-1's own adversarial SQL corpus (`tests/fixtures/adversarial_sql_corpus/*.json`, all 5 certified
+  dialects); `abac.evaluate()` over 500 policies, the exact scenario PG-1's own
+  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises, reused here rather than
+  reimplemented; `fuse_results()`, hybrid retrieval's reciprocal-rank-fusion combiner, over a
+  synthetic 500-candidate catalog; and `app.openapi()` — TS-4's own gate input — with FastAPI's
+  schema cache cleared every iteration so it is genuinely regenerated, not cached.
+- Each benchmark runs a warmup, then several timed iterations, and the comparison uses the median
+  (p50) rather than a tail percentile: on a shared CI runner the tail is dominated by scheduler noise
+  unrelated to the code under test, while the median stays representative with far fewer samples.
+  The regression threshold is 20% — chosen because repeated local measurement showed run-to-run
+  median variance comfortably under 15% for three of the four benchmarks even on an unusually loaded
+  machine (see below), leaving headroom above that noise floor while still catching a real slowdown.
+  A benchmark that crosses the threshold is re-measured once before the gate actually fails, so one
+  transient blip does not fail the build by itself — the regression has to reproduce.
+- Committed baseline at `Docs/90-reference/perf-baseline.json`; `--accept-baseline` regenerates it
+  deliberately, exactly like `scripts/openapi_diff.py`'s own flag. Wired as a new job in
+  `.github/workflows/ci.yml` alongside the existing five gates (ruff, mypy, lint-imports,
+  single-Alembic-head, openapi-diff, pytest) — additive only, none of the existing jobs were
+  restructured.
+- 16 tests (`tests/test_perf_baseline_gate.py`): pure `find_regressions()` coverage of the threshold
+  boundary and edge cases (exactly-at-threshold passes, missing-on-either-side entries are
+  informational only, a zero baseline doesn't divide by zero), plus — per this item's own definition
+  of done — `aida.abac.evaluate` wrapped with an artificial `time.sleep` to prove the gate actually
+  flags a regression in a real benchmarked function (not just a synthetic fixture), and the same
+  unmodified benchmark proven not to be flagged.
+- Found and fixed two false positives of its own in the same edit: the tracker row's prose cited the
+  OpenAPI diff script as a bare filename instead of the full `scripts/openapi_diff.py` path
+  the doc-claims gate (TS-12) requires, and separately named the new CI job in backticks on the same
+  line as "contracts kept" (from the lint-imports verification sentence), which made the doc-claims
+  gate's contract-name checker mistake the job name for an import-linter contract citation. Both
+  fixed before commit; `uv run pytest tests/test_doc_claims.py` re-run clean for every citation this
+  entry and the tracker row introduce.
+- This session's sandbox was, for its own reasons, unusually heavily loaded — many concurrent
+  sibling sessions each running their own full ~2,400-test suite at the same time on the same
+  machine (confirmed via `ps aux`: multiple `pytest -q` processes from other worktrees running
+  concurrently throughout). That is real, encountered evidence, not a hypothetical, of exactly the
+  shared-runner noise this gate's own docstring warns about: the first version of the fusion-ranking
+  benchmark (20 `fuse_results()` calls per measured iteration, ~18ms) swung 107–188% run-to-run under
+  that load, and even the CI-facing test written to prove "the gate passes when nothing regressed"
+  flaked once at a 20.1% reading against the real 20% production threshold. Fixed two ways: the
+  fusion-ranking benchmark's inner-loop batch size was raised from 20 to 100 calls per iteration
+  (diluting a single scheduler stall's effect on the measured median), and the CLI round-trip test
+  was changed to stub `measure()` to a fixed value rather than compare two live timings, since it
+  exists to prove argument/file-I/O wiring, not timing precision — that coverage already exists,
+  risk-free, in the pure `find_regressions()` unit tests. Left as an open, named caveat rather than
+  engineered away entirely: real GitHub Actions runners are dedicated, not shared with N other full
+  suites the way this sandbox was, so the committed baseline may still want one deliberate
+  `--accept-baseline` re-capture after the job's first live run there — not yet observed, verified
+  locally only, the same caveat TS-4 recorded for its own gate.
+- `ruff check .` clean, `mypy src` clean (184 files), `lint-imports` 4 contracts kept / 0 broken,
+  `alembic heads` a single head. Full `pytest` run twice after all fixes above: both times exactly
+  two failures, both pre-existing and unrelated — `tests/test_doc_claims.py::test_cited_test_path_resolves`
+  citing a `TestParameterContractDesigner` class inside `tests/test_studio.py`, from `03-tracker.md:231`
+  and this log's own ST-A4 entry (`06-accomplishment-log.md:2064`), both from the ST-A4 commit already
+  on origin before this session started (confirmed identical `tests/test_doc_claims.py` against
+  `origin/feature/snowflake-dbt-lineage-mcp`; `tests/test_studio.py` has no such class, only flat
+  test functions). Out of scope for PF-3 (neither the tracker's ST-A4 row nor another session's
+  accomplishment-log entry is this item's to edit) and left for whoever owns ST-A4 to fix.

@@ -19,6 +19,15 @@
 #                    removed response field, narrowed enum, ...) fails CI
 #                    unless acknowledged with an API version bump. See
 #                    `scripts/openapi_diff.py`.
+#   perf-baseline -- tracker PF-3: a small set of fast, deterministic
+#                    in-process hot paths (the SQL guard pipeline, ABAC
+#                    evaluation, hybrid-retrieval fusion ranking, OpenAPI
+#                    generation) is timed and compared against a committed
+#                    baseline; a benchmark that reproduces more than 20%
+#                    slower on re-measurement fails CI. This is the CI-runner
+#                    regression-gate mechanism, not the bank-scale load/soak/
+#                    spike testing tracked separately (PF-1/PF-2/PF-4/PF-7,
+#                    TS-7). See `scripts/perf_baseline.py`.
 #   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
 #
 # A change that breaks any of these does not merge.
@@ -118,6 +127,27 @@ jobs:
 
       - name: Breaking-change check against committed baseline
         run: uv run python scripts/openapi_diff.py
+
+  perf-baseline:
+    name: Perf regression gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Benchmark hot paths against committed baseline
+        run: uv run python scripts/perf_baseline.py
 
   tests:
     name: Tests
