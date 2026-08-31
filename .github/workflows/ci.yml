@@ -83,13 +83,6 @@ env:
   # Fail rather than silently resolving a different dependency set than the lockfile
   # pins. A stale `uv.lock` is itself a CI failure.
   UV_FROZEN: "1"
-  # AU-3 (config.py) requires `environment` to be set explicitly outside pytest, so a
-  # typo'd variable *name* fails as loudly as a typo'd value. The `tests` job is exempt
-  # via its own pytest detection; every other job invokes a plain script (alembic,
-  # openapi_diff.py, perf_baseline.py, ...) that imports `aida.main` outside pytest and
-  # needs this set explicitly. `development` is correct here: these jobs introspect the
-  # app's schema/hot paths, they never deploy anything.
-  AIDA_ENVIRONMENT: "development"
 
 jobs:
   quality:
@@ -153,6 +146,15 @@ jobs:
     name: OpenAPI diff gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # AU-3 (config.py) requires `environment` to be set explicitly outside pytest, so a
+    # typo'd variable *name* fails as loudly as a typo'd value. This job invokes a plain
+    # script that imports `aida.main` outside pytest, so it needs this set explicitly --
+    # scoped to just this job (not the workflow-level env), since `tests/test_config.py`'s
+    # own AU-3 coverage relies on `AIDA_ENVIRONMENT` being genuinely absent from the
+    # ambient environment to prove the "unset outside tests" failure mode. `development`
+    # is correct here: this job only introspects the app's schema, it never deploys.
+    env:
+      AIDA_ENVIRONMENT: "development"
     steps:
       - uses: actions/checkout@v4
 
@@ -174,6 +176,12 @@ jobs:
     name: Perf regression gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # See the openapi-diff job above: this job also imports `aida.main` outside pytest
+    # (to generate the OpenAPI schema as one of its benchmarks) and needs this scoped,
+    # job-level env var for the same reason -- not at the workflow level, which would
+    # defeat AU-3's own "unset outside tests" test coverage in the `tests` job.
+    env:
+      AIDA_ENVIRONMENT: "development"
     steps:
       - uses: actions/checkout@v4
 
