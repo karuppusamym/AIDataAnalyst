@@ -18,6 +18,10 @@ from aida.asset_description_service import (
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.metric_suggestion_service import (
+    apply_metric_suggestion_proposal,
+    reject_metric_suggestion_proposal,
+)
 from aida.models import (
     AiAsset,
     AiAssetVersion,
@@ -43,6 +47,7 @@ from aida.models import (
     ModelRouteConfiguration,
     Project,
     SemanticMetric,
+    SemanticMetricProposal,
     SemanticMetricVersion,
     SemanticModelVersion,
     TermSemanticBinding,
@@ -1450,6 +1455,40 @@ async def _apply_governance_review_decision(
             "table_id": str(draft.table_id),
             "overall_score": draft.overall_score,
             "published_version_id": published_version_id,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":
+        metric_proposal = await session.get(SemanticMetricProposal, UUID(review.object_id))
+        if metric_proposal is None or metric_proposal.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # SM-4: this is the only call site that publishes a proposed
+            # metric definition, and it only runs after the maker-checker
+            # guard above (status PENDING, independent reviewer) has
+            # already passed -- no evidence score, however high, reaches
+            # this line without an independent decision.
+            event_type, published_metric_version = await apply_metric_suggestion_proposal(
+                session,
+                metric_proposal,
+                reviewer=context.principal_id,
+                now=now,
+            )
+            published_metric_version_id: str | None = str(published_metric_version.id)
+        else:
+            event_type = await reject_metric_suggestion_proposal(
+                metric_proposal,
+                reviewer=context.principal_id,
+                now=now,
+            )
+            published_metric_version_id = None
+        aggregate_type = "semantic_metric_proposal"
+        aggregate_id = str(metric_proposal.id)
+        payload = {
+            "proposal_id": str(metric_proposal.id),
+            "table_id": str(metric_proposal.table_id),
+            "measure_column_id": str(metric_proposal.measure_column_id),
+            "overall_score": metric_proposal.overall_score,
+            "published_metric_version_id": published_metric_version_id,
             "review_id": str(review.id),
         }
     else:

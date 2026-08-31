@@ -3989,6 +3989,45 @@ class TermSemanticBindingRead(ApiModel):
 
 
 # ---------------------------------------------------------------------------
+# SM-4: Metric suggestions from approved annotations
+# ---------------------------------------------------------------------------
+
+
+class MetricSuggestionProposalGenerate(ApiModel):
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class MetricSuggestionProposalRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    project_id: UUID
+    table_id: UUID
+    table_name: str
+    measure_column_id: UUID
+    measure_column_name: str
+    source_annotation_id: UUID
+    proposed_slug: str
+    proposed_name: str
+    proposed_description: str
+    proposed_aggregation: str
+    proposed_grain: str
+    accuracy_score: float
+    clarity_score: float
+    style_score: float
+    completeness_score: float
+    overall_score: float
+    evidence: dict[str, Any]
+    status: str
+    governance_review_id: UUID | None
+    published_metric_version_id: UUID | None
+    created_by: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # CT-5: asset certification lifecycle with expiry (single table or column)
 # ---------------------------------------------------------------------------
 
