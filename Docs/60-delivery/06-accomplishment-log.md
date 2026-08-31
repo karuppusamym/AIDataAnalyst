@@ -3972,3 +3972,94 @@ Only `.github/workflows/ci.yml`, `Dockerfile`, and the new `.gitleaks.toml` were
 is CI tooling configuration enabling the `secret-scan` job, not application code). The 16-CVE
 dependency baseline and the follow-up task to clear it are deliberate, documented debt, not an
 oversight — see the `dependency-scan` section above and tracker row AU-13.
+
+---
+
+## 2026-08-31 — AU-2 (redefine DONE to require a live call site) closed: process rule plus a 36-row re-verification sweep
+
+### The process fix
+
+`03-tracker.md`'s "How to use this" section previously defined `DONE` only as "its exit condition
+is verifiably met" — the same one-line bar that let the 17 rows `04-end-to-end-audit-2026-08-30.md`
+found get marked `DONE` on a passing unit test with zero live callers. A new paragraph, **"The
+live-call-site rule (AU-2, added 2026-08-31...)"**, now sits immediately after the existing
+`**Rules.**` line: any row whose exit evidence claims a module/function/endpoint is "wired",
+"reachable", "live" or "called from" something must name a concrete `file:line` on a path
+transitively reachable from one of the five processes in `tests/test_reachability_gate.py`'s
+`ENTRY_POINTS` dict (`aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+`aida.projectors.graph_projector`, `aida.projectors.outbox_publisher`) — not a passing test or a
+module's mere existence. Two exceptions are named explicitly rather than left implicit: module-level
+reachability is necessary but not sufficient (a row about one *function* needs that function's own
+call site, the AU-1-vs-AU-5 `ai_decision_lineage.py` distinction), and a row blocked on
+infrastructure the harness cannot reach (live Kafka, a real IdP) may cite an in-process proof if it
+says so plainly. A row that cannot produce this evidence is not `DONE`.
+
+### The re-verification sweep
+
+36 `DONE` rows across sections A, B, C, D, E, F, G, M and N were re-checked by grepping the actual
+code for the row's cited call site and confirming the containing router/module is `include_router`'d
+(or otherwise imported/called) from a real entry point — not by re-reading the row's own prose:
+
+- **A**: ST-01, ST-02, ST-03, ST-11, ST-12, ST-16 (`mcp_server.py`'s `validate_sql` tool slug +
+  `sql_validation_router` mounted `main.py:61,218`), ST-17 (`record_audit` at 11+ sites each in
+  `ai_registry_api.py`/`product_marketplace_api.py`, both routers included `main.py:211,226`).
+- **B**: IN-1 (`bulk_onboard_datasources`, `api.py:1044`), IN-5b (`persist_envelope_extensions`
+  called `workflows/activities.py:982`).
+- **C**: CT-1 (`catalog_bulk_actions` imported `api.py:25`, 6 bulk-* endpoints `api.py:3154-3504`),
+  RL-4 (`UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` used `graph_projector.py:471`), PR-4 (`start_task`/
+  `heartbeat_task`/`finish_task` called 10+ times in `workflows/activities.py`, read endpoints
+  `api.py:1534,1578`).
+- **D**: GL-1..GL-4 — the vaguest pre-rule exit text found in this sweep (no file names at all,
+  despite being P0) — strengthened in place with concrete citations (`glossary_api.py:175,282`,
+  `stewardship_api.py:417,484,551`, routers mounted `main.py:32,59,62,221,222`); GL-6
+  (`run_owner_routing_pass` called from the scheduler's own loop, `scheduler.py:539`); LN-5
+  (`extract_column_lineage` called `dbt_api.py:370`, `dbt_router` mounted `main.py:30,212`).
+- **E**: DQ-1, DQ-2, DQ-5, RT-4, RT-5, AG-4 — `notification_router`/`quality_router`/
+  `runtime_contracts_router`/`search_router`/`tool_plans_router` all confirmed `include_router`'d
+  (`main.py:219,227,231,234,237`).
+- **F**: TL-2 (same router as AG-4), MG-2 (`kill_switch_blocking_state` called
+  `model_gateway.py:375`, `ai_governance_router` mounted `main.py:17,210`), QG-7 (structural
+  import-linter claim, not a call-site claim), PG-2 (`principal_kind_of` derives from the real
+  `SecurityContext` at `authorization_gate.py:61-68`, called `:133,151` on the query-gateway
+  authorization path — not a hardcoded default), PG-3 (`POST /v1/governance/reviews/bulk-decision`
+  at `semantic_api.py:1562`, `semantic_router` mounted `main.py:59`).
+- **G**: ID-4 (`enforce_not_revoked` called `security.py:83` inside `get_security_context`), CX-1
+  (`/mcp` router `mcp_server.py:140` mounted via `mcp_router`, `main.py:37`), OB-4
+  (`observability_router` mounted `main.py:49`), OB-8 (`redact_sensitive_data` wired into
+  `configure_logging`, `logging.py:144`, called `main.py:74`), CX-6 (`consume_mcp_budget` called
+  `mcp_server.py:2004`).
+- **M**: UX-12 (`compose_catalog_rows` called `api.py:1985` inside `list_catalog_rows`).
+- **N**: AU-4 (`hide_parameters=True` at `atlas/platform/db.py:40`; AU-3/AU-5/AU-9 read and found
+  already carrying exactly this rule's evidence shape, so not re-derived).
+
+**Result: no additional false `DONE` found.** Every row in this sample was genuinely reachable from
+a live entry point — the concurrent wiring work earlier the same day (AG-5/LN-3, OB-1/OB-2/OB-3,
+RT-1/RT-2/RT-3/RT-9/SM-2, AG-1/AG-2/TS-6, DQ-3/AG-6/TL-3 with RT-7 correctly still open, PG-1/PG-6/
+PG-8, AU-6) already accounted for the 17 rows the original audit caught, and this sweep found no
+eighteenth. `tests/test_reachability_gate.py` re-run clean (5/5) to confirm the module-level graph
+this sweep's function-level spot-checks build on had not drifted mid-session.
+
+### Scope note
+
+Honestly not a full audit: roughly 130 of the 170+ tracker rows (most of section C beyond the 3
+sampled, section H's certification rows — all status `—`, so out of scope by definition — and §L's
+competitive-review items) were not individually re-verified, per this item's own "representative
+sample, not all 170+ rows" instruction. A full sweep remains open work for a future pass.
+
+### A doc-claims regression caught and fixed in the same pass
+
+This entry's own first draft in `03-tracker.md` cited the test file using `::`-qualified syntax
+against a module-level dict rather than a function, and separately used a bare hyphenated slug for
+an endpoint name on a table row that also mentioned an unrelated import-linter contract elsewhere in
+the same (very long, single-line) row — both tripped `test_doc_claims.py`'s mechanical citation gate
+(TS-12) on the first full-suite run, since that gate reads any hyphenated backtick-quoted token on a
+line containing the word "contract" as a contract-name citation. Fixed by dropping the `::`
+qualifier and writing the endpoint's full path instead of the bare slug — exactly the kind of drift
+that gate exists to catch, this time caught before merge rather than after.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). Full `pytest` suite green (exit 0, zero
+`FAILED` lines) including the full doc-claims gate re-run in isolation to confirm the fix
+(`test_doc_claims.py` — all passing). Docs-only change to `03-tracker.md` plus this log entry; no
+application code touched.
