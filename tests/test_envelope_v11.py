@@ -828,3 +828,46 @@ async def test_hostile_text_in_a_view_definition_is_quarantined(
     from aida.ingest_screening import is_eligible_for_model_context
 
     assert is_eligible_for_model_context(view.screening_status) is False
+
+
+async def test_a_multilingual_indirect_injection_in_a_routine_body_is_quarantined(
+    session: AsyncSession,
+) -> None:
+    """AG-1/AG-2/TS-6: the richer corpus, reached through the live write path.
+
+    The instruction-override case above is also caught by `prompt_risk.py`'s narrow,
+    English-only classifier alone -- it does not prove `injection_defense.py`'s 726-line
+    multilingual/obfuscation/indirect-injection surface (AG-1/AG-2's adversarial corpus,
+    `injection_corpus.py`) actually runs on the live path, only that *some* screening does.
+    This uses a Chinese "ignore all previous instructions" payload from that corpus, which
+    `DeterministicPromptRiskClassifier` alone does not flag (it has no multilingual
+    signals) but `injection_defense.screen_metadata` does. Driven through `_ingest`, the
+    same real pipeline entry point `ingestion_api` uses -- not a direct call to
+    `injection_defense.screen_metadata` in isolation, which is the exact failure mode that
+    left `is_eligible_for_model_context` orphaned.
+    """
+    from aida.ingest_screening import is_eligible_for_model_context
+    from aida.injection_corpus import MULTILINGUAL_INJECTIONS
+
+    hostile_comment, expected_threat, _description = next(
+        item for item in MULTILINGUAL_INJECTIONS if "Chinese" in item[2]
+    )
+    assert expected_threat == "MULTILINGUAL_INJECTION"
+
+    datasource = await _datasource(session)
+    hostile_body = (
+        f"BEGIN /* {hostile_comment} */ UPDATE customer.account SET closed_on = now(); END;"  # noqa: S608,E501
+    )
+    await _ingest(
+        session,
+        datasource,
+        _envelope(routines=[_routine(body_sql=hostile_body)]),
+    )
+
+    routine = await session.scalar(select(MetadataRoutine))
+    assert routine is not None
+    assert routine.screening_status == "QUARANTINED"
+    assert "INJECTION_DEFENSE:MULTILINGUAL_INJECTION" in routine.screening_reason_codes
+    # Quarantined, not deleted -- a human looking at the object still sees the body.
+    assert routine.body_sql_redacted is not None
+    assert is_eligible_for_model_context(routine.screening_status) is False

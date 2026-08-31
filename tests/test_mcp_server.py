@@ -40,6 +40,8 @@ from aida.mcp_server import (
 from aida.models import (
     AuditEvent,
     DataSource,
+    DbtArtifactImport,
+    DbtResource,
     GovernedTool,
     GovernedToolVersion,
     MetadataCatalog,
@@ -770,6 +772,157 @@ async def test_native_lineage_tool_get_transformation_detail_surfaces_not_found(
         "isError": True,
         "content": [{"type": "text", "text": "Transformation not found or accessible."}],
     }
+
+
+# ---------------------------------------------------------------------------
+# AG-1/AG-2/TS-6 -- `_transformation_detail` is the live model-context builder for a
+# dbt resource's `description` (a manifest `description:` field, source-controlled,
+# with no stored `screening_status` of its own the way `MetadataViewDefinition`/
+# `MetadataRoutine` have -- see envelope_models.py). Unlike the tests above,
+# `_transformation_detail` is deliberately NOT monkeypatched here: these drive the real
+# function, through the real `_handle_native_lineage_tool_call` dispatch
+# (`_handle_tools_call` uses the same path for the live `/mcp` endpoint), so the
+# screening wired into it actually runs.
+# ---------------------------------------------------------------------------
+
+
+class TransformationDetailSession:
+    """Fake session for `_transformation_detail`'s single-row DbtResource lookup, plus
+    the `.add()`/`.commit()` calls `_handle_native_lineage_tool_call` makes for the audit
+    and outbox records on a successful read."""
+
+    def __init__(self, datasource: object, resource: object, artifact: object) -> None:
+        self.datasource = datasource
+        self.resource = resource
+        self.artifact = artifact
+        self.added: list[object] = []
+        self.committed = False
+
+    async def get(self, model: type[object], _identity: object) -> object:
+        if model is DbtArtifactImport:
+            return self.artifact
+        return self.datasource
+
+    async def scalar(self, _stmt: object) -> object:
+        return self.resource
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _dbt_resource_scenario(description: str) -> tuple[DataSource, DbtResource, DbtArtifactImport]:
+    org = uuid4()
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    artifact_id = uuid4()
+    resource = DbtResource(
+        id=uuid4(),
+        organization_id=org,
+        artifact_import_id=artifact_id,
+        unique_id="model.bank.customers",
+        resource_type="model",
+        package_name="bank",
+        name="customers",
+        relation_name="analytics.public.customers",
+        materialization="table",
+        description=description,
+        sql_parse_status="REDACTED",
+    )
+    artifact = DbtArtifactImport(
+        id=artifact_id,
+        organization_id=org,
+        dbt_project_id=uuid4(),
+        manifest_fingerprint="fp-1",
+        dbt_schema_version="v12",
+        dbt_version="1.9.0",
+        resource_count=1,
+        model_count=1,
+        source_count=0,
+        test_count=0,
+        lineage_edge_count=0,
+        matched_resource_count=1,
+        unmatched_resource_count=0,
+        imported_by="tester",
+    )
+    return datasource, resource, artifact
+
+
+async def test_transformation_detail_quarantines_a_multilingual_injection_description() -> None:
+    """AG-1/AG-2's corpus (`injection_corpus.py`), reached through the live MCP path.
+
+    A Chinese "ignore all previous instructions" payload -- flagged by
+    `injection_defense.screen_metadata`'s multilingual detector, not by
+    `prompt_risk.py`'s English-only classifier alone -- proves the richer detector, not
+    just some detector, is what `_transformation_detail` now runs before this text
+    reaches the calling LLM's context.
+    """
+    from aida.injection_corpus import MULTILINGUAL_INJECTIONS
+
+    hostile_description, expected_threat, _label = next(
+        item for item in MULTILINGUAL_INJECTIONS if "Chinese" in item[2]
+    )
+    assert expected_threat == "MULTILINGUAL_INJECTION"
+
+    datasource, resource, artifact = _dbt_resource_scenario(hostile_description)
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = TransformationDetailSession(datasource, resource, artifact)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(datasource.id), "entity_id": str(resource.id)},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    body_text = result["content"][1]["text"]
+    payload = json.loads(body_text.removeprefix("```json\n").removesuffix("\n```"))
+    assert payload["description"] is None
+    assert payload["description_screening"]["status"] == "QUARANTINED"
+    assert (
+        "INJECTION_DEFENSE:MULTILINGUAL_INJECTION"
+        in payload["description_screening"]["reason_codes"]
+    )
+    assert hostile_description not in body_text
+    assert session.committed is True
+
+
+async def test_transformation_detail_passes_through_a_benign_description() -> None:
+    """The live screen must not become a false-positive tax on an ordinary manifest."""
+    benign = "One row per active customer, refreshed nightly by the customers model."
+    datasource, resource, artifact = _dbt_resource_scenario(benign)
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = TransformationDetailSession(datasource, resource, artifact)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(datasource.id), "entity_id": str(resource.id)},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    body_text = result["content"][1]["text"]
+    payload = json.loads(body_text.removeprefix("```json\n").removesuffix("\n```"))
+    assert payload["description"] == benign
+    assert payload["description_screening"]["status"] == "CLEAN"
 
 
 async def test_native_lineage_tool_get_lineage_impact_surfaces_node_not_found(

@@ -77,6 +77,7 @@ from aida.context_product_policy import (
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.mcp_budget import (
     McpBudgetDecision,
     budget_headers,
@@ -910,6 +911,25 @@ async def _transformation_detail(
     if resource is None:
         return None
     artifact = await session.get(DbtArtifactImport, resource.artifact_import_id)
+    # `resource.description` is source-controlled free text pulled from a dbt manifest
+    # (a model/source `description:` in someone's YAML) and this tool call hands it
+    # straight to the calling LLM's context -- the exact indirect-injection surface
+    # ADR-0013 leaves unaddressed for the *question* screen alone. Nothing screens
+    # `DbtResource.description` at dbt-artifact write time (unlike
+    # `MetadataViewDefinition`/`MetadataRoutine`, which carry a stored `screening_status`
+    # column, see `envelope_models.py`), so it is screened here, live, on this one-row
+    # read -- the "one question every model-context builder must ask" per
+    # `ingest_screening.is_eligible_for_model_context`, actually asked.
+    description = resource.description
+    description_screening: dict[str, Any] | None = None
+    if description:
+        verdict = screen_text(description, content_origin=f"dbt_resource:{resource.id}:description")
+        description_screening = {
+            "status": verdict.status,
+            "reason_codes": verdict.reason_codes,
+        }
+        if not is_eligible_for_model_context(verdict.status):
+            description = None
     return {
         "dbt_resource_id": str(resource.id),
         "lineage_node_id": (
@@ -922,7 +942,8 @@ async def _transformation_detail(
         "name": resource.name,
         "relation_name": resource.relation_name,
         "materialization": resource.materialization,
-        "description": resource.description,
+        "description": description,
+        "description_screening": description_screening,
         "compiled_sql_hash": resource.compiled_sql_hash,
         "compiled_sql_redacted": resource.compiled_sql_redacted,
         "sql_parse_status": resource.sql_parse_status,

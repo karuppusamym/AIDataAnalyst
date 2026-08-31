@@ -2852,3 +2852,84 @@ that first manifest.
   the datastores themselves (Postgres, Redis, Temporal, Neo4j, Redpanda, object storage) are
   referenced by in-cluster hostname but this directory does not include manifests to actually
   run them — that would be its own tracker item.
+
+## 2026-08-31 — AG-1/AG-2/TS-6 (indirect-injection defense) closed: the 726-line corpus was reachable from nothing
+
+- The 2026-08-30 audit (`04-end-to-end-audit-2026-08-30.md` §2) found AG-1/AG-2/TS-6 all pointed at
+  `injection_defense.py`/`injection_corpus.py` (726 lines, a genuinely richer detector than what
+  ships live) with zero callers outside their own test file, and separately that
+  `ingest_screening.is_eligible_for_model_context` — its own docstring calls it "the one question
+  every model-context builder must ask" — had zero callers anywhere, including inside
+  `ingest_screening.py` itself. Two distinct gaps, both closed here.
+- **Gap 1 — the richer detector never ran on live text.** `ingest_screening.screen_text`
+  (`ingest_screening.py:75`), the function actually wired into the live write path
+  (`ingestion.py:544`'s `_store_source_sql`, which sets `MetadataViewDefinition`/
+  `MetadataRoutine.screening_status` on every ingested view definition and routine body), only ran
+  `prompt_risk.DeterministicPromptRiskClassifier` — no multilingual, no obfuscation/encoding, no
+  homoglyph coverage. `screen_text` now also runs `injection_defense.screen_metadata`
+  (`ingest_screening.py:91`) and quarantines on either detector flagging, tagging the reason code
+  `INJECTION_DEFENSE:<threat_type>` so the two detectors stay distinguishable in the stored verdict.
+  `SCREENING_VERSION` is now the concatenation of both detectors' versions, so a stored verdict from
+  before this change is identifiable for re-screening. `screen_many` now passes each field's name as
+  `content_origin` for a better evidence trail; existing callers passing no `content_origin` are
+  unaffected (new keyword-only parameter, default `"unknown"`).
+- **Gap 2 — `is_eligible_for_model_context` had no consumer, because the consumer it was written for
+  doesn't exist yet.** Tracing every reader of the `screening_status` columns
+  `MetadataViewDefinition`/`MetadataRoutine` carry (envelope 1.1, gap/02 N2/N12) found none —
+  "meaning inference and tool generation," the two consumers envelope_models.py's docstring names as
+  the intended readers, are not built. Rather than invent a consumer for those two tables, this
+  found the real, live, already-reachable analogue: `mcp_server.py::_transformation_detail`
+  (dispatched from `_handle_native_lineage_tool_call`'s `get_transformation_detail` slug, itself
+  reached from the real `/mcp` `tools/call` JSON-RPC handler) returns `DbtResource.description` —
+  free text pulled from a dbt manifest's `description:` field, source-controlled, and with no stored
+  `screening_status` column of its own — directly into an MCP tool response, i.e. straight into the
+  calling LLM's context. This is this branch's (`feature/snowflake-dbt-lineage-mcp`) own new
+  indirect-injection surface, live and previously completely unscreened.
+  `_transformation_detail` (`mcp_server.py:924-935`) now screens `resource.description` live via
+  `ingest_screening.screen_text` on this single-row read (explicitly not a bulk path — the module's
+  "screen once at write" rationale doesn't apply where there is no write-time verdict to read back)
+  and gates it through `is_eligible_for_model_context` before it goes into the response; a quarantined
+  description is nulled out and replaced with `description_screening: {status, reason_codes}` rather
+  than silently dropped, matching the "quarantine, not deletion" contract (the DB row is untouched —
+  only the MCP-served copy is redacted).
+- Both fixes proven end to end, not by calling `injection_defense.py`/`is_eligible_for_model_context`
+  directly in a test (the exact failure mode the audit found — a passing unit test with no callers is
+  indistinguishable from a wired one):
+  - `tests/test_envelope_v11.py::test_a_multilingual_indirect_injection_in_a_routine_body_is_quarantined`
+    drives a Chinese "ignore all previous instructions" string from `injection_corpus.MULTILINGUAL_INJECTIONS`
+    through `_ingest` (the same helper `test_hostile_text_in_a_view_definition_is_quarantined` above
+    uses to drive the real ingestion pipeline) embedded in a routine body, and asserts
+    `MetadataRoutine.screening_status == "QUARANTINED"` with `INJECTION_DEFENSE:MULTILINGUAL_INJECTION`
+    in the reason codes — a case `DeterministicPromptRiskClassifier` alone does not flag (verified:
+    `prompt_risk.py`'s classifier has no multilingual signal, only English `\b`-word patterns), so this
+    is proof the richer detector, not just some detector, runs live.
+  - `tests/test_mcp_server.py::test_transformation_detail_quarantines_a_multilingual_injection_description`
+    seeds a fake `DbtResource` with the same corpus string as its `description` and drives it through
+    `_handle_native_lineage_tool_call("get_transformation_detail", ...)` — `_transformation_detail`
+    is deliberately left unmonkeypatched here, unlike every other `get_transformation_detail` test in
+    the file, specifically so its own screening code executes — and asserts the JSON response omits
+    the hostile text and carries `description_screening: {"status": "QUARANTINED", ...}`.
+    `::test_transformation_detail_passes_through_a_benign_description` is the paired false-positive
+    check: an ordinary manifest description passes through unchanged with `"status": "CLEAN"`.
+  - The pre-existing `test_hostile_text_in_a_view_definition_is_quarantined` (an
+    `INSTRUCTION_OVERRIDE` case `prompt_risk.py` alone already caught) still passes unchanged —
+    Gap 1's fix is additive, not a behavior change for cases already caught.
+- Tracker rows AG-1, AG-2, TS-6 updated in place with file:line citations for both call sites rather
+  than left as the original "delivered" evidence, per AU-2's redefinition of DONE (reachability
+  gate).
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green in a
+  genuine foreground run — one unrelated flake on first pass,
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  (a wall-clock linear-vs-quadratic ratio assertion, sensitive to the heavy CPU contention from the
+  several other concurrent sibling-worktree `pytest` runs sharing this host at the time), confirmed
+  by re-running it alone (passed in 37.6s) and unrelated to any file this item touches.
+- Known limitations / left for a follow-up: `mcp_server.py` has other free-text fields flowing into
+  tool/resource/prompt responses (context-product and business descriptions among them) that were not
+  audited or screened here — this item's scope was the one confirmed-live, confirmed-unscreened path
+  (`_transformation_detail`'s dbt description) that matches the audit's citation, not a full sweep of
+  the MCP server's text surface. `DbtResource` itself still carries no `screening_status` column, so
+  `_transformation_detail` screens live on every read rather than once at dbt-artifact write time
+  (`dbt_artifacts.py`) the way view/routine text does — cheap enough for this single-row detail call,
+  but adding a stored verdict at dbt ingestion would need a `models.py` migration and was out of this
+  item's scope (`models.py` is flagged as under concurrent edit; `envelope_models.py` exists
+  specifically to avoid touching it).
