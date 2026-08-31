@@ -3767,6 +3767,104 @@ collector has no such exemption) rather than silently left to rot into false cla
 the end-to-end audit also flagged are explicitly out of scope for this item — concurrent sibling
 work per the task brief. `AU-11`'s quality_state resolution reads `DataQualityIncident`/
 `DataQualityObservation` directly rather than through `quality_coupling.py`'s not-yet-wired gating
+
+## 2026-08-31 — AU-7 (behavioural authorization tests for `require_roles`) closed
+
+### The finding
+
+`04-end-to-end-audit-2026-08-30.md` §5: "`require_roles` has 348 call sites and zero
+behavioural tests. Nothing constructs a principal with the wrong role and asserts 403. A route
+declared `require_roles('Viewer')` that should be `PlatformAdmin`-only passes every gate in
+this repo." The tracker's exit criterion asked for a table-driven suite, generated from the
+live app, asserting the expected role set per route and that a wrong-role principal gets 403.
+
+### What was built
+
+New `tests/test_au7_behavioural_authz.py`, driven entirely off the live app rather than a
+hand-maintained list — reusing `tests/support/app_surface.py`'s established `iter_api_routes`
+convention (the same one `test_inv5_tenant_isolation.py`/`test_inv7_attributability.py` use)
+rather than writing a second route enumerator.
+
+`app_surface.py` gained one new helper, `require_roles_gate(route)`. Extracting a route's
+declared role set turned out not to be an AST problem: `require_roles(*allowed)` is a
+dependency *factory* — the object FastAPI actually wires into `route.dependant.dependencies`
+is the inner closure it returns, not `require_roles` itself, so the declared roles are not
+sitting in the source text at the call site when that call site passes an aliased constant
+(`require_roles(*COMPILER_ROLES)`, `require_roles(*UNIFIED_LINEAGE_READER_ROLES)`, ...) — an
+AST scan would see a variable name, not a role. `require_roles_gate` instead reads the value
+back out of the closure Python already built: `call.__closure__`, keyed by the free-variable
+name in `call.__code__.co_freevars`. This reads what the live app actually wired rather than
+re-deriving it from source, so it is correct for every one of the 324 call sites regardless of
+whether the route wrote its roles inline or through a shared constant.
+
+Of 333 live routes, 323 carry a `require_roles` gate. The other 10 are named individually in
+`_NOT_ROLE_GATED_ROUTES` with a reason each, and `test_the_not_role_gated_route_list_stays_closed`
+asserts the live set matches the list exactly (in either direction) rather than trusting it to
+stay true: 3 genuinely unauthenticated routes (health/metrics — already INV-5's own exclusion),
+`GET /v1/me` (returns the caller's own identity, nothing to gate a role on), `POST /mcp`
+(per-tool authorization lives inside `mcp_server.py`, not at the transport route), the 3
+`consumption_lineage_api.py` reads (tenant-scoped via `enforce_organization`, no role
+restriction by design — CX-4), and `POST /v1/security/tokens/revoke` /
+`POST /v1/security/tokens/detokenize` (manually role-checked inside the handler body on
+purpose, per `detokenization_api.py`'s own module docstring, specifically so a denied attempt
+is itself audited before the 403 — a bare `Depends(require_roles(...))` failure never reaches
+a handler body at all).
+
+For each of the 323 gated routes, two parametrized tests drive the real dependency callable
+directly (the same "call the real thing FastAPI wired, not a reimplementation" convention
+`test_inv5_tenant_isolation.py` uses for `route.endpoint`, applied one level up at the
+dependency the endpoint sits behind):
+
+- `test_wrong_role_is_denied` — a principal holding one synthetic role
+  (`AU7-Probe-Unknown-Role`, which is not a real platform role anywhere in `src/aida` and is
+  therefore disjoint from every route's declared set by construction) is asserted to get a 403
+  from the gate. One probe validates unmodified across a route allowing one role and a route
+  allowing nine, because the property under test is "a role outside the declared set is
+  rejected", not "this specific other role is rejected".
+- `test_an_allowed_role_passes_the_role_gate` — a principal holding a declared-allowed role is
+  asserted not to be rejected by the gate. Deliberately scoped to the role gate alone, per the
+  tracker's own scoping note: the assertion is that `require_roles` itself lets the principal
+  through, not that the whole request would succeed — a route can still deny that principal
+  downstream for tenancy or any other reason, which is INV-5's job, not this suite's.
+
+Plus 3 structural sanity/tripwire tests: the gated-route set is non-empty (≥300, so a broken
+enumeration can't silently parametrize over nothing), every gate declares at least one role
+(`require_roles()` called bare would deny every principal unconditionally via
+`frozenset().isdisjoint(())` always being `True` — a distinct bug shape from a merely wrong
+role set, held structurally rather than trusted by inspection), and the exclusion-list-stays-
+closed test described above. 646 parametrized cases + 3 sanity tests = 649 new tests, all
+generated from the live app, none hand-listed.
+
+### Bug hunt
+
+Before writing the suite, hand-audited: every mutating route (POST/PUT/PATCH/DELETE) whose
+allowed set includes a broad or `Viewer`-inclusive role, every route whose path or handler name
+names a sensitive concern (`kill-switch`, `security`, `credential`, `policy`, `organization`,
+`revoke`, `token`, `admin`, `sync`, `delete`, ...), every single-role (`PlatformAdmin`-only)
+declaration (`POST /v1/organizations`, kill-switch engage/release), and the three modules using
+a paired `READ_ROLES`/`WRITE_ROLES`-style constant convention (`asset_description_api.py`,
+`glossary_api.py`, `stewardship_api.py`) for a read endpoint accidentally wired to the write
+constant or vice versa — each checked against its own module's documented intent, not guessed.
+
+**No genuine role-misconfiguration was found.** The one pattern that looked suspicious at
+first pass — `graph_perspectives_api.py`'s `create`/`update`/`delete` endpoints all allowing
+`Viewer` and `Auditor` alongside the admin/steward roles — turned out to be a documented,
+deliberate design: a graph perspective is "a personal/shared productivity artifact, not a
+governed object" (that module's own docstring); the broad `require_roles` gate only decides who
+may call the endpoint at all, and a second, owner-only check inside the handler body (`_can_view`
+plus an explicit owner comparison on PATCH/DELETE) does the real authorization. This is a clean
+bill of health, not the absence of a check — the specific routes inspected are named above and
+in the tracker row.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files) — `require_roles_gate` lives in
+`tests/support/`, outside `mypy src`'s `packages = ["aida"]` scope, consistent with every other
+`tests/support/` helper, so it is ruff-checked but not mypy-checked. Full `pytest` suite green:
+4,069 collected tests, 0 failures, 0 errors, 6 skipped (pre-existing, unrelated to this change),
+in ~196s (`--junitxml` confirmed the count independently of the terminal summary line, which an
+unrelated pre-existing OpenTelemetry metrics-exporter-at-shutdown warning in
+`test_observability.py` intermittently pushes past the tail of captured stdout on some runs).
 API, so it does not depend on that sibling work landing first.
 
 ---
