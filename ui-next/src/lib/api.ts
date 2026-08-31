@@ -62,9 +62,12 @@ export interface CatalogQuery {
 }
 
 /**
- * PROPOSED read-model endpoint. Until the BFF row lands, this runs against
- * fixtures so the screen is reviewable now; flip VITE_USE_FIXTURES=0 once
- * `GET /v1/organizations/{org}/catalog/rows` exists.
+ * `GET /v1/organizations/{org}/catalog/rows` (UX-12) exists now, but
+ * `VITE_USE_FIXTURES` stays at its default here: it is shared with
+ * `fetchAssetEvidence` below, which still runs against UX-13's not-yet-built
+ * evidence endpoint, so flipping the flag globally would 404 that call
+ * rather than just switch this screen to real data. Flip it to `0` once
+ * UX-13 lands too, or split the flag per-endpoint sooner.
  */
 export async function fetchCatalogRows(
   query: CatalogQuery,
