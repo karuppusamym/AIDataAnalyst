@@ -456,6 +456,10 @@ corrected for this and should be read with this note in hand until it is.
 | AT-D3 | INV-9 breach: `query_history` advertised, nothing consumes it | 02 | — | P1 | TODO | — | `query_history=True` on the Snowflake connector with no `get_query_history()` anywhere. Flip the flag to `False` now; it returns to `True` when AT-12 certifies it |
 | AT-D4 | `PropagationLog.tsx` renders a mechanism that does not exist | 21 | — | P1 | TODO | — | The UI shows classification propagation; the backend has none. Either hide it behind the AT-11 feature flag or ship AT-11 |
 | AT-D5 | `parse_procedure_lineage` is `_parse_sql` with a different docstring | 09 | — | P1 | TODO | — | No dynamic-SQL detection at all. N3 (procedure-body parsing) is not started; the plan counts it as in progress. Correct the plan or start the work |
+| AT-19 | Transformation code rendered on the lineage edge | 09/21 | — | P1 | TODO | — | The lineage view shows the exact view-DDL or routine-body fragment that produced an edge, with its redaction status, sourced from envelope 1.1. Answers "why do you say so", not just "does an edge exist", and is what makes N4's review workflow correctable rather than merely reportable. Collibra ships in-line code context; we can do it with better provenance. Source: `Docs/review-2026-08/atlan-context/05-lineage-cross-vendor.md` |
+| AT-20 | Lineage evidence export as a signed artifact | 09/20 | — | P1 | TODO | — | Point-in-time lineage for a chosen asset and depth: diagram plus edge set, carrying the pinned graph version, the derivation method per edge, and the asserting principal for human edges. For a bank the artifact is the deliverable — it goes in a BCBS 239 pack. Collibra exports a plain diagram; ours is worth more only if we can hand it over |
+| AT-21 | Impact analysis as a pull-request gate | 09/17 | — | P1 | TODO | — | A CI check on the customer's dbt/SQL repository resolves a proposed schema change against the graph and fails or comments when the blast radius touches a certified metric, a published context product or a regulatory report. **Blocked on AT-10**: impact analysis that cannot see view, procedure or BI edges gives a false all-clear, which is worse than no gate |
+| AT-22 | Publish the parser capability matrix | 02/09 | — | P2 | TODO | — | Per dialect and per construct, derived from the E12 certification corpus, with the unsupported list stated rather than implied. Uncontested: none of Atlan, Collibra or Alation publishes a parse success rate, dialect matrix, depth limit or latency number on its lineage page. **Blocked on AT-D2** — publishing a coverage matrix for a parser that degrades silently would be the marketed-versus-actual drift we criticise |
 
 Ph left unassigned (`—`) pending phase-owner triage, per this file's own convention for
 unassigned items. Not yet reflected in the §K summary counts.
@@ -509,6 +513,54 @@ needed no row because they are already built: the proposal card (diff + confiden
 required rationale), the run-report review queue, and the propagation log that names the
 mechanism of each hop. UX-18 is small and high-value — a semantic edit made without
 seeing its consumers is the current portal's most consequential blind spot.
+
+## N. End-to-end audit findings (2026-08-30)
+
+Full report: `Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`.
+
+> **Read this before trusting any DONE row above.** A four-part audit — test suite, dead-code
+> reachability, primary-journey trace, production/security readiness — found that **17 rows in
+> sections A–H marked DONE have unreachable implementations**, six of them P0. Roughly 4,600
+> lines of code that passes its unit tests has zero call sites outside its own file and its
+> own test. Verified against a full AST import graph from five real entry points, with dynamic
+> dispatch ruled out.
+>
+> **The rows affected are: OB-1, OB-2, OB-3, AG-1, AG-2, AG-5, LN-3, TS-6, DQ-3, RT-1, RT-2,
+> RT-3, RT-7, RT-9, TL-3, AG-6, SM-2, PG-1, PG-6, PG-8.** Their exit conditions describe
+> behaviour the running application does not have. They are left as written rather than
+> silently edited, so the correction is visible — but none should be counted as delivered.
+>
+> **AG-5 / LN-3 deserve separate mention.** `ai_decision_lineage.record_decision` has zero
+> callers, so no decision, rejection or refusal is ever recorded and `list_refusals` queries a
+> permanently empty table. Section §L positions the refusal record as the differentiator Atlan
+> structurally cannot copy. That positioning is currently unsupported by the product.
+>
+> **Cause, and why it recurs:** rows are written from the module, not from the call graph. A
+> module with passing unit tests and no callers is indistinguishable from a healthy one, and
+> nothing in CI detects the difference. AU-1 below is the fix; it should land before any
+> further DONE row is written.
+>
+> Separately, this file's own metrics are wrong: ST-02/ST-03 claim "716 passed" and "199
+> routes"; actual is 1,458 test functions and 320 routes. `pytest-cov` is declared and invoked
+> nowhere — line coverage has never been measured.
+
+| ID | Item | Mod | Ph | Pri | Status | Owner | Exit |
+|---|---|:--:|:--:|:--:|:--:|:--:|---|
+| AU-1 | CI reachability gate — fail the build when a `src/aida/` module is importable from no entry point | — | A | **P0** | TODO | — | A test walks the AST import graph from `main`, `worker`, `scheduler`, `graph_projector`, `outbox_publisher` and fails on any unreachable module not on an explicit, justified allow-list. Would have caught all 17 rows above. **Land this before writing another DONE row.** |
+| AU-2 | Redefine DONE to require a live call site | — | A | **P0** | TODO | — | The row template requires a `file:line` on a live path, not a passing unit test; existing DONE rows re-verified against the AU-1 graph |
+| AU-3 | Config fails closed on unknown or missing `AIDA_*` variables | — | A | **P0** | TODO | — | `extra="forbid"` on Settings (`config.py:21`) so a misspelled variable name errors instead of being ignored, plus a startup assertion that `environment` was explicitly set. Today `AIDA_ENVIRONMNET=production` silently boots development posture with every production guard disabled |
+| AU-4 | Stop source error text entering the value-free control plane (ADR-0014 / INV-6) | 03 | A | **P0** | TODO | — | `hide_parameters=True` on the engine (`platform/db.py:31`); the seven `run.error_message = str(exc)` sites (`workflows/activities.py:1039,1254,…`) use the `error_class` pattern already in `query_gateway.py:708`; a test asserts no bound parameter reaches `analysis_run.error_message` or the log pipeline |
+| AU-5 | Emit AI decision lineage from the orchestrator | 13/09 | A | **P0** | TODO | — | `record_decision` called on retrieval selection/rejection, tool selection/rejection and refusal; `list_refusals` returns real rows for a query the gateway declined. Supersedes the DONE marking on AG-5/LN-3 |
+| AU-6 | Wire or delete the remaining unreachable modules | — | A | P1 | TODO | — | Each of the 14 modules is either called from a live path or deleted with its tracker row reopened. Recommend deleting `data_contracts.py` and `abac.py` (live duplicates exist: `runtime_contracts.py`, `policy_engine.py`) and wiring `quality_coupling`/`trust_scoring` |
+| AU-7 | Behavioural authorization tests for `require_roles` | — | B | **P0** | TODO | — | 348 call sites currently have zero behavioural tests. A table-driven suite generated from the live app asserts the expected role set per route and that a wrong-role principal gets 403 — so a route declared `Viewer` that should be `PlatformAdmin` fails CI |
+| AU-8 | Migration↔ORM drift gate | — | B | P1 | TODO | — | One test applies all 84 migrations to an empty database and diffs against `Base.metadata`. Today every DB test builds schema from the ORM, so drift is invisible; DQ-1 records this bug firing once already |
+| AU-9 | Production deployment artifact | — | C | **P0** | TODO | — | A reviewable manifest pinning `AIDA_ENVIRONMENT=production` and `identity_provider=oidc`, non-root, resource limits, pinned image digests. None exists today — `infra/` holds four `init.sql` files — so C1/C2 have nothing to review and the shipped artifacts would deploy an unauthenticated admin API |
+| AU-10 | One non-`env` secret provider | 02 | C | **P0** | TODO | — | `SecretResolver` registers only `env` (`secrets.py:59`), which production config forbids (`config.py:255`), so no credential resolves in any production-valid configuration. The `SecretProvider` Protocol and caching exist; only the fetch is missing |
+| AU-11 | Populate the ABAC gate's attributes on the query path | 17/16 | B | P1 | TODO | — | `query_gateway.py:579-588` passes `classifications=frozenset()`, `certification=None`, `quality_state=None`, `freshness_state=None`, so every policy rule keyed on those axes is unreachable from the money path |
+| AU-12 | Survive a Temporal outage | — | C | P1 | TODO | — | `main.py:77-81` connects with no timeout, retry or try/except inside `lifespan`, so a workflow-engine outage prevents startup entirely — the readiness probe at `:191-193` is written to report `temporal: DOWN` but can never execute |
+| AU-13 | Dependency and secret scanning in CI; build the image in CI | — | D | P1 | TODO | — | CI has real SAST (ruff `S`), `mypy --strict` and import-linter, but no dependency-vulnerability scan, no secret scan, no SBOM, and never builds the Dockerfile — a broken image is found at deploy. Also: `Dockerfile:17` uses `pip install .` rather than the `uv.lock` CI pins, so transitives float |
+| AU-14 | Measure coverage at all | — | D | P2 | TODO | — | `pytest-cov` is a declared dependency invoked nowhere. Establish a baseline and a floor; 16 of 36 API modules (92 of 320 endpoints) are currently imported by no test |
+
 
 ## Related documents
 
