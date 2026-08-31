@@ -189,7 +189,7 @@ async def test_hybrid_retrieve_ranks_a_governed_tool_above_an_equally_relevant_t
         settings=Settings(_env_file=None),
     )
 
-    assert [hit.object_type for hit in hits] == ["TOOL_VERSION", "TABLE"]
+    assert [hit.object_type for hit in hits] == ["GOVERNED_TOOL", "TABLE"]
     tool_hit, table_hit = hits
     assert tool_hit.score == pytest.approx(0.5)  # 0.25 BM25 + 0.25 governed-tool boost
     assert table_hit.score == pytest.approx(0.25)  # same BM25, no boost

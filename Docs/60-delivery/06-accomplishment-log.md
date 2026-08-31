@@ -3172,3 +3172,114 @@ that first manifest.
   response field" / "No breaking OpenAPI changes detected"), then regenerated the committed baseline
   with `--accept-baseline` (same mechanism UX-12's entry above documents). Second foreground run:
   full suite green, no failures.
+
+## 2026-08-31 — RT-1/RT-2/RT-3/RT-9/SM-2 closed: `retrieval.py`'s hybrid/vector/graph/fusion
+stack wired into the live orchestration path, not deleted
+
+- Re-read `04-end-to-end-audit-2026-08-30.md` §2 before starting: `retrieval.py` +
+  `fusion_ranking.py` + `vector_store.py` + `embedding_provider.py` + `graph_retrieval.py` +
+  `vector_retrieval.py` (~2,320 lines, independently unit-tested) had zero callers outside their
+  own files and tests. The live path — `GovernedAgentOrchestrator.run()` →
+  `agent_intelligence.GovernedRetriever.retrieve()` — ran a separate, narrower, hand-rolled
+  lexical scan instead. `retrieval.py:43-52`'s own docstring documented the intended hand-off
+  ("Import and call from `agent_intelligence.GovernedRetriever.retrieve()`") that had never been
+  made. Confirmed no concurrent session had already closed this gap: `03-tracker.md`'s AU-6 row
+  lists only `abac.py` and `quality_coupling`/`trust_scoring` as its remaining unwired modules.
+- **Decision: wire in, not retire.** `retrieval.py`'s lexical stage (`hybrid_retrieve`) was a
+  strict superset of `GovernedRetriever`'s own scan (same object types plus glossary-term
+  binding folding, SM-2), and `hybrid_retrieve_enhanced` already orchestrated vector similarity,
+  graph expansion and RRF/weighted-linear fusion with a documented fail-closed fallback when no
+  embedding provider is configured — a working, mostly-sound design that had simply never been
+  called. Discarding ~2,320 lines of tested code to avoid a translation-layer fix would have
+  thrown away real product capability (hybrid search is the P0 capability behind the "ask"
+  experience per the audit's own journey trace §3 stage 5) for a problem that turned out to be
+  fixable in the retrieval subsystem alone. Nothing found during investigation was broken beyond
+  repair — three real gaps were found and fixed (below), none of them a reason to retire.
+- **What "drop-in replacement" actually required, and wasn't true as written**:
+  `agent_intelligence.GovernedPlanner.plan()` filters retrieval hits on
+  `hit.object_type == "GOVERNED_TOOL"` and reads `hit.metadata["allowed_roles"]` /
+  `["required_parameters"]` to decide tool eligibility and whether to ask for clarification.
+  `retrieval.py`'s tool hits used `object_type="TOOL_VERSION"` and never populated that metadata
+  — wiring the two together as documented would have made every governed tool permanently
+  invisible to the planner (`tools = [...]` always empty), silently disabling the `GOVERNED_TOOL`
+  strategy branch entirely. Fixed in `hybrid_retrieve` by renaming the object type and adding the
+  two metadata keys (`retrieval.py`, tool candidate block), computed the same way
+  `GovernedRetriever`'s old code did. Also added `source_table_id` to `SEMANTIC_METRIC` metadata
+  and `table_id` to `DBT_*` metadata — both read by `agent_orchestrator._model_context` to decide
+  which tables to hydrate into SQL-generation context, present in the old scan's hits, absent
+  from `retrieval.py`'s.
+- **The graph stage was a structural no-op even in isolation**: `hybrid_retrieve_enhanced` built
+  a `KnowledgeGraph` containing only the lexical hits as nodes, with no edges ever added —
+  `expand_graph`'s BFS therefore could never reach anything beyond the seeds (which it doesn't
+  even emit as hits at depth 0). RT-2's own unit tests never caught this because they test
+  `expand_graph` directly against a hand-built graph *with* edges; nothing exercised the
+  zero-edge graph `hybrid_retrieve_enhanced` actually constructs. Fixed by loading real
+  table-to-table edges from `MetadataConstraint` (`FOREIGN_KEY`, `ACTIVE`, datasource-scoped —
+  already-governed metadata needing no further approval to read) before calling `expand_graph`.
+  dbt `depends_on` / governed-tool `referenced_tables` edges would extend real coverage further
+  and are left as a documented follow-up rather than attempted here. Fixing this also surfaced a
+  second, independent bug: the graph-to-candidate conversion used `GraphHit.object_id` verbatim
+  as the merged candidate's `object_id`, but that field is the graph's own composite node id
+  (`"TABLE:<uuid>"`, per how the nodes were constructed) — a graph-only hit (no matching lexical
+  or vector hit) would have leaked that composite string into `RetrievalHit.object_id`, which
+  `_model_context`'s `UUID(hit.object_id)` expects to be a bare id, and would have raised on the
+  first real graph-only hit. Fixed by stripping the `"{object_type}:"` prefix before use. Also
+  fixed `graph_expansion_path` being hardcoded to `[]` in the returned evidence regardless of
+  whether expansion ran.
+- **Fusion score vs. tool-selection threshold — the one place this stayed deliberately narrow**:
+  `GovernedPlanner.plan()` gates `GOVERNED_TOOL` eligibility on
+  `hit.score >= Settings.agent_tool_match_threshold` (default `0.55`), a `[0,1]` match-confidence
+  number the lexical stage produces. RRF's fused score is a different, much smaller relative
+  quantity (`~1/rrf_k` per contributing signal) — handing it to that threshold would have meant
+  no governed tool could ever be selected by score alone, a real, silent change to
+  tool-selection orchestration behaviour that this item's scope explicitly excluded ("do not
+  touch... tool selection"). Fixed by keeping a `GOVERNED_TOOL` hit's pre-fusion lexical/boost
+  score as its operational `.score`, while the real fused score stays fully visible in
+  `metadata["retrieval_evidence"]["final_score"]` for inspection. Every other object type — none
+  of which is threshold-gated — gets the richer fused score.
+- **RT-9's "cross-source" claim was partly already wrong, unrelated to the reachability gap**:
+  `hybrid_retrieve` takes one `datasource: DataSource` and every query inside it is scoped to
+  that single datasource; it never searched across sources, before or after this change. The
+  genuinely cross-datasource search surface is `full_text_index.py` → `search_api.py`'s
+  `/v1/search` (mounted `main.py:48`), which was already live and is untouched by this work.
+  Recorded honestly on the RT-9 tracker row rather than left implied.
+- **Result**: `agent_intelligence.GovernedRetriever.retrieve()` (`agent_intelligence.py:93`) now
+  delegates to `retrieval.hybrid_retrieve_enhanced` (`retrieval.py:670`), translating results back
+  to `RetrievalHit`; the ~300-line duplicate lexical scan it used to run itself is deleted. Reached
+  from the real live entry point `GovernedAgentOrchestrator.run()` (`agent_orchestrator.py:308`),
+  the same object `api.py`'s `POST /datasources/{id}/agent-analyses` route constructs — no new
+  call site was invented for this fix, the existing one now calls real code.
+- **Tests**: new `tests/test_agent_orchestrator_retrieval_wiring.py` — a real (in-memory SQLite)
+  end-to-end proof through `GovernedAgentOrchestrator.run()` itself (not a direct
+  `hybrid_retrieve`/`hybrid_retrieve_enhanced` call, the exact isolation gap that let this go
+  unnoticed for five P0/tracker rows): a table matching the question lexically, a second table
+  sharing no token with the question or the first table's text at all and reachable only via a
+  real `MetadataConstraint` foreign key, and a governed tool planned via
+  `preferred_tool_version_id` with a missing required parameter so the run reaches
+  `CLARIFICATION` — retrieval and planning already complete and persisted — without needing a
+  real SQL warehouse or model route. Asserts the graph-only table is present in
+  `agent_run.retrieval_evidence` with a `"graph"` source signal and the correct
+  `graph_expansion_path`, re-read from the database after `_persist_rejection`'s commit rather
+  than off the in-memory object `run()` built. The embedding provider is stubbed with a real
+  OpenAI-shaped wire call (`httpx.MockTransport`, same pattern `test_embedding_provider.py` uses)
+  rather than skipped, so the vector-similarity signal is proven live too, not just structurally
+  present. Also fixed `test_retrieval_ranking.py`'s one assertion of the old `"TOOL_VERSION"`
+  object type. `tests/test_agent_orchestrator_retrieval_wiring.py` uses the same
+  `AuditEvent.id` sqlite-autoincrement workaround as `test_kill_switch_drill.py` /
+  `test_bulk_governance_decisions.py` (`BigInteger` PK relies on a Postgres sequence sqlite
+  doesn't have) — this test is the first one to exercise `_persist_rejection`'s `record_audit`
+  call against a real in-memory database.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files, via `uv run --extra dev mypy
+  src` — mypy's `pydantic.mypy` plugin needs the `dev` extra installed, not just the base venv).
+  `lint-imports` clean (4 contracts kept, 0 broken — no new import-linter contract needed;
+  `aida.retrieval` was already importable from `aida.agent_intelligence` under every existing
+  contract). Full `pytest` suite green: 3120 passed, 5 skipped, 1 xfailed, 0 failed.
+- Known limitations, stated rather than left implied: (1) `vector_store.py` (446 lines, the
+  actual persisted pgvector/bruteforce/external embedding-store abstraction RT-1's exit text
+  describes) remains unwired — this integration uses `vector_retrieval.py`'s simpler live-embed-
+  per-query approach instead, which works but re-embeds every candidate on every query rather
+  than searching a maintained index; populating a persisted index is a separate background-job
+  piece of work. (2) Graph edges are FK-only; dbt lineage and tool-reference edges would extend
+  real graph coverage. (3) The vector stage requires an org to configure an approved embedding
+  model route — with none configured (the default) it fails closed and the pipeline runs
+  lexical + graph + fusion only, same posture as before this change.

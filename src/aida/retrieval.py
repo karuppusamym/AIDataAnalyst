@@ -81,6 +81,7 @@ from aida.models import (
     GovernedToolVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
+    MetadataConstraint,
     MetadataTable,
     SemanticMetric,
     SemanticMetricVersion,
@@ -339,12 +340,19 @@ async def hybrid_retrieve(
             preferred_tool_version_id and preferred_tool_version_id == version.id
         ) else 0.0
         score = round(min(1.0, bm25 + exact + tool_boost + preferred_boost), 4)
-        hit_id = f"TOOL_VERSION:{version.id}"
+        # Object type and metadata shape here are load-bearing, not cosmetic:
+        # GovernedPlanner.plan() (agent_intelligence.py) filters
+        # `hit.object_type == "GOVERNED_TOOL"` to find tool candidates at all, then reads
+        # `hit.metadata["allowed_roles"]` and `hit.metadata["required_parameters"]` to decide
+        # eligibility and whether to ask for clarification. Diverging from that contract
+        # silently makes every governed tool invisible to the planner.
+        parameters = version.parameter_schema
+        hit_id = f"GOVERNED_TOOL:{version.id}"
         if hit_id not in seen_ids:
             seen_ids.add(hit_id)
             hits.append(
                 HybridRetrievalHit(
-                    object_type="TOOL_VERSION",
+                    object_type="GOVERNED_TOOL",
                     object_id=str(version.id),
                     display_name=version.name,          # version.name is the display name
                     score=score,
@@ -355,6 +363,14 @@ async def hybrid_retrieve(
                         "datasource_id": str(version.datasource_id),
                         # GovernedToolVersion has no primary_table_id; use referenced_tables list
                         "referenced_tables": version.referenced_tables or [],
+                        "slug": tool.slug,
+                        "version": version.version,
+                        "allowed_roles": version.allowed_roles,
+                        "required_parameters": [
+                            item["name"]
+                            for item in parameters
+                            if item.get("required", True) and item.get("default") is None
+                        ],
                     },
                 )
             )
@@ -474,6 +490,11 @@ async def hybrid_retrieve(
                                 metadata={
                                     "dbt_resource_id": str(dbt_resource.id),
                                     "resource_type": dbt_resource.resource_type,
+                                    "table_id": (
+                                        str(dbt_resource.matched_table_id)
+                                        if dbt_resource.matched_table_id
+                                        else None
+                                    ),
                                 },
                             )
                         )
@@ -548,6 +569,11 @@ async def hybrid_retrieve(
                             "metric_id": str(metric.id),
                             "metric_slug": metric.slug,
                             "bound_term_ids": bound_term_ids,
+                            # _model_context (agent_orchestrator.py) reads table_id or
+                            # source_table_id off every hit to decide which tables to hydrate
+                            # into the model's SQL-generation context; without this a metric
+                            # hit contributes no table context.
+                            "source_table_id": str(metric_version.source_table_id),
                         },
                     )
                 )
@@ -673,6 +699,7 @@ async def hybrid_retrieve_enhanced(
         fuse_results,
     )
     from aida.graph_retrieval import (
+        GraphEdge,
         GraphNode,
         KnowledgeGraph,
         expand_graph,
@@ -780,10 +807,16 @@ async def hybrid_retrieve_enhanced(
     # ------------------------------------------------------------------
     # Stage 3: Graph expansion (if enabled)
     # ------------------------------------------------------------------
+    # Real edges, not just seed nodes. A graph with nodes but no edges lets BFS reach
+    # only depth 0 (the seeds themselves, which `expand_graph` doesn't even emit as
+    # hits) -- expansion *past* what lexical/vector already found is the entire point
+    # of RT-2, so the edge source has to be real governed metadata, not a placeholder.
+    # `MetadataConstraint` foreign keys are exactly that: already-approved,
+    # datasource-scoped table-to-table relationships requiring no further governance
+    # to read. dbt `depends_on` / tool `referenced_tables` edges would extend this
+    # further and are a documented follow-up (03-tracker.md RT-2), not required here.
     if include_graph and lexical_hits:
         kg = KnowledgeGraph()
-        # Build minimal graph from seed hits (in production this would
-        # load from the database; here we create nodes from the hits)
         for hit in lexical_hits:
             kg.add_node(GraphNode(
                 node_id=f"{hit.object_type}:{hit.object_id}",
@@ -791,6 +824,63 @@ async def hybrid_retrieve_enhanced(
                 display_name=hit.display_name,
                 organization_id=org_id,
                 datasource_id=hit.metadata.get("datasource_id"),
+            ))
+
+        fk_rows = (
+            await session.execute(
+                select(MetadataConstraint, MetadataTable)
+                .join(MetadataTable, MetadataTable.id == MetadataConstraint.table_id)
+                .where(
+                    MetadataConstraint.datasource_id == datasource.id,
+                    MetadataConstraint.organization_id == org_id,
+                    MetadataConstraint.constraint_type == "FOREIGN_KEY",
+                    MetadataConstraint.status == "ACTIVE",
+                    MetadataConstraint.referenced_table_id.is_not(None),
+                    MetadataTable.status == "ACTIVE",
+                )
+                .limit(settings.agent_retrieval_scan_limit)
+            )
+        ).all()
+        referenced_ids = {constraint.referenced_table_id for constraint, _table in fk_rows}
+        referenced_tables: dict[UUID, MetadataTable] = {}
+        if referenced_ids:
+            referenced_tables = {
+                table.id: table
+                for table in (
+                    await session.scalars(
+                        select(MetadataTable).where(
+                            MetadataTable.id.in_(referenced_ids),
+                            MetadataTable.status == "ACTIVE",
+                        )
+                    )
+                ).all()
+            }
+        for constraint, table in fk_rows:
+            target_table = referenced_tables.get(constraint.referenced_table_id)
+            if target_table is None:
+                continue
+            source_node_id = f"TABLE:{table.id}"
+            target_node_id = f"TABLE:{target_table.id}"
+            if kg.get_node(source_node_id) is None:
+                kg.add_node(GraphNode(
+                    node_id=source_node_id,
+                    node_type="TABLE",
+                    display_name=table.name,
+                    organization_id=org_id,
+                    datasource_id=datasource.id,
+                ))
+            if kg.get_node(target_node_id) is None:
+                kg.add_node(GraphNode(
+                    node_id=target_node_id,
+                    node_type="TABLE",
+                    display_name=target_table.name,
+                    organization_id=org_id,
+                    datasource_id=datasource.id,
+                ))
+            kg.add_edge(GraphEdge(
+                source_id=source_node_id,
+                target_id=target_node_id,
+                edge_type="FOREIGN_KEY",
             ))
 
         seed_ids = [f"{h.object_type}:{h.object_id}" for h in lexical_hits[:10]]
@@ -803,18 +893,25 @@ async def hybrid_retrieve_enhanced(
         )
 
         for ghit in graph_hits:
-            key = ghit.object_id
+            # `GraphHit.object_id` is the graph's own node id (`f"{type}:{id}"`, per the
+            # construction above), not a bare object id -- unwrap it here rather than
+            # leaking the composite string into `RankedCandidate.object_id`, which every
+            # other caller (e.g. `_model_context`'s `UUID(hit.object_id)`) expects to be
+            # the raw id.
+            raw_object_id = ghit.object_id.removeprefix(f"{ghit.object_type}:")
+            key = f"{ghit.object_type}:{raw_object_id}"
             if key in candidates:
                 candidates[key].signals.append(
                     SignalScore(signal="graph", raw_score=ghit.proximity_score)
                 )
+                candidates[key].metadata.setdefault("graph_expansion_path", ghit.expansion_path)
             else:
                 candidates[key] = RankedCandidate(
                     object_type=ghit.object_type,
-                    object_id=ghit.object_id,
+                    object_id=raw_object_id,
                     display_name=ghit.display_name,
                     signals=[SignalScore(signal="graph", raw_score=ghit.proximity_score)],
-                    metadata=ghit.metadata,
+                    metadata={**ghit.metadata, "graph_expansion_path": ghit.expansion_path},
                 )
 
     # ------------------------------------------------------------------
@@ -859,17 +956,35 @@ async def hybrid_retrieve_enhanced(
                 }
                 for f in evidence_factors
             ],
-            graph_expansion_path=[],
+            graph_expansion_path=candidate.metadata.get("graph_expansion_path", []),
             source_signals=[s.signal for s in candidate.signals],
             metadata=candidate.metadata,
         )
+
+        # GovernedPlanner.plan() (agent_intelligence.py) gates GOVERNED_TOOL selection
+        # on `hit.score >= Settings.agent_tool_match_threshold`, a [0,1] match-confidence
+        # figure the lexical stage produces (BM25 + boosts, capped at 1.0). A fusion
+        # score is a different, relative ranking quantity on its own scale (RRF's is
+        # ~1/rrf_k) -- handing it to that threshold would silently change which
+        # governed tools the planner will ever select, which is tool-selection
+        # orchestration behaviour this integration does not touch. So a tool hit keeps
+        # its lexical score as `.score`; the real fused score is still fully visible in
+        # `retrieval_evidence.final_score` for inspection. Every other object type
+        # (nothing else is threshold-gated) gets the richer fused score as `.score`.
+        if candidate.object_type == "GOVERNED_TOOL":
+            lexical_signal = candidate.get_signal("lexical")
+            operational_score = (
+                lexical_signal.raw_score if lexical_signal else candidate.final_score
+            )
+        else:
+            operational_score = candidate.final_score
 
         result_hits.append(
             HybridRetrievalHit(
                 object_type=candidate.object_type,
                 object_id=candidate.object_id,
                 display_name=candidate.display_name,
-                score=candidate.final_score,
+                score=operational_score,
                 reason_codes=[s.signal for s in candidate.signals],
                 metadata={
                     **candidate.metadata,
