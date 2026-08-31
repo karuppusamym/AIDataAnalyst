@@ -1173,6 +1173,11 @@ class ToolExecutionResponse(ApiModel):
     tool_slug: str
     tool_version: int
     execution: QueryExecutionResponse
+    # TL-3: non-null when `check_tool_gate` demoted this execution to WARN
+    # (an upstream dependency has an open, non-critical quality incident); a
+    # BLOCK never reaches this response -- it is refused with HTTP 409 before
+    # a `ToolExecution` row exists.
+    quality_gate: dict[str, Any] | None = None
 
 
 class AgentAnalysisRequest(ApiModel):

@@ -26,6 +26,7 @@ from aida.models import (
     ToolCertificationRun,
     ToolExecution,
 )
+from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
 from aida.schemas import (
     GovernanceReviewRead,
@@ -468,6 +469,41 @@ async def execute_tool(
         ensure_datasource_enabled(datasource)
     except RunAdmissionRejected as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # TL-3: gate execution on open quality incidents against the tool's own
+    # declared dependencies (`version.referenced_tables`, authorised at
+    # tool-version creation time) -- resolved to this datasource's tables and
+    # checked before a single row of SQL is rendered or sent to the warehouse.
+    execution_context = replace(context, organization_id=version.organization_id)
+    dependency_table_ids = await resolve_table_ids(
+        session, datasource=datasource, table_names=version.referenced_tables
+    )
+    dependency_incidents = await fetch_open_incidents(
+        session, datasource=datasource, table_ids=list(dependency_table_ids.values())
+    )
+    quality_gate = check_tool_gate(
+        tool_id=str(tool.id),
+        dependency_asset_ids=[str(table_id) for table_id in dependency_table_ids.values()],
+        incidents=dependency_incidents,
+    )
+    if quality_gate.action == "BLOCK":
+        record_audit(
+            session,
+            execution_context,
+            action="tool.execute",
+            resource_type="governed_tool_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details={
+                "reason": "QUALITY_INCIDENT_BLOCK",
+                "message": quality_gate.message,
+                "affected_assets": quality_gate.affected_assets,
+            },
+        )
+        await session.commit()
+        raise HTTPException(status_code=409, detail=quality_gate.message)
+
     try:
         rendered = render_tool_sql(
             version.sql_template,
@@ -502,7 +538,6 @@ async def execute_tool(
         else None
     )
     gateway = QueryExecutionGateway(settings)
-    execution_context = replace(context, organization_id=version.organization_id)
     try:
         result = await gateway.execute(
             session,
@@ -537,6 +572,7 @@ async def execute_tool(
         details={
             "tool_version_id": str(version.id),
             "query_execution_id": str(result.execution.id),
+            "quality_gate_action": quality_gate.action,
         },
     )
     record_outbox(
@@ -558,6 +594,15 @@ async def execute_tool(
         tool_slug=tool.slug,
         tool_version=version.version,
         execution=_query_response(result),
+        quality_gate=(
+            {
+                "action": quality_gate.action,
+                "affected_assets": quality_gate.affected_assets,
+                "message": quality_gate.message,
+            }
+            if quality_gate.action != "ALLOW"
+            else None
+        ),
     )
 
 

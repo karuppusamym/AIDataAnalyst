@@ -3092,3 +3092,83 @@ that first manifest.
   `execution.error_message = str(exc)[:1000]` — out of scope here because `QueryRejected` is raised
   internally with a curated reason string, not a raw source-connector exception, but worth a second
   look if that assumption ever stops holding.
+
+## 2026-08-31 — DQ-3 / TL-3 / AG-6 wired for real; RT-7 honestly deferred
+
+- `Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` section 2 found `quality_coupling.py`/
+  `trust_scoring.py` (416 lines) real and unit-tested but with zero call sites anywhere else in
+  `src/aida`: `check_tool_gate` gated nothing, no trust warning was ever emitted, and the trust
+  factor never entered ranking, despite DQ-3/RT-7/AG-6/TL-3 all being marked DONE on 2026-08-30.
+  Confirmed independently before touching anything: `grep -rln "quality_coupling\|trust_scoring"
+  src/aida` outside the two modules themselves returned nothing, and neither did the same grep over
+  `tests/` outside their own two unit-test files.
+- **TL-3 (tool gating) — closed.** `tool_api.py::execute_tool`, the real governed-tool execution
+  endpoint (`POST /v1/tool-versions/{id}/execute`), now resolves the tool's own declared
+  `referenced_tables` (authorised against the datasource's catalog at tool-version creation time) to
+  this datasource's `MetadataTable` rows and checks them against real OPEN/ACKNOWLEDGED
+  `DataQualityIncident` rows via `quality_coupling.check_tool_gate`, before a single row of SQL is
+  rendered or a warehouse is touched. A CRITICAL incident on a dependency table blocks with HTTP 409
+  — no `ToolExecution` row is ever created, and a `DENIED` `AuditEvent` is recorded
+  (`reason: QUALITY_INCIDENT_BLOCK`). A WARNING incident allows execution through, with the gate
+  outcome surfaced in the response's new `ToolExecutionResponse.quality_gate` field (`action`,
+  `affected_assets`, `message`) and in the success `AuditEvent`'s `quality_gate_action` detail. No
+  open incident (or only a RESOLVED one) leaves `quality_gate` null.
+- **AG-6 (answer trust warnings) — closed.** `GovernedAgentOrchestrator.run` (`agent_orchestrator.py`)
+  resolves the tables the *executed* query actually touched
+  (`gateway_result.execution.referenced_tables`) against the same real `DataQualityIncident` rows;
+  when any are OPEN/ACKNOWLEDGED it computes a real `trust_scoring.compute_trust_score` (seeded from
+  the worst `quality_coupling.demote_in_retrieval` factor among the affected tables) plus
+  `quality_coupling.get_trust_warning` messages, and folds both into `agent_run.plan_evidence["trust"]`
+  (returned to the caller as `AgentAnalysisResponse.plan_evidence`, not a buried internal field) and
+  into the deterministic explanation string itself, e.g. `"... TRUST WARNING (grade F, score
+  30/100): Asset <table_id> has 1 active quality incident (highest severity: CRITICAL). Results may
+  be unreliable."`. A clean run (no open incidents) carries no `"trust"` key and no warning text.
+- Both wiring points resolve names to rows through one shared, new pair of async helpers added to
+  `quality_coupling.py` itself (deliberately co-located with the pure functions they feed, rather
+  than duplicated at each call site, so tool-gating and answer-warnings can never resolve the same
+  incident differently): `resolve_table_ids` (the same qualified/unqualified `schema.table` /
+  `catalog.schema.table` name matching `QueryExecutionGateway.allowed_tables` already uses, so a name
+  a tool's SQL was authorised to touch resolves to the same `MetadataTable` row here) and
+  `fetch_open_incidents` (the real `IncidentSummary` rows the existing pure functions — unchanged —
+  consume).
+- **RT-7 (ranking factor) — honestly deferred, not guessed at.** The task brief for this item warned
+  that a sibling agent might have just wired `retrieval.py::hybrid_retrieve` / `fusion_ranking.py`
+  into the live retrieval path this same wave (RT-1/RT-2/RT-3/RT-9/SM-2, all marked DONE
+  2026-08-30/31) — which is exactly where `demote_in_retrieval` would plug in. Checked before
+  starting: `grep -rln "hybrid_retrieve\|fusion_ranking\|GovernedRetriever" src/aida` shows
+  `agent_orchestrator.py` constructs `self.retriever = GovernedRetriever(settings)`
+  (`agent_intelligence.py`'s own lexical `_score`/hit-sort implementation) — `retrieval.py` and
+  `fusion_ranking.py` have no real callers outside their own modules and each other;
+  `graph_perspectives_api.py`'s docstring only *mentions* `aida.fusion_ranking` while explicitly
+  disclaiming any dependency on it, and `tests/test_hybrid_retrieval.py` says outright "Pure unit
+  tests -- no database required." So RT-1/RT-2/RT-3/RT-9/SM-2's own exit text describing
+  `retrieval.py`/`hybrid_retrieve` as "the live retrieval path" is itself not accurate — the same
+  reference-only pattern this item exists to fix, one module over. Wiring the trust factor into a
+  ranking implementation nothing calls would not satisfy RT-7's exit criterion ("Part of DQ-3"), so
+  per the task's own scope-discipline instruction this was deferred rather than guessed at against an
+  interface (`GovernedRetriever`/`fusion_ranking`) that may change under a future agent's hands. A
+  follow-up task was filed (not started here, out of scope for this item) to reconcile
+  RT-1/RT-2/RT-3/RT-9/SM-2's exit evidence with this finding.
+- Tracker: DQ-3 moved DONE → IN PROGRESS (2 of 3 legs genuinely live; re-close once RT-7 lands for
+  real); RT-7 moved DONE → TODO with the finding above; AG-6 and TL-3 stay DONE with real exit
+  evidence replacing the reference-only text.
+- Tests: new `tests/test_quality_runtime_coupling.py` (6 tests, real in-memory sqlite via aiosqlite,
+  same `_Scenario`-seeded-through-the-ORM pattern `test_semantic_glossary_binding.py` established for
+  SM-2) — `execute_tool` blocks on a CRITICAL incident (409, zero `ToolExecution` rows, one `DENIED`
+  `AuditEvent`), warns-but-allows on a WARNING incident (`quality_gate.action == "WARN"`), allows
+  cleanly with no incidents, and allows when the only incident is RESOLVED;
+  `GovernedAgentOrchestrator.run` surfaces a trust warning end-to-end (real `DEVELOPMENT_SQL` plan
+  path, `QueryExecutionGateway.execute` monkeypatched to stand in for an actual warehouse round-trip
+  — gating/warning behaviour is what these tests prove, not the SQL execution itself, which is
+  covered elsewhere) and stays silent with no open incidents. `AuditEvent.id`'s sqlite
+  autoincrement-PK workaround follows the existing `test_kill_switch_drill.py` /
+  `test_bulk_governance_decisions.py` pattern rather than inventing a new one.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite run
+  foreground twice: the first run caught one real, expected fallout —
+  `test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output`, because
+  `ToolExecutionResponse.quality_gate` is a genuinely new optional response field. Confirmed additive
+  and non-breaking with `uv run python scripts/openapi_diff.py` ("POST
+  /v1/tool-versions/{version_id}/execute 200 response [application/json].quality_gate: added new
+  response field" / "No breaking OpenAPI changes detected"), then regenerated the committed baseline
+  with `--accept-baseline` (same mechanism UX-12's entry above documents). Second foreground run:
+  full suite green, no failures.

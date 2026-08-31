@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 from uuid import UUID
 
@@ -32,10 +32,17 @@ from aida.models import (
     ToolExecution,
 )
 from aida.prompt_risk import DeterministicPromptRiskClassifier
+from aida.quality_coupling import (
+    demote_in_retrieval,
+    fetch_open_incidents,
+    get_trust_warning,
+    resolve_table_ids,
+)
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.tool_rendering import ToolParameterError, render_tool_sql
+from aida.trust_scoring import AssetContext, compute_trust_score
 
 
 class ModelRouteUnavailable(RuntimeError):
@@ -546,7 +553,52 @@ class GovernedAgentOrchestrator:
         if tool_execution:
             tool_execution.status = "COMPLETED"
             tool_execution.query_execution_id = gateway_result.execution.id
+
+        # AG-6: surface a trust warning when the answer was built from a table
+        # carrying an open quality incident. Reads the same `IncidentSummary`
+        # rows TL-3's tool gate checks, via the shared `quality_coupling`
+        # wiring helpers, so gating and warning cannot silently disagree about
+        # which incidents are active.
+        answer_table_ids = await resolve_table_ids(
+            session,
+            datasource=datasource,
+            table_names=gateway_result.execution.referenced_tables,
+        )
+        answer_incidents = await fetch_open_incidents(
+            session, datasource=datasource, table_ids=list(answer_table_ids.values())
+        )
+        trust_evidence: dict[str, Any] | None = None
+        if answer_incidents:
+            distinct_asset_ids = {str(table_id) for table_id in answer_table_ids.values()}
+            warnings = [
+                warning
+                for asset_id in sorted(distinct_asset_ids)
+                if (warning := get_trust_warning(asset_id, answer_incidents)) is not None
+            ]
+            worst_factor = min(
+                (
+                    demote_in_retrieval(asset_id, answer_incidents)
+                    for asset_id in distinct_asset_ids
+                ),
+                default=1.0,
+            )
+            trust_score = compute_trust_score(AssetContext(quality_score=round(worst_factor * 100)))
+            trust_evidence = {
+                "trust_score": trust_score.overall_score,
+                "trust_grade": trust_score.grade,
+                "factors": [asdict(factor) for factor in trust_score.factors],
+                "warnings": [asdict(warning) for warning in warnings],
+            }
+            plan_evidence["trust"] = trust_evidence
+            agent_run.plan_evidence = plan_evidence
+
         explanation = self._deterministic_explanation(gateway_result)
+        if trust_evidence and trust_evidence["warnings"]:
+            explanation += (
+                f" TRUST WARNING (grade {trust_evidence['trust_grade']}, "
+                f"score {trust_evidence['trust_score']}/100): "
+                + " ".join(warning["message"] for warning in trust_evidence["warnings"])
+            )
         record_audit(
             session,
             context,

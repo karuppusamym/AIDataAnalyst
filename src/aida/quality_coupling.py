@@ -3,11 +3,33 @@
 Integrates quality incident status with runtime decisions: demotion in
 retrieval ranking, trust warnings on answers, and tool gating when
 upstream dependencies have quality incidents.
+
+The functions above `resolve_table_ids`/`fetch_open_incidents` are pure and
+database-free by design (see the tests in `tests/test_quality_coupling.py`).
+`resolve_table_ids` and `fetch_open_incidents` are the one real wiring point
+that turns a datasource-scoped SQL table reference into the `IncidentSummary`
+rows those pure functions consume -- kept here, not duplicated at each call
+site, so `tool_api.py::execute_tool` (TL-3) and
+`agent_orchestrator.py::GovernedAgentOrchestrator.run` (AG-6) resolve
+incidents identically.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from uuid import UUID
+
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from aida.models import (
+    DataQualityIncident,
+    DataSource,
+    MetadataCatalog,
+    MetadataSchema,
+    MetadataTable,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,6 +193,86 @@ def check_tool_gate(
         affected_assets=affected,
         message=message,
     )
+
+
+async def resolve_table_ids(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    table_names: Sequence[str],
+) -> dict[str, UUID]:
+    """Resolve SQL-qualified table names to this datasource's `MetadataTable` ids.
+
+    Accepts the same qualified/unqualified name shapes
+    `QueryExecutionGateway.allowed_tables` already authorises against
+    (``schema.table``, ``catalog.schema.table``, or an unambiguous bare table
+    name), case-insensitively, so a name a tool's SQL was authorised to touch
+    resolves to the same table row here. A name that does not resolve within
+    this datasource is simply absent from the returned mapping.
+    """
+    leaf_names = {name.rsplit(".", 1)[-1].lower() for name in table_names}
+    if not leaf_names:
+        return {}
+    rows = (
+        await session.execute(
+            select(
+                MetadataCatalog.name,
+                MetadataSchema.name,
+                MetadataTable.name,
+                MetadataTable.id,
+            )
+            .join(MetadataSchema, MetadataSchema.catalog_id == MetadataCatalog.id)
+            .join(MetadataTable, MetadataTable.schema_id == MetadataSchema.id)
+            .where(
+                MetadataCatalog.datasource_id == datasource.id,
+                MetadataTable.organization_id == datasource.organization_id,
+                MetadataTable.status == "ACTIVE",
+                func.lower(MetadataTable.name).in_(leaf_names),
+            )
+        )
+    ).all()
+    by_qualified: dict[str, UUID] = {}
+    by_leaf: dict[str, list[UUID]] = {}
+    for catalog_name, schema_name, table_name, table_id in rows:
+        by_qualified[f"{schema_name}.{table_name}".lower()] = table_id
+        by_qualified[f"{catalog_name}.{schema_name}.{table_name}".lower()] = table_id
+        by_leaf.setdefault(table_name.lower(), []).append(table_id)
+    for leaf, ids in by_leaf.items():
+        if len(ids) == 1:
+            by_qualified.setdefault(leaf, ids[0])
+    return {
+        name: by_qualified[name.lower()] for name in table_names if name.lower() in by_qualified
+    }
+
+
+async def fetch_open_incidents(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    table_ids: Sequence[UUID],
+) -> list[IncidentSummary]:
+    """Fetch the OPEN/ACKNOWLEDGED quality incidents for the given tables."""
+    if not table_ids:
+        return []
+    rows = (
+        await session.scalars(
+            select(DataQualityIncident).where(
+                DataQualityIncident.datasource_id == datasource.id,
+                DataQualityIncident.table_id.in_(list(table_ids)),
+                DataQualityIncident.status.in_(("OPEN", "ACKNOWLEDGED")),
+            )
+        )
+    ).all()
+    return [
+        IncidentSummary(
+            incident_id=str(row.id),
+            asset_id=str(row.table_id),
+            severity=row.severity,
+            status=row.status,
+            anomaly_type=row.anomaly_type,
+        )
+        for row in rows
+    ]
 
 
 def should_expire_certification(

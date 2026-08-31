@@ -20765,6 +20765,18 @@
           "execution": {
             "$ref": "#/components/schemas/QueryExecutionResponse"
           },
+          "quality_gate": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Gate"
+          },
           "tool_execution_id": {
             "format": "uuid",
             "title": "Tool Execution Id",
