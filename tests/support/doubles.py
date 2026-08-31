@@ -264,9 +264,10 @@ class CatalogSession(RecordingSession):
     invariant test down with it for a reason that has nothing to do with the
     invariant.
 
-    Three lookups exist on the path, and their SELECT lists distinguish them
+    Four lookups exist on the path, and their SELECT lists distinguish them
     unambiguously: three columns (catalog, schema, table) is the authorised-table
-    lookup, four columns (…, column) is the column-resolution lookup, and the
+    lookup, four columns (…, column) is the column-resolution lookup, two columns
+    (value_shape, column name) is the QG-6 tokenization-policy lookup, and the
     single-column `scalars` call is the sensitive-classification lookup. Anything
     else raises, so a genuinely new lookup fails loudly here instead of silently
     receiving an empty result the assertions would then "pass" on.
@@ -279,6 +280,7 @@ class CatalogSession(RecordingSession):
         columns: list[tuple[str, str, str, str]],
         sensitive_columns: list[str],
         bindings: list[SourceBinding] | None = None,
+        tokenized_columns: list[tuple[str, str]] | None = None,
     ) -> None:
         super().__init__()
         self._tables = tables
@@ -289,9 +291,16 @@ class CatalogSession(RecordingSession):
         # the honest default for a double: these tests are about the gateway, and a
         # binding invented here would quietly assert an access grant they never made.
         self._bindings = bindings or []
+        # No tokenization policy by default -- every column stays fully redacted
+        # (today's behaviour) unless a test opts a column in explicitly.
+        # (value_shape, column_name) pairs, matching `_tokenized_output_names`'
+        # SELECT list.
+        self._tokenized_columns = tokenized_columns or []
 
     async def execute(self, statement: Any) -> ScriptedResult:
         width = len(getattr(statement, "column_descriptions", ()) or ())
+        if width == 2:
+            return ScriptedResult(list(self._tokenized_columns))
         if width == 3:
             return ScriptedResult(list(self._tables))
         if width == 4:

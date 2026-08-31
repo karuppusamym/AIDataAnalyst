@@ -229,6 +229,23 @@ class Settings(BaseSettings):
     hmac_signing_vault_token_reference: str = Field(default="", max_length=500)
     hmac_signing_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
 
+    # QG-6: reversible, format-preserving tokenization for sensitive query-gateway
+    # output columns configured for TOKENIZE rather than plain redaction. Same
+    # provider-neutral, config-selected, resolved-fresh-per-call shape as
+    # `hmac_signing_provider` above (see `aida.tokenization`); "local" holds
+    # `tokenization_key` in process config and is forbidden in production below,
+    # "vault_transform" calls out to HashiCorp Vault's Transform secrets engine for
+    # every tokenize/detokenize call, and the raw key never enters this process.
+    tokenization_key: str = "development-only-change-me"
+    tokenization_provider: Literal["local", "vault_transform"] = "local"
+    tokenization_vault_url: str | None = Field(default=None, max_length=500)
+    tokenization_vault_role_name: str = Field(default="pii-tokens", max_length=200)
+    # Resolved through the same `SecretResolver` path (and the same
+    # `credential_provider`) as every other credential in this codebase -- the
+    # Vault token authenticates the *request*, not the tokenization key itself.
+    tokenization_vault_token_reference: str = Field(default="", max_length=500)
+    tokenization_timeout_seconds: float = Field(default=10.0, gt=0, le=120)
+
     @property
     def max_query_estimate_cost(self) -> float:
         return self.max_postgres_plan_cost
@@ -271,6 +288,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "an application-managed local HMAC signer is forbidden in production; "
                 "configure a KMS-backed hmac_signing_provider (QG-5)"
+            )
+        if self.environment == "production" and len(self.tokenization_key) < 32:
+            raise ValueError("a production tokenization key must contain at least 32 characters")
+        if self.environment == "production" and self.tokenization_provider == "local":
+            raise ValueError(
+                "an application-managed local tokenization provider is forbidden in "
+                "production; configure a KMS-backed tokenization_provider (QG-6)"
             )
         return self
 

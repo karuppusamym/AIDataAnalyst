@@ -9183,6 +9183,61 @@
         "title": "DbtProjectRead",
         "type": "object"
       },
+      "DetokenizeRead": {
+        "additionalProperties": false,
+        "properties": {
+          "detokenized_at": {
+            "format": "date-time",
+            "title": "Detokenized At",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "detokenized_at"
+        ],
+        "title": "DetokenizeRead",
+        "type": "object"
+      },
+      "DetokenizeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasource Id"
+          },
+          "purpose": {
+            "maxLength": 500,
+            "minLength": 3,
+            "title": "Purpose",
+            "type": "string"
+          },
+          "token": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Token",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "purpose"
+        ],
+        "title": "DetokenizeRequest",
+        "type": "object"
+      },
       "DomainLineageGraphRead": {
         "additionalProperties": false,
         "description": "Same merged FK + suggested + dbt + OpenLineage graph as\nUnifiedLineageGraphRead, federated across every datasource in one\ndata_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.\n\nThis is a federated bounded view, not a global graph query: each\ncontributing datasource's graph is built and capped by the existing,\nunchanged single-datasource builder, then merged under the domain's\ncombined node_limit/edge_limit -- ADR-0010's bounded/lazy/value-free\ncontract holds at this wider scope exactly as it does at the narrower\none. Node and edge ids are prefixed per-datasource to guarantee no\nfalse merge between two different datasources' same-named synthetic\n(unmatched dbt/OpenLineage) nodes.\n\nA candidate relationship reaching across a data_domain boundary only\never renders as an edge here when an ACTIVE cross_boundary_grant permits\nthis domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-\ndefault, never inherited) -- `withheld_cross_boundary_domain_ids` names\nany domain that has such a candidate but no covering grant, reported\nrather than silently dropped, mirroring the withheld:\"no_grant\"\ntransparency this ADR requires everywhere it applies.",
@@ -60625,6 +60680,134 @@
         "summary": "Search Suggest",
         "tags": [
           "search"
+        ]
+      }
+    },
+    "/v1/security/tokens/detokenize": {
+      "post": {
+        "operationId": "detokenize_value_v1_security_tokens_detokenize_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetokenizeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetokenizeRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reverse a tokenized value back to its original form (gated, audited; QG-6)",
+        "tags": [
+          "query-gateway"
         ]
       }
     },

@@ -4960,3 +4960,67 @@ class TermSemanticBinding(Base, TimestampMixin):
     governance_review_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
     )
+
+
+# ---------------------------------------------------------------------------
+# QG-6: dynamic masking / tokenization integration
+# ---------------------------------------------------------------------------
+
+
+class ColumnTokenizationPolicy(Base, TimestampMixin):
+    """Declares that one catalog column gets tokenized rather than fully redacted.
+
+    `query_gateway.py`'s masking pass already has a conservative default: a
+    sensitive output column (module 05 classification in
+    `aida.classification.SENSITIVE_CLASSES`) is replaced with the literal
+    ``"***MASKED***"`` string. A row here for a given `column_id` is an
+    explicit steward decision to *narrow* that default for one column -- the
+    value becomes a reversible, format-preserving token
+    (`aida.tokenization.TokenizationProvider`) instead of a full redaction, so
+    a downstream workflow that genuinely needs the original value back can get
+    it through the gated, audited detokenize endpoint
+    (`aida.detokenization_api.detokenize_value`) rather than bypassing the
+    gateway.
+
+    Scoped to one `column_id` (`aida.models.MetadataColumn`, not a name string)
+    so the policy travels with the catalog's own identity for that column --
+    the same de-duplicated, table-qualified reference every other per-column
+    governance construct in this module uses, rather than a bare name that
+    would collide across tables with a same-named column.
+
+    No `strategy` field: existence of an enabled row *is* "tokenize this
+    column"; there is deliberately no third state distinct from "no row"
+    (redact, the existing conservative default) and "disabled" (a policy that
+    was configured and then explicitly turned back off, kept for its audit
+    trail rather than deleted) other than the `enabled` flag itself.
+    """
+
+    __tablename__ = "column_tokenization_policy"
+    __table_args__ = (
+        UniqueConstraint("column_id", name="uq_column_tokenization_policy_column"),
+        Index(
+            "ix_column_tokenization_policy_org_datasource",
+            "organization_id",
+            "datasource_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # "NUMERIC" today (credit-card numbers, SSNs, account and phone numbers --
+    # `aida.tokenization`'s Feistel-style construction only transforms the
+    # digit run of a value). Left open rather than a bare boolean so a second
+    # value shape (e.g. an alphanumeric account identifier) can be declared
+    # later without a schema change; an unsupported shape is a matter for the
+    # tokenization provider to refuse, not this table to validate.
+    value_shape: Mapped[str] = mapped_column(String(20), default="NUMERIC", nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)

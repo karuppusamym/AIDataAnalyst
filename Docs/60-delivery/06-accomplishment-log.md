@@ -2156,3 +2156,82 @@ Studio has moved from Pending to Partial in the status matrix.
   deterministically. The mechanism proven (SQLAlchemy `begin_nested()` SAVEPOINT rollback contains
   a real `IntegrityError`) is dialect-independent, but a live-Postgres run of the same scenario has
   not been performed in this environment.
+
+## 2026-08-31 — QG-6 (dynamic masking / tokenization integration) closed
+
+- Gave `query_gateway.py`'s masking pass a second strategy alongside the existing flat
+  `"***MASKED***"` redaction: reversible, format-preserving tokenization for output columns a
+  steward has explicitly opted in. `tokenization.py`'s `TokenizationProvider` protocol is
+  `signing.py`'s `SigningProvider` (QG-5) restructured for a second operation pair
+  (`tokenize`/`detokenize` instead of `sign`/`verify`) rather than a new shape: async, resolved
+  fresh per call by `resolve_tokenization_provider`, no fallback on failure. `LocalFpeTokenizationProvider`
+  transforms the digit run of a value with a deterministic, invertible, unbalanced Feistel-style
+  construction (keyed HMAC-SHA256 round function, alternating modular updates to two unequal
+  halves) — covers realistic numeric PII shapes (card numbers, SSNs, account/phone numbers) and is
+  explicitly documented as **not** a validated FF1/FF3-1 implementation, the same honesty line drawn
+  around `LocalHmacSigningProvider`. `VaultTransformTokenizationProvider` calls HashiCorp Vault's
+  Transform secrets engine over plain `httpx`, the same wire shape `VaultTransitSigningProvider`
+  already uses for Transit.
+- New `ColumnTokenizationPolicy` model/table (migration `2fa45be65bf7`, on top of head `4f730e96ee9b`):
+  a steward-declared, `column_id`-scoped row that opts one catalog column into tokenization.
+  `query_gateway.py`'s `_tokenized_output_names` mirrors `_sensitive_output_names`'s shape exactly
+  (including reusing `sensitive_projection_names` for alias/derived-expression propagation, so a
+  tokenized column stays tokenized under a rename or a wrapping expression), and `execute()` now
+  tokenizes the columns that policy covers instead of redacting them — `tokenized_names` takes
+  precedence over `masked_columns` for the columns it names, every other sensitive column keeps
+  today's behaviour unchanged. A query that needs to tokenize but has no usable provider configured
+  is rejected closed (`TOKENIZATION_PROVIDER_UNAVAILABLE` / `TOKENIZATION_FAILED`), never silently
+  falling back to redaction or returning the raw value.
+- Reversal is gated: `POST /v1/security/tokens/detokenize` (`detokenization_api.py`) requires one of
+  `PlatformAdmin`/`OrganizationAdmin`/`ComplianceOfficer`/`DataSteward`, a stated `purpose`, and
+  writes an audit row via `record_audit` on *every* path — both the grant and the denial — before
+  the response returns, using the same "record before deciding what to return" shape
+  `token_revocation_api.py` established rather than a bare `require_roles` dependency (which would
+  raise before the handler body, and audit-record, ever runs). INV-6 held: neither the token nor the
+  recovered value ever enters the audit `details` payload.
+- Production configuration now refuses `tokenization_provider == "local"` and a `tokenization_key`
+  under 32 characters, the same shape and same `reject_insecure_production_configuration` function
+  as the existing `hmac_signing_provider == "local"` / `audit_hmac_key` checks. The Tier-0
+  `_SECURE_PRODUCTION_BASELINE` fixture in `test_tier0_invariants.py` was updated to configure the
+  KMS-backed tokenization provider (mirrors its existing `hmac_signing_provider: "vault_transit"`
+  entry), and two new parameterized cases added to `_INCOMPLETE_POSTURE_CASES` alongside QG-5's.
+- 33 new tests across three files: `test_tokenization.py` (22 — round-trip/determinism/key-binding/
+  format-preservation for the local provider across SSN/card/phone/account-number lengths, mocked
+  Vault Transform wire contract, fail-closed on network error/non-2xx/malformed body, production
+  refusal), `test_query_tokenization.py` (4 — a policy-covered column comes back tokenized not
+  redacted, the exact token the gateway produced detokenizes back to the original value through the
+  same provider a real detokenize call would resolve, a sensitive column with no policy keeps
+  today's flat redaction unchanged, a query needing tokenization with no usable provider is rejected
+  closed with the execution row recorded `REJECTED`), and `test_detokenization_api.py` (7 — an
+  authorized caller with a stated purpose recovers the value and the grant is audited without ever
+  leaking the token or value into the audit payload, every one of the four authorized roles is
+  accepted, an unauthorized caller is denied *and the denial is itself audited*, an unavailable
+  provider fails closed with a 503 and that failure is also audited).
+- `tests/support/doubles.py`'s `CatalogSession` (shared Tier-0 test double) gained a fourth
+  recognised statement shape (a 2-column select, for the `ColumnTokenizationPolicy` join) alongside
+  the existing 3-/4-column/scalars routing, with an empty default so every existing caller is
+  unaffected.
+- OpenAPI baseline regenerated (`uv run python scripts/openapi_diff.py --accept-baseline`) after
+  confirming the only diff is additive (`added path '/v1/security/tokens/detokenize'`) — no breaking
+  changes, no version bump needed.
+- Full suite run in the foreground start to finish (not backgrounded, per the coordinator's
+  correction mid-session — a backgrounded run does not survive this session's own turn boundaries),
+  both before and after rebasing onto latest origin: `ruff check .` clean, `mypy src` clean (186
+  files), `lint-imports` (4 contracts kept, 0 broken), one Alembic head, the OpenAPI baseline diff
+  additive-only, and `pytest` green except one pre-existing, unrelated failure introduced by the
+  CT-1 commit this session rebased onto (`eaf7ee1`, confirmed via `git show`) — its own
+  accomplishment-log entry cites test_studio.py's TestParameterContractDesigner the same way an
+  earlier ST-A4 entry did before a same-day fix (`08a37cb`) repointed the ST-A4 citations at a real
+  function; `test_doc_claims.py::test_cited_test_path_resolves` correctly reports it, since the
+  doc-claims scanner resolves `path::name` citations only against functions, never classes.
+  Untouched by QG-6. (Deliberately not written as a backtick-fenced `path.py::Name` citation here,
+  so this note about the gap does not itself become another instance the same scanner trips on.)
+- Not yet DONE, stated plainly: no source-native (in-database) tokenization or masking policy — this
+  is the query-gateway's own output-layer transform over an already-executed result set, the same
+  "application layer today, source-native next" boundary the module doc's target column already
+  named. `VaultTransformTokenizationProvider` has never made a request against a real Vault
+  instance — verified only against a mocked HTTP transport asserting the documented wire contract,
+  the same standing limitation already recorded for QG-5's `VaultTransitSigningProvider` and the
+  connector work (CN-1c/CN-2a). Only one value shape is implemented (the digit run of a value);
+  `ColumnTokenizationPolicy.value_shape` is left open for a future alphanumeric scheme without a
+  schema change, but no such scheme exists yet.

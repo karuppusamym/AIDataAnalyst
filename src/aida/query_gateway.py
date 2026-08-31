@@ -17,6 +17,7 @@ from aida.connectors.execution_access import open_execution_session
 from aida.connectors.sql_execution import SqlExecutor
 from aida.events import record_audit, record_outbox
 from aida.models import (
+    ColumnTokenizationPolicy,
     DataSource,
     MetadataCatalog,
     MetadataColumn,
@@ -47,6 +48,7 @@ from aida.sql_validation import (
     resolve_column_references,
     row_limit_finding,
 )
+from aida.tokenization import TokenizationError, resolve_tokenization_provider
 
 
 class QueryRejected(RuntimeError):
@@ -187,6 +189,12 @@ class GatewayResult:
     execution: QueryExecution
     rows: tuple[dict[str, Any], ...]
     masked_columns: tuple[str, ...]
+    # QG-6: output columns whose value was replaced with a reversible token
+    # (`aida.tokenization.TokenizationProvider`) rather than the flat
+    # "***MASKED***" redaction `masked_columns` still uses. Disjoint from
+    # `masked_columns` -- a column configured for tokenization is never also
+    # counted as fully redacted.
+    tokenized_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -533,6 +541,49 @@ class QueryExecutionGateway:
             )
         )
 
+    async def _tokenized_output_names(
+        self,
+        session: AsyncSession,
+        datasource: DataSource,
+        normalized_sql: str,
+    ) -> set[str]:
+        """Output column names an enabled `ColumnTokenizationPolicy` covers (QG-6).
+
+        Same shape as `_sensitive_output_names` -- name-based lookup, aliases
+        and derived expressions expanded through `sensitive_projection_names`
+        -- deliberately: a column that stays tokenized under a rename or a
+        wrapping expression must not silently fall back to full redaction,
+        which the same alias/derived-expression propagation
+        `_sensitive_output_names` already relies on also guarantees here. A
+        two-column select (rather than the one-column `scalars` call above)
+        so `ColumnTokenizationPolicy` participates in the query -- not just a
+        classification value on `MetadataColumn` -- and stays queryable by its
+        own `enabled` flag independent of classification.
+        """
+        rows = (
+            await session.execute(
+                select(ColumnTokenizationPolicy.value_shape, MetadataColumn.name)
+                .join(MetadataColumn, MetadataColumn.id == ColumnTokenizationPolicy.column_id)
+                .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+                .where(
+                    ColumnTokenizationPolicy.organization_id == datasource.organization_id,
+                    ColumnTokenizationPolicy.datasource_id == datasource.id,
+                    ColumnTokenizationPolicy.enabled.is_(True),
+                    MetadataTable.status == "ACTIVE",
+                    MetadataColumn.organization_id == datasource.organization_id,
+                    MetadataColumn.status == "ACTIVE",
+                )
+            )
+        ).all()
+        tokenized_source_names = {name.lower() for _value_shape, name in rows}
+        return tokenized_source_names.union(
+            sensitive_projection_names(
+                normalized_sql,
+                dialect=datasource.dialect,
+                sensitive_source_names=tokenized_source_names,
+            )
+        )
+
     async def execute(
         self,
         session: AsyncSession,
@@ -625,16 +676,54 @@ class QueryExecutionGateway:
                 datasource,
                 outcome.executable_sql,
             )
+            tokenized_names = await self._tokenized_output_names(
+                session,
+                datasource,
+                outcome.executable_sql,
+            )
+            # QG-6: a column explicitly configured for tokenization is tokenized,
+            # not redacted -- `tokenized_names` takes precedence over the
+            # conservative `masked_columns` default for the columns it covers.
+            # Every other sensitive column keeps today's behaviour unchanged.
+            tokenized_columns = sorted(
+                {key for row in source_result.rows for key in row if key.lower() in tokenized_names}
+            )
             masked_columns = sorted(
-                {key for row in source_result.rows for key in row if key.lower() in sensitive_names}
-            )
-            rows = tuple(
                 {
-                    key: "***MASKED***" if key in masked_columns else value
-                    for key, value in row.items()
+                    key
+                    for row in source_result.rows
+                    for key in row
+                    if key.lower() in sensitive_names and key not in tokenized_columns
                 }
-                for row in source_result.rows
             )
+            tokenize_provider = None
+            if tokenized_columns:
+                # Resolved fresh per call, the same shape as `_sign_sql`'s
+                # `resolve_signing_provider` call -- see `aida.tokenization`'s
+                # module docstring. Deliberately un-guarded here too: an
+                # unconfigured or unbuildable provider must reject the query,
+                # not silently fall back to full redaction for a column a
+                # steward explicitly configured to tokenize.
+                try:
+                    tokenize_provider = resolve_tokenization_provider(self.settings)
+                except TokenizationError as exc:
+                    raise QueryRejected("TOKENIZATION_PROVIDER_UNAVAILABLE") from exc
+            masked_rows: list[dict[str, Any]] = []
+            for row in source_result.rows:
+                masked_row: dict[str, Any] = {}
+                for key, value in row.items():
+                    if value is not None and key in tokenized_columns:
+                        assert tokenize_provider is not None  # narrows for mypy
+                        try:
+                            masked_row[key] = await tokenize_provider.tokenize(str(value))
+                        except TokenizationError as exc:
+                            raise QueryRejected("TOKENIZATION_FAILED") from exc
+                    elif key in masked_columns:
+                        masked_row[key] = "***MASKED***"
+                    else:
+                        masked_row[key] = value
+                masked_rows.append(masked_row)
+            rows = tuple(masked_rows)
             execution.status = "COMPLETED"
             execution.warehouse_query_id = source_result.warehouse_query_id
             execution.row_count = len(rows)
@@ -653,6 +742,7 @@ class QueryExecutionGateway:
                     "lineage_output_count": len(execution.column_lineage),
                     "row_count": len(rows),
                     "masked_columns": masked_columns,
+                    "tokenized_columns": tokenized_columns,
                     "plan_cost": plan_cost,
                     "estimate_kind": estimate_kind,
                     "estimated_rows": report.estimated_rows,
@@ -677,6 +767,7 @@ class QueryExecutionGateway:
                 execution=execution,
                 rows=rows,
                 masked_columns=tuple(masked_columns),
+                tokenized_columns=tuple(tokenized_columns),
             )
         except QueryRejected as exc:
             # `AuthorizationRejected` is a `QueryRejected`, so a refusal is bookkept
