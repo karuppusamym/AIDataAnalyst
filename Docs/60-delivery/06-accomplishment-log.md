@@ -3345,3 +3345,86 @@ stack wired into the live orchestration path, not deleted
   (`compose.yaml`, the AU-9 k8s manifests) injects real env vars, not a `.env` file, so this covers
   the actual threat surface named in the audit; extending the same scan to a parsed dotenv file is a
   small, well-scoped follow-up if a `.env`-based deployment path is ever added.
+
+## 2026-08-31 — AU-1 (CI reachability gate) closed: the detector the audit called "the single highest-leverage change in this document"
+
+`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` found ~4,600 lines behind 17 DONE rows
+(six P0) reachable from nothing but their own file and their own test — invisible to CI because
+a module with passing unit tests and zero callers looks identical to a healthy one. Its §7
+Method described an ~80-line one-off script that found them; this item is the permanent version
+of that script, run on every push.
+
+- New `tests/test_reachability_gate.py`. Parses every `.py` file under `src/aida/` with `ast`,
+  resolves every `import`/`from ... import` statement (including relative imports, though none
+  currently exist in this codebase) to the dotted module names it causes Python to load, and
+  builds the full static import graph. Seeds a BFS from the five real entry points named in the
+  tracker exit criterion — `aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+  `aida.projectors.graph_projector`, `aida.projectors.outbox_publisher` — plus each entry
+  point's own parent packages (running `graph_projector.py` as a script loads
+  `aida.projectors/__init__.py` first, exactly like a live `from aida.x import y` does
+  elsewhere in the graph, so the seed set has to include that or the package `__init__` modules
+  themselves show up as false-positive "unreachable"). Any `src/aida` module outside the
+  resulting reachable set fails the build unless it's on the file's own `ALLOWLIST` dict, where
+  every entry names the tracker row that owns the gap.
+- Dynamic dispatch ruled out the same way the audit did (§7): `test_no_dynamic_module_dispatch`
+  greps all of `src/aida/` for `importlib`/`import_module`/`__import__`/`entry_points`/
+  `sys.modules[`/`globals()[` on every run rather than trusting a one-time comment, and
+  `test_no_undeclared_console_entry_points` parses `pyproject.toml` for `[project.scripts]` /
+  `[project.entry-points]` (there are none). Both hit zero today, matching the audit; either
+  would fail loudly if one is ever introduced, forcing whoever adds it to account for it
+  explicitly instead of silently invalidating the static graph.
+- `test_entry_points_exist_on_disk` fails if `ENTRY_POINTS` ever names a module that moved or was
+  renamed — a stale entry point would silently shrink the graph this gate walks into a no-op.
+- Self-cleaning by construction, not just at write time: `test_allowlist_has_no_stale_entries`
+  recomputes reachability on every run and fails if an allow-listed module was deleted (dead
+  reference) or became reachable (an entry hiding a real fix). This actually fired mid-session —
+  see below.
+- Deliberately did **not** weaken the gate to pass. Verified the detector actually detects: added
+  a throwaway orphan module under `src/aida/`, confirmed `test_all_modules_reachable_or_allowlisted`
+  failed on it with a clear message, then removed the module (not committed).
+- **What's actually still on `ALLOWLIST` today, and why each one is there** (re-verified against
+  the current tree, not copied from the audit — the audit's list turned out to be hours, not
+  days, stale relative to this session, and several sibling worktrees were actively wiring these
+  exact modules in throughout): `observability.py` (OB-1 — `configure_tracing` still never
+  called), `siem_routing.py` (OB-2 — zero call sites), `worm_archive.py` (OB-3 — zero call
+  sites), `vector_store.py` (RT-1 — the *persisted* vector index specifically, as opposed to its
+  now-wired sibling `vector_retrieval.py`'s live-embed-per-query approach), `injection_corpus.py`
+  (AG-1/AG-2/TS-6 — a standalone corpus module never imported by anything outside its own test,
+  including its own sibling `injection_defense.py`). That is 5 modules, not the audit's 13 — it
+  dropped in three steps mid-session, each one caught by `test_allowlist_has_no_stale_entries` on
+  the very next rebase rather than noticed by hand: `injection_defense.py` came off first, when a
+  concurrent commit (`6ed7e2f`, "fix(AG-1/AG-2/TS-6): wire injection_defense corpus...") landed on
+  origin and wired `injection_defense.screen_metadata` into `ingest_screening.screen_text`; then
+  `quality_coupling.py` + `trust_scoring.py` came off after the next rebase picked up `a635f5f`
+  ("fix(DQ-3/TL-3/AG-6): wire quality_coupling/trust_scoring into live paths"), which wired both
+  into `tool_api.py::execute_tool`'s pre-execution gate and `agent_orchestrator.py`'s post-run
+  trust warning, closing DQ-3/RT-7/AG-6/TL-3; then `retrieval.py` + `fusion_ranking.py` +
+  `graph_retrieval.py` + `embedding_provider.py` + `vector_retrieval.py` came off after a third
+  rebase picked up `676bbf8` ("wire retrieval.py's hybrid/vector/graph/fusion stack into the live
+  orchestration path"), closing RT-1/RT-2/RT-3/RT-9/SM-2 — `vector_store.py` alone stayed behind,
+  per that commit's own known-limitations note: it's a persisted index the change didn't
+  populate, using live per-query embedding instead. `abac.py` and `ai_decision_lineage.py` are
+  **not** on this list and never were:
+  both routers are registered on the live app (`main.py:126-127`), so both modules are
+  module-reachable — the audit's separate finding that their core *functions* (`record_decision`,
+  real ABAC enforcement vs. the `policy_engine.evaluate` duplicate) have no live caller is a
+  function-level claim this module-level gate cannot see or contradict; that is explicitly AU-2's
+  scope ("redefine DONE to require a live call site"), not this item's.
+- Wired into `.github/workflows/ci.yml` as a new `reachability` job, additive alongside the
+  existing `quality`/`migrations`/`openapi-diff`/`perf-baseline`/`tests` jobs, running
+  `uv run python -m pytest tests/test_reachability_gate.py -v`.
+- Tracker row AU-1 updated to DONE with the same allow-list evidence above.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green in
+  a genuine foreground run (`uv run python -m pytest -q`, exit code 0, zero `FAILED` entries) —
+  ran twice; the first pass hit the same
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  wall-clock flake the AG-1/AG-2/TS-6 entry above already documents (heavy concurrent-worktree CPU
+  contention on this host), reconfirmed unrelated by running it alone (passed) and by a clean
+  second full-suite run.
+- Known limitations: this is a module-level gate only, exactly matching AU-1's exit criterion —
+  it proves *something* on a live path imports a module, not that a specific function in it is
+  ever called. `abac.py`/`ai_decision_lineage.py` above are the concrete example of that
+  boundary. Closing that gap is AU-2, already tracked, not reopened here. The allow-list will
+  need re-verification again the next time a sibling session wires in one of its remaining 5
+  entries — that's expected maintenance, not a defect in the gate, and this session watched it
+  happen three separate times while finishing this very item.
