@@ -2061,7 +2061,8 @@ Studio has moved from Pending to Partial in the status matrix.
   directly instead of its previous hand-rolled loop. Also exposed standalone at
   `POST /v1/studio/parameter-contracts/validate` (`studio_api.py`) so an author can validate a
   contract incrementally while still drafting, before it is attached to any change item.
-- 9 new tests (`tests/test_studio.py::TestParameterContractDesigner`): valid contract renders a
+- 9 new tests in the `TestParameterContractDesigner` class (e.g.
+  `tests/test_studio.py::test_valid_contract_renders_a_sample`): valid contract renders a
   sample, invalid type reported as a typed error (not a crash), inverted bounds rejected, sensitive
   parameter with default rejected, duplicate name rejected, undeclared placeholder rejected, unused
   definition rejected, `allowed_values` takes precedence for the synthetic sample, malformed SQL
