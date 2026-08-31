@@ -2461,3 +2461,80 @@ Studio has moved from Pending to Partial in the status matrix.
   baseline was accepted.
 - Also removed `ui-next/vite.config.ts.timestamp-*.mjs`, a stray Vite build artifact that had been
   committed by an earlier session; harmless but not something that belongs in the tree.
+
+## 2026-08-31 — CN-2b (Databricks adapter) — native pull adapter, moved off `declare_planned`
+
+- Re-checked the live tracker before starting: CN-2b was still `TODO`, Databricks still registered
+  only via `connector_registry.declare_planned(...)` (canonical push ingestion only, no pull
+  adapter) — not duplicated by any concurrent session.
+- Added `src/aida/connectors/databricks.py` (`DatabricksConnector`), modeled directly on
+  `aida.connectors.snowflake` — the closest existing adapter shape (a cloud warehouse reached over a
+  DB-API driver via `INFORMATION_SCHEMA`, with EXPLAIN-based cost estimation) — and reusing the same
+  shared assembly helpers (`aida.connectors.discovery`) every other adapter uses rather than
+  reinventing per-adapter logic:
+  - **Discovery**: Unity Catalog's per-catalog `INFORMATION_SCHEMA` (catalog → schema → table →
+    column via `COLUMNS`/`TABLES`; `PRIMARY KEY`/`UNIQUE` via `TABLE_CONSTRAINTS`/
+    `KEY_COLUMN_USAGE`; best-effort `FOREIGN KEY` via `REFERENTIAL_CONSTRAINTS`/
+    `CONSTRAINT_COLUMN_USAGE`, degrading to "none observed" rather than failing discovery on an
+    older metastore without that surface). Table/column/schema/catalog comments are also
+    implemented and `object_comments` is honestly claimed `True`; `views`/`routines`/`grants` are
+    deliberately left `False` — Unity Catalog exposes the ANSI-shaped views for them, but claiming
+    those axes without a live workspace to verify column shapes and refusal modes against would be
+    exactly the overclaim INV-9 exists to prevent.
+  - **Capability negotiation**: `ConnectorCapabilities` matches what `discover()` actually reads —
+    `catalogs`/`schemas`/`constraints`/`explain`/`query_history`/`approximate_statistics`/
+    `object_comments` `True`; `indexes`/`partitions`/`delegated_identity` (PAT-only auth for now)/
+    `views`/`routines`/`grants` honestly `False`.
+  - **Credentials**: JSON payload or DSN URI (`databricks://token:<access_token>@<host>/<catalog>/
+    <schema>?http_path=...`), parsed the same way `SecretResolver` hands resolved DSNs to every
+    other adapter — no inline secrets, no plumbing changes to the secret-resolution path itself.
+  - **Cost estimation**: `EXPLAIN COST <sql>`, parsing Spark's humanized
+    `Statistics(sizeInBytes=<n> <unit>, rowCount=<n>)` fragments (byte-unit conversion table for
+    `B`/`KiB`/`MiB`/`GiB`/`TiB`/`PiB`/`EiB`; largest fragment taken rather than summed, since
+    fragments nest bottom-up in the plan and summing would multiply-count). Falls back to a floor
+    estimate (`DATABRICKS_EXPLAIN_FALLBACK`) exactly as Snowflake's EXPLAIN-JSON path does when a
+    plan carries no CBO statistics (table never `ANALYZE`d).
+  - **Bounded profiling**: batched per-column-group queries (not one round trip per column) over a
+    `LIMIT`-bounded CTE — `COUNT`/`APPROX_COUNT_DISTINCT`/`MIN|MAX(LENGTH(...))`, same shape as the
+    BigQuery adapter's batching, chosen because Spark's planner benefits more from one shared scan
+    per batch than Snowflake-style per-column round trips do.
+- Registered in `src/aida/connectors/registry.py`: `connector_registry.register("databricks", ...,
+  maturity="BETA", ...)` replacing the `declare_planned` entry (Teradata and Db2 remain planned).
+  Notes are explicit that this has never been exercised against a live Databricks workspace — same
+  honesty precedent already carried by the Snowflake, Oracle and BigQuery rows.
+- Added `databricks-sql-connector==4.4.0` to `pyproject.toml` `dependencies` (matching how
+  `snowflake-connector-python` is a hard dependency, not an extra) plus the matching
+  `ignore_missing_imports` mypy override; `uv sync --extra dev` picked it up cleanly with no
+  conflicts. `import databricks.sql` stays lazy inside `_get_connection`, guarded by `ImportError`,
+  same as every other adapter's driver import.
+- 24 new tests (`tests/test_connectors_databricks.py`): identifier quoting/escaping, JSON and URI
+  DSN parsing (including malformed-payload and missing-field rejection), `EXPLAIN COST` byte-unit
+  conversion (parametrized over `B`/`KiB`/`MiB`/`GiB`) and largest-fragment selection, the no-
+  statistics fallback, registry definition/capability-honesty checks, mocked-connection discovery
+  (columns/constraints/FK/comments assembling correctly) and a companion test proving FK and
+  comment-query refusals degrade the envelope rather than raising, mocked `execute_read_query`
+  (captures `cursor.query_id`), mocked `estimate_read_query`, mocked `profile_table`, and the
+  positive-limits guard.
+- Updated four existing tests that encoded the old `declare_planned` state, all pre-existing
+  assertions this change made false rather than test bugs: `tests/test_connectors.py`
+  (`default_capabilities(databricks)` now equals the real capability dict, not `{}`);
+  `tests/test_ingestion.py` (the "planned connector" example switched to `teradata`; added a new
+  `test_registry_exposes_databricks_as_implemented`, mirroring the existing Snowflake one);
+  `tests/test_inv9_capability_honesty.py` (added a `databricks` entry to `_CONSTRUCTION_DSNS` so
+  INV-9's advertised-vs-implemented and SQL-execution-surface checks actually run against it; the
+  registry-populated tripwire's planned-count floor dropped from `>= 3` to `>= 2` — Databricks moved
+  out of the planned set, and that is the correct, intended consequence of doing the work, not a
+  weakened check, since two connectors — Teradata, Db2 — remain honestly planned).
+- Verification run against `origin/feature/snowflake-dbt-lineage-mcp` HEAD `ca80b14` (synced via
+  `git fetch && git reset --hard` before starting, confirming CN-2b was not already closed): `ruff
+  check .` clean; `mypy src` clean (185 source files); full `pytest` suite green except two
+  pre-existing, unrelated failures confirmed present on the clean checkout before this change
+  (`tests/test_doc_claims.py::test_cited_test_path_resolves[...TestParameterContractDesigner]` ×2 —
+  a stale doc citation from the ST-A4 entry above, naming a test class that does not exist in
+  `tests/test_studio.py`; not touched here, out of this item's scope).
+- Known limitations, stated the same way the Snowflake/Oracle/BigQuery rows already state theirs:
+  no live Databricks workspace was available to verify against; `views`/`routines`/`grants`
+  discovery axes are not implemented; auth is PAT-only (no OAuth service-principal / workload
+  identity); FK discovery is best-effort against a Unity Catalog surface newer than PK/UNIQUE and
+  unverified live; no certification run or version fixtures yet (CN-3 remains open for every
+  adapter, not specific to this one).

@@ -11,6 +11,7 @@ dependencies = [
   "aiokafka==0.14.0",
   "alembic==1.16.5",
   "asyncpg==0.31.0",
+  "databricks-sql-connector==4.4.0",
   "defusedxml==0.7.1",
   "fastapi==0.141.1",
   "google-cloud-bigquery==3.44.0",
@@ -73,7 +74,7 @@ plugins = ["pydantic.mypy"]
 packages = ["aida"]
 
 [[tool.mypy.overrides]]
-module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*", "snowflake", "snowflake.*"]
+module = ["aiokafka", "aiokafka.*", "asyncpg", "asyncpg.*", "pytds", "pytds.*", "defusedxml", "defusedxml.*", "oracledb", "oracledb.*", "snowflake", "snowflake.*", "databricks", "databricks.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

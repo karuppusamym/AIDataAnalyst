@@ -59,6 +59,13 @@ _CONSTRUCTION_DSNS: dict[str, str] = {
             "location": "europe-west2",
         }
     ),
+    "databricks": json.dumps(
+        {
+            "server_hostname": "dbc-test.cloud.databricks.com",
+            "http_path": "/sql/1.0/warehouses/test123",
+            "access_token": "dapi_test_token",
+        }
+    ),
 }
 
 _IMPLEMENTED = [
@@ -82,8 +89,10 @@ def test_the_registry_is_populated() -> None:
     """Tripwire: every test in this module is parameterized over the registry, so
     an empty registry would turn the whole file into a no-op that reports green.
     """
-    assert len(_IMPLEMENTED) >= 5
-    assert len(_PLANNED) >= 3
+    assert len(_IMPLEMENTED) >= 6
+    # CN-2b moved Databricks from `declare_planned` to a real pull adapter, so only
+    # teradata and db2 remain planned; the tripwire tracks that, not a fixed count.
+    assert len(_PLANNED) >= 2
     assert len(_CAPABILITY_FLAGS) >= 8
 
 

@@ -4,6 +4,7 @@ from typing import Any
 
 from aida.connectors.base import Connector, ConnectorCapabilities
 from aida.connectors.bigquery import BigQueryConnector
+from aida.connectors.databricks import DatabricksConnector
 from aida.connectors.oracle import OracleConnector
 from aida.connectors.postgres import PostgresConnector
 from aida.connectors.snowflake import SnowflakeConnector
@@ -175,8 +176,26 @@ connector_registry.register(
     ),
     capabilities=SnowflakeConnector.DEFAULT_CAPABILITIES,
 )
+connector_registry.register(
+    "databricks",
+    DatabricksConnector,
+    display_name="Databricks SQL",
+    dialect="databricks",
+    maturity="BETA",
+    version="1.0.0",
+    notes=(
+        "Pull discovery of Unity Catalog catalogs/schemas/tables/columns via "
+        "per-catalog INFORMATION_SCHEMA, PRIMARY KEY/UNIQUE constraints, "
+        "best-effort FOREIGN KEY discovery (degrades to none rather than failing "
+        "on older metastores), table/column/schema/catalog comments, EXPLAIN "
+        "COST-based query estimation, and bounded profiling. PAT auth only (no "
+        "delegated/workload identity); view/routine/grant axes not yet "
+        "implemented. Code complete; never exercised against a live Databricks "
+        "workspace -- same honesty gap as the Snowflake, Oracle and BigQuery rows."
+    ),
+    capabilities=DatabricksConnector.DEFAULT_CAPABILITIES,
+)
 for connector_type, display_name, dialect in (
-    ("databricks", "Databricks SQL", "databricks"),
     ("teradata", "Teradata", "teradata"),
     ("db2", "IBM Db2", "db2"),
 ):

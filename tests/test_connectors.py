@@ -40,7 +40,7 @@ def test_registry_definitions_expose_capabilities_without_connector_instantiatio
     assert default_capabilities(postgres) == postgres.capabilities
     assert default_capabilities(sqlserver) == sqlserver.capabilities
     assert default_capabilities(snowflake) == snowflake.capabilities
-    assert default_capabilities(databricks) == {}
+    assert default_capabilities(databricks) == databricks.capabilities
 
 
 # --- envelope 1.1 axes (gap/02 N1) ------------------------------------------

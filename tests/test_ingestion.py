@@ -138,11 +138,11 @@ def test_connector_certification_is_deterministic() -> None:
 
 
 def test_registry_exposes_planned_connectors_without_claiming_implementation() -> None:
-    databricks = connector_registry.definition("databricks")
+    teradata = connector_registry.definition("teradata")
 
-    assert databricks.implementation_status == "PLANNED"
-    assert "databricks" not in connector_registry.supported_types
-    assert databricks.transports == ("PUSH",)
+    assert teradata.implementation_status == "PLANNED"
+    assert "teradata" not in connector_registry.supported_types
+    assert teradata.transports == ("PUSH",)
 
 
 def test_registry_exposes_snowflake_as_implemented() -> None:
@@ -152,6 +152,16 @@ def test_registry_exposes_snowflake_as_implemented() -> None:
     assert "snowflake" in connector_registry.supported_types
     assert "PULL" in snowflake.transports
     assert "PUSH" in snowflake.transports
+
+
+def test_registry_exposes_databricks_as_implemented() -> None:
+    """CN-2b: Databricks moved from `declare_planned` to a real pull adapter."""
+    databricks = connector_registry.definition("databricks")
+
+    assert databricks.implementation_status == "IMPLEMENTED"
+    assert "databricks" in connector_registry.supported_types
+    assert "PULL" in databricks.transports
+    assert "PUSH" in databricks.transports
 
 
 def test_registry_exposes_bigquery_as_implemented() -> None:
