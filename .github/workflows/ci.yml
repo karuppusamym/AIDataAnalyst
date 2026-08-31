@@ -56,6 +56,13 @@ env:
   # Fail rather than silently resolving a different dependency set than the lockfile
   # pins. A stale `uv.lock` is itself a CI failure.
   UV_FROZEN: "1"
+  # AU-3 (config.py) requires `environment` to be set explicitly outside pytest, so a
+  # typo'd variable *name* fails as loudly as a typo'd value. The `tests` job is exempt
+  # via its own pytest detection; every other job invokes a plain script (alembic,
+  # openapi_diff.py, perf_baseline.py, ...) that imports `aida.main` outside pytest and
+  # needs this set explicitly. `development` is correct here: these jobs introspect the
+  # app's schema/hot paths, they never deploy anything.
+  AIDA_ENVIRONMENT: "development"
 
 jobs:
   quality:
