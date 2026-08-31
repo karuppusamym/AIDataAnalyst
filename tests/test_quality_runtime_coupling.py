@@ -24,7 +24,14 @@ section 2). This file proves the two real wiring points landed this wave:
      and `quality_coupling.get_trust_warning` messages into
      `agent_run.plan_evidence["trust"]` (returned to the caller as
      `AgentAnalysisResponse.plan_evidence`) and into the deterministic
-     explanation string itself -- a visible warning, not a buried one.
+     explanation string itself -- a visible warning, not a buried one. As of
+     C3 (`GovernedAgentOrchestrator._checkpoint_explained`), a WARNING
+     incident still only warns, but a CRITICAL incident now genuinely
+     refuses the run -- the same `check_quality_gate` BLOCK action TL-3 has
+     always used to stop a governed tool before it runs, closing the gap
+     where a model-generated or development-override answer could surface
+     data from a critically incident-affected table with nothing stronger
+     than a warning appended after the fact.
 
 Both wiring points resolve incidents through the same
 `quality_coupling.resolve_table_ids` / `fetch_open_incidents` helpers against
@@ -60,6 +67,7 @@ from aida.agent_orchestrator import GovernedAgentOrchestrator
 from aida.config import Settings
 from aida.db import Base
 from aida.models import (
+    AgentRun,
     AnalysisRun,
     AuditEvent,
     DataDomain,
@@ -76,7 +84,7 @@ from aida.models import (
     QueryExecution,
     ToolExecution,
 )
-from aida.query_gateway import GatewayResult, QueryExecutionGateway
+from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
 from aida.schemas import ToolExecutionRequest
 from aida.tool_api import execute_tool
 from tests.support.doubles import security_context
@@ -270,7 +278,11 @@ async def _fake_execute(
 ) -> GatewayResult:
     """Stands in for a real warehouse round-trip: gating/warning behaviour is
     what these tests prove, not `QueryExecutionGateway`'s own SQL execution
-    (covered elsewhere)."""
+    (covered elsewhere). `row_count` is set to match `rows=()` -- a real
+    `execute()` always sets it on every successful `QueryExecution` (C3's
+    EXECUTED checkpoint independently re-verifies it is present and within
+    bound), so leaving it `None` here would make this double describe an
+    execution the real gateway never produces."""
     execution = QueryExecution(
         organization_id=datasource.organization_id,
         datasource_id=datasource.id,
@@ -279,6 +291,7 @@ async def _fake_execute(
         dialect=datasource.dialect,
         sql_hash="fake-sql-hash",
         referenced_tables=["finance.fact_sales"],
+        row_count=0,
     )
     session.add(execution)
     await session.flush()
@@ -385,9 +398,14 @@ async def test_execute_tool_allows_when_incident_is_resolved(
 async def test_run_surfaces_trust_warning_when_answer_touches_flagged_table(
     scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A WARNING-severity incident still only warns -- `check_quality_gate`'s
+    `gate_action` is `DEMOTE`/`WARN`, not `BLOCK`, so C3's EXPLAINED
+    checkpoint lets the run complete. See
+    `test_run_blocks_when_answer_touches_table_with_critical_incident` for
+    the CRITICAL case, which now refuses instead of merely warning."""
     monkeypatch.setattr(QueryExecutionGateway, "execute", _fake_execute)
     await scenario.completed_analysis()
-    await scenario.incident(severity="CRITICAL", status="OPEN")
+    await scenario.incident(severity="WARNING", status="OPEN")
 
     orchestrator = GovernedAgentOrchestrator(Settings())
     result = await orchestrator.run(
@@ -407,6 +425,42 @@ async def test_run_surfaces_trust_warning_when_answer_touches_flagged_table(
     assert trust["warnings"], "expected at least one trust warning"
     assert trust["trust_score"] < 100
     assert "TRUST WARNING" in result.explanation
+
+
+async def test_run_blocks_when_answer_touches_table_with_critical_incident(
+    scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C3's EXPLAINED checkpoint: a CRITICAL open incident on a table the
+    answer actually came from now refuses the run via `check_quality_gate`'s
+    `BLOCK` action -- the same gate `test_execute_tool_blocks_when_dependency_has_critical_incident`
+    already proves for TL-3's tool-gating path. Before this change, AG-6 only
+    ever warned; this is the new deny path."""
+    monkeypatch.setattr(QueryExecutionGateway, "execute", _fake_execute)
+    await scenario.completed_analysis()
+    await scenario.incident(severity="CRITICAL", status="OPEN")
+
+    orchestrator = GovernedAgentOrchestrator(Settings())
+    with pytest.raises(QueryRejected) as exc_info:
+        await orchestrator.run(
+            scenario.db,
+            datasource=scenario.datasource,
+            context=scenario.analyst(),
+            correlation_id="corr-trust-block",
+            question="What is total revenue for fact_sales this quarter?",
+            candidate_sql="SELECT 1 FROM finance.fact_sales",
+            preferred_tool_version_id=None,
+            tool_parameters={},
+            requested_limit=None,
+        )
+    assert "EXPLAINED_QUALITY_INCIDENT_BLOCK" in str(exc_info.value)
+
+    run = (
+        await scenario.db.execute(select(AgentRun).order_by(AgentRun.created_at.desc()))
+    ).scalars().first()
+    assert run is not None
+    assert run.status == "FAILED"
+    assert run.failure_reason is not None
+    assert run.failure_reason.startswith("EXPLAINED_QUALITY_INCIDENT_BLOCK")
 
 
 async def test_run_has_no_trust_warning_with_no_open_incidents(
