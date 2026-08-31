@@ -43703,6 +43703,22 @@
             }
           },
           {
+            "description": "CX-9: 'personalized' (default) ranks the policy-filtered catalog by the requester's domain ownership (GL-2) and role, highest affinity first -- nothing is hidden, only reordered. 'catalog' restores the pre-CX-9 undifferentiated alphabetical order, identical for every requester.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "personalized",
+              "description": "CX-9: 'personalized' (default) ranks the policy-filtered catalog by the requester's domain ownership (GL-2) and role, highest affinity first -- nothing is hidden, only reordered. 'catalog' restores the pre-CX-9 undifferentiated alphabetical order, identical for every requester.",
+              "enum": [
+                "personalized",
+                "catalog"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Principal-Id",
             "required": false,
