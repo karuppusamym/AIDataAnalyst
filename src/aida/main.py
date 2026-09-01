@@ -39,6 +39,7 @@ from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
 from aida.lineage_evidence_export_api import router as lineage_evidence_export_router
 from aida.logging import configure_logging
+from aida.marketplace_discovery import router as marketplace_discovery_router
 from aida.mcp_server import router as mcp_router
 from aida.metric_suggestion_api import router as metric_suggestion_router
 from aida.models import Organization
@@ -313,6 +314,7 @@ app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
+app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)

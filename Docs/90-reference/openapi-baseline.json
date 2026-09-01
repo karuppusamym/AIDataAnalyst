@@ -13996,6 +13996,112 @@
         "title": "MarketplaceAccessRequestRead",
         "type": "object"
       },
+      "MarketplaceDiscoveryResponse": {
+        "additionalProperties": false,
+        "description": "HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same\n``Page`` shape ``GET /v1/marketplace/products`` returns, plus the resolved\nfilters and the screening decision, so a caller can see exactly which\nstructured call the question resolved to -- transparency, not a second\nresult set.",
+        "properties": {
+          "prompt_risk_decision": {
+            "enum": [
+              "ALLOW",
+              "BLOCK"
+            ],
+            "title": "Prompt Risk Decision",
+            "type": "string"
+          },
+          "prompt_risk_reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Prompt Risk Reason Codes",
+            "type": "array"
+          },
+          "prompt_risk_score": {
+            "title": "Prompt Risk Score",
+            "type": "number"
+          },
+          "resolved_filters": {
+            "$ref": "#/components/schemas/MarketplaceFilterResolution"
+          },
+          "results": {
+            "$ref": "#/components/schemas/Page"
+          }
+        },
+        "required": [
+          "results",
+          "resolved_filters",
+          "prompt_risk_decision",
+          "prompt_risk_reason_codes",
+          "prompt_risk_score"
+        ],
+        "title": "MarketplaceDiscoveryResponse",
+        "type": "object"
+      },
+      "MarketplaceFilterResolution": {
+        "additionalProperties": false,
+        "description": "The structured contract a marketplace question resolves to: exactly\n``search_marketplace``'s own typed filter arguments, nothing more. Each\nfield is bounded to what ``search_marketplace`` itself already accepts\n(``q``/``domain`` at the same 200-char cap its ``Query(...)`` parameters\nenforce, ``classification`` restricted to the literal set the marketplace\nschema defines) so the pydantic contract itself is the first bound -- an\nout-of-contract model response fails validation before it ever becomes a\nquery argument, the same discipline ``semantic_inference.py``'s model\ncontracts use for metadata-inference output.",
+        "properties": {
+          "classification": {
+            "anyOf": [
+              {
+                "enum": [
+                  "PUBLIC",
+                  "INTERNAL",
+                  "CONFIDENTIAL",
+                  "RESTRICTED"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "q": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Q"
+          },
+          "rationale_codes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 10,
+            "title": "Rationale Codes",
+            "type": "array"
+          },
+          "sort": {
+            "default": "personalized",
+            "enum": [
+              "personalized",
+              "catalog"
+            ],
+            "title": "Sort",
+            "type": "string"
+          }
+        },
+        "title": "MarketplaceFilterResolution",
+        "type": "object"
+      },
       "MeRead": {
         "additionalProperties": false,
         "properties": {
@@ -48836,6 +48942,159 @@
           }
         },
         "summary": "Search Marketplace",
+        "tags": [
+          "data-products-marketplace"
+        ]
+      }
+    },
+    "/v1/marketplace/products/ask": {
+      "get": {
+        "description": "AT-3: conversational natural-language entry point for marketplace discovery.\n\nA \"find me X\" question is screened by the identical deterministic control\n``agent_orchestrator.GovernedAgentOrchestrator.run()`` applies to every\ngoverned question, resolved to ``search_marketplace``'s own filter arguments\nvia the model gateway (bounded/validated before use), and answered through\nthat exact, unmodified function with this caller's own ``SecurityContext`` --\nsee the module docstring above for the full pipeline and rationale. A\nconversational search can therefore never surface anything a structured\n``GET /v1/marketplace/products`` call with the same resolved filters could\nnot also return.",
+        "operationId": "ask_marketplace_v1_marketplace_products_ask_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "question",
+            "required": true,
+            "schema": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketplaceDiscoveryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask Marketplace",
         "tags": [
           "data-products-marketplace"
         ]

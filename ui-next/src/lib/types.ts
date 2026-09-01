@@ -2325,6 +2325,24 @@ export interface MarketplaceAccessRequestRead {
   updated_at: string;
 }
 
+/** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
+export interface MarketplaceDiscoveryResponse {
+  results: Page;
+  resolved_filters: MarketplaceFilterResolution;
+  prompt_risk_decision: "ALLOW" | "BLOCK";
+  prompt_risk_reason_codes: string[];
+  prompt_risk_score: number;
+}
+
+/** The structured contract a marketplace question resolves to: exactly */
+export interface MarketplaceFilterResolution {
+  q?: string | null;
+  domain?: string | null;
+  classification?: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "RESTRICTED" | null;
+  sort?: "personalized" | "catalog";
+  rationale_codes?: string[];
+}
+
 export interface MeRead {
   principal_id: string;
   principal_type: string;
