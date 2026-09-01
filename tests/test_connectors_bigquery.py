@@ -10,6 +10,7 @@ from aida.connectors.base import QueryEstimate
 from aida.connectors.bigquery import (
     BigQueryConnector,
     _assemble_catalog,
+    _BigQueryEnvelopeRows,
     _build_view_definition,
     _parse_credential_payload,
     _profile_expressions,
@@ -654,6 +655,59 @@ async def test_a_refused_routines_query_is_recorded_rather_than_read_as_no_routi
     assert catalogs[0].schemas[0].routines == ()
     recorded = catalogs[0].attributes["envelope_v11_unavailable"]
     assert "bigquery.routines.list" in recorded["routines"]
+
+
+def test_a_schema_known_only_through_a_routine_still_surfaces() -> None:
+    """A dataset holding only a routine has no row in `INFORMATION_SCHEMA.COLUMNS`.
+
+    `assemble_catalog` unions schema names across every 1.1 axis precisely for this
+    case (INV-9); the schema must not silently vanish just because BigQuery's routine
+    inventory outruns its table inventory.
+    """
+    catalogs = _assemble_catalog(
+        "bank-warehouse",
+        [],
+        [],
+        envelope=_BigQueryEnvelopeRows(
+            routines=(
+                {
+                    "routine_schema": "batch",
+                    "routine_name": "nightly_close",
+                    "routine_type": "PROCEDURE",
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "batch"
+    assert schema.tables == ()
+    assert len(schema.routines) == 1
+    assert schema.routines[0].name == "nightly_close"
+
+
+def test_a_schema_known_only_through_its_own_description_still_surfaces() -> None:
+    catalogs = _assemble_catalog(
+        "bank-warehouse",
+        [],
+        [],
+        envelope=_BigQueryEnvelopeRows(
+            schema_options=(
+                {
+                    "schema_name": "reporting",
+                    "option_name": "description",
+                    "option_value": '"Reporting dataset"',
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "reporting"
+    assert schema.tables == ()
+    assert schema.source_description == "Reporting dataset"
 
 
 async def test_descriptions_land_at_every_level_bigquery_exposes() -> None:

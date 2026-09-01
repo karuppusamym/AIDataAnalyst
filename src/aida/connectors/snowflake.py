@@ -717,35 +717,18 @@ def _assemble_snowflake_catalog(
     apply_column_descriptions(table_map, _column_description_rows(column_rows))
     apply_view_definitions(table_map, _view_definition_rows(table_map, envelope))
 
-    # Scoped to schemas `table_map` already knows about, matching the previous
-    # rebuild-based assembly, which only ever walked `catalog.schemas` derived from
-    # `table_map` and so never surfaced a schema holding only routines or only
-    # grants. `assemble_catalog`'s own routines=/grants= contract would happily
-    # synthesize such a schema (see `test_a_schema_with_only_routines_survives_assembly`
-    # in tests/test_connectors.py) -- correct for postgres/sqlserver, which pass it
-    # unfiltered, but a behavior change here that this dedup does not make silently.
     routines: dict[str, list[DiscoveredRoutine]] = {}
     for row in envelope.routines:
         schema_name = str(row["routine_schema"])
-        if schema_name in table_map:
-            routines.setdefault(schema_name, []).append(_build_routine(row))
-    grants = {
-        schema_name: grant_list
-        for schema_name, grant_list in build_grants(
-            [_grant_row(row) for row in envelope.grants]
-        ).items()
-        if schema_name in table_map
-    }
+        routines.setdefault(schema_name, []).append(_build_routine(row))
+    grants = build_grants([_grant_row(row) for row in envelope.grants])
 
-    # Same scoping as routines/grants above: a schema known only through its own
-    # COMMENT, with no tables, routines, or grants, was never surfaced before. A
-    # `None` description is dropped rather than kept -- `assemble_catalog` reads a
+    # A `None` description is dropped rather than kept -- `assemble_catalog` reads a
     # missing key exactly the same way it would read one mapped to `None`.
     schema_descriptions = {
         str(row["schema_name"]): description
         for row in envelope.schemata
-        if str(row["schema_name"]) in table_map
-        and (description := _optional_text(row.get("comment"))) is not None
+        if (description := _optional_text(row.get("comment"))) is not None
     }
 
     catalogs = assemble_catalog(

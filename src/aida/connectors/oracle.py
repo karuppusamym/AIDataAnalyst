@@ -1078,23 +1078,8 @@ def _assemble_catalog(
     apply_column_descriptions(tables, _column_description_rows(envelope))
     apply_view_definitions(tables, _view_definition_rows(tables, envelope))
 
-    # Scoped to schemas `tables` already knows about, matching the previous
-    # rebuild-based assembly, which only ever walked `catalog.schemas` derived from
-    # `tables` and so never surfaced a schema holding only routines or only grants.
-    # `assemble_catalog`'s own routines=/grants= contract would happily synthesize
-    # such a schema (see `test_a_schema_with_only_routines_survives_assembly` in
-    # tests/test_connectors.py) -- correct for postgres/sqlserver, which pass it
-    # unfiltered, but a behavior change here that this dedup does not make silently.
-    routines = {
-        schema_name: routine_list
-        for schema_name, routine_list in _envelope_routines(envelope).items()
-        if schema_name in tables
-    }
-    grants = {
-        schema_name: grant_list
-        for schema_name, grant_list in build_grants(_grant_rows(envelope)).items()
-        if schema_name in tables
-    }
+    routines = _envelope_routines(envelope)
+    grants = build_grants(_grant_rows(envelope))
     catalogs = assemble_catalog(
         str(catalog_name),
         tables,

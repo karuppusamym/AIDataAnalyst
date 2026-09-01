@@ -8182,3 +8182,146 @@ No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Ale
 touched — every composed field reads existing columns (`metadata_column.classification`,
 `data_quality_incident.severity`, `asset_certification`, `ownership_assignment`,
 `asset_documentation_version`) through existing or newly-added read-only query helpers.
+
+---
+
+## 2026-09-01 — IN-5g closed: Oracle/Snowflake/BigQuery surface schemas known only through a routine, grant, or comment
+
+### Not IN-5f's dedup regressing -- IN-5f's dedup deliberately preserving a pre-existing gap
+
+IN-5f folded Oracle/Snowflake/BigQuery's envelope-1.1 assembly onto `connectors/discovery.py`'s
+shared helpers, and in doing so found that each connector's own `_assemble_catalog` (Snowflake:
+`_assemble_snowflake_catalog`) filtered its routines/grants/schema_descriptions dicts down to schema
+names already present in the table map before handing them to `assemble_catalog`. That filter exactly
+reproduced each connector's *prior*, pre-IN-5f rebuild-based assembly -- which only ever walked
+schemas derived from the table query -- so IN-5f kept it rather than silently changing behavior mid
+dedup, and queued the actual fix as separate work (this row).
+
+The filtered-out behavior was itself the bug: `assemble_catalog` unions schema names across `tables`,
+`routines`, `grants`, and `schema_descriptions` specifically so that a schema holding only a stored
+procedure, only a grant, or only its own schema-level comment -- and zero tables -- still appears in
+the discovered catalog (`connectors/discovery.py`'s own docstring;
+`test_a_schema_with_only_routines_survives_assembly` in `tests/test_connectors.py`). postgres.py and
+sqlserver.py already get this right, because they pass `routines=`/`grants=`/`schema_descriptions=`
+straight through unfiltered. Oracle, Snowflake, and BigQuery did not: a schema containing, say, only a
+PL/SQL package with no tables has been silently invisible to discovery on these three sources since
+before IN-5f, and remained so after it.
+
+### The fix
+
+Removed the three filters, one per connector:
+
+- `oracle.py::_assemble_catalog`: dropped the `if schema_name in tables` comprehension guards on both
+  `routines` and `grants`, now built directly from `_envelope_routines(envelope)` and
+  `build_grants(_grant_rows(envelope))`.
+- `bigquery.py::_assemble_catalog`: same shape, dropped `if schema_name in tables` on `routines` and
+  on `schema_descriptions` (kept the pre-existing `description is not None` filter, which is unrelated
+  -- it drops a schema whose only OPTIONS row isn't actually a description).
+- `snowflake.py::_assemble_snowflake_catalog`: dropped `if schema_name in table_map` on the routines
+  loop, the grants comprehension, and the schema_descriptions comprehension (kept its own unrelated
+  `description is not None` filter via the walrus assignment).
+
+No change to `connectors/discovery.py` itself -- `assemble_catalog` already had the right contract;
+these three connectors were the only callers not using it.
+
+### Tests (`tests/test_connectors_oracle.py` +2, `tests/test_connectors_bigquery.py` +2,
+`tests/test_connectors_snowflake.py` +3)
+
+One reproduction test per axis each connector actually supports (Oracle: routines, grants; BigQuery:
+routines, schema_descriptions -- no grants axis on BigQuery at all; Snowflake: routines, grants,
+schema comments), each building a catalog from zero table rows plus one routine/grant/comment row for
+a schema name that appears nowhere else, and asserting that schema now appears with `tables == ()`.
+All 7 were run and confirmed **failing** against the pre-fix code (`assert len(catalogs[0].schemas) ==
+1` / `== 0`), then confirmed passing after the fix -- a genuine before/after, not an assertion written
+to match whatever the code already did.
+
+### Verification
+
+`PYTHONPATH=src pytest tests/test_connectors_oracle.py tests/test_connectors_snowflake.py
+tests/test_connectors_bigquery.py tests/test_connectors.py`: 125 passed before the fix, 132 passed
+after (the 7 new tests), zero other diffs in outcome -- no existing assertion about which schemas
+appear, what they contain, or how unavailable axes are recorded changed. `ruff check` and `mypy
+--strict` clean on all six touched files (`oracle.py`, `bigquery.py`, `snowflake.py`, plus their three
+test files).
+
+### This fix was lost twice before landing, and why that changed how it landed
+
+First implementation: in worktree `claude/vibrant-mclaren-93e006`. Before it could be committed, a
+concurrent session merged `origin/feature/snowflake-dbt-lineage-mcp` into that same branch (commit
+`e9386de`, whose own message names the cause: "rebase blocked by dirty worktree from a concurrent
+session's uncommitted connector work") -- the merge process discarded this session's uncommitted
+working-tree changes rather than stashing or preserving them. Second implementation: redone
+immediately after discovery, in the same worktree, same approach, re-verified green -- then, mid-edit
+on the next file, the entire worktree directory was found empty (confirmed three independent ways:
+PowerShell `Get-ChildItem -Force`, .NET `Directory.GetFileSystemEntries`, `cmd /c dir /a`, all reporting
+zero entries) and its `git worktree list` registration gone, apparently torn down by another process
+while this session was actively editing inside it.
+
+Recovery: the branch ref `claude/vibrant-mclaren-93e006` no longer existed either, but its last commit
+(`e9386de`) was still reachable in the local object database (`git cat-file -t e9386de` → `commit`) --
+not yet garbage-collected. A fresh worktree was created from that commit (`git worktree add
+../vibrant-mclaren-recovered -b claude/vibrant-mclaren-recovered e9386de`), and this fix was
+implemented a third time there. This time the result is committed immediately rather than left as
+uncommitted working-tree state, specifically because leaving it uncommitted is what made it
+disposable to an external process twice in one session -- a git commit is durable in a way an editor
+buffer or working-tree diff is not.
+
+---
+
+## 2026-09-01 — IN PROGRESS sweep: all 26 rows reverified; AU-6 and KG-1 closed
+
+Requested: re-verify every tracker row still marked IN PROGRESS (26 of them) and, per row, either
+close it (if actually complete), fix it (if a concrete remaining piece is actually finishable here),
+or leave it honestly open with the real blocker restated. Read every one of the 26 rows' full
+evidence text against the current code/tests rather than trusting the status column alone.
+
+### Closed this pass
+
+**AU-6** (wire or delete the remaining unreachable modules): the row's own last update deferred to
+RT-7 ("the third...stays open as its own row -- see RT-7"). RT-7 closed 2026-08-31, later the same
+day AU-6 was last touched. Reverified `tests/test_reachability_gate.py` fresh: 5/5 pass, and the live
+`ALLOWLIST` in that file is down to exactly 2 entries (`aida.vector_store`, `aida.injection_corpus`),
+each citing a tracker row that either states the gap explicitly as a known limitation (RT-1, DONE) or
+whose module is confirmed-by-docstring to be test-fixture data never meant to be production-wired
+(`injection_corpus.py`: "Test corpus for indirect prompt injection detection... used by the test suite
+to verify zero bypasses" -- the live detection logic it supplies cases for, `injection_defense.py`, is
+separately wired per AG-1/AG-2/TS-6). No open thread left under this row. Flipped IN PROGRESS -> DONE.
+
+**KG-1** (project approved relationships, module 10/Knowledge Graph): its own evidence text has read
+"Same as RL-4" since it was written. RL-4 (module 06/10, the same capability tracked under Relationships)
+closed 2026-08-30 with one honestly-stated remaining gap (cross-source candidates have no Neo4j
+projection path). KG-1 was simply never flipped when RL-4 closed -- a duplicate-tracking row falling
+out of sync with its twin, not a real second gap. Flipped IN PROGRESS -> DONE, pointing at RL-4.
+
+`pytest tests/test_reachability_gate.py tests/test_rt7_quality_trust_ranking.py
+tests/test_quality_runtime_coupling.py`: 15 passed, confirming the evidence behind both closures.
+
+### Read and reconfirmed genuinely open (no action -- restating the real blocker would not change it)
+
+The other 24 IN PROGRESS rows were read in full and fall into two honest categories, neither of which
+a coding pass in this sandbox can close by itself:
+
+- **Blocked on infrastructure or data this sandbox does not have**, already stated as such in the
+  row's own text: CN-1a/CN-1c/CN-2a/CN-2b (no live Oracle/BigQuery/Snowflake/Databricks credentials),
+  CN-3 (PostgreSQL 14 leg configured but `dockerd` cannot start here), CT-2/PR-5 (no 1M-object/1M-table
+  live-scale rig), RL-7 (no labelled banking corpus), QG-2/QG-5/QG-6/AU-10 (no live Vault/Postgres/SQL
+  Server instance to run the apply/fetch path against), LN-1/LN-4/TL-1 (the "no-DB-test-harness"
+  systemic gap named across CT-1/LN-4/TL-1), N5 (embedding the real catalogue and running a recall@10
+  eval needs a live, populated warehouse plus a paid embedding-provider key, not present here), UX-5
+  (the interactive axe-core/screen-reader WCAG AA audit needs a running browser against a live UI,
+  which this pass did not attempt to stand up), TS-3 (the trace-span sentinel scanner is genuinely
+  unbuilt, not infra-blocked, but is new scope rather than a "verify and finish" item -- see below).
+- **Real, unfinished feature scope, explicitly and honestly labeled "not started"/"remaining" in the
+  row's own text**, each large enough to be its own piece of work rather than a quick finish: ST-04/05/06
+  (module-by-module `models.py`/`schemas.py`/`platform/` extraction, explicitly phased -- Phase 3 done,
+  Phase 4+ covers 16 more modules by design), GL-6 (escalation is single-tier, multi-tier not built),
+  MG-3 (private-endpoint routing not started), AT-7 part (b) (consumer-binding registry with staged
+  rollout -- part (a) is DONE), TS-3 (trace-span sentinel scan not built).
+
+No row in this second group was force-closed or given cosmetic evidence to make it look done -- per
+this file's own entry conventions, a status change without a genuinely satisfied exit condition is
+worse than leaving the row visibly open. Recommendation handed back to the requester rather than acted
+on unilaterally: of the "real, unfinished feature scope" group, MG-3's private-endpoint routing,
+AT-7(b)'s consumer-binding registry, GL-6's multi-tier escalation, and TS-3's trace-span sentinel scan
+are all buildable in this sandbox without external infrastructure, unlike the rest of the list -- worth
+prioritizing explicitly rather than attempting all four unguided in one pass.
