@@ -6422,3 +6422,61 @@ exact test in the AG-7/TL-5/SM-5 entries above, not anything this row touched.
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+## 2026-09-01 — ST-18 closed: INV-7's "mutation" ratified as "records an actor's decision"
+
+ST-17 (`Docs/review-2026-08/gap/09-inv7-audit-closeout.md`) left one open architectural question:
+does INV-7's "every mutation produces an audit record" cover the lazily-created per-tenant default
+rows `ensure_default_domain` (`aida.domain_service`) and `ensure_organization_integration_policy`
+(`aida.integration_service`) stage on first read, reached from `GET` routes tracked in
+`tests/test_inv7_attributability.py`'s `_LAZY_DEFAULT_WRITE_ROUTES`? The closeout doc recommended
+"records an actor's decision" (so these routes stay excused) over "stages a row" (which would
+require both helpers to return a created/found flag and the twelve call sites to audit only on the
+creating branch). This row is Architecture ratifying that recommendation, not rubber-stamping it.
+
+### Independent verification, not just repetition
+
+Read both helpers as they exist in the tree today rather than trusting the closeout doc's quoted
+snippets: `ensure_default_domain` (`src/aida/domain_service.py:10`) takes `(session, lob)` and
+builds its `DataDomain` from four constants (`name="Ungoverned"`, `code="UNGOVERNED"`,
+`is_default=True`) plus `lob.organization_id`/`lob.id`; `ensure_organization_integration_policy`
+(`src/aida/integration_service.py:10`) takes `(session, organization_id)` and builds its
+`OrganizationIntegrationPolicy` from `organization_id` alone, with
+`transformation_metadata_integrations` filled by the model's own schema default
+(`default_transformation_metadata_integrations`, `src/atlas/modules/identity_tenancy/models.py`),
+not by the helper. Neither signature accepts a caller-supplied value of any kind — confirmed
+against the model definitions directly, not the doc's paraphrase. The recommendation's premise —
+"no caller input reaches the row, so naming a creator would manufacture attribution rather than
+preserve it" — holds: two principals racing to the same route stage a byte-identical row, and
+`created_at` already bounds when it happened without needing an attributed actor. Recommendation
+adopted as-is.
+
+One discrepancy noted for the record, not acted on: the closeout doc and the ST-18 tracker row both
+say "8 GET call sites"; `_LAZY_DEFAULT_WRITE_ROUTES` today has twelve entries (dbt/BI
+artifact-import and lineage routes added by concurrent work since ST-17 landed). Immaterial to
+which reading binds — this became a docs-only close — but worth flagging for whoever next touches
+that count.
+
+### What changed
+
+`Docs/10-architecture/01-principles-and-invariants.md`'s INV-7 section gained a ratified scope note
+stating the binding reading, the reasoning, the two falsifiable tests that hold its premise
+(`test_the_lazy_default_write_list_stays_closed`, `test_lazy_default_writers_record_no_actor_decision`),
+and what would collapse the carve-out (either helper accepting a caller-supplied value).
+`Docs/review-2026-08/gap/09-inv7-audit-closeout.md` §4 gained a ratified banner pointing back at the
+invariants document instead of reading as an open recommendation.
+
+Per the tracker row's own exit clause, "records an actor's decision" winning means no code change:
+the eight-then-twelve GET routes stay excused, both helpers keep their current signatures, and
+`_LAZY_DEFAULT_WRITE_ROUTES` stays as-is. Nothing under `src/` or `migrations/` touched.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py` and
+`tests/test_inv7_attributability.py`: all pass (11/11 on the latter). No Python file was touched by
+this row, so `ruff check`/`mypy` were not re-run — the change is Markdown-only in
+`Docs/10-architecture/01-principles-and-invariants.md`,
+`Docs/review-2026-08/gap/09-inv7-audit-closeout.md` and this log.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
