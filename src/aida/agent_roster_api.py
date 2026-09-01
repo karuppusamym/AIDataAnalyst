@@ -6,8 +6,6 @@ requires: the organization-wide (not per-agent) scope of the method/results
 data, and why every agent is reported with no auto-apply branch.
 """
 
-from __future__ import annotations
-
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
