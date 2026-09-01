@@ -6110,3 +6110,96 @@ the SDK touches a database, the network, or a credential. Pre-existing coupling 
 `aida.schemas`/`aida.tool_rendering`, not introduced here, and out of scope for this row
 (`models.py`/`schemas.py` are read-only for TL-5) — flagged as a follow-up task rather than fixed
 in place.
+
+## 2026-09-01 — AG-7 closed: query memory similarity + safe adaptation
+
+### What "query memory" turned out to mean here
+
+The obvious reading — embed past natural-language questions, find the nearest one, replay its
+SQL — runs straight into two deliberate, already-landed platform decisions, not a gap:
+`AgentRun`'s own docstring says "raw user questions are intentionally not persisted" (only an
+HMAC `question_hash` is kept), and `QueryExecution.normalized_sql` is redacted of every literal
+value *before* it is ever written (`aida.sql_redaction.redact_sql_literals`, applied in
+`query_gateway.py`'s validation pipeline — "the executable form never leaves the gateway"). So
+there is no question text to embed and no literal-bearing SQL to replay; building either would
+mean adding new persisted state this session was explicitly told to stop and report on rather
+than work around. It wasn't necessary to stop, because a real, already-persisted, value-free
+substrate exists one level down: `QueryExecution.referenced_tables` (table names, no values) is
+genuine structural evidence of what a past successful query was *about*, and the live retrieval
+stage already resolves a *new* question to a set of candidate `MetadataTable` ids before any SQL
+is generated. Comparing those two table-id sets is real similarity with zero new columns and zero
+new tables.
+
+### What shipped
+
+New `src/aida/query_memory.py`:
+
+* `jaccard_similarity` / `check_candidate_staleness` / `select_best_match` — pure, database-free
+  functions, mirroring `aida.quality_coupling` / `aida.tool_first_rate`'s own split. Staleness has
+  two independent triggers, either one enough to reject a candidate: the whole-model
+  `semantic_version` string (module 13's existing "PUBLISHED `SemanticModelVersion`, else
+  technical-metadata" computation, already used everywhere else in this codebase for "has
+  anything semantic changed") no longer matches, or *any* table the candidate referenced has
+  `updated_at` later than the candidate run's own completion timestamp — catching a raw
+  catalog/schema re-ingestion that never triggered a semantic-model publish. A table that no
+  longer resolves at all (renamed, dropped) is treated as changed, not as absent evidence.
+* `find_query_memory_match` — the one DB-facing function, reusing
+  `aida.quality_coupling.resolve_table_ids` rather than re-resolving names its own way, and
+  `aida.timeutil.as_utc` for the SQLite-vs-PostgreSQL timezone-round-trip comparison every other
+  timestamp comparison in this codebase already has to guard against.
+* Reuses the existing `QueryMemoryEvidence` table (`status == "ELIGIBLE"` — negative feedback
+  already suppresses reuse, landed in an earlier ST-05-era pass) as the memory ledger; no schema
+  change.
+
+Wired into `agent_orchestrator.py`'s existing `MODEL_GENERATION` branch (the `else:` arm reached
+when no governed tool matched and no development-SQL override was supplied) as a new
+`generation_source="QUERY_MEMORY_ADAPTATION"` candidate path, gated off by default behind a new
+`Settings.agent_query_memory_enabled` flag. When a fresh, non-stale, `ELIGIBLE` match exists above
+`agent_query_memory_min_similarity`, its redacted `normalized_sql` is added to the *same*
+`structured_completion` call's payload as `query_memory_template` grounding (with a system-prompt
+addendum asking the model to adapt it where it genuinely fits), and `plan_evidence` records a
+value-free match summary (ids, similarity, table count — never SQL text or table names). The SQL
+the model returns then reaches the identical `self.query_gateway.execute(...)` call — and
+therefore the identical `sql_guard.validate` — every other generation strategy uses; no second,
+parallel, or weaker validation path was added anywhere. `tool_first_rate.py` (TL-6) was updated to
+count the new source as freeform (same reasoning already applied to `DEVELOPMENT_OVERRIDE`: it
+never touched the governed-tool catalog, so crediting it as tool-first would misstate governance
+maturity).
+
+### Verification
+
+39 tests. `tests/test_query_memory.py` (25, pure, no database): `jaccard_similarity` identical/
+disjoint/partial/empty-set cases; `check_candidate_staleness` for a matching version, a superseded
+semantic version, a table touched after the run, an unresolved table, and multiple simultaneous
+reasons; `select_best_match` for no candidates, a single valid match, below-threshold rejection,
+negative-feedback suppression, stale-candidate rejection even at perfect overlap, highest-
+similarity-wins among several valid candidates, a deterministic tie-break, and value-free
+`.evidence()`; plus `retrieved_table_ids_from_hits` extraction. `tests/test_agent_orchestrator_
+query_memory.py` (5, a real `GovernedAgentOrchestrator.run()` against an in-memory SQLite database,
+the same harness `test_quality_runtime_coupling.py` uses for AG-6): a fresh eligible candidate is
+offered and the run is labelled `QUERY_MEMORY_ADAPTATION`; a candidate whose referenced table was
+touched after it completed is excluded and the run falls back to `MODEL_GATEWAY`, with no
+`query_memory_template` ever reaching the model payload; no prior memory falls back the same way;
+the feature stays off with the default `Settings` (nothing offered even with an eligible candidate
+sitting in the table); and the validation-bypass proof — a memory match is found and offered (so
+the feature genuinely engaged), the fake model returns a mutating `DELETE` statement, and the run
+is rejected with `MUTATING_OR_ADMIN_STATEMENT_FORBIDDEN` exactly as any other generation path would
+reject it, with the persisted `AgentRun.generation_source` still reading
+`QUERY_MEMORY_ADAPTATION` on the rejected row — proving the guard stopped it, not an absent match.
+`tests/test_tool_first_rate.py` gained one test and one updated assertion for the new source.
+
+`ruff check` and `mypy src` clean (255 files) on every touched/new file.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+`tests/test_openapi_diff_gate.py` clean — no HTTP route added or changed (three new `Settings`
+fields, no schema or route). Full-repo `uv run pytest`: zero failures. The one failure that
+appears if `AIDA_ENVIRONMENT=development` is exported for the *entire* suite rather than scoped to
+the doc-claims run alone (`test_config.py::test_environment_must_be_explicit_outside_tests`) is
+that test's own pre-existing sensitivity to the variable being set at all, not anything this row
+touched — reproduced identically on unmodified `HEAD` via `git stash`/`stash pop`. A separate,
+also pre-existing `test_doc_claims.py` gap (7 failures, from a sibling session's public-SDK row
+landed in this branch's history just before this row's final rebase, citing several of that SDK's
+source filenames bare rather than module-qualified) reproduces identically with this entire diff
+reverted — confirmed the same way, untouched by and out of scope for AG-7.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
