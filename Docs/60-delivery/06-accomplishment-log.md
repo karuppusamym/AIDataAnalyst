@@ -5331,6 +5331,8 @@ confirmed unrelated to this row too, untouched here.
 `python scripts/generate_module.py observability_audit` to scaffold, same as this row did for
 connectivity) are still TODO.
 
+---
+
 ## 2026-09-01 — UX-14: `ui-next` API types generated from the live OpenAPI document
 
 `ui-next/src/lib/types.ts` was hand-written, with its own header admitting the plan: "the moment
@@ -5407,3 +5409,51 @@ only the same `aida.main` untyped-import note `scripts/openapi_diff.py` reports 
 `mypy` job scopes to `mypy src` only, so neither script is gated there -- pre-existing, unrelated to
 this row, confirmed by running the same check against `openapi_diff.py`). No `models.py`/
 `schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `03 ingestion` scaffolded and populated
+
+Third of the five leaf modules, same shape as the `connectivity` row above: no scaffold existed,
+so `scripts/generate_module.py ingestion` ran first, then populated in the same pass.
+
+### What moved
+
+Three model classes from `aida.models` to `atlas.modules.ingestion.models`: `MetadataIngestionJob`
+(idempotent evidence for one canonical push/stream delivery), `MetadataIngestionBatch` (durable
+manifest for a resumable, chunked snapshot), `MetadataIngestionChunk` (checksum-addressed chunk,
+payload nulled after processing). Sixteen schema classes plus the `MetadataAttribute` type alias
+from `aida.schemas` to `atlas.modules.ingestion.schemas`: the full envelope family
+(`MetadataColumnEnvelope`, `MetadataConstraintEnvelope`, `MetadataViewDefinitionEnvelope`,
+`MetadataRoutineParameterEnvelope`, `MetadataRoutineEnvelope`, `MetadataGrantEnvelope`,
+`MetadataTableEnvelope`, `MetadataSchemaEnvelope`, `MetadataCatalogEnvelope`) plus the
+job/batch/chunk create and read DTOs (`MetadataIngestionCreate/Read`,
+`MetadataIngestionBatchCreate/Read`, `MetadataIngestionChunkCreate/Read`).
+
+The interesting ownership call in this row: the envelope *schemas* (wire format for what a producer
+sends) are ingestion's per the module register's explicit "envelopes" in its owned-data list, but
+`aida.envelope_models`'s ORM classes (`MetadataViewDefinition`, `MetadataRoutine`,
+`MetadataRoutineParameter`, `MetadataObjectDescription`, `MetadataSourceGrant`) are the *persisted
+catalog records* an envelope eventually gets turned into -- module 04 (catalog)'s domain, not this
+module's job/batch/chunk pipeline state, despite sharing "metadata ingestion envelope" in their
+docstring. Left untouched in `aida.envelope_models`, to be picked up when catalog's own row lands.
+`FleetSummaryRead` was also considered and explicitly **not** moved -- it composes datasource,
+analysis-run, scan-policy and outbox state across four different modules' domains, so it doesn't
+fit any one leaf module's "owns" description; it stays in `aida.schemas` for now, closer to
+`operational_api.py`'s eventual home (module 20, per `04-module-decomposition.md` §9's mapping
+table) than to ingestion's job/batch/chunk DTOs.
+
+Same scope, same shim pattern, same new-contract treatment as the two rows before it: no
+`schema=` change, no FK conversion, `aida.models`/`aida.schemas` re-export everything, and a new
+`ingestion module privacy` import-linter contract.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 227 files). `lint-imports` 6 kept, 0 broken. Route
+count identical before/after (52/52, `git stash` comparison against the connectivity-only commit).
+Full `pytest` suite: zero failures. `alembic heads` still the same pre-existing two heads, confirmed
+unrelated and untouched by this row (same as the prior two entries).
+
+### Remaining in ST-05/ST-06
+
+`04 catalog` and `20 observability_audit` (needs `python scripts/generate_module.py
+observability_audit` to scaffold first).

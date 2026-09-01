@@ -173,6 +173,33 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), ingestion's
+# turn. Same shape and rationale as the two module-privacy contracts above.
+name = "ingestion module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.ingestion.service",
+  "atlas.modules.ingestion.repository",
+  "atlas.modules.ingestion.models",
+  "atlas.modules.ingestion.schemas",
+  "atlas.modules.ingestion.router",
+  "atlas.modules.ingestion.workers",
+]
+allowed_importers = [
+  "atlas.modules.ingestion.api",
+  "atlas.modules.ingestion.contracts",
+  "atlas.modules.ingestion.service",
+  "atlas.modules.ingestion.repository",
+  "atlas.modules.ingestion.models",
+  "atlas.modules.ingestion.schemas",
+  "atlas.modules.ingestion.router",
+  "atlas.modules.ingestion.workers",
+  "atlas.modules.ingestion.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
 # INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
 # ADR-0004 both name as the enforcement mechanism for the execution choke point.
 # Until now it did not exist, so the platform's most-marketed property was a
