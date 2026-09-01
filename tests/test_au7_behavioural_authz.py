@@ -128,6 +128,23 @@ _NOT_ROLE_GATED_ROUTES: dict[str, str] = {
     "GET /api/v1/organizations/{organization_id}/consumption-lineage/graph": (
         "same as consumption-lineage/by-resource above (CX-4)"
     ),
+    "POST /v1/access-review/entitlements/generate": (
+        "self-service by design (OB-7): any authenticated principal may pull their own "
+        "entitlement report with no role restriction; pulling a *different* principal's "
+        "report is manually role-checked inside the handler body against "
+        "access_review_api._ON_BEHALF_OF_ROLES, mirroring the audited-before-403 shape "
+        "token revoke/detokenize already use above"
+    ),
+    "GET /v1/access-review/reports": (
+        "same self-service-by-default shape as entitlements/generate above (OB-7): a "
+        "principal with no elevated role only ever sees their own report history, "
+        "enforced manually via access_review_api._ON_BEHALF_OF_ROLES, not require_roles"
+    ),
+    "GET /v1/access-review/reports/{report_id}": (
+        "same self-service-by-default shape as entitlements/generate above (OB-7); "
+        "enforce_organization gates tenancy and the handler manually checks "
+        "_ON_BEHALF_OF_ROLES before returning another principal's report"
+    ),
 }
 
 

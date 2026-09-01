@@ -94,10 +94,21 @@ def require_roles_gate(
     this way -- rather than re-parsing the `require_roles(...)` call with `ast` -- is what makes
     this work for a role set built from an aliased constant (`require_roles(*COMPILER_ROLES)`),
     where the AST at the call site names a variable, not a role.
+
+    `require_roles_or_delegated` (PG-4) is treated as an equivalent gate, not a separate case:
+    it is `require_roles`'s exact `allowed`-role check plus an *additional* delegation path that
+    can only widen who passes, never narrow it -- a principal holding none of `allowed` and no
+    matching active delegation is refused exactly as `require_roles` would refuse them. Its
+    closure has the identical `allowed` free variable, just under a different `__qualname__`
+    (`require_roles_or_delegated.<locals>.dependency`), so it is recognized the same way.
     """
     for dependant in _iter_dependants(route.dependant):
         call = dependant.call
-        if getattr(call, "__qualname__", "") != "require_roles.<locals>.dependency":
+        qualname = getattr(call, "__qualname__", "")
+        if qualname not in (
+            "require_roles.<locals>.dependency",
+            "require_roles_or_delegated.<locals>.dependency",
+        ):
             continue
         freevars = call.__code__.co_freevars
         cells = call.__closure__ or ()
