@@ -96,6 +96,20 @@ from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
     MetadataViewDefinitionEnvelope as MetadataViewDefinitionEnvelope,
 )
 
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.catalog.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import MetadataTableRead` (etc.) caller keeps working
+# unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.catalog.schemas import (  # noqa: E402, I001
+    MetadataColumnRead as MetadataColumnRead,
+    MetadataConstraintRead as MetadataConstraintRead,
+    MetadataIndexRead as MetadataIndexRead,
+    MetadataPartitionRead as MetadataPartitionRead,
+    MetadataTableRead as MetadataTableRead,
+)
+
 
 class AnalysisRunCreate(ApiModel):
     mode: str = Field(default="INCREMENTAL", pattern=r"^(FULL|INCREMENTAL)$")
@@ -230,17 +244,6 @@ class OutboxEventRead(ApiModel):
     published_at: datetime | None
 
 
-class MetadataColumnRead(ApiModel):
-    id: UUID
-    name: str
-    ordinal_position: int
-    physical_type: str
-    nullable: bool
-    classification: str
-    classification_source: str
-    status: str
-
-
 class ClassificationEvidenceRead(ApiModel):
     id: UUID
     column_id: UUID
@@ -274,49 +277,6 @@ class ClassificationFeedIngestResponse(ApiModel):
     matched: int
     changed: int
     unmatched: list[str]
-
-
-class MetadataConstraintRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    constraint_type: str
-    columns: list[str]
-    referenced_table_id: UUID | None
-    referenced_columns: list[str]
-    status: str
-
-
-class MetadataIndexRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    index_type: str
-    columns: list[str]
-    is_unique: bool
-    is_primary: bool
-    status: str
-
-
-class MetadataPartitionRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    partition_type: str
-    ordinal_position: int
-    key_columns: list[str]
-    high_value: str | None
-    status: str
-
-
-class MetadataTableRead(ApiModel):
-    id: UUID
-    datasource_id: UUID
-    schema_id: UUID
-    name: str
-    object_type: str
-    status: str
-    fingerprint: str
 
 
 class ColumnProfileRead(ApiModel):

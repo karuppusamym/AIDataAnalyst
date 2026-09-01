@@ -200,6 +200,35 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), catalog's turn
+# -- the plan's own "Risk: medium" module ("many inbound callers"). Same shape and
+# rationale as the module-privacy contracts above; the shim-at-the-old-path technique
+# is this contract's actual mitigation for that risk, not a separate step.
+name = "catalog module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.catalog.service",
+  "atlas.modules.catalog.repository",
+  "atlas.modules.catalog.models",
+  "atlas.modules.catalog.schemas",
+  "atlas.modules.catalog.router",
+  "atlas.modules.catalog.workers",
+]
+allowed_importers = [
+  "atlas.modules.catalog.api",
+  "atlas.modules.catalog.contracts",
+  "atlas.modules.catalog.service",
+  "atlas.modules.catalog.repository",
+  "atlas.modules.catalog.models",
+  "atlas.modules.catalog.schemas",
+  "atlas.modules.catalog.router",
+  "atlas.modules.catalog.workers",
+  "atlas.modules.catalog.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
 # INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
 # ADR-0004 both name as the enforcement mechanism for the execution choke point.
 # Until now it did not exist, so the platform's most-marketed property was a

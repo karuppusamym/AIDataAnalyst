@@ -5552,6 +5552,8 @@ ui-next && npm run typecheck && npm run test && npm run build` all green (12/12 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
 
+---
+
 ## 2026-09-01 — SM-6 closed: Open Semantic Interchange evaluation recorded as `ADR-0022`
 
 Pure documentation, no code touched. Tracker `SM-6` ("Open Semantic Interchange evaluation --
@@ -5650,3 +5652,73 @@ only), `Docs/90-reference/openapi-baseline.json` (regenerated, description-text 
 `contracts.py` file and no Alembic migration touched. N3 itself (real procedure-body parsing,
 including dynamic-SQL detection) remains `TODO` and unstarted, deliberately — that is a multi-day
 build the row explicitly excludes from this pass.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06 note: pre-existing `test_doc_claims.py` gap flagged, not fixed
+
+`uv run pytest -q` after the `03 ingestion` row's rebase surfaced 10 failures in
+`tests/test_doc_claims.py`, all
+tracing to lines the concurrent UX-14 commits (`8359e88`, `16c59fb`) introduced, not to this row:
+bare citations of three scripts (bare filename, no `scripts/` prefix -- that root isn't in
+`EXTRA_BARE_FILENAME_ROOTS`, which only covers `tests/` and `migrations/versions/`) and two CI job
+names cited in a way that trips the contract-citation heuristic (they're workflow job names, not
+import-linter contract names). Confirmed unrelated by direct line-range
+inspection -- `git checkout` of the pre-rebase commit was unavailable in this environment, so
+provenance was established by reading the exact flagged lines and matching them byte-for-byte
+against UX-14's own accomplishment-log/tracker prose, none of which this row touched. Queued as a
+follow-up task (`task_7f558980`) rather than fixed here, per this log's established out-of-scope
+discipline -- it is a test-infrastructure gap in a different row's work, not a regression from a
+models/schemas move.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `04 catalog` scaffolded and populated
+
+Fourth of the five leaf modules, and the refactor plan's own flagged "Risk: medium" one --
+`06-refactor-plan.md` §6 calls out catalog by name: "many inbound callers; convert them
+incrementally with the old import kept as a deprecated alias for one release." The shim-at-the-old-
+path technique every row in this series already uses **is** that mitigation, applied from this row's
+first commit rather than as a follow-up -- there was never a moment where a catalog caller's import
+would have broken.
+
+### What moved
+
+Seven model classes from `aida.models` to `atlas.modules.catalog.models`: `MetadataCatalog`,
+`MetadataSchema`, `MetadataTable`, `MetadataColumn`, `MetadataConstraint`, `MetadataIndex`,
+`MetadataPartition` -- the full catalog hierarchy. "Fingerprints" and "tombstones" from the module
+register's owned-data list are not separate tables: every one of the seven already carries its own
+`fingerprint` column, and a tombstoned object is `status != "ACTIVE"` plus `deprecated_at`, not a
+distinct record -- so nothing beyond the seven needed moving to cover that part of the register too.
+Five read DTOs from `aida.schemas` to `atlas.modules.catalog.schemas`: `MetadataColumnRead`,
+`MetadataConstraintRead`, `MetadataIndexRead`, `MetadataPartitionRead`, `MetadataTableRead`. No
+`Create`/`Update` DTOs exist for this module -- catalog objects arrive only through ingestion
+(module 03's envelope, moved in the row before this one), never created directly through this
+module's own API.
+
+Deliberately **not** moved: `ClassificationEvidence` and its four schemas
+(`ClassificationEvidenceRead`, `ClassificationFeedRecord`, `ClassificationFeedIngestRequest`,
+`ClassificationFeedIngestResponse`), even though the evidence ledger references `MetadataColumn` by
+ID and its schema classes sit textually interleaved with the catalog ones in both `aida.models` and
+`aida.schemas` today. "Classifications" is module 05 (profiling)'s registered word in
+`04-module-decomposition.md` §4, not catalog's -- the interleaving in the old flat file is exactly
+the kind of accidental proximity the decomposition is meant to undo, not a signal to follow.
+`aida.envelope_models`'s catalog-adjacent ORM classes and `MetadataEnrichmentProposal`/
+`MetadataBusinessAnnotation`/`MetadataBusinessAnnotationVersion` (module 07 semantic-layer's
+"annotations") were also considered and left for their own modules' passes, per the same reasoning
+the `03 ingestion` row above already gave for the envelope-model classes.
+
+Same scope, same shim pattern, same new-contract treatment as every row before it in this series.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 239 files). `lint-imports` 7 kept, 0 broken. Route
+count identical before/after (52/52). Full `pytest` suite: the same 10 pre-existing, confirmed-
+unrelated `test_doc_claims.py` failures noted above and no others -- zero failures attributable to
+this row. `alembic heads` still the same pre-existing two heads, confirmed unrelated and untouched.
+
+### Remaining in ST-05/ST-06
+
+`20 observability_audit` only -- the last of the five Phase 3 leaf modules. Needs
+`python scripts/generate_module.py observability_audit` to scaffold first, same as this row and the
+two before it did for their own modules.
