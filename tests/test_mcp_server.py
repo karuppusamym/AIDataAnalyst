@@ -24,6 +24,8 @@ from typing import Any
 from uuid import uuid4
 
 from aida import mcp_server
+from aida.asset_context import AssetContextSignals, ClassificationSummary
+from aida.authorization_gate import AuthorizationDenied
 from aida.config import Settings
 from aida.mcp_server import (
     MCP_PROTOCOL_VERSION,
@@ -47,9 +49,14 @@ from aida.models import (
     MetadataCatalog,
     MetadataSchema,
     MetadataTable,
+    OutboxEvent,
     TableProfile,
 )
-from aida.schemas import UnifiedLineageGraphRead
+from aida.schemas import (
+    UnifiedLineageGraphRead,
+    UnifiedLineageImpactNodeRead,
+    UnifiedLineageImpactRead,
+)
 from aida.security import SecurityContext
 from aida.unified_lineage_api import LineageNodeNotFoundError
 
@@ -327,6 +334,7 @@ def test_native_lineage_tool_slugs_match_declared_definitions() -> None:
         "get_lineage_impact",
         "resolve_entity",
         "get_transformation_detail",
+        "get_asset_context",
     }
 
 
@@ -366,6 +374,7 @@ async def test_newest_native_lineage_tools_deny_ineligible_caller_like_unknown_t
             "get_transformation_detail",
             {"datasource_id": str(uuid4()), "entity_id": str(uuid4())},
         ),
+        ("get_asset_context", {"table_id": str(uuid4())}),
     ]
 
     for slug, arguments in scenarios:
@@ -1226,3 +1235,439 @@ def test_catalog_read_reports_null_row_count_when_no_profile_exists() -> None:
     payload = _read_resource(context, session, datasource_id, schema.name, table.name)
 
     assert payload["row_count_estimate"] is None
+
+
+# ---------------------------------------------------------------------------
+# AT-13 -- atlas__get_asset_context: one composite call, one policy
+# evaluation, one audit record. Success-path tests monkeypatch
+# `compose_asset_context_signals` and `build_unified_lineage_impact_payload`
+# (real ORM-backed collaborators, same convention every other native lineage
+# tool's tests use, see the module docstring) and `gate` (so no real
+# workspace/policy machinery is needed), and only exercise this handler's own
+# decision logic: role gating, table/datasource resolution, the exactly-one-
+# gate-call / exactly-one-audit-record shape, and response composition. The
+# `usage_decision` embedded in the response is produced by the REAL, un-mocked
+# `compute_usage_decision` -- so these tests also prove the wiring between the
+# composed signals and the pure decision function, not just that some
+# decision object comes back.
+# ---------------------------------------------------------------------------
+
+
+class AssetContextSession:
+    """Fake session for `_handle_get_asset_context`: `.get()` answers the
+    MetadataTable and DataSource lookups (the only direct session use --
+    signal composition and lineage traversal are monkeypatched collaborators,
+    same convention as `LineageToolSession` above); `.add()`/`.commit()`
+    record what the audit/outbox path did."""
+
+    def __init__(self, *, table: object, datasource: object) -> None:
+        self.table = table
+        self.datasource = datasource
+        self.added: list[object] = []
+        self.committed = False
+
+    async def get(self, model: type[object], _identity: object) -> object:
+        if model is MetadataTable:
+            return self.table
+        return self.datasource
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+def _asset_context_scenario() -> tuple[DataSource, MetadataTable]:
+    org = uuid4()
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org,
+        project_id=uuid4(),
+        connector_type="postgresql",
+        name="warehouse",
+        status="ACTIVE",
+    )
+    table = MetadataTable(
+        id=uuid4(),
+        organization_id=org,
+        datasource_id=datasource.id,
+        schema_id=uuid4(),
+        name="customers",
+        object_type="TABLE",
+        status="ACTIVE",
+        fingerprint="table-fp",
+    )
+    return datasource, table
+
+
+def _canned_signals(
+    *,
+    certification_state: str = "CERTIFIED",
+    quality_state: str = "PASSING",
+    has_open_critical_incident: bool = False,
+    owner: str | None = "steward@bank.example",
+    has_sensitive_classification: bool = False,
+) -> AssetContextSignals:
+    return AssetContextSignals(
+        owner=owner,
+        owner_source="ownership_assignment (GL-2, ACTIVE)" if owner else None,
+        certification_state=certification_state,
+        certification_expires_at=None,
+        quality_state=quality_state,
+        open_incident_count=1 if has_open_critical_incident else 0,
+        has_open_critical_incident=has_open_critical_incident,
+        classification=ClassificationSummary(
+            total_columns=10,
+            classified_columns=3,
+            distinct_classifications=(
+                ("INTERNAL", "PII") if has_sensitive_classification else ("INTERNAL",)
+            ),
+            has_sensitive_classification=has_sensitive_classification,
+        ),
+    )
+
+
+def _canned_impact(datasource: DataSource, table: MetadataTable) -> UnifiedLineageImpactRead:
+    return UnifiedLineageImpactRead(
+        datasource_id=datasource.id,
+        focus_node_id=str(table.id),
+        focus_node_kind="TABLE",
+        focus_label=table.name,
+        upstream=[
+            UnifiedLineageImpactNodeRead(
+                node_id=str(uuid4()),
+                node_kind="TABLE",
+                label="raw_customers",
+                qualified_name="raw.public.raw_customers",
+                depth=2,
+                contributing_edge_sources=["FOREIGN_KEY"],
+            )
+        ],
+        downstream=[],
+        requested_depth=5,
+        node_limit=200,
+        upstream_truncated=False,
+        downstream_truncated=False,
+    )
+
+
+async def test_get_asset_context_denies_ineligible_caller_like_an_unknown_tool() -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),
+    )
+    session = AssetContextSession(table=None, datasource=None)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(uuid4())},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [
+            {"type": "text", "text": "Tool 'get_asset_context' not found or not published."}
+        ],
+    }
+
+
+async def test_leak_get_asset_context_denied_caller_cannot_distinguish_existing_from_missing_table(
+    monkeypatch: object,
+) -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),  # disjoint from UNIFIED_LINEAGE_READER_ROLES
+    )
+
+    async def _forbidden_signals(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "compose_asset_context_signals must not run before the role check denies"
+        )
+
+    monkeypatch.setattr(mcp_server, "compose_asset_context_signals", _forbidden_signals)  # type: ignore[attr-defined]
+
+    real_table_id = uuid4()  # stands in for a table id that genuinely exists
+    missing_table_id = uuid4()  # stands in for one that does not
+
+    session_for_real_table = DeniedCallerSpySession()
+    result_for_real_table = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(real_table_id)},
+        session_for_real_table,
+        caller,  # type: ignore[arg-type]
+    )
+
+    session_for_missing_table = DeniedCallerSpySession()
+    result_for_missing_table = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(missing_table_id)},
+        session_for_missing_table,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result_for_real_table == result_for_missing_table
+    assert result_for_real_table == {
+        "isError": True,
+        "content": [
+            {"type": "text", "text": "Tool 'get_asset_context' not found or not published."}
+        ],
+    }
+    assert session_for_real_table.get_called is False
+    assert session_for_missing_table.get_called is False
+
+
+async def test_get_asset_context_rejects_a_non_uuid_table_id() -> None:
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset({"Analyst"}),
+    )
+    session = AssetContextSession(table=None, datasource=None)
+
+    result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": "not-a-uuid"},
+        session,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "table_id must be a UUID."}],
+    }
+
+
+async def test_get_asset_context_reports_identical_not_found_for_missing_and_wrong_org() -> None:
+    org = uuid4()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=org,
+        roles=frozenset({"Analyst"}),
+    )
+
+    missing_session = AssetContextSession(table=None, datasource=None)
+    missing_result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(uuid4())},
+        missing_session,  # type: ignore[arg-type]
+        caller,
+    )
+
+    foreign_datasource, foreign_table = _asset_context_scenario()  # different org than `caller`
+    wrong_org_session = AssetContextSession(table=foreign_table, datasource=foreign_datasource)
+    wrong_org_result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(foreign_table.id)},
+        wrong_org_session,  # type: ignore[arg-type]
+        caller,
+    )
+
+    assert missing_result == wrong_org_result
+    assert missing_result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "Asset not found or not accessible."}],
+    }
+
+
+async def test_get_asset_context_returns_not_found_when_the_gate_denies(
+    monkeypatch: object,
+) -> None:
+    datasource, table = _asset_context_scenario()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = AssetContextSession(table=table, datasource=datasource)
+
+    gate_calls: list[dict[str, object]] = []
+
+    async def _denying_gate(_session: object, _context: object, **kwargs: object) -> object:
+        gate_calls.append(kwargs)
+        raise AuthorizationDenied("WORKSPACE_ENFORCED_DENY")
+
+    async def _forbidden_signals(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("compose_asset_context_signals must not run once the gate denies")
+
+    monkeypatch.setattr(mcp_server, "gate", _denying_gate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mcp_server, "compose_asset_context_signals", _forbidden_signals)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(table.id)},
+        session,  # type: ignore[arg-type]
+        caller,
+        "corr-denied",
+        Settings(_env_file=None),
+    )
+
+    # Same anti-enumeration wording as a table that doesn't exist at all --
+    # a policy denial is never distinguishable from "not found".
+    assert result == {
+        "isError": True,
+        "content": [{"type": "text", "text": "Asset not found or not accessible."}],
+    }
+    assert len(gate_calls) == 1
+    assert session.added == []
+    assert session.committed is False
+
+
+async def test_get_asset_context_makes_exactly_one_policy_evaluation_and_one_audit_record(
+    monkeypatch: object,
+) -> None:
+    """AT-13's explicit anti-pattern: a composite read must not perform one
+    policy evaluation or one audit record per composed fact. This proves the
+    whole call -- certification + quality + classification + lineage depth +
+    owner + usage_decision -- makes exactly ONE `gate()` call and leaves
+    exactly ONE `AuditEvent` and ONE `OutboxEvent` behind, not five (or two)
+    of either.
+    """
+    datasource, table = _asset_context_scenario()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = AssetContextSession(table=table, datasource=datasource)
+
+    gate_calls: list[dict[str, object]] = []
+
+    async def _allowing_gate(_session: object, _context: object, **kwargs: object) -> object:
+        gate_calls.append(kwargs)
+        return None
+
+    signals_calls = 0
+
+    async def _fake_signals(*_args: object, **_kwargs: object) -> AssetContextSignals:
+        nonlocal signals_calls
+        signals_calls += 1
+        return _canned_signals(has_open_critical_incident=True, owner=None)
+
+    async def _fake_impact(*_args: object, **_kwargs: object) -> UnifiedLineageImpactRead:
+        return _canned_impact(datasource, table)
+
+    monkeypatch.setattr(mcp_server, "gate", _allowing_gate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mcp_server, "compose_asset_context_signals", _fake_signals)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mcp_server, "build_unified_lineage_impact_payload", _fake_impact)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(table.id)},
+        session,  # type: ignore[arg-type]
+        caller,
+        "corr-asset-context",
+        Settings(_env_file=None),
+    )
+
+    assert "isError" not in result
+    assert result["content"][0]["text"].startswith("✅ Asset context composed")
+
+    # Exactly one policy evaluation, reusing asset_evidence_api.py's own
+    # gate() call shape verbatim -- not a second/different evaluation.
+    assert len(gate_calls) == 1
+    assert gate_calls[0]["action"] == "READ_METADATA"
+    assert gate_calls[0]["resource_type"] == "datasource"
+    assert gate_calls[0]["resource_id"] == str(datasource.id)
+    assert gate_calls[0]["datasource_id"] == datasource.id
+
+    # Signals composed exactly once (not per-fact).
+    assert signals_calls == 1
+
+    # Exactly one audit record and one outbox event for the WHOLE composite
+    # call -- not one per composed fact.
+    audit_events = [value for value in session.added if isinstance(value, AuditEvent)]
+    outbox_events = [value for value in session.added if isinstance(value, OutboxEvent)]
+    assert len(audit_events) == 1
+    assert len(outbox_events) == 1
+    assert len(session.added) == 2
+    assert audit_events[0].action == "mcp.asset_context.read"
+    assert audit_events[0].outcome == "SUCCESS"
+    assert audit_events[0].resource_type == "metadata_table"
+    assert audit_events[0].resource_id == str(table.id)
+    assert session.committed is True
+
+    body_text = result["content"][1]["text"]
+    payload = json.loads(body_text.removeprefix("```json\n").removesuffix("\n```"))
+
+    # Every composed fact is present, and the usage_decision was computed by
+    # the REAL compute_usage_decision from the (mocked) signals above: an
+    # open critical incident with no owner assigned -- BLOCKED wins over
+    # CAUTION, and both factors are visible, not a bare label.
+    assert payload["owner"] is None
+    assert payload["certification"]["state"] == "CERTIFIED"
+    assert payload["quality"]["has_open_critical_incident"] is True
+    assert payload["classification"]["has_sensitive_classification"] is False
+    assert payload["lineage"]["available"] is True
+    assert payload["lineage"]["max_upstream_depth"] == 2
+    assert payload["usage_decision"]["decision"] == "BLOCKED"
+    factor_names = {factor["name"] for factor in payload["usage_decision"]["factors"]}
+    assert factor_names == {
+        "certification_state",
+        "open_critical_quality_incident",
+        "quality_state",
+        "has_owner",
+        "has_sensitive_classification",
+    }
+
+
+async def test_get_asset_context_surfaces_lineage_unavailable_without_failing_the_call(
+    monkeypatch: object,
+) -> None:
+    """A table the unified graph never registered as a node (e.g.
+    deprecated) still gets every other composed fact -- lineage
+    unavailability is reported honestly, not an error that sinks the whole
+    composite call."""
+    datasource, table = _asset_context_scenario()
+    caller = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = AssetContextSession(table=table, datasource=datasource)
+
+    async def _allowing_gate(_session: object, _context: object, **_kwargs: object) -> object:
+        return None
+
+    async def _fake_signals(*_args: object, **_kwargs: object) -> AssetContextSignals:
+        return _canned_signals()
+
+    async def _raising_impact(*_args: object, **_kwargs: object) -> None:
+        raise LineageNodeNotFoundError("lineage node not found in this datasource's graph")
+
+    monkeypatch.setattr(mcp_server, "gate", _allowing_gate)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mcp_server, "compose_asset_context_signals", _fake_signals)  # type: ignore[attr-defined]
+    monkeypatch.setattr(mcp_server, "build_unified_lineage_impact_payload", _raising_impact)  # type: ignore[attr-defined]
+
+    result = await _handle_native_lineage_tool_call(
+        "get_asset_context",
+        {"table_id": str(table.id)},
+        session,  # type: ignore[arg-type]
+        caller,
+        "corr-no-lineage",
+        Settings(_env_file=None),
+    )
+
+    assert "isError" not in result
+    body_text = result["content"][1]["text"]
+    payload = json.loads(body_text.removeprefix("```json\n").removesuffix("\n```"))
+    assert payload["lineage"] == {
+        "available": False,
+        "reason": "table is not a node in this datasource's unified lineage graph",
+        "source": "unified_lineage_api.build_unified_lineage_impact_payload (EA.14)",
+    }
+    # Certification, quality, classification, owner and usage_decision are
+    # still present -- lineage unavailability didn't take down the rest.
+    assert payload["usage_decision"]["decision"] == "ALLOWED"
+    assert session.committed is True
