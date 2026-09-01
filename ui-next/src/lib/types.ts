@@ -74,6 +74,14 @@ export interface AgentAnalysisResponse {
   explanation: string;
 }
 
+/** Whether this agent's plan has a real, code-backed auto-apply branch */
+export interface AgentAutoApplyRead {
+  has_auto_apply_branch: boolean;
+  threshold: number | null;
+  threshold_source: string | null;
+  evidence: string;
+}
+
 export interface AgentEvaluationRunRead {
   id: string;
   organization_id: string;
@@ -89,6 +97,32 @@ export interface AgentEvaluationRunRead {
   updated_at: string;
 }
 
+/** The "task plan" half of this row's exit condition: not a static, */
+export interface AgentMethodSummaryRead {
+  scope: "ORGANIZATION_WIDE";
+  note: string;
+  window_days: number;
+  sampled_runs: number;
+  by_strategy: Record<string, number>;
+  average_confidence: number | null;
+  tool_first: ToolFirstRateSummaryRead;
+}
+
+/** EA.10c AI registry data for one agent's latest version -- the */
+export interface AgentPurposeRead {
+  asset_id: string;
+  asset_key: string;
+  version: number;
+  status: string;
+  name: string;
+  description: string;
+  intended_use: string;
+  owner_principal: string;
+  provider_type: string;
+  risk_tier: string;
+  documentation_url: string | null;
+}
+
 export interface AgentRetrievalPreviewRead {
   datasource_id: string;
   retrieval_evidence: Record<string, unknown>[];
@@ -100,10 +134,37 @@ export interface AgentRetrievalPreviewRequest {
   candidate_sql_available?: boolean;
 }
 
+export interface AgentRosterEntryRead {
+  purpose: AgentPurposeRead;
+  method: AgentMethodSummaryRead;
+  recent_results: AgentRunOutcomeRead[];
+  recent_results_total: number;
+  auto_apply: AgentAutoApplyRead;
+}
+
+export interface AgentRosterRead {
+  organization_id: string;
+  generated_at: string;
+  window_days: number;
+  agents: AgentRosterEntryRead[];
+  total_agents: number;
+}
+
 export interface AgentRunGroundingReceiptsRead {
   agent_run_id: string;
   fragment_count: number;
   fragments: GroundingFragmentReceiptRead[];
+}
+
+/** One recent `AgentRun`'s outcome -- the "live results" half of this */
+export interface AgentRunOutcomeRead {
+  run_id: string;
+  status: string;
+  strategy: string | null;
+  confidence: number | null;
+  generation_source: string;
+  created_at: string;
+  failure_reason: string | null;
 }
 
 export interface AgentRunRead {
@@ -3866,6 +3927,17 @@ export interface ToolFirstRateRead {
   target_rate: number;
   meets_target: boolean | null;
   computed_at: string;
+}
+
+/** TL-6's `aida.tool_first_rate.ToolFirstRate`, embedded verbatim -- */
+export interface ToolFirstRateSummaryRead {
+  tool_first_executions: number;
+  freeform_executions: number;
+  total_executions: number;
+  rate: number | null;
+  by_source: Record<string, number>;
+  target_rate: number;
+  meets_target: boolean | null;
 }
 
 export interface ToolParameterDefinition {

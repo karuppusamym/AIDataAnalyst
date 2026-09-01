@@ -328,6 +328,50 @@
         "title": "AgentAnalysisResponse",
         "type": "object"
       },
+      "AgentAutoApplyRead": {
+        "additionalProperties": false,
+        "description": "Whether this agent's plan has a real, code-backed auto-apply branch\nand, only when one genuinely exists, the threshold that governs it. See\nthis module's docstring for how this is determined -- never a value\ninvented for an agent that does not actually have one.",
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "has_auto_apply_branch": {
+            "title": "Has Auto Apply Branch",
+            "type": "boolean"
+          },
+          "threshold": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold"
+          },
+          "threshold_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold Source"
+          }
+        },
+        "required": [
+          "has_auto_apply_branch",
+          "threshold",
+          "threshold_source",
+          "evidence"
+        ],
+        "title": "AgentAutoApplyRead",
+        "type": "object"
+      },
       "AgentEvaluationRunRead": {
         "additionalProperties": false,
         "properties": {
@@ -405,6 +449,134 @@
         "title": "AgentEvaluationRunRead",
         "type": "object"
       },
+      "AgentMethodSummaryRead": {
+        "additionalProperties": false,
+        "description": "The \"task plan\" half of this row's exit condition: not a static,\nhand-written description, but what this organization's governed agent\nhas actually been doing lately, aggregated from `AgentRun.plan_evidence`\n(`agent_intelligence.AgentPlan.evidence()`) and `generation_source`.",
+        "properties": {
+          "average_confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Average Confidence"
+          },
+          "by_strategy": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Strategy",
+            "type": "object"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "sampled_runs": {
+            "title": "Sampled Runs",
+            "type": "integer"
+          },
+          "scope": {
+            "const": "ORGANIZATION_WIDE",
+            "title": "Scope",
+            "type": "string"
+          },
+          "tool_first": {
+            "$ref": "#/components/schemas/ToolFirstRateSummaryRead"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "note",
+          "window_days",
+          "sampled_runs",
+          "by_strategy",
+          "average_confidence",
+          "tool_first"
+        ],
+        "title": "AgentMethodSummaryRead",
+        "type": "object"
+      },
+      "AgentPurposeRead": {
+        "additionalProperties": false,
+        "description": "EA.10c AI registry data for one agent's latest version -- the\n\"published purpose\" half of this row's exit condition, verbatim from\n`AiAssetVersion` (`aida.ai_registry_api._apply_definition`), never\nre-worded here.",
+        "properties": {
+          "asset_id": {
+            "format": "uuid",
+            "title": "Asset Id",
+            "type": "string"
+          },
+          "asset_key": {
+            "title": "Asset Key",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "documentation_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Documentation Url"
+          },
+          "intended_use": {
+            "title": "Intended Use",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "owner_principal": {
+            "title": "Owner Principal",
+            "type": "string"
+          },
+          "provider_type": {
+            "title": "Provider Type",
+            "type": "string"
+          },
+          "risk_tier": {
+            "title": "Risk Tier",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "asset_id",
+          "asset_key",
+          "version",
+          "status",
+          "name",
+          "description",
+          "intended_use",
+          "owner_principal",
+          "provider_type",
+          "risk_tier",
+          "documentation_url"
+        ],
+        "title": "AgentPurposeRead",
+        "type": "object"
+      },
       "AgentRetrievalPreviewRead": {
         "additionalProperties": false,
         "properties": {
@@ -456,6 +628,80 @@
         "title": "AgentRetrievalPreviewRequest",
         "type": "object"
       },
+      "AgentRosterEntryRead": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_apply": {
+            "$ref": "#/components/schemas/AgentAutoApplyRead"
+          },
+          "method": {
+            "$ref": "#/components/schemas/AgentMethodSummaryRead"
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/AgentPurposeRead"
+          },
+          "recent_results": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRunOutcomeRead"
+            },
+            "title": "Recent Results",
+            "type": "array"
+          },
+          "recent_results_total": {
+            "title": "Recent Results Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "purpose",
+          "method",
+          "recent_results",
+          "recent_results_total",
+          "auto_apply"
+        ],
+        "title": "AgentRosterEntryRead",
+        "type": "object"
+      },
+      "AgentRosterRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/AgentRosterEntryRead"
+            },
+            "title": "Agents",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "total_agents": {
+            "readOnly": true,
+            "title": "Total Agents",
+            "type": "integer"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "generated_at",
+          "window_days",
+          "agents",
+          "total_agents"
+        ],
+        "title": "AgentRosterRead",
+        "type": "object"
+      },
       "AgentRunGroundingReceiptsRead": {
         "additionalProperties": false,
         "properties": {
@@ -482,6 +728,74 @@
           "fragments"
         ],
         "title": "AgentRunGroundingReceiptsRead",
+        "type": "object"
+      },
+      "AgentRunOutcomeRead": {
+        "additionalProperties": false,
+        "description": "One recent `AgentRun`'s outcome -- the \"live results\" half of this\nrow's exit condition.",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "failure_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Reason"
+          },
+          "generation_source": {
+            "title": "Generation Source",
+            "type": "string"
+          },
+          "run_id": {
+            "format": "uuid",
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Strategy"
+          }
+        },
+        "required": [
+          "run_id",
+          "status",
+          "strategy",
+          "confidence",
+          "generation_source",
+          "created_at",
+          "failure_reason"
+        ],
+        "title": "AgentRunOutcomeRead",
         "type": "object"
       },
       "AgentRunRead": {
@@ -23244,6 +23558,68 @@
           "computed_at"
         ],
         "title": "ToolFirstRateRead",
+        "type": "object"
+      },
+      "ToolFirstRateSummaryRead": {
+        "additionalProperties": false,
+        "description": "TL-6's `aida.tool_first_rate.ToolFirstRate`, embedded verbatim --\nthe same locally-scoped-`ApiModel` idiom `operational_api.\nToolFirstRateRead.from_rate` already uses for this exact dataclass.",
+        "properties": {
+          "by_source": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Source",
+            "type": "object"
+          },
+          "freeform_executions": {
+            "title": "Freeform Executions",
+            "type": "integer"
+          },
+          "meets_target": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Target"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "target_rate": {
+            "title": "Target Rate",
+            "type": "number"
+          },
+          "tool_first_executions": {
+            "title": "Tool First Executions",
+            "type": "integer"
+          },
+          "total_executions": {
+            "title": "Total Executions",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "tool_first_executions",
+          "freeform_executions",
+          "total_executions",
+          "rate",
+          "by_source",
+          "target_rate",
+          "meets_target"
+        ],
+        "title": "ToolFirstRateSummaryRead",
         "type": "object"
       },
       "ToolParameterDefinition": {
@@ -53716,6 +54092,159 @@
           }
         },
         "summary": "Run Agent Evaluation"
+      }
+    },
+    "/v1/organizations/{organization_id}/ai-agents/roster": {
+      "get": {
+        "description": "The agent roster: for every registered `AGENT`-kind AI asset in this\norganization, its published purpose (EA.10c AI registry), an aggregated\nmethod summary (recent `AgentRun.plan_evidence`/`generation_source`,\nreusing TL-6's `tool_first_execution_rate` verbatim), a bounded window\nof recent live results, and an honest auto-apply determination -- so a\nsteward can inspect an agent's method before trusting its output.\n\nSame authorization boundary as the rest of the AI registry\n(`aida.ai_registry_api.AI_READERS`): this is a read over the same\nregistry data, plus derived run evidence, for the same audience.",
+        "operationId": "get_agent_roster_v1_organizations__organization_id__ai_agents_roster_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window_days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "recent_results_limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Recent Results Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRosterRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Roster",
+        "tags": [
+          "ai-agent-roster"
+        ]
       }
     },
     "/v1/organizations/{organization_id}/ai-assets": {

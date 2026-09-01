@@ -8898,3 +8898,56 @@ on-prem proxy) was reachable in this sandbox, so the mechanism that *selects* a 
 end to end, but that a request sent to such a URL actually traverses a private network path rather
 than the public internet is not -- the same standing live-infrastructure gap as QG-5/QG-6's Vault
 adapters and CN-1c/CN-2a's live-cloud-account gap.
+
+---
+
+## 2026-09-01 — UX-19 closed: agent roster with published purpose, task plan and live results
+
+A steward should be able to inspect an agent's method before trusting its output. This composes
+that view entirely from data that already exists — no new registry, no new run-tracking table.
+
+### Composition
+
+`GET /v1/organizations/{organization_id}/ai-agents/roster` (`agent_roster_api.py`, composed by
+`agent_roster.py::compose_agent_roster`), same authorization boundary as the rest of the AI
+registry (`ai_registry_api.AI_READERS`):
+
+1. **Purpose** — EA.10c's AI registry. Every `AGENT`-kind `AiAsset`'s governed `AiAssetVersion`
+   already carries steward-authored `name`/`description`/`intended_use`/`owner_principal`/
+   `risk_tier` — a genuine published purpose, not invented here.
+2. **Method** — aggregated from recent `AgentRun.plan_evidence` (the real
+   `GovernedPlanner.plan(...).evidence()` payload), reusing `aida.fleet.tool_first_execution_rate`/
+   `aida.tool_first_rate.compute_tool_first_rate` verbatim for the tool-first/freeform split.
+3. **Live results** — a bounded, paginated window of the organization's most recent `AgentRun`
+   outcomes (status, strategy, confidence, generation_source, failure reason).
+
+### Two honest gaps, not papered over
+
+**No `AgentRun` → `AiAsset` link exists.** Checked directly against `models.py`: `AgentRun` is
+produced by exactly one operational path (`GovernedAgentOrchestrator.run`), scoped only by
+`organization_id`/`datasource_id` — never by "which registered agent." The AI registry can hold
+`AGENT`-kind entries this platform doesn't itself execute (see `test_ai_registry.py`'s "Fraud
+triage agent" fixture — a governance dossier, no matching code path). A name-matching heuristic
+to fake the link would be exactly the fabrication this row forbids. Runs are shown as
+`scope="ORGANIZATION_WIDE"` with an explanatory note instead — real data, honestly scoped.
+
+**No agent in this codebase has a real auto-apply threshold.** The row's exit condition — "plans
+that end in an auto-apply branch state the threshold that governs them" — was checked against
+every AI-authored proposal pathway that exists: glossary-link proposals, asset-description drafts
+(whose own module docstring states it "rejects the no-review auto-apply" pattern), metric
+suggestions, and every GL-2/GL-5/GL-7 bulk operation — all route through the shared
+`GovernanceReview` maker-checker queue with no confidence-gated bypass. The two "confidence"-named
+values that do exist (glossary label-match confidence; `Settings.agent_tool_match_threshold`,
+which gates only which tool is *eligible* to answer a read-only question) don't gate an
+unreviewed action. AT-1 itself — the row that would introduce a real auto-apply branch — is still
+`TODO`. So every agent reports `has_auto_apply_branch=False`; `_AUTO_APPLY_EVIDENCE` is the single
+place to change when a future row adds a genuine one.
+
+### Verification
+
+`tests/test_agent_roster.py` — 7 tests, real in-memory SQLite, all pass. `ruff check` clean.
+`test_doc_claims.py` and `test_openapi_diff_gate.py` clean (baseline + `ui-next` types
+regenerated for the one new additive route). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file or Alembic migration touched — this session finished the close-out after the
+implementing agent paused waiting on a background test run; the diff it left was reviewed, tested
+fresh, and found sound before pushing.
