@@ -1,14 +1,18 @@
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.connector_health import ConnectorHealthScore
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
+from aida.fleet import datasource_health, fleet_health
 from aida.models import (
     AnalysisRun,
     AuditEvent,
@@ -32,6 +36,54 @@ from aida.schemas import (
 from aida.security import SecurityContext, enforce_organization, require_roles
 
 router = APIRouter(prefix="/v1", tags=["operations"])
+
+
+# --- CN-7: per-connector health scoring ---------------------------------------
+#
+# Local response models, not `aida.schemas` -- ST-05/ST-06 (see
+# `Docs/40-engineering/06-refactor-plan.md`) is actively splitting that file on
+# this same branch, and `aida.policy_native_sync_api` / `aida.sql_validation_api`
+# already establish the pattern of a locally-scoped `ApiModel` for new API
+# surface that shouldn't contend with that split.
+class ApiModel(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class ConnectorHealthFactorRead(ApiModel):
+    name: str
+    score: float
+    maximum: float
+    reason: str
+    evidence: dict[str, Any]
+
+
+class ConnectorHealthScoreRead(ApiModel):
+    datasource_id: UUID
+    score: int
+    status: str
+    factors: list[ConnectorHealthFactorRead]
+    blockers: list[str]
+    computed_at: datetime
+
+    @classmethod
+    def from_score(cls, score: ConnectorHealthScore) -> "ConnectorHealthScoreRead":
+        return cls(
+            datasource_id=score.datasource_id,
+            score=score.score,
+            status=score.status,
+            factors=[
+                ConnectorHealthFactorRead(
+                    name=factor.name,
+                    score=factor.score,
+                    maximum=factor.maximum,
+                    reason=factor.reason,
+                    evidence=factor.evidence,
+                )
+                for factor in score.factors
+            ],
+            blockers=score.blockers,
+            computed_at=score.computed_at,
+        )
 
 
 async def _require_organization(
@@ -173,6 +225,42 @@ async def list_organization_datasources(
         offset=offset,
         total=total or 0,
     )
+
+
+@router.get(
+    "/datasources/{datasource_id}/health",
+    response_model=ConnectorHealthScoreRead,
+)
+async def get_datasource_health(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "OrganizationAdmin",
+            "ProjectAdmin",
+            "MetadataAdmin",
+            "DataAdmin",
+            "Operations",
+            "Analyst",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ConnectorHealthScoreRead:
+    """CN-7: one connector's explainable health score.
+
+    Derived entirely from existing `AnalysisRun`/`ScanPolicy` history --
+    see `aida.connector_health` for the five scored factors and
+    `aida.fleet.datasource_health` for how they're gathered.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    score = await datasource_health(session, datasource_id)
+    if score is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    return ConnectorHealthScoreRead.from_score(score)
 
 
 @router.get("/organizations/{organization_id}/analysis-runs", response_model=Page)
@@ -330,6 +418,26 @@ async def fleet_summary(
         dead_letter_outbox_events=dead_letter_outbox or 0,
         generated_at=now,
     )
+
+
+@router.get("/organizations/{organization_id}/fleet-health", response_model=Page)
+async def organization_fleet_health(
+    organization_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Auditor", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """CN-7: per-connector health scores for every datasource in the fleet.
+
+    The batch counterpart to `GET /v1/datasources/{id}/health` -- powers the
+    fleet view's per-connector health column without one request per
+    connector. Each item carries the same explainable factor breakdown.
+    """
+    await _require_organization(session, context, organization_id)
+    scores = await fleet_health(session, organization_id)
+    items = [ConnectorHealthScoreRead.from_score(score) for score in scores]
+    return Page(items=items, limit=len(items), offset=0, total=len(items))
 
 
 @router.get("/organizations/{organization_id}/outbox-events", response_model=Page)

@@ -928,6 +928,23 @@ export interface ConnectorCertificationRead {
   updated_at: string;
 }
 
+export interface ConnectorHealthFactorRead {
+  name: string;
+  score: number;
+  maximum: number;
+  reason: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface ConnectorHealthScoreRead {
+  datasource_id: string;
+  score: number;
+  status: string;
+  factors: ConnectorHealthFactorRead[];
+  blockers: string[];
+  computed_at: string;
+}
+
 export interface ConsumptionRecordPage {
   items: ConsumptionRecordRead[];
   total: number;

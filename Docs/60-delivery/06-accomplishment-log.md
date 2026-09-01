@@ -5409,6 +5409,7 @@ only the same `aida.main` untyped-import note `scripts/openapi_diff.py` reports 
 `mypy` job scopes to `mypy src` only, so neither script is gated there -- pre-existing, unrelated to
 this row, confirmed by running the same check against `openapi_diff.py`). No `models.py`/
 `schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
 ---
 
 ## 2026-09-01 (continued) — ST-05/ST-06: `03 ingestion` scaffolded and populated
@@ -5457,3 +5458,96 @@ unrelated and untouched by this row (same as the prior two entries).
 
 `04 catalog` and `20 observability_audit` (needs `python scripts/generate_module.py
 observability_audit` to scaffold first).
+
+---
+
+## 2026-09-01 — CN-7: per-connector health scoring, visible in fleet view
+
+Per-connector health scoring for the operator fleet view, derived entirely from existing
+`AnalysisRun`/`ScanPolicy`/`DataSource` rows -- no new column, table, or Alembic migration, and
+`models.py`/`schemas.py` untouched (ST-05/ST-06 is actively splitting those files on this same
+branch).
+
+### What was built
+
+`src/aida/connector_health.py` -- pure, DB-free scoring (mirrors `aida.trust_scoring`'s
+`TrustFactor`/`compute_trust_score` idiom and `aida.ai_registry`'s per-factor-with-`evidence`
+shape). Five factors summing to a fixed 100-point budget, each carrying its own `reason` and
+`evidence` dict so no factor is an opaque number:
+
+- `RUN_SUCCESS_RATE` (35 pts) -- share of the last `RUN_HISTORY_WINDOW` (20) terminal runs
+  (`COMPLETED` vs `FAILED`/`CANCELLED`/`SUBMISSION_FAILED`) that succeeded.
+- `STALENESS` (25 pts) -- minutes since the last successful run, scored against the connector's
+  own `ScanPolicy.interval_minutes` when one exists (linear decay to 0 at 2x the interval), fixed
+  thresholds otherwise.
+- `FAILURE_STREAK` (20 pts) -- consecutive failed terminal runs counting back from the newest;
+  3+ trips a `REPEATED_FAILURES` blocker.
+- `PROFILING_COVERAGE` (10 pts) -- `profiled_tables`/`discovered_tables` on the latest successful
+  run.
+- `DATASOURCE_ENABLEMENT` (10 pts) -- 0 when `DataSource.status == "DISABLED"`.
+
+`compute_connector_health` (`connector_health.py:279`) combines them into a 0-100 score and a
+`HEALTHY`/`DEGRADED`/`CRITICAL`/`UNKNOWN` status -- `UNKNOWN` (not a low score) when the connector
+has no run history at all, since absence of evidence isn't evidence of poor health.
+
+DB aggregation lives in `src/aida/fleet.py` (the module already home to admission-control fleet
+policy), not `connector_health.py`: `datasource_health` (`fleet.py:124`) for one connector,
+`fleet_health` (`fleet.py:160`) for a whole org in one `row_number() OVER (PARTITION BY
+datasource_id ...)` windowed query (the same ranked-window idiom `aida.catalog_read_model` already
+uses) instead of one query per datasource.
+
+Exposed on the existing fleet API surface, `src/aida/operational_api.py` (home of
+`fleet_summary`/`list_organization_datasources`): `GET /v1/datasources/{id}/health`
+(`operational_api.py:234`) for one connector, `GET /v1/organizations/{id}/fleet-health`
+(`:424`, `response_model=Page`) for the whole fleet in one call. Both routed through
+`operational_router`, included at `aida.main.py:292` (live-call-site: imported `main.py:55`) --
+transitively reachable from the FastAPI entry point in `ENTRY_POINTS`
+(`tests/test_reachability_gate.py`). Response schemas (`ConnectorHealthScoreRead`,
+`ConnectorHealthFactorRead`) are local `ApiModel`s in `operational_api.py`, not `aida.schemas` --
+the same locally-scoped-`ApiModel` pattern `aida.policy_native_sync_api`/`aida.sql_validation_api`
+already use for new surface that shouldn't contend with the ST-05/ST-06 split.
+
+Visible in fleet view: `ui/app.js` fetches `fleet-health` alongside `fleet-summary` in
+`loadOrganizationData`, indexes it by `datasource_id`, and `renderSources()` adds a "Health"
+column (`healthCell`) showing `STATUS (score)` with every factor's reason in a hover tooltip.
+`ui/scripts/core.js`'s `statusClass` gained `DEGRADED`/`UNKNOWN` -> `warn` styling (`HEALTHY`/
+`CRITICAL` already mapped to good/bad).
+
+### Verification
+
+`tests/test_connector_health.py` -- 33 pure-logic tests, no database, covering every factor
+(neutral/none cases, boundary ratios, streak counting/capping, evidence contents), the composite
+(`UNKNOWN` on no history, `HEALTHY` on a perfect record, `DATASOURCE_DISABLED`/
+`REPEATED_FAILURES` blockers, determinism, 0-100 clamping, weights-sum-to-100, every factor
+explainable).
+
+`tests/test_operational_behaviors.py` -- 11 new integration tests against a real in-memory SQLite
+engine (following `tests/test_asset_evidence.py`'s own rationale: PostgreSQL is unreachable in
+this sandbox, SQLite enforces the same row semantics the windowed query relies on): end-to-end
+`datasource_health`/`fleet_health` against seeded `AnalysisRun`/`ScanPolicy`/`DataSource` rows,
+`ScanPolicy.interval_minutes` driving staleness, missing datasource returns `None`, never-run
+datasource is `UNKNOWN`, `fleet_health` covers every datasource in an org without an N+1 shape and
+agrees with `datasource_health` under the `RUN_HISTORY_WINDOW` cap, and the two endpoint functions
+themselves: cross-org 403, missing-datasource 404, and an explainable-factors assertion on the
+single and batch responses.
+
+Full `uv run pytest` (whole suite, rebased onto the concurrently-landed ST-05/ST-06 `connectivity`
+split and UX-14's `ui-next` type generator): clean except 10 pre-existing `tests/test_doc_claims.py`
+failures, confirmed unrelated by `git stash`-ing this row's changes and reproducing them
+identically beforehand -- all 10 are citations UX-14's own commits added to
+`tracker.md:503`/`accomplishment-log.md:5344+` (bare `scripts/*.py` filenames the citation
+resolver's root list doesn't cover, and two CI job names misread as import-linter contract names),
+none of this row's files. `ruff check` (touched Python + `ui/`) clean. `mypy src` clean (216
+files). `uv run lint-imports`: 5 kept, 0 broken (new `connectivity module privacy` contract from
+the concurrent ST-05/ST-06 land also kept).
+
+Mounting the two new routes changed `app.openapi()`: regenerated `Docs/90-reference/
+openapi-baseline.json` via `scripts/openapi_diff.py --accept-baseline` (confirmed additive-only,
+`scripts/openapi_diff.py` itself reports "No breaking OpenAPI changes"), and regenerated
+`ui-next/src/lib/types.ts` via `scripts/generate_ui_types.py --accept-baseline` (UX-14's gate,
+360 -> 362 schemas for the new `ConnectorHealthScoreRead`/`ConnectorHealthFactorRead`). `cd
+ui-next && npm run typecheck && npm run test && npm run build` all green (12/12 tests,
+`tsc -b && vite build` clean) against the regenerated types.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.

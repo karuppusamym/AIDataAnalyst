@@ -5504,6 +5504,88 @@
         "title": "ConnectorCertificationRead",
         "type": "object"
       },
+      "ConnectorHealthFactorRead": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "maximum": {
+            "title": "Maximum",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "score",
+          "maximum",
+          "reason",
+          "evidence"
+        ],
+        "title": "ConnectorHealthFactorRead",
+        "type": "object"
+      },
+      "ConnectorHealthScoreRead": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "factors": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorHealthFactorRead"
+            },
+            "title": "Factors",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "score",
+          "status",
+          "factors",
+          "blockers",
+          "computed_at"
+        ],
+        "title": "ConnectorHealthScoreRead",
+        "type": "object"
+      },
       "ConsumptionRecordPage": {
         "additionalProperties": false,
         "properties": {
@@ -36572,6 +36654,135 @@
         "summary": "Get Graph Summary"
       }
     },
+    "/v1/datasources/{datasource_id}/health": {
+      "get": {
+        "description": "CN-7: one connector's explainable health score.\n\nDerived entirely from existing `AnalysisRun`/`ScanPolicy` history --\nsee `aida.connector_health` for the five scored factors and\n`aida.fleet.datasource_health` for how they're gathered.",
+        "operationId": "get_datasource_health_v1_datasources__datasource_id__health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorHealthScoreRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Datasource Health",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/knowledge-graph": {
       "get": {
         "description": "Return a bounded authoritative graph slice with declared and suggested edges.",
@@ -54603,6 +54814,135 @@
         "summary": "Grant Delegation",
         "tags": [
           "delegation"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/fleet-health": {
+      "get": {
+        "description": "CN-7: per-connector health scores for every datasource in the fleet.\n\nThe batch counterpart to `GET /v1/datasources/{id}/health` -- powers the\nfleet view's per-connector health column without one request per\nconnector. Each item carries the same explainable factor breakdown.",
+        "operationId": "organization_fleet_health_v1_organizations__organization_id__fleet_health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Organization Fleet Health",
+        "tags": [
+          "operations"
         ]
       }
     },

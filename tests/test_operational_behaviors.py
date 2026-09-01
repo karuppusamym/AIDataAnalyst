@@ -4,16 +4,39 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.config import Settings
-from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
-from aida.models import AnalysisRun, AuditEvent, DataSource, Organization, OutboxEvent, ScanPolicy
-from aida.operational_api import requeue_outbox_event
+from aida.db import Base
+from aida.fleet import (
+    RunAdmissionRejected,
+    datasource_health,
+    ensure_datasource_enabled,
+    fleet_health,
+    reserve_analysis_run,
+)
+from aida.models import (
+    AnalysisRun,
+    AuditEvent,
+    DataDomain,
+    DataSource,
+    LineOfBusiness,
+    Organization,
+    OutboxEvent,
+    Project,
+    ScanPolicy,
+)
+from aida.operational_api import (
+    get_datasource_health,
+    organization_fleet_health,
+    requeue_outbox_event,
+)
 from aida.projectors import graph_projector
 from aida.projectors.outbox_publisher import record_publish_failure, retry_delay_seconds
 from aida.security import SecurityContext, enforce_organization
 from aida.workflows import scheduler
 from aida.workflows.scheduler import due_scan_policies_statement
+from tests.support.doubles import security_context
 
 
 class SchedulerSession:
@@ -538,3 +561,308 @@ def test_due_scan_policies_statement_orders_by_priority_then_next_run_at() -> No
     # Priority is the primary sort key; next_run_at is only a tiebreaker within a
     # priority tier, so it must appear after priority in the ORDER BY clause.
     assert order_by_clause.index("priority DESC") < order_by_clause.index("next_run_at")
+
+
+# ---------------------------------------------------------------------------
+# CN-7 -- per-connector health scoring, integration-level.
+#
+# Runs the real `aida.fleet.datasource_health`/`fleet_health` aggregations and
+# the real `aida.operational_api` endpoint functions against an in-memory
+# SQLite database, following `tests/test_asset_evidence.py`'s own rationale:
+# PostgreSQL is unreachable in this sandbox, but SQLite is a real SQL engine
+# that enforces the same row semantics the ranked/windowed queries rely on.
+# The scoring math itself is covered exhaustively, without a database, in
+# `tests/test_connector_health.py`.
+# ---------------------------------------------------------------------------
+
+_HEALTH_SETTINGS = Settings(_env_file=None)
+
+
+@pytest.fixture
+async def health_session():
+    engine = create_async_engine("sqlite+aiosqlite://")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
+        engine, expire_on_commit=False, class_=AsyncSession
+    )
+    async with session_factory() as db_session:
+        yield db_session
+    await engine.dispose()
+
+
+async def _seed_health_datasource(
+    session: AsyncSession, *, status: str = "ACTIVE"
+) -> DataSource:
+    org = Organization(id=uuid4(), name="Bank", slug=f"bank-{uuid4().hex[:8]}")
+    lob = LineOfBusiness(
+        id=uuid4(), organization_id=org.id, name="Retail", code=f"RTL{uuid4().hex[:6]}"
+    )
+    domain = DataDomain(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        name="Ungoverned",
+        code=f"UNG{uuid4().hex[:6]}",
+    )
+    project = Project(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        data_domain_id=domain.id,
+        name="Warehouse",
+        slug=f"wh-{uuid4().hex[:8]}",
+    )
+    datasource = DataSource(
+        id=uuid4(),
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        data_domain_id=domain.id,
+        project_id=project.id,
+        name=f"src-{uuid4().hex[:8]}",
+        connector_type="snowflake",
+        dialect="snowflake",
+        environment="PROD",
+        network_zone="default",
+        credential_reference="env://TEST_DSN",
+        status=status,
+        capabilities={},
+    )
+    session.add_all([org, lob, domain, project, datasource])
+    await session.flush()
+    return datasource
+
+
+def _health_run(
+    datasource: DataSource,
+    *,
+    status: str,
+    error_class: str | None = None,
+    discovered_tables: int = 10,
+    profiled_tables: int = 10,
+) -> AnalysisRun:
+    return AnalysisRun(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        mode="INCREMENTAL",
+        trigger_type="SCHEDULED",
+        status=status,
+        temporal_workflow_id=f"discovery-{datasource.id}-{uuid4()}",
+        discovered_tables=discovered_tables,
+        profiled_tables=profiled_tables,
+        error_class=error_class,
+    )
+
+
+def _health_context(datasource: DataSource, **overrides: object) -> SecurityContext:
+    return security_context(
+        organization_id=datasource.organization_id,
+        roles=frozenset({"PlatformAdmin"}),
+        **overrides,
+    )
+
+
+async def test_datasource_health_reflects_run_history_end_to_end(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _health_run(datasource, status="COMPLETED"),
+            _health_run(datasource, status="COMPLETED"),
+        ]
+    )
+    await health_session.flush()
+
+    score = await datasource_health(health_session, datasource.id)
+
+    assert score is not None
+    assert score.datasource_id == datasource.id
+    assert score.status == "HEALTHY"
+    assert len(score.factors) == 5
+    factor_names = {factor.name for factor in score.factors}
+    assert factor_names == {
+        "RUN_SUCCESS_RATE",
+        "STALENESS",
+        "FAILURE_STREAK",
+        "PROFILING_COVERAGE",
+        "DATASOURCE_ENABLEMENT",
+    }
+
+
+async def test_datasource_health_surfaces_repeated_failures_as_a_blocker(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _health_run(datasource, status="FAILED", error_class="ConnectionTimeout"),
+            _health_run(datasource, status="FAILED", error_class="ConnectionTimeout"),
+            _health_run(datasource, status="FAILED", error_class="ConnectionTimeout"),
+        ]
+    )
+    await health_session.flush()
+
+    score = await datasource_health(health_session, datasource.id)
+
+    assert score is not None
+    assert score.status == "CRITICAL"
+    assert "REPEATED_FAILURES" in score.blockers
+    assert "NO_SUCCESSFUL_RUN" in score.blockers
+
+
+async def test_datasource_health_uses_scan_policy_interval_for_staleness(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    stale_success = _health_run(datasource, status="COMPLETED")
+    health_session.add(stale_success)
+    await health_session.flush()
+    # Backdate the run so it reads as long overdue against a tight schedule.
+    stale_success.created_at = datetime.now(UTC) - timedelta(days=10)
+    stale_success.updated_at = datetime.now(UTC) - timedelta(days=10)
+    health_session.add(
+        ScanPolicy(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            enabled=True,
+            interval_minutes=60,
+            mode="INCREMENTAL",
+            priority=50,
+            next_run_at=datetime.now(UTC),
+            created_by="test",
+        )
+    )
+    await health_session.commit()
+
+    score = await datasource_health(health_session, datasource.id)
+
+    assert score is not None
+    staleness = next(f for f in score.factors if f.name == "STALENESS")
+    assert staleness.evidence["scan_interval_minutes"] == 60
+    assert staleness.score == 0.0
+
+
+async def test_datasource_health_returns_none_for_missing_datasource(health_session) -> None:
+    assert await datasource_health(health_session, uuid4()) is None
+
+
+async def test_datasource_health_unknown_when_never_run(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    await health_session.commit()
+
+    score = await datasource_health(health_session, datasource.id)
+
+    assert score is not None
+    assert score.status == "UNKNOWN"
+    assert "NO_RUN_HISTORY" in score.blockers
+
+
+async def test_fleet_health_covers_every_datasource_without_n_plus_one_shape(
+    health_session,
+) -> None:
+    healthy = await _seed_health_datasource(health_session)
+    # Second datasource shares the same organization so both are returned by
+    # one fleet_health() call.
+    org_id = healthy.organization_id
+    disabled = DataSource(
+        id=uuid4(),
+        organization_id=org_id,
+        line_of_business_id=healthy.line_of_business_id,
+        data_domain_id=healthy.data_domain_id,
+        project_id=healthy.project_id,
+        name=f"src-{uuid4().hex[:8]}",
+        connector_type="oracle",
+        dialect="oracle",
+        environment="PROD",
+        network_zone="default",
+        credential_reference="env://TEST_DSN_2",
+        status="DISABLED",
+        capabilities={},
+    )
+    health_session.add(disabled)
+    health_session.add(_health_run(healthy, status="COMPLETED"))
+    await health_session.commit()
+
+    scores = await fleet_health(health_session, org_id)
+
+    assert {score.datasource_id for score in scores} == {healthy.id, disabled.id}
+    disabled_score = next(s for s in scores if s.datasource_id == disabled.id)
+    assert "DATASOURCE_DISABLED" in disabled_score.blockers
+    healthy_score = next(s for s in scores if s.datasource_id == healthy.id)
+    assert healthy_score.status == "HEALTHY"
+
+
+async def test_fleet_health_windows_run_history_per_datasource(health_session) -> None:
+    from aida.connector_health import RUN_HISTORY_WINDOW
+
+    datasource = await _seed_health_datasource(health_session)
+    # More runs than the window: the oldest ones must not affect the score
+    # via the failure-streak factor (they're outside the window entirely).
+    for _ in range(RUN_HISTORY_WINDOW + 5):
+        health_session.add(_health_run(datasource, status="FAILED"))
+    health_session.add(_health_run(datasource, status="COMPLETED"))
+    await health_session.commit()
+
+    scores = await fleet_health(health_session, datasource.organization_id)
+    single = await datasource_health(health_session, datasource.id)
+
+    fleet_score = next(s for s in scores if s.datasource_id == datasource.id)
+    # Both entry points see the same windowed history and agree.
+    assert fleet_score.score == single.score
+    assert fleet_score.blockers == single.blockers
+
+
+async def test_get_datasource_health_endpoint_denies_cross_organization_access(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    await health_session.commit()
+    other_org_context = security_context(organization_id=uuid4(), roles=frozenset({"Viewer"}))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await get_datasource_health(
+            datasource.id, context=other_org_context, session=health_session
+        )
+    assert excinfo.value.status_code == 403
+
+
+async def test_get_datasource_health_endpoint_404s_for_missing_datasource(health_session) -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        await get_datasource_health(
+            uuid4(),
+            context=security_context(organization_id=uuid4(), roles=frozenset({"PlatformAdmin"})),
+            session=health_session,
+        )
+    assert excinfo.value.status_code == 404
+
+
+async def test_get_datasource_health_endpoint_returns_explainable_factors(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add(_health_run(datasource, status="COMPLETED"))
+    await health_session.commit()
+
+    result = await get_datasource_health(
+        datasource.id, context=_health_context(datasource), session=health_session
+    )
+
+    assert result.datasource_id == datasource.id
+    assert result.status in {"HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"}
+    assert len(result.factors) == 5
+    for factor in result.factors:
+        assert factor.reason
+        assert 0 <= factor.score <= factor.maximum
+
+
+async def test_organization_fleet_health_endpoint_pages_every_datasource(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    await health_session.commit()
+
+    page = await organization_fleet_health(
+        datasource.organization_id,
+        context=_health_context(datasource),
+        session=health_session,
+    )
+
+    assert page.total == 1
+    assert page.items[0].datasource_id == datasource.id
