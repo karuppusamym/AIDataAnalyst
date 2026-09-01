@@ -5551,3 +5551,47 @@ ui-next && npm run typecheck && npm run test && npm run build` all green (12/12 
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+## 2026-09-01 — SM-6 closed: Open Semantic Interchange evaluation recorded as `ADR-0022`
+
+Pure documentation, no code touched. Tracker `SM-6` ("Open Semantic Interchange evaluation --
+decision recorded as an ADR") and the module-07 parity table both said "not implemented" /
+`TODO`. That was stale: `src/aida/context_compiler.py` already carries an `OSI` branch --
+`ContextCompilerTarget` in `platform_schemas.py` includes `"OSI"` alongside `"ODCS"`,
+`"SNOWFLAKE_SEMANTIC_VIEW"`, and `"DATABRICKS_METRIC_VIEW"`, `_artifact_payload` emits an
+`{"specification": "OpenSemanticInterchange", "specificationVersion": "1.0", "semanticContext":
+...}` envelope, and `validate_compiled_artifact` requires those three keys for it. The decision
+was already implicitly made in code during CP-5 (EA.10c/EE.9); what was missing was the ADR and
+an honest description of what that branch actually is.
+
+It is a placeholder, not spec conformance: unlike `SNOWFLAKE_SEMANTIC_VIEW`/
+`DATABRICKS_METRIC_VIEW`, which project `tables` into vendor-shaped structures, the `OSI` branch
+just wraps the same common metadata dict every target wraps -- no mapping to OSI's own
+entity/dimension/measure schema. `tests/test_agentic_platform.py` proves determinism/drift for
+`ODCS` and `YAML` by name; no test exercises `OSI` specifically.
+
+`Docs/10-architecture/adr/ADR-0022-open-semantic-interchange-target.md`: Open Semantic Interchange
+stays one more thin, deterministic export projection out of the governed context compiler --
+never the internal semantic model, never a second source of truth for module 07/08's governed
+metrics and dimensions. The `OSI` target is kept (near-zero cost, multi-vendor momentum per
+`00-product/03-market-landscape.md` §3.2), but full schema-conformant mapping and OSI import are
+deliberately not funded now -- no named customer/partner need, and the standard (Snowflake-led,
+per the market-landscape research) hasn't settled enough to build exact conformance against
+without expecting churn. Revisit trigger: a named customer/partner OSI requirement, a stable
+public 1.0 OSI schema, or OSI becoming a real deal-level buying criterion.
+
+ADR numbered 0022 after listing `Docs/10-architecture/adr/` directly (highest existing file was
+`ADR-0021-experience-shell-stack-and-strangle-migration.md`, not yet reflected in the README
+index at the time of this pass -- left untouched, out of scope for this row) rather than trusting
+the README's register, which stopped at `ADR-0020`.
+
+Docs touched: new `Docs/10-architecture/adr/ADR-0022-open-semantic-interchange-target.md`;
+`Docs/10-architecture/adr/README.md` register row added; `Docs/90-reference/02-decision-log.md`
+(`SM-6` moved from "Open questions" into the ADR table, now pointing at `ADR-0022`);
+`Docs/20-modules/07-semantic-layer.md` (parity table and `SM-6` open-work row updated to describe
+the actual placeholder rather than "not implemented"); `Docs/60-delivery/03-tracker.md` (`SM-6` ->
+`DONE`).
+
+`uv run pytest tests/test_doc_claims.py -q` clean after this pass's edits. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.

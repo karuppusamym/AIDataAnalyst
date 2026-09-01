@@ -59,6 +59,7 @@ The observable condition under which this should be reconsidered.
 | [0018](ADR-0018-three-axis-tenancy-and-classification.md) | Access, classification and technical hierarchies are modelled separately; only access grants | Accepted | The permission boundary itself must be the line of business, provable from containment without evaluating policy |
 | [0019](ADR-0019-vector-index-without-pgvector.md) | Nearest-neighbour search is a port; the default adapter needs no PostgreSQL extension | Accepted | Post-filter candidate sets are routinely above a few thousand, or the estate's database standard adopts `pgvector` |
 | [0020](ADR-0020-graph-store-decision.md) | The classification tree and the lineage graph both live in PostgreSQL; no separate graph store | Accepted | Measured p95 lineage traversal exceeds ~200 ms at real depth, or all-paths enumeration / graph algorithms become requirements |
+| [0022](ADR-0022-open-semantic-interchange-target.md) | Open Semantic Interchange stays a thin export target, not the internal semantic model | Accepted | A named customer/partner needs OSI conformance, OSI reaches a stable public schema, or OSI becomes a real deal-level buying criterion |
 
 ## Superseded decision history
 
