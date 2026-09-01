@@ -14,6 +14,7 @@ from aida.models import (
     GlossaryTerm,
     GlossaryTermVersion,
     MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataSchema,
     MetadataTable,
     OwnershipRule,
@@ -833,21 +834,28 @@ def test_active_certified_table_ids_excludes_expired_and_revoked_certifications(
 
 class _LinkProposalSession:
     """Answers the five sequential fetches `generate_glossary_link_proposals` makes:
-    three `execute()` calls (term_rows, link_rows, proposal_rows) and two `scalars()`
-    calls (annotations, tables), each dispatched from its own queue in call order.
+    four `execute()` calls (term_rows, annotation_rows, link_rows, proposal_rows) --
+    AT-6 moved the annotations fetch from `scalars()` to `execute()` since it now
+    joins the current `MetadataBusinessAnnotationVersion` -- and one `scalars()`
+    call (tables), each dispatched from its own queue in call order.
     """
 
     def __init__(
         self,
         *,
         term_rows: list[tuple[object, object]],
-        annotations: list[object],
+        annotations: list[tuple[object, object]],
         link_rows: list[tuple[object, ...]],
         proposal_rows: list[tuple[object, ...]],
         tables: list[object],
     ) -> None:
-        self._execute_queue: list[list[tuple[object, ...]]] = [term_rows, link_rows, proposal_rows]
-        self._scalars_queue: list[list[object]] = [annotations, tables]
+        self._execute_queue: list[list[tuple[object, ...]]] = [
+            term_rows,
+            annotations,
+            link_rows,
+            proposal_rows,
+        ]
+        self._scalars_queue: list[list[object]] = [tables]
         self.added: list[object] = []
         self.timeline: list[str] = []
 
@@ -882,8 +890,11 @@ class _LinkProposalSession:
 
 def _sample_business_annotation(
     *, organization_id: UUID, table_id: UUID, business_name: str, synonyms: list[str]
-) -> MetadataBusinessAnnotation:
-    return MetadataBusinessAnnotation(
+) -> tuple[MetadataBusinessAnnotation, MetadataBusinessAnnotationVersion]:
+    """AT-6: content lives on the (returned) current `MetadataBusinessAnnotationVersion`,
+    never on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
+    """
+    annotation = MetadataBusinessAnnotation(
         id=uuid4(),
         organization_id=organization_id,
         datasource_id=uuid4(),
@@ -891,7 +902,13 @@ def _sample_business_annotation(
         domain_id=uuid4(),
         entity_id=uuid4(),
         source_proposal_id=uuid4(),
+    )
+    version = MetadataBusinessAnnotationVersion(
+        id=uuid4(),
+        organization_id=organization_id,
+        annotation_id=annotation.id,
         version=1,
+        status="APPROVED",
         business_name=business_name,
         business_description="Approved business context for this table.",
         table_role="FACT",
@@ -903,6 +920,7 @@ def _sample_business_annotation(
         approved_by="steward",
         approved_at=datetime(2026, 8, 1, tzinfo=UTC),
     )
+    return annotation, version
 
 
 def _sample_metadata_table(*, organization_id: UUID, name: str) -> MetadataTable:

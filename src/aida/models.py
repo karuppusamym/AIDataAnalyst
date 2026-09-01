@@ -1481,6 +1481,19 @@ class AgentRun(Base, TimestampMixin):
     retrieval_evidence: Mapped[list[dict[str, Any]]] = mapped_column(
         JSON, default=list, nullable=False
     )
+    # AT-6: one entry per grounding fragment assembled into model context (the
+    # retrieval hits selected in `agent_orchestrator.GovernedAgentOrchestrator.run`,
+    # i.e. the same set `retrieval_evidence` above describes) --
+    # {"object_type", "object_id", "fragment_digest", "annotation_version_id"}.
+    # `fragment_digest` is a SHA-256 of the fragment's actual grounding content
+    # (never the content itself -- value-free, matching `retrieval_evidence`).
+    # `annotation_version_id` is set only for a `BUSINESS_ANNOTATION` fragment
+    # and points at the exact `MetadataBusinessAnnotationVersion` row hashed, so
+    # the run replays against that content even after a later approval
+    # supersedes it. See `agent_run_replay.py`.
+    grounding_fragment_digests: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
     plan_evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     recommended_tool_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("governed_tool_version.id", ondelete="SET NULL"), index=True
@@ -2366,6 +2379,23 @@ class MetadataEnrichmentProposal(Base, TimestampMixin):
 
 
 class MetadataBusinessAnnotation(Base, TimestampMixin):
+    """Identity/pointer row for a table's business annotation.
+
+    AT-6: content (`business_name`, `business_description`, ...) used to live
+    directly on this row and was mutated in place on every re-approval
+    (`semantic_inference.apply_enrichment_proposal`'s old `else:` branch), which
+    made it impossible to know what content an `AgentRun` was actually grounded
+    on once a later approval overwrote it -- see
+    `Docs/review-2026-08/atlan-context/00-decisions.md` §1. All authored content
+    now lives on the append-only `MetadataBusinessAnnotationVersion` below,
+    following the same parent-identity / versioned-content split as
+    `AssetDocumentation`/`AssetDocumentationVersion` and
+    `GlossaryTerm`/`GlossaryTermVersion`. This row keeps only the current
+    domain/entity classification pointer and identity -- resolve content
+    through the current (`status="APPROVED"`) version, or through a specific
+    `MetadataBusinessAnnotationVersion.id` for replay of a past `AgentRun`.
+    """
+
     __tablename__ = "metadata_business_annotation"
     __table_args__ = (
         UniqueConstraint("table_id", name="uq_metadata_business_annotation_table_id"),
@@ -2390,7 +2420,41 @@ class MetadataBusinessAnnotation(Base, TimestampMixin):
     source_proposal_id: Mapped[UUID] = mapped_column(
         ForeignKey("metadata_enrichment_proposal.id", ondelete="RESTRICT"), nullable=False
     )
-    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class MetadataBusinessAnnotationVersion(Base, TimestampMixin):
+    """Append-only content history for a `MetadataBusinessAnnotation` (AT-6).
+
+    One row per approved re-annotation. The previously `APPROVED` row (if any)
+    is flipped to `SUPERSEDED` in the same transaction that inserts the new
+    `APPROVED` row -- see `business_annotation_versions.write_annotation_version`
+    -- never mutated for content. An `AgentRun.grounding_fragment_digests`
+    entry for a `BUSINESS_ANNOTATION` retrieval hit records this row's id, so a
+    run can be replayed against exactly this content even after a later
+    approval supersedes it.
+    """
+
+    __tablename__ = "metadata_business_annotation_version"
+    __table_args__ = (
+        UniqueConstraint("annotation_id", "version"),
+        Index(
+            "ix_metadata_business_annotation_version_org_status",
+            "organization_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    annotation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_business_annotation.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVED", nullable=False)
     business_name: Mapped[str] = mapped_column(String(255), nullable=False)
     business_description: Mapped[str] = mapped_column(Text, nullable=False)
     table_role: Mapped[str] = mapped_column(String(50), nullable=False)

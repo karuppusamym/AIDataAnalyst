@@ -4464,3 +4464,139 @@ intended surface. `snowflake-connector-python`'s version bump in `pyproject.toml
 separately requested but was a hard resolver requirement to get a CVE-fixed `pyopenssl` at all (see
 above) — no unrelated `src/` refactoring rode along with it. See tracker row AU-13's follow-up note
 for the version table.
+
+## 2026-09-01 — AT-6 (context receipts: grounding-fragment digests + `MetadataBusinessAnnotation` versioning) closed
+
+The tracker's own framing of this row: *"We cannot reconstruct what a model saw"* —
+`AgentRun.retrieval_evidence` recorded which objects were retrieved, never what they said, and
+`MetadataBusinessAnnotation` was mutated in place on every re-approval with no history table. Both
+are fixed for real, end to end, not just modeled.
+
+### `MetadataBusinessAnnotation` split into identity + append-only version, matching the codebase's own convention
+
+`MetadataBusinessAnnotation` (`src/aida/models.py:2381`) now carries only identity and the current
+domain/entity classification pointer — no content columns. All authored content
+(`business_name`/`business_description`/`table_role`/`grain_statement`/`synonyms`/
+`suggested_questions`/`tags`/`confidence`/`approved_by`/`approved_at`) moved to the new, append-only
+`MetadataBusinessAnnotationVersion` (`src/aida/models.py:2425`), the exact parent-identity /
+versioned-content shape already used by `AssetDocumentation`/`AssetDocumentationVersion`
+(`asset_description_service.apply_asset_description_draft`) and
+`GlossaryTerm`/`GlossaryTermVersion` (`semantic_api.decide_governance_review`): the prior `APPROVED`
+row flips to `SUPERSEDED` in the same transaction that inserts the new `APPROVED` row, and is never
+edited for content again.
+
+A grep for every construction site of `MetadataBusinessAnnotation` in `src/` before this change
+found exactly one write path: `semantic_inference.apply_enrichment_proposal`'s `else:` branch, which
+did `annotation.business_name = output.business_name` (and seven siblings) plus
+`annotation.version += 1` directly on the row being read elsewhere — the in-place mutation the
+tracker row names. That branch now calls the new single write function,
+`business_annotation_versions.write_annotation_version` (`src/aida/business_annotation_versions.py:97`),
+which supersedes-then-inserts instead. `current_version_alias`/`current_versions_by_annotation_id`
+(same file) are the shared "read the current version" helpers, mirroring
+`catalog_read_model._latest_approved_documentation`'s window-function shape.
+
+Every downstream reader of the old content columns was updated to join the current version instead
+— found by grepping every `MetadataBusinessAnnotation` field read across `src/`, not assumed:
+`retrieval.py` (`hybrid_retrieve`'s `BUSINESS_ANNOTATION` candidate text — and the reason this
+mattered enough to fix rather than leave a TODO: this is the exact text a grounded query scores
+against), `catalog_read_model.py` (`_business_annotations`/`_description`), `semantic_intelligence_api.py`
+(`_annotation_read` and all three of its call sites: the list, get-by-table, and business-map
+endpoints), `stewardship_api.py` (`generate_glossary_link_proposals`'s label-matching scan), and
+`asset_description_service.py` (`_asset_evidence`'s business-name/description/grain evidence
+fields). None of these were in the tracker row's literal file list, but the model split makes them
+load-bearing — `mypy src` caught three of them (`asset_description_service.py`) as `attr-defined`
+errors, which is exactly the kind of drift a type checker is supposed to catch before a human does.
+
+### Fragment hashing at the real grounding-assembly call site
+
+`GovernedAgentOrchestrator.run()` (`src/aida/agent_orchestrator.py`) is where retrieved grounding
+content is actually assembled for a run — `retrieval_hits` becomes both `retrieval_evidence` (already
+existed) and, new, `AgentRun.grounding_fragment_digests` (`src/aida/models.py:1494`, a JSON column
+following the same shape as its `retrieval_evidence`/`plan_evidence`/`step_trace` siblings rather
+than a new table, per this codebase's existing evidence-on-the-run convention).
+`_compute_grounding_fragment_digests` (`agent_orchestrator.py:146`, wired in at `:460`, right after
+`retrieval_hits` is finalized and before the `RESOLVED` transition) computes one SHA-256 digest per
+fragment. For a `BUSINESS_ANNOTATION` hit specifically, `retrieval.py`'s `hybrid_retrieve` now joins
+the current `MetadataBusinessAnnotationVersion` (via `current_version_alias`) and stamps
+`metadata["annotation_version_id"]` on the hit; the digest is computed from that version's actual
+content (`business_annotation_versions.annotation_version_content_digest` — one shared definition
+used by both the hashing side and the replay-verification side below, so they cannot silently drift
+apart), and the version id is recorded alongside the digest. Every other hit type (`TABLE`,
+`COLUMN`, `GOVERNED_TOOL`, `DBT_RESOURCE`, `SEMANTIC_METRIC`, `GLOSSARY_TERM`) still gets a real
+digest, computed from its own value-free identifiers, since none of those have separately versioned
+content in this codebase yet — a real but weaker receipt than the annotation case, called out
+explicitly in the code comment rather than left silent.
+
+### The replay proof
+
+`agent_run_replay.resolve_grounding` (`src/aida/agent_run_replay.py:63`) takes an `AgentRun` and
+resolves each stored digest back to source content: for a `BUSINESS_ANNOTATION` fragment, it fetches
+the exact `MetadataBusinessAnnotationVersion` by id (`session.get`, which works regardless of
+`status` — a superseded row is still fetchable by primary key) and recomputes the digest to confirm
+it still matches what was recorded on the run. Exposed at
+`GET /v1/agent-runs/{agent_run_id}/grounding-receipts` (`src/aida/api.py:3043`,
+`AgentRunGroundingReceiptsRead`/`GroundingFragmentReceiptRead` in `schemas.py`).
+
+`tests/test_at6_context_receipts.py::test_resolve_grounding_replays_against_superseded_version_not_current_one`
+is the end-to-end proof the tracker exit criterion asks for, run for real rather than argued: a real
+question ("orders") is run through `GovernedAgentOrchestrator.run()` against a seeded table with a
+business annotation, producing a real persisted `AgentRun` with a `BUSINESS_ANNOTATION` fragment
+digest; the annotation is then re-approved through the real write path
+(`write_annotation_version`), which supersedes the original version; `resolve_grounding` is called
+on the *original* run and asserted to return the *original* content (`business_name == "Orders"`,
+not `"Orders (corrected)"`), with `digest_verified == True` and `current_status == "SUPERSEDED"`.
+Three more tests in the same file cover the versioning mechanics directly
+(`test_write_annotation_version_supersedes_instead_of_mutating`,
+`test_apply_enrichment_proposal_versions_on_reapproval`) and that the live orchestrator path
+actually produces the digest in the first place
+(`test_orchestrator_run_hashes_business_annotation_grounding_fragment`).
+
+### Migration `f8a3c1d97e42`
+
+`migrations/versions/f8a3c1d97e42_at6_context_receipts_and_annotation_versioning.py`: creates
+`metadata_business_annotation_version`; copies every existing `metadata_business_annotation` row's
+live content forward as its version 1 `APPROVED` row (carrying forward what already exists, not
+fabricating history the tracker row says cannot be backfilled); drops the now-superseded content
+columns from `metadata_business_annotation`; adds `agent_run.grounding_fragment_digests`. Verified —
+not just written — against a real Postgres database:
+`AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL=postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida_migration_drift_test
+uv run python -m pytest tests/test_migration_orm_drift.py -v` passes, meaning `alembic upgrade head`
+through every migration in order produces a schema that diffs clean against `Base.metadata` — no
+drift between this migration and the ORM changes above. `uv run alembic heads` confirms a single
+head (`f8a3c1d97e42`) before pushing.
+
+### Two pre-existing gates this change had to satisfy, not just pytest
+
+`tests/test_inv6_value_freedom.py` polices column *naming* (INV-6, value-freedom) across every
+mapped table by reflection, and had a named exemption for
+`metadata_business_annotation.suggested_questions`; moving that column to the version table required
+renaming the exemption to `metadata_business_annotation_version.suggested_questions` (with an updated
+rationale referencing this change) rather than deleting it — the column still matches the `question`
+value-bearing-name fragment for the same reason it always did (model- or steward-authored example
+prompts, not source data). `tests/test_openapi_diff_gate.py` compares the committed OpenAPI baseline
+against `app.openapi()`; the new endpoint and two new schemas required regenerating it via
+`AIDA_ENVIRONMENT=development uv run python scripts/openapi_diff.py --accept-baseline`, reviewed via
+`git diff` before committing — purely additive (254 insertions, 0 deletions): the new
+`grounding_fragment_digests` field on `AgentRunRead`, the two new schemas, and the one new path.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (191 files). Full `pytest` suite (`uv run pytest -q`,
+foreground, not backgrounded): exit code 0, zero `FAILED`/`ERROR` lines anywhere in the output. (This
+environment's pytest does not print a final "N passed" summary line even under `--collect-only` —
+also observed and noted in AU-13's follow-up entry above — so exit code plus the explicit absence of
+failure lines is the check here; the identical command surfaced exactly 3 real, named `FAILED` lines
+before the INV-6 exemption and OpenAPI baseline fixes above, confirming the harness does report
+failures when they exist.) `tests/test_at6_context_receipts.py`'s 4 tests, and every test file
+touched by the model split (`test_glossary_stewardship.py`, `test_catalog_rows_read_model.py`,
+`test_marketplace_personalization.py`, `test_agent_orchestrator_retrieval_wiring.py`), also re-run in
+isolation and confirmed green individually.
+
+### Scope note
+
+Stayed within the grounding-assembly call site (`agent_orchestrator.py`), `MetadataBusinessAnnotation`'s
+model and every real write/read path to it, `AgentRun`'s schema, one migration, and their tests, per
+the tracker row's file scope — no tool-selection or model-call logic in the orchestrator was touched.
+The wider blast radius (five extra `src/` files reading the old content columns) was not optional
+scope creep: it is what "the model is identity/pointer only" *means* once enforced by the type
+checker rather than left as an aspiration.

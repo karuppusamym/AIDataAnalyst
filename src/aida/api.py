@@ -20,6 +20,7 @@ from aida.agent_orchestrator import (
     GovernedAgentOrchestrator,
     ModelRouteUnavailable,
 )
+from aida.agent_run_replay import resolve_grounding
 from aida.asset_certification import asset_certification_is_active, current_asset_certification
 from aida.authorization_gate import AuthorizationDenied, gate
 from aida.catalog_bulk_actions import (
@@ -92,6 +93,7 @@ from aida.schemas import (
     AgentEvaluationRunRead,
     AgentRetrievalPreviewRead,
     AgentRetrievalPreviewRequest,
+    AgentRunGroundingReceiptsRead,
     AgentRunRead,
     AiRuntimeStatusRead,
     AnalysisRunCreate,
@@ -123,6 +125,7 @@ from aida.schemas import (
     DataSourceSummaryRead,
     DataSourceUpdate,
     GraphSummaryRead,
+    GroundingFragmentReceiptRead,
     LineOfBusinessCreate,
     LineOfBusinessRead,
     MetadataColumnRead,
@@ -3031,6 +3034,69 @@ async def get_agent_run(
         if agent_run.principal_id != context.principal_id:
             raise HTTPException(status_code=403, detail="agent run belongs to another principal")
     return AgentRunRead.model_validate(agent_run)
+
+
+@router.get(
+    "/agent-runs/{agent_run_id}/grounding-receipts",
+    response_model=AgentRunGroundingReceiptsRead,
+)
+async def get_agent_run_grounding_receipts(
+    agent_run_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "Analyst", "AgentDeveloper", "Viewer", "Auditor")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> AgentRunGroundingReceiptsRead:
+    """AT-6 replay proof: resolve every grounding-fragment digest stored on this
+    run back to the exact content it was hashed from. A `BUSINESS_ANNOTATION`
+    fragment resolves to its `MetadataBusinessAnnotationVersion` -- which, being
+    append-only (`business_annotation_versions.py`), is still exactly the
+    content this run saw even if a later approval has since superseded it.
+    `digest_verified` recomputes the digest from that stored content and
+    confirms it still matches what was recorded on the run at grounding time.
+    """
+    agent_run = await session.get(AgentRun, agent_run_id)
+    if agent_run is None:
+        raise HTTPException(status_code=404, detail="agent run not found")
+    enforce_organization(context, agent_run.organization_id)
+    if "PlatformAdmin" not in context.roles and "Auditor" not in context.roles:
+        if agent_run.principal_id != context.principal_id:
+            raise HTTPException(status_code=403, detail="agent run belongs to another principal")
+    resolved = await resolve_grounding(session, agent_run)
+    return AgentRunGroundingReceiptsRead(
+        agent_run_id=agent_run.id,
+        fragment_count=len(resolved),
+        fragments=[
+            GroundingFragmentReceiptRead(
+                object_type=fragment.object_type,
+                object_id=fragment.object_id,
+                fragment_digest=fragment.fragment_digest,
+                annotation_version_id=(
+                    UUID(fragment.annotation_version_id)
+                    if fragment.annotation_version_id
+                    else None
+                ),
+                annotation_version=(
+                    fragment.resolved_annotation_version.version
+                    if fragment.resolved_annotation_version is not None
+                    else None
+                ),
+                annotation_status=fragment.current_status,
+                business_name=(
+                    fragment.resolved_annotation_version.business_name
+                    if fragment.resolved_annotation_version is not None
+                    else None
+                ),
+                business_description=(
+                    fragment.resolved_annotation_version.business_description
+                    if fragment.resolved_annotation_version is not None
+                    else None
+                ),
+                digest_verified=fragment.digest_verified,
+            )
+            for fragment in resolved
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------

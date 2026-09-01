@@ -26,6 +26,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import current_version_alias
 from aida.models import (
     AssetDescriptionDraft,
     AssetDocumentation,
@@ -276,8 +277,16 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         )
     ).all()
 
+    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
+    # not on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
+    annotation_alias, annotation_ranked = current_version_alias()
     annotation = await session.scalar(
-        select(MetadataBusinessAnnotation).where(MetadataBusinessAnnotation.table_id == table.id)
+        select(annotation_alias)
+        .join(
+            MetadataBusinessAnnotation,
+            MetadataBusinessAnnotation.id == annotation_alias.annotation_id,
+        )
+        .where(MetadataBusinessAnnotation.table_id == table.id, annotation_ranked.c.rn == 1)
     )
 
     term_rows = (
@@ -309,7 +318,7 @@ async def gather_evidence(session: AsyncSession, table: MetadataTable) -> AssetE
         dbt_documented_column_count=dbt_documented_column_count,
         business_name=annotation.business_name if annotation else None,
         business_description=annotation.business_description if annotation else None,
-        business_annotation_id=annotation.id if annotation else None,
+        business_annotation_id=annotation.annotation_id if annotation else None,
         grain_statement=annotation.grain_statement if annotation else None,
         bound_term_names=tuple(name for name, _ in term_rows),
         bound_term_ids=tuple(term_id for _, term_id in term_rows),

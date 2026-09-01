@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import current_version_alias
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -1019,10 +1020,20 @@ async def generate_glossary_link_proposals(
         labels.extend((synonym, "SYNONYM") for synonym in version.synonyms)
         for label, kind in labels:
             label_index.setdefault(label.strip().casefold(), []).append((term, version, kind))
-    annotations = (
-        await session.scalars(
-            select(MetadataBusinessAnnotation)
-            .where(MetadataBusinessAnnotation.organization_id == organization_id)
+    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
+    # not on `MetadataBusinessAnnotation` -- see `business_annotation_versions.py`.
+    annotation_version_alias, annotation_version_ranked = current_version_alias()
+    annotation_rows = (
+        await session.execute(
+            select(MetadataBusinessAnnotation, annotation_version_alias)
+            .join(
+                annotation_version_alias,
+                annotation_version_alias.annotation_id == MetadataBusinessAnnotation.id,
+            )
+            .where(
+                MetadataBusinessAnnotation.organization_id == organization_id,
+                annotation_version_ranked.c.rn == 1,
+            )
             .order_by(MetadataBusinessAnnotation.id)
             .limit(10_000)
         )
@@ -1054,9 +1065,11 @@ async def generate_glossary_link_proposals(
             )
         ).all()
     }
-    for annotation in annotations:
-        annotation_labels = [(annotation.business_name, "BUSINESS_NAME")]
-        annotation_labels.extend((value, "ANNOTATION_SYNONYM") for value in annotation.synonyms)
+    for annotation, content_version in annotation_rows:
+        annotation_labels = [(content_version.business_name, "BUSINESS_NAME")]
+        annotation_labels.extend(
+            (value, "ANNOTATION_SYNONYM") for value in content_version.synonyms
+        )
         candidates: dict[UUID, tuple[GlossaryTerm, GlossaryTermVersion, float, str, str]] = {}
         for annotation_label, annotation_kind in annotation_labels:
             normalized = annotation_label.strip().casefold()
@@ -1095,7 +1108,7 @@ async def generate_glossary_link_proposals(
                     "strategy": "APPROVED_LABEL_EXACT_MATCH",
                     "matched_label": matched_label,
                     "term_label_kind": term_kind,
-                    "annotation_version": annotation.version,
+                    "annotation_version": content_version.version,
                 },
                 created_by=context.principal_id,
             )
@@ -1116,7 +1129,7 @@ async def generate_glossary_link_proposals(
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={
-            "annotations_scanned": len(annotations),
+            "annotations_scanned": len(annotation_rows),
             "approved_terms_scanned": len(term_rows),
             "proposals_created": len(created),
         },

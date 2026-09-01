@@ -271,6 +271,11 @@ async def _seed_marketplace(
                 status="ACTIVE",
                 assigned_by="steward",
             ),
+            # AT-6: `MetadataBusinessAnnotation` is identity/domain-pointer only --
+            # content lives on `MetadataBusinessAnnotationVersion`
+            # (`business_annotation_versions.py`). `_owned_domain_names` (the
+            # function under test here) only reads `domain_id`/`table_id`, so no
+            # version row is needed for this test.
             MetadataBusinessAnnotation(
                 organization_id=org.id,
                 datasource_id=uuid4(),
@@ -278,13 +283,6 @@ async def _seed_marketplace(
                 domain_id=payments_domain.id,
                 entity_id=uuid4(),
                 source_proposal_id=uuid4(),
-                business_name="Payments table",
-                business_description="Approved business context.",
-                table_role="FACT",
-                grain_statement="One row per payment.",
-                confidence=0.95,
-                approved_by="steward",
-                approved_at=datetime(2026, 1, 1, tzinfo=UTC),
             ),
             MetadataBusinessAnnotation(
                 organization_id=org.id,
@@ -293,13 +291,6 @@ async def _seed_marketplace(
                 domain_id=risk_domain.id,
                 entity_id=uuid4(),
                 source_proposal_id=uuid4(),
-                business_name="Risk table",
-                business_description="Approved business context.",
-                table_role="FACT",
-                grain_statement="One row per exposure.",
-                confidence=0.95,
-                approved_by="steward",
-                approved_at=datetime(2026, 1, 1, tzinfo=UTC),
             ),
         ]
     )

@@ -1219,11 +1219,39 @@ class AgentRunRead(ApiModel):
     query_execution_id: UUID | None
     step_trace: list[dict[str, Any]]
     retrieval_evidence: list[dict[str, Any]]
+    # AT-6: one entry per grounding fragment hashed at assembly time --
+    # {"object_type", "object_id", "fragment_digest", "annotation_version_id"}.
+    # See `GET /v1/agent-runs/{id}/grounding-receipts` to resolve these back to
+    # source content.
+    grounding_fragment_digests: list[dict[str, Any]]
     plan_evidence: dict[str, Any]
     recommended_tool_version_id: UUID | None
     failure_reason: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class GroundingFragmentReceiptRead(ApiModel):
+    """One resolved AT-6 grounding-fragment digest: what was hashed, and --
+    for a `BUSINESS_ANNOTATION` fragment -- the exact (possibly since
+    superseded) `MetadataBusinessAnnotationVersion` content it resolves to.
+    """
+
+    object_type: str
+    object_id: str
+    fragment_digest: str
+    annotation_version_id: UUID | None
+    annotation_version: int | None
+    annotation_status: str | None
+    business_name: str | None
+    business_description: str | None
+    digest_verified: bool
+
+
+class AgentRunGroundingReceiptsRead(ApiModel):
+    agent_run_id: UUID
+    fragment_count: int
+    fragments: list[GroundingFragmentReceiptRead]
 
 
 class AiRuntimeStatusRead(ApiModel):

@@ -47,6 +47,7 @@ from aida.models import (
     GlossaryTermVersion,
     LineOfBusiness,
     MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataCatalog,
     MetadataSchema,
     MetadataTable,
@@ -323,15 +324,25 @@ async def test_description_falls_back_through_the_documented_precedence(session)
     )
 
     annotated = await _seed_table(session, datasource, name="t_annotation")
+    annotation = MetadataBusinessAnnotation(
+        id=uuid4(),
+        organization_id=annotated.organization_id,
+        datasource_id=datasource.id,
+        table_id=annotated.id,
+        domain_id=uuid4(),
+        entity_id=uuid4(),
+        source_proposal_id=uuid4(),
+    )
+    session.add(annotation)
+    # AT-6: content lives on `MetadataBusinessAnnotationVersion`, never on
+    # `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
     session.add(
-        MetadataBusinessAnnotation(
+        MetadataBusinessAnnotationVersion(
             id=uuid4(),
             organization_id=annotated.organization_id,
-            datasource_id=datasource.id,
-            table_id=annotated.id,
-            domain_id=uuid4(),
-            entity_id=uuid4(),
-            source_proposal_id=uuid4(),
+            annotation_id=annotation.id,
+            version=1,
+            status="APPROVED",
             business_name="Accounts",
             business_description="Approved business-annotation description.",
             table_role="FACT",

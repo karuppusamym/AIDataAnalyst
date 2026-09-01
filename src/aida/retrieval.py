@@ -62,6 +62,7 @@ import structlog
 from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
 from aida.embedding_provider import (
     AsyncEmbeddingProvider,
@@ -378,9 +379,24 @@ async def hybrid_retrieve(
             )
 
     # 4. Business annotations (approved semantic enrichments)
+    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`
+    # (append-only, never mutated in place -- `business_annotation_versions.py`),
+    # not on `MetadataBusinessAnnotation` itself. The hit's `metadata` carries
+    # `annotation_version_id` precisely so the orchestrator's grounding-fragment
+    # digest (AT-6, `agent_orchestrator._compute_grounding_fragment_digests`)
+    # hashes -- and the run's evidence can later resolve back to -- this exact
+    # version, even after a later approval supersedes it.
+    version_alias, version_ranked = current_version_alias()
     biz_rows = (
         await session.execute(
-            select(MetadataBusinessAnnotation, BusinessDomain, BusinessEntity, MetadataTable)
+            select(
+                MetadataBusinessAnnotation,
+                version_alias,
+                BusinessDomain,
+                BusinessEntity,
+                MetadataTable,
+            )
+            .join(version_alias, version_alias.annotation_id == MetadataBusinessAnnotation.id)
             .join(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
             .join(BusinessEntity, BusinessEntity.id == MetadataBusinessAnnotation.entity_id)
             .join(MetadataTable, MetadataTable.id == MetadataBusinessAnnotation.table_id)
@@ -388,21 +404,22 @@ async def hybrid_retrieve(
                 MetadataBusinessAnnotation.datasource_id == datasource.id,
                 MetadataBusinessAnnotation.organization_id == datasource.organization_id,
                 MetadataTable.status == "ACTIVE",
+                version_ranked.c.rn == 1,
             )
             .limit(scan_limit)
         )
     ).all()
 
-    for annotation, domain, entity, table in biz_rows:
+    for annotation, version, domain, entity, table in biz_rows:
         candidate_text = " ".join(
             filter(None, [
-                annotation.business_name,
-                annotation.business_description,
+                version.business_name,
+                version.business_description,
                 domain.display_name,
                 entity.display_name,
-                annotation.grain_statement,
-                " ".join(annotation.synonyms or []),
-                " ".join(annotation.suggested_questions or []),
+                version.grain_statement,
+                " ".join(version.synonyms or []),
+                " ".join(version.suggested_questions or []),
             ])
         )
         bm25 = _bm25_score(query_tokens, candidate_text)
@@ -416,7 +433,7 @@ async def hybrid_retrieve(
                     HybridRetrievalHit(
                         object_type="BUSINESS_ANNOTATION",
                         object_id=str(annotation.id),
-                        display_name=annotation.business_name or table.name,
+                        display_name=version.business_name or table.name,
                         score=score,
                         reason_codes=["BM25_BUSINESS_ANNOTATION"],
                         metadata={
@@ -424,6 +441,7 @@ async def hybrid_retrieve(
                             "source_table_id": str(table.id),
                             "domain": domain.display_name,
                             "entity": entity.display_name,
+                            "annotation_version_id": str(version.id),
                         },
                     )
                 )

@@ -17,6 +17,10 @@ from aida.ai_decision_lineage import (
     record_decision,
     record_decisions,
 )
+from aida.business_annotation_versions import (
+    annotation_version_content_digest,
+    resolve_annotation_version,
+)
 from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.model_gateway import (
@@ -132,6 +136,66 @@ def _record_retrieval_decisions(
     )
     if edges:
         record_decisions(session, organization_id, edges)
+
+
+def _canonical_json(value: Any) -> bytes:
+    """Deterministic byte encoding for content hashing (AT-6): sorted keys, no
+    incidental whitespace, so the same content always digests identically.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+async def _compute_grounding_fragment_digests(
+    session: AsyncSession, retrieval_hits: list[RetrievalHit]
+) -> list[dict[str, Any]]:
+    """AT-6: hash every grounding fragment assembled into this run's context --
+    the same set of retrieval hits `retrieval_evidence` already records -- and
+    return one value-free entry per fragment for `AgentRun.grounding_fragment_digests`.
+
+    A `BUSINESS_ANNOTATION` hit's fragment is the exact content of the current
+    `MetadataBusinessAnnotationVersion` it resolved to at retrieval time
+    (`retrieval.py` stamps `metadata["annotation_version_id"]`), so the digest
+    is computed from that versioned content and the version id is recorded
+    alongside it -- letting `agent_run_replay.resolve_grounding` point back at
+    precisely this content even after a later approval supersedes it
+    (`business_annotation_versions.write_annotation_version` never mutates a
+    superseded row, so it stays resolvable by id). Every other hit type has no
+    separately versioned content in this codebase yet, so its fragment is its
+    own value-free identifiers (`object_type`, `object_id`, `display_name`,
+    `metadata`) -- still a real digest of what was assembled, just not one that
+    survives a change to the underlying object's free text.
+    """
+    entries: list[dict[str, Any]] = []
+    for hit in retrieval_hits:
+        annotation_version_id: str | None = None
+        fragment_digest: str | None = None
+        if hit.object_type == "BUSINESS_ANNOTATION":
+            raw_version_id = hit.metadata.get("annotation_version_id")
+            version = (
+                await resolve_annotation_version(session, UUID(str(raw_version_id)))
+                if raw_version_id
+                else None
+            )
+            if version is not None:
+                annotation_version_id = str(version.id)
+                fragment_digest = annotation_version_content_digest(version)
+        if fragment_digest is None:
+            content: dict[str, Any] = {
+                "object_type": hit.object_type,
+                "object_id": hit.object_id,
+                "display_name": hit.display_name,
+                "metadata": hit.metadata,
+            }
+            fragment_digest = f"sha256:{hashlib.sha256(_canonical_json(content)).hexdigest()}"
+        entries.append(
+            {
+                "object_type": hit.object_type,
+                "object_id": hit.object_id,
+                "fragment_digest": fragment_digest,
+                "annotation_version_id": annotation_version_id,
+            }
+        )
+    return entries
 
 
 class GovernedAgentOrchestrator:
@@ -392,6 +456,12 @@ class GovernedAgentOrchestrator:
         )
         retrieval_evidence = [hit.evidence() for hit in retrieval_hits]
         agent_run.retrieval_evidence = retrieval_evidence
+        # AT-6: fragment-level content receipts, computed at the moment these
+        # hits are assembled as this run's grounding -- see
+        # `_compute_grounding_fragment_digests` for what gets hashed and why.
+        agent_run.grounding_fragment_digests = await _compute_grounding_fragment_digests(
+            session, retrieval_hits
+        )
         state = state.transition(RuntimeStage.RESOLVED, semantic_version=semantic_version)
         trace.append(
             _trace(

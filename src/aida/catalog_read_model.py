@@ -78,6 +78,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from aida.asset_certification import asset_certification_is_active
+from aida.business_annotation_versions import current_version_alias
 from aida.models import (
     AssetCertification,
     AssetDescriptionDraft,
@@ -88,6 +89,7 @@ from aida.models import (
     DataQualityObservation,
     GlossaryTermVersion,
     MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataTable,
     OwnershipAssignment,
     TableProfile,
@@ -288,17 +290,25 @@ async def _latest_pending_drafts(
 
 async def _business_annotations(
     session: AsyncSession, table_ids: list[UUID]
-) -> dict[UUID, MetadataBusinessAnnotation]:
+) -> dict[UUID, MetadataBusinessAnnotationVersion]:
+    """The current (`APPROVED`) content version per table -- AT-6:
+    `MetadataBusinessAnnotation` itself carries no content any more, see
+    `business_annotation_versions.py`.
+    """
     if not table_ids:
         return {}
+    alias, ranked = current_version_alias()
     rows = (
-        await session.scalars(
-            select(MetadataBusinessAnnotation).where(
-                MetadataBusinessAnnotation.table_id.in_(table_ids)
+        await session.execute(
+            select(alias, MetadataBusinessAnnotation.table_id)
+            .join(alias, alias.annotation_id == MetadataBusinessAnnotation.id)
+            .where(
+                MetadataBusinessAnnotation.table_id.in_(table_ids),
+                ranked.c.rn == 1,
             )
         )
     ).all()
-    return {annotation.table_id: annotation for annotation in rows}
+    return {table_id: version for version, table_id in rows}
 
 
 async def _glossary_terms_by_table(
@@ -389,7 +399,7 @@ def _description(
     *,
     documentation: AssetDocumentationVersion | None,
     pending_draft: AssetDescriptionDraft | None,
-    annotation: MetadataBusinessAnnotation | None,
+    annotation: MetadataBusinessAnnotationVersion | None,
 ) -> tuple[str | None, bool]:
     if documentation is not None:
         return documentation.readme, False

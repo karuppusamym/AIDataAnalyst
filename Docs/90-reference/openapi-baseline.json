@@ -456,6 +456,34 @@
         "title": "AgentRetrievalPreviewRequest",
         "type": "object"
       },
+      "AgentRunGroundingReceiptsRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_run_id": {
+            "format": "uuid",
+            "title": "Agent Run Id",
+            "type": "string"
+          },
+          "fragment_count": {
+            "title": "Fragment Count",
+            "type": "integer"
+          },
+          "fragments": {
+            "items": {
+              "$ref": "#/components/schemas/GroundingFragmentReceiptRead"
+            },
+            "title": "Fragments",
+            "type": "array"
+          }
+        },
+        "required": [
+          "agent_run_id",
+          "fragment_count",
+          "fragments"
+        ],
+        "title": "AgentRunGroundingReceiptsRead",
+        "type": "object"
+      },
       "AgentRunRead": {
         "additionalProperties": false,
         "properties": {
@@ -483,6 +511,14 @@
           "generation_source": {
             "title": "Generation Source",
             "type": "string"
+          },
+          "grounding_fragment_digests": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Grounding Fragment Digests",
+            "type": "array"
           },
           "id": {
             "format": "uuid",
@@ -592,6 +628,7 @@
           "query_execution_id",
           "step_trace",
           "retrieval_evidence",
+          "grounding_fragment_digests",
           "plan_evidence",
           "recommended_tool_version_id",
           "failure_reason",
@@ -11857,6 +11894,97 @@
           "projection_lag"
         ],
         "title": "GraphSummaryRead",
+        "type": "object"
+      },
+      "GroundingFragmentReceiptRead": {
+        "additionalProperties": false,
+        "description": "One resolved AT-6 grounding-fragment digest: what was hashed, and --\nfor a `BUSINESS_ANNOTATION` fragment -- the exact (possibly since\nsuperseded) `MetadataBusinessAnnotationVersion` content it resolves to.",
+        "properties": {
+          "annotation_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotation Status"
+          },
+          "annotation_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotation Version"
+          },
+          "annotation_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Annotation Version Id"
+          },
+          "business_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Description"
+          },
+          "business_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Business Name"
+          },
+          "digest_verified": {
+            "title": "Digest Verified",
+            "type": "boolean"
+          },
+          "fragment_digest": {
+            "title": "Fragment Digest",
+            "type": "string"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "object_type",
+          "object_id",
+          "fragment_digest",
+          "annotation_version_id",
+          "annotation_version",
+          "annotation_status",
+          "business_name",
+          "business_description",
+          "digest_verified"
+        ],
+        "title": "GroundingFragmentReceiptRead",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -24506,6 +24634,132 @@
         "tags": [
           "intelligence-governance"
         ]
+      }
+    },
+    "/v1/agent-runs/{agent_run_id}/grounding-receipts": {
+      "get": {
+        "description": "AT-6 replay proof: resolve every grounding-fragment digest stored on this\nrun back to the exact content it was hashed from. A `BUSINESS_ANNOTATION`\nfragment resolves to its `MetadataBusinessAnnotationVersion` -- which, being\nappend-only (`business_annotation_versions.py`), is still exactly the\ncontent this run saw even if a later approval has since superseded it.\n`digest_verified` recomputes the digest from that stored content and\nconfirms it still matches what was recorded on the run at grounding time.",
+        "operationId": "get_agent_run_grounding_receipts_v1_agent_runs__agent_run_id__grounding_receipts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "agent_run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Agent Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentRunGroundingReceiptsRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Run Grounding Receipts"
       }
     },
     "/v1/ai-assessment-templates": {

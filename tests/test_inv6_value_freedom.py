@@ -408,8 +408,11 @@ _COLUMN_NAME_EXEMPTIONS: dict[str, str] = {
     "query_memory_evidence.question_hash": (
         "keyed HMAC fingerprint, never the question text"
     ),
-    "metadata_business_annotation.suggested_questions": (
-        "model- or steward-authored example prompts about a table, not source data"
+    "metadata_business_annotation_version.suggested_questions": (
+        "model- or steward-authored example prompts about a table, not source data -- "
+        "AT-6 moved this (and every other annotation content column) off "
+        "metadata_business_annotation onto its append-only version table, see "
+        "business_annotation_versions.py"
     ),
     "studio_eval_result.eval_question_id": (
         "foreign key to studio_eval_question.id (ST-A8) -- an object reference, never "
