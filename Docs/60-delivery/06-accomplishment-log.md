@@ -7119,3 +7119,121 @@ data would support it (unbounded, timestamped history), but it is a larger follo
 the weekly-cycle case this row's exit condition names. No live-Postgres verification of the new query
 (the same standing sandbox limitation CN-1c/CN-2a/DQ-4 already carry). The 120-row-per-table lookback
 bound is a deliberate cost cap, not tuned against a real production history size.
+
+## 2026-09-01 — AT-17 closed: metric-formula collision detection, reusing GL-3's conflict queue as-is
+
+GL-3 detects two *glossary terms* colliding on a shared label. AT-17 is the sibling gap: two
+*metrics* computing the same number a different way, published under different names/owners, so a
+question routed to one and a question routed to the other silently disagree. Read GL-3's mechanism
+in full first (`stewardship_api.py`'s `detect_glossary_conflicts`/`list_glossary_conflicts`/
+`submit_conflict_resolution`, `stewardship_service.py`'s `apply_conflict_resolution`/
+`reject_conflict_resolution`, the `GlossaryConflict` model in `models.py`) as the template to mirror,
+per this row's own instructions.
+
+### What "formula" turned out to mean, and why `sqlglot` does not apply
+
+The task brief assumed a raw SQL/DSL formula field worth parsing with `sqlglot` (as `sql_guard.py`
+already does elsewhere). Reading `SemanticMetricVersion` in `models.py` (read-only, as required) found
+otherwise: a metric's formula is entirely structural, no SQL text or expression DSL anywhere on the
+row -- one `aggregation` enum (`SUM`/`COUNT`/`AVG`/`MIN`/`MAX`, `schemas.py`'s
+`SemanticMetricCreate.aggregation: Literal[...]`) over one `measure_column_id` (nullable only for
+`COUNT`), one `source_table_id`, one free-text `grain`, one optional `default_time_column_id`. There
+is no ratio/composite metric type in this schema (no numerator/denominator, no metric-of-metrics
+shape), so the textbook example in the brief -- "`SUM(amount)/COUNT(*)` and `AVG(amount)` compute the
+same thing" -- cannot even be *posed* as two different metric rows here: nothing in this schema can
+express a ratio metric at all. `SemanticMetricProposal` (SM-4) confirmed the same structural shape.
+Parsing SQL would have been solving a problem this schema does not have, so `metric_formula_signature.py`
+compares the structural tuple instead, with no dependency on `sqlglot`.
+
+### The detector (`src/aida/metric_formula_signature.py`, pure, DB-free)
+
+`normalize_metric_formula` builds a `MetricFormulaSignature` from a plain snapshot dict (mirroring
+SM-7's `semantic_diff.py` idiom: no session, no ORM import). `compare_formulas` classifies two
+different metrics' signatures as:
+
+- **`EXACT_MATCH`** -- `(aggregation, source_table_id, measure_column_id, default_time_column_id,
+  grain)` identical, raw `grain` string included. Two metrics, byte-for-byte the same formula, two
+  different names/owners.
+- **`NORMALIZED_GRAIN_MATCH`** -- identical on every field except `grain`, which matches only after
+  `strip().casefold()` -- the same normalization GL-3 already applies to glossary labels. This is the
+  one genuinely *semantic, not textual* equivalence this detector reaches: `"Daily"` and `"daily "`
+  read as different strings but denote the same grain.
+
+**Honest limit, stated plainly (per this row's own instruction not to overclaim):** nothing past
+those two tiers is attempted. No cross-aggregation algebra (`SUM`/`AVG` over the identical column are
+never flagged against each other -- correctly, since they are not equal in general, and the ratio case
+that *would* be equal cannot exist in this schema regardless). No column-alias resolution (two
+different `measure_column_id`s are always "different", even if lineage might say they trace to the
+same underlying value). No invented grain-synonym taxonomy (`"daily"` vs `"1d"` is not attempted --
+only case/whitespace, matching GL-3's own scope rather than inventing a business dictionary this
+codebase has no other authority for). Exact-formula and grain-normalized duplication across
+differently-named/owned metrics is still the real, valuable catch this row asked for -- it is just
+not general algebraic formula equivalence, which this schema has no representation for in the first
+place.
+
+### Wiring: GL-3's own infrastructure, reused, not a parallel table
+
+Checked `GlossaryConflict`'s schema before assuming either way, per this row's stop condition:
+`term_id` is already `Mapped[UUID | None]` (nullable), and neither `apply_conflict_resolution` nor
+`reject_conflict_resolution` reference `term_id` at all -- the maker-checker resolution GL-3 built is
+already generic over what a conflict's two positions represent. So a metric-formula collision is
+stored as a real `GlossaryConflict` row with `term_id=None`, `conflict_type=
+"METRIC_FORMULA_COLLISION"`, and both metrics' identity/formula fields (plus `match_kind`) in
+`position_a`/`position_b` -- no schema change, no migration, and it resolves through the *exact same*
+`POST /v1/glossary-conflicts/{conflict_id}/resolution` route and `GLOSSARY_CONFLICT` governance-review
+branch (`semantic_api._apply_governance_review_decision`) GL-3 already built. "Losing position
+retained" holds identically: neither `apply_conflict_resolution` nor a later `RESOLVED` status ever
+clears `position_a`/`position_b`.
+
+Two new endpoints in `semantic_api.py`, mirroring GL-3's own trigger shape exactly (GL-3's own
+`detect_glossary_conflicts` is a manual, on-demand scan endpoint -- not scheduled, not auto-fired on
+term publish -- confirmed by grepping `workflows/`, which never calls it):
+
+- `POST /v1/organizations/{organization_id}/metric-conflicts/detect` --
+  `detect_metric_formula_collisions`. Scans every `PUBLISHED` `SemanticMetricVersion` in the org
+  (bounded at 5,000 rows scanned / 100 conflicts created per call, the same caps
+  `detect_glossary_conflicts` uses), builds snapshots, calls the pure
+  `find_formula_collisions`, dedupes against already-`OPEN`/`REVIEW_REQUIRED`
+  `METRIC_FORMULA_COLLISION` rows by metric-id pair (same dedup shape as GL-3's `existing_pairs`), and
+  persists one `GlossaryConflict` per new collision.
+- `GET /v1/organizations/{organization_id}/metric-conflicts` -- `list_metric_formula_collisions`,
+  the read side, scoped to `conflict_type == "METRIC_FORMULA_COLLISION"` (mirrors
+  `list_glossary_conflicts`).
+
+No `models.py`/`schemas.py`/`contracts.py` file touched, no Alembic migration added, per this row's
+hard constraints -- genuinely unnecessary here, not worked around: `GlossaryConflictRead` (`str`
+`conflict_type`, already-imported) serves both endpoints' responses unmodified, and the detect
+endpoint constructs `GlossaryConflict` rows directly via the ORM rather than through the
+`conflict_type`-`Literal`-restricted `GlossaryConflictCreate` Pydantic model -- the exact same bypass
+`detect_glossary_conflicts` itself already uses for its own `SYNONYM_COLLISION` rows.
+
+### Tests
+
+Pure, no-database (`tests/test_metric_formula_signature.py`, 16 tests): exact duplicates across two
+differently-named/owned metrics, grain-normalized duplicates (case/whitespace only), same-metric
+different-version is never a "collision", and every documented honest-limit case correctly *not*
+flagged (different aggregation on the same column, different measure column on the same table,
+different source table, different default time column) plus a three-way collision reporting each
+pairwise combination exactly once.
+
+Integration, real in-memory sqlite (`tests/test_metric_formula_collision_endpoint.py`, 7 tests,
+`_Scenario` seeding pattern reused from SM-7's `test_semantic_diff_endpoint.py` so the real SQL join
+runs): two differently-named/owned `PUBLISHED` metrics with an identical formula produce exactly one
+persisted `GlossaryConflict` with `term_id is None`; a grain-only difference is reported as
+`NORMALIZED_GRAIN_MATCH`; a genuinely different metric (different aggregation, no shared column)
+produces zero conflicts; re-running detect against an already-open conflict creates nothing new
+(idempotent); the list endpoint returns only `METRIC_FORMULA_COLLISION` rows, not a `SYNONYM_COLLISION`
+row seeded in the same org; and a full resolve cycle through `submit_conflict_resolution` +
+`apply_conflict_resolution` (GL-3's own functions, called unmodified) proves both positions survive
+resolution untouched.
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_metric_formula_signature.py
+tests/test_metric_formula_collision_endpoint.py tests/test_glossary_stewardship.py
+tests/test_semantic_diff_endpoint.py tests/test_semantic_glossary_binding.py
+tests/test_semantic_contracts.py tests/test_doc_claims.py tests/test_openapi_diff_gate.py -q`: all
+green. `ruff check` and `mypy src` (258 files) clean on every touched file. Two new HTTP routes added
+(read-only additions, no breaking changes per `scripts/openapi_diff.py`) -- `Docs/90-reference/
+openapi-baseline.json` regenerated (`--accept-baseline`); `ui-next/src/lib/types.ts` already matched
+the live schema (`scripts/generate_ui_types.py` reported no diff -- no new Pydantic schema was added,
+only two paths reusing `GlossaryConflictRead`/`Page`).
+
