@@ -8857,3 +8857,44 @@ clean. New routes changed `app.openapi()`: `Docs/90-reference/openapi-baseline.j
 additive; `cd ui-next && npm run typecheck && npm run test && npm run build` all green (`npm install`
 was needed first — `node_modules` was absent in this worktree). No `models.py`/`schemas.py`/
 `platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+---
+
+## 2026-09-01 — MG-3 closed: private-endpoint routing for approved model routes
+
+`ModelRouteConfiguration` already carried a maker-checker-approved `endpoint_alias` field on every
+route, and `ModelCallEvidence` already recorded it on every call -- but nothing ever read it back.
+Both `OpenAIResponsesProvider` and `GeminiGenerateContentProvider` unconditionally called
+`self.settings.openai_base_url`/`gemini_base_url`, a single global public endpoint, regardless of what
+alias the approved route named. A route a bank had approved specifically to route through, say, an
+Azure OpenAI private endpoint would have its calls go out over the public internet anyway -- the
+`endpoint_alias` was decorative.
+
+Fix: a new `Settings.model_endpoint_urls: dict[str, str]` (`atlas/platform/config.py`), keyed by
+`endpoint_alias`. `model_gateway._resolve_endpoint_base_url(route, settings, default)` looks the
+route's alias up in that map; a hit returns the private URL, a miss returns the existing public
+default unchanged. Both providers now call through the resolved URL instead of the hardcoded public
+one. This is additive by construction, not a behavior change requiring a flag: an alias with no entry
+in the (default-empty) map behaves exactly as before, so every route approved up to now keeps working
+identically the moment this ships.
+
+Production posture: extended the existing `if self.environment == "production"` HTTPS check (which
+already covered `openai_base_url`/`gemini_base_url`) to also reject any `model_endpoint_urls` value not
+served over HTTPS, naming the offending alias(es) in the error. Added as a new case to
+`tests/test_tier0_invariants.py`'s `_INCOMPLETE_POSTURE_CASES` parametrized list rather than a
+standalone test, since that list already is INV-4's enumeration of every production fail-closed branch
+in `Settings` -- a new branch belongs in the same table, not next to it.
+
+4 new tests in `tests/test_model_gateway.py`: `test_openai_adapter_routes_through_a_configured_private_endpoint`
+and its Gemini equivalent assert the outbound request's `request.url.host` matches the configured
+private host via `httpx.MockTransport`; `test_openai_adapter_falls_back_to_the_public_default_for_an_unmapped_alias`
+proves a route whose alias isn't in the map still calls `api.openai.com`, so the new setting can never
+silently redirect a route nobody configured it for. `pytest tests/test_model_gateway.py
+tests/test_tier0_invariants.py tests/test_config.py`: 51 passed (baseline 47, +4 new). `ruff check` and
+`mypy --strict` clean on both touched source files (`model_gateway.py`, `config.py`).
+
+Honest gap: no real private endpoint (Azure OpenAI PrivateLink, GCP Private Service Connect, or an
+on-prem proxy) was reachable in this sandbox, so the mechanism that *selects* a private URL is proven
+end to end, but that a request sent to such a URL actually traverses a private network path rather
+than the public internet is not -- the same standing live-infrastructure gap as QG-5/QG-6's Vault
+adapters and CN-1c/CN-2a's live-cloud-account gap.
