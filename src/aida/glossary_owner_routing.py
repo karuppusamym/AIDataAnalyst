@@ -43,15 +43,6 @@ from aida.notification_routing import (
 DEFAULT_ROUTE_AFTER = timedelta(days=7)
 DEFAULT_ESCALATE_AFTER = timedelta(days=14)
 
-# GL-6 tier 2: an entry still unaddressed a further week after its first
-# escalation (day 21 overall, continuing the 7/14-day progression above)
-# escalates a second time. Tier 2 does not just repeat the same channel --
-# it always produces an ITSM payload (see `sync_unowned_asset_backlog`
-# below), since the point of a second tier is to reach an operational queue
-# once the first escalation channel has not resolved it, whether or not any
-# notification rule matches at all.
-DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=21)
-
 
 @dataclass(frozen=True, slots=True)
 class TableFacts:

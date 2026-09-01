@@ -9449,3 +9449,65 @@ separate scope, not a small addition to bolt on here. Building the registry and 
 function this pass, leaving the wiring for whoever builds that endpoint, matches the tracker's own
 framing of AT-7(b) as "a registry with staged rollout" -- the registry is real and complete; the
 endpoint that would consult it during an ordinary read is the next, separate piece.
+
+---
+
+## 2026-09-01 — Found and fixed: literal unresolved `git stash pop` conflict markers committed to the shared trunk
+
+Rebasing this branch's AT-7(b) commit onto the latest `feature/snowflake-dbt-lineage-mcp` pulled in
+commit `cc41a13` ("feat(glossary): implement two-tier escalation for unowned assets with ITSM
+payloads") -- an independent, parallel implementation of the exact same GL-6 tier-2 escalation feature
+this branch had already closed and pushed earlier the same day. That collision itself is unsurprising
+given how many concurrent sessions are landing work on this branch today; what made it a real defect is
+that `cc41a13` was committed with **literal, unresolved `<<<<<<< Updated upstream` / `=======` /
+`>>>>>>> Stashed changes` markers still in the file** -- the `git stash pop` conflict from reconciling
+that session's own stashed work against this branch's already-pushed GL-6 commit was never actually
+resolved before the commit landed. `git rebase`'s own conflict markers use commit hashes, never
+"Updated upstream"/"Stashed changes" -- confirmed via `git show cc41a13 -- <path>` that these strings
+were already baked into that commit's diff, not an artifact of this session's own rebase.
+
+Scope of the corruption, found by a repo-wide `grep -rln "Updated upstream\|Stashed changes"`:
+`src/aida/stewardship_api.py` (one block, inside `route_unowned_asset_backlog`'s return statement --
+this made the file **fail to parse as Python at all**, since `<<<<<<<` is not valid syntax),
+`tests/test_glossary_owner_routing.py` (eight blocks, spanning two whole test functions'-worth of
+interleaved fixture setup), and `Docs/30-contracts/04-event-catalog.md` (one block, two differently-worded
+rows for the same `stewardship.unowned_asset_escalated_tier2.v1` event). `Docs/90-reference/openapi-baseline.json`
+was also touched by that commit but auto-merged cleanly (confirmed still valid JSON via `json.load`)
+and `Docs/20-modules/08-glossary-and-stewardship.md` merged clean with no markers.
+
+### Resolution
+
+The two implementations differed in one real design choice: this branch's own (already-migrated,
+already-tested) design keeps a dedicated `escalated_tier2_at` column, so `escalated_at` always still
+means "when tier 1 fired" even after tier 2 also fires; the other session's design had no new column at
+all and instead overwrote `escalated_at` with the tier-2 timestamp, plus re-offered the incident to
+`route_notification` a second time before unconditionally building the ITSM payload. Kept this branch's
+version throughout -- it already has a real migration, already-passing tests, and preserves more
+history (both timestamps distinguishable) rather than less. One net-new addition kept from the other
+side: `test_sync_tier2_escalation_produces_itsm_payload_even_without_a_matching_rule`, a legitimate
+(if largely redundant with this branch's own zero-rules assertion) test proving tier 2's ITSM guarantee
+holds with `notification_rules=[]`. The duplicated `DEFAULT_ESCALATE_TIER2_AFTER` constant (defined
+twice, 7 days then silently re-defined to 21 -- Python just uses whichever assignment executes last at
+module load, so the second, unintended value was the one actually active) and the duplicated tier-2
+`if` block in `sync_unowned_asset_backlog` (both would not literally double-fire in one pass, since the
+first one already flips `status` away from `"ESCALATED"` before the second's own guard re-checks it,
+but two competing implementations of the same branch sitting in one function is a defect regardless of
+whether it happened to produce a wrong *answer* today) were both removed, leaving exactly the one
+canonical implementation this branch already had before the rebase pulled in the collision.
+
+### Verification
+
+`ast.parse()` on all three affected Python files confirms they parse as valid syntax again (a
+regression check the normal test suite could not have caught, since a `SyntaxError` in
+`stewardship_api.py` would have failed collection for every test in this session, not just this row's).
+`pytest tests/test_glossary_owner_routing.py tests/test_glossary_stewardship.py
+tests/test_fleet_scheduling.py`: 59 passed (57 before, +2 -- the kept extra test, plus `route_notification`'s
+import staying genuinely used rather than orphaned). `pytest tests/test_openapi_diff_gate.py`: clean,
+confirming the auto-merged baseline still matches `app.openapi()` exactly. `ruff check`/`mypy --strict`
+clean on both touched source files. Full session regression (all 15 touched test files from
+IN-5g/MG-3/GL-6/AT-7b): 314 passed.
+
+Not fixed here, flagged for whoever owns it: `cc41a13` itself remains in this branch's history exactly
+as committed, markers and all, until this fix's own commit lands on top of it -- the broken intermediate
+state is still visible via `git show cc41a13`, which is correct (history is not rewritten), but anyone
+bisecting through that exact commit would find a file that fails to import.
