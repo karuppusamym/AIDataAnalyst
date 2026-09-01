@@ -119,7 +119,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 
 | Aspect | Now | Target |
 |---|---|---|
-| Baselines | Implemented — volume, null-rate, schema fingerprint; source/table policies; immutable observations | Custom rule packs, seasonality |
+| Baselines | Implemented — volume, null-rate, schema fingerprint; source/table policies; immutable observations; custom threshold rule packs (row-count min/max, column null-rate max) on their own schedule, independent of the profiling scan (DQ-4) | Seasonality |
 | Incidents | Implemented — fingerprinted lifecycle, audited transitions, auto-recovery | Notification routing, ownership escalation |
 | Freshness | Fails closed as `NOT_CONFIGURED` | Approved connector watermark contracts |
 | Scan-age posture | Implemented and explicitly labelled | Unchanged |
@@ -135,7 +135,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 | DQ-1 | Notification and escalation routing | P0 |
 | DQ-2 | Approved connector watermark contracts → activate freshness | P0 |
 | DQ-3 | **Runtime coupling: retrieval demotion, answer warnings, tool gating** | P1 |
-| DQ-4 | Custom rule packs and rule scheduling | P1 |
+| DQ-4 | Custom rule packs and rule scheduling | P1 (delivered 2026-08-31, see `60-delivery/03-tracker.md`) |
 | DQ-5 | Data SLA/SLO definitions | P1 |
 | DQ-6 | Seasonality-aware thresholds | P2 |
 | DQ-7 | Bank-scale incident-volume certification | P1 |

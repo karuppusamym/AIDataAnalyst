@@ -183,6 +183,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `quality.incident_auto_recovered` | Signal normalized | incident_id |
 | `quality.sla_breached` | SLA missed | sla_id, table_id |
 | `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
+| `data_quality.rule_pack.created.v1` | DQ-4: a custom quality rule pack created | datasource_id, name |
+| `data_quality.custom_rule_pack.evaluated.v1` | DQ-4: a rule pack's own-cadence sweep evaluated all its rules | rule_pack_id, datasource_id, rules_evaluated, skipped_no_data, incidents_opened, incidents_resolved |
 | `contract.violations_detected` | Runtime data contract evaluation found violations | contract_id, violation_count, enforcement_action |
 
 ### Runtime — topic `atlas.execution.v1` (key: `organization_id`)

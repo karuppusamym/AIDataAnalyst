@@ -10,6 +10,7 @@ from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from aida.config import Settings, get_settings
+from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
@@ -419,6 +420,28 @@ async def run_owner_routing_pass(
     return swept
 
 
+# --- DQ-4: custom quality rule packs -----------------------------------------
+#
+# Each QualityRulePack carries its own interval_minutes (unlike GL-6's single
+# org-wide cadence), so due-ness is tracked per rule-pack id rather than per
+# organization. Same in-process-memory, restart-just-resweeps-once-more
+# tradeoff as _owner_routing_last_run_at, for the same reason: no existing
+# per-pack "next due at" column, and a sweep is idempotent/safe to repeat
+# (custom_quality_rules.evaluate_rule_pack reconciles from the latest stored
+# profile every time).
+_custom_rule_pack_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_custom_rule_pack_pass(*, now: datetime | None = None) -> int:
+    """Sweep every enabled ``QualityRulePack`` due per its own
+    ``interval_minutes``, independent of the profiling scan cadence above --
+    DQ-4's exit condition ("rules run outside scans"). Delegates to
+    ``custom_quality_rules.run_due_rule_packs``, which already isolates one
+    rule pack's failure from the rest, matching ``run_owner_routing_pass``.
+    """
+    return await run_due_rule_packs(now=now, last_run_at=_custom_rule_pack_last_run_at)
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -537,6 +560,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     now = datetime.now(UTC)
     await rebalance_usage_weighted_priorities(settings, now=now)
     await run_owner_routing_pass(settings, now=now)
+    await run_custom_rule_pack_pass(now=now)
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.

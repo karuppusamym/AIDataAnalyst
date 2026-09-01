@@ -2827,6 +2827,39 @@ class DataQualitySummaryRead(ApiModel):
     source_freshness_status: Literal["NOT_CONFIGURED"]
 
 
+class QualityRulePackUpsert(ApiModel):
+    name: str = Field(min_length=3, max_length=200)
+    enabled: bool = True
+    interval_minutes: int = Field(default=60, ge=5, le=10_080)
+
+
+class QualityRulePackRead(QualityRulePackUpsert):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class QualityRuleUpsert(ApiModel):
+    name: str = Field(min_length=3, max_length=200)
+    rule_type: Literal["TABLE_ROW_COUNT_MIN", "TABLE_ROW_COUNT_MAX", "COLUMN_NULL_RATE_MAX"]
+    table_id: UUID
+    column_id: UUID | None = None
+    threshold: float
+    enabled: bool = True
+
+
+class QualityRuleRead(QualityRuleUpsert):
+    id: UUID
+    organization_id: UUID
+    rule_pack_id: UUID
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class ContextProductQualityRequirements(ApiModel):
     minimum_score: int = Field(default=0, ge=0, le=100)
     deny_on_critical_incident: bool = True
