@@ -465,7 +465,7 @@ jobs:
           --cov=aida --cov=atlas
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
-          --cov-fail-under=68
+          --cov-fail-under=69
 
       - name: Upload coverage report
         if: always()

@@ -9682,3 +9682,73 @@ run --extra dev pytest tests/test_doc_claims.py -q` run before the closing push 
 route added/changed -> no OpenAPI/`ui-next` regen needed. No new `record_outbox` event type -> no
 `04-event-catalog.md` change needed. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict
 markers run immediately before the closing push: none found.
+
+## 2026-09-01 — AU-14 closed: coverage measurement wired in, a real baseline established, and a CI floor set
+
+`pytest-cov==6.2.1` had been a declared dev dependency since before this session, invoked nowhere -- no
+`--cov` flag anywhere in `pyproject.toml`'s `[tool.pytest.ini_options]` or `.github/workflows/ci.yml`.
+Coverage was simply never measured. Fixed:
+
+- `pyproject.toml`: new `[tool.coverage.run]` (`source = ["aida", "atlas"]`, `branch = true`, test/
+  migration dirs omitted) and `[tool.coverage.report]` sections. Deliberately not folded into
+  `[tool.pytest.ini_options]`'s `addopts` -- `migration-drift`/`reachability`/
+  `connector-version-fixtures` each invoke `pytest` against a single test file for a fast targeted
+  signal, and forcing `--cov` into every one of those would slow them down for a meaningless
+  partial-suite number; `pytest-cov`'s plugin only activates when `--cov` is actually passed on the
+  command line, so this costs those jobs nothing.
+- `.github/workflows/ci.yml`'s `tests` job (the one job that runs the full suite) now runs
+  `--cov=aida --cov=atlas --cov-report=term-missing --cov-report=xml --cov-fail-under=69` and uploads
+  `coverage.xml` as a build artifact.
+
+**A real baseline, run for real, not estimated.** `AIDA_ENVIRONMENT=development uv run --extra dev
+pytest --cov=aida --cov=atlas --cov-report=term-missing --cov-report=xml --cov-report=json` against the
+full suite: 6,095 tests collected, 6,082 passed / 3 failed / 9 skipped / 1 xfailed. **74.10% combined
+statement+branch coverage** (77.39% statement-only, 59.91% branch-only; 31,433 statements, 7,107
+missed, 7,278 branches, 1,010 partial). 32 files at exactly 0%: two real `aida` modules
+(`batch_ingestion.py`, `workflows/worker.py`) and all six files (`api.py`/`contracts.py`/`events.py`/
+`repository.py`/`router.py`/`service.py`) of five `src/atlas/modules/*` scaffolds (`catalog`,
+`connectivity`, `identity_tenancy`, `ingestion`, `observability_audit`) -- confirmed genuinely
+unreachable, not a measurement artifact: `main.py` never imports any of them, and their own
+module-scaffold tests live under `src/atlas/modules/*/tests/`, outside `testpaths = ["tests"]`, so
+they are never collected by a plain `pytest` run.
+
+**Re-verified the row's own "16 of 36 API modules ... imported by no test" claim** against real
+coverage instead of a name-grep proxy, since the count had visibly drifted since the row was written:
+51 API-surface modules exist today (46 `src/aida/*_api.py` + 5 `src/atlas/modules/*/api.py`, the
+latter a naming convention that postdates the row's original count). Result is better than the stale
+claim on the `aida` side and confirms it on the `atlas` side: **0 of the 46 `aida` `*_api.py` files are
+at 0% coverage** (lowest is `ingestion_api.py` at 15.41%) -- a same-name-string grep against `tests/`
+flags 8 of them (`compliance_api.py`, `negative_knowledge_api.py`, `notification_api.py`,
+`quality_api.py`, `runtime_contracts_api.py`, `search_api.py`, `semantic_intelligence_api.py`,
+`sql_validation_api.py`) as apparently untested by name, but all 8 measure 17-72% real coverage --
+reached via `TestClient`-driven integration tests that exercise the live route without the test source
+ever mentioning the module's file name, so the grep proxy overstates the gap and the coverage number is
+the honest one. **All 5 of the `atlas` `api.py` router modules are at 0%** -- the real, current
+instance of the row's claim.
+
+**Floor: `--cov-fail-under=69`.** Chosen as a 5-point margin below the measured 74.10%, matching AG-8's
+own quality-baseline gate's established 5-point-margin convention for a percentage-point CI floor -- a
+regression ratchet against backsliding (the suite already clears it by 5.10 points today), not a target
+still to be reached.
+
+Full results (the complete 51-module coverage table, the zero-coverage-file breakdown, and the
+pre-existing-failure analysis) published at `Docs/90-reference/coverage-baseline.md`, plus a
+machine-readable `Docs/90-reference/coverage-baseline.json` summary, following the AG-8/SM-3 published
+benchmark-results convention.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py -q`: clean, all
+citations in the tracker row and the two published files resolve. The 3 test failures surfaced during
+the coverage run are pre-existing and unrelated to this change (CI/tooling-only -- no `aida`/`atlas`
+source was touched): `test_config.py::test_environment_must_be_explicit_outside_tests` fails
+specifically when `AIDA_ENVIRONMENT` is set in the ambient shell env, which this run's own
+`AIDA_ENVIRONMENT=development` (required for `pytest-cov`'s dev-extra import) triggers -- already
+documented as a known, out-of-scope conflict in this same file's AU-12 entry;
+`test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output` reflects the
+committed OpenAPI baseline drifting behind other feature rows landing on this fast-moving branch, TS-4's
+own gate's concern, not this row's; `test_au12_temporal_outage_resilience.py::
+test_readiness_recovers_to_up_once_reconnect_succeeds` is a timing-sensitive reconnect-polling assertion
+that reads as ordinary flakiness under a 6,095-test run with coverage instrumentation active. None are
+coverage-tooling issues and none block this row's own exit criterion. Repo-wide grep for literal
+`<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately before the closing push: none found.
