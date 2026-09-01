@@ -84,6 +84,7 @@ from aida.context_product_policy import (
     was_previously_authorized_consumer,
 )
 from aida.db import get_session
+from aida.envelope_models import MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.mcp_budget import (
@@ -243,8 +244,13 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "slug": "get_transformation_detail",
         "description": (
-            "Return value-safe dbt transformation evidence for a dbt resource or matched table: "
-            "redacted compiled SQL, dependencies, tests, materialization, and source artifact hash."
+            "Return value-safe transformation evidence -- the code that produced a lineage "
+            "edge -- for a dbt resource, a matched table, or a view. dbt-matched entities "
+            "get redacted compiled SQL, dependencies, tests, materialization and source "
+            "artifact hash; a view table (AT-19, envelope 1.1) gets its redacted definition "
+            "SQL, redaction status and screening status. Answers 'why do you say so' for a "
+            "VIEW_DEFINITION or DBT_DEPENDENCY edge from get_lineage_graph -- not just that "
+            "the edge exists."
         ),
         "inputSchema": {
             "type": "object",
@@ -949,6 +955,31 @@ async def _transformation_detail(
     datasource: DataSource,
     entity_id: UUID,
 ) -> dict[str, Any] | None:
+    """Resolve one entity id to its transformation evidence.
+
+    Two independent sources, tried in order:
+
+    1. dbt-compiled SQL (`DbtResource`, unchanged from EE.10) -- `entity_id` is
+       a `DbtResource.id` or the `MetadataTable.id` it matched to.
+    2. AT-19: connector-discovered view DDL (`MetadataViewDefinition`, envelope
+       1.1) -- `entity_id` is the `MetadataTable.id` of the view itself.
+       `MetadataViewDefinition.table_id` carries a `UniqueConstraint`, so this
+       is a genuine 1:1 lookup, not a guess: exactly the view/procedure
+       identity `unified_lineage_api.py`'s `VIEW_DEFINITION` edges reference
+       via `transformation_reference.entity_id` in their `evidence`, so the
+       edge and this tool can never present two disconnected representations
+       of the same fact.
+
+       Stored-procedure bodies (`MetadataRoutine`) are deliberately NOT
+       resolved here: `ProcedureLineageEdge` carries no FK, specific_name, or
+       any other identity field back to the `MetadataRoutine` row a given
+       edge was parsed from (`view_lineage_api.py`'s `_persist_edges` takes
+       only raw SQL text with no routine-identity parameter), so there is no
+       stable per-edge link to follow -- fabricating one here would present
+       an unverifiable guess as fact. `PROCEDURE_DEFINITION` edges keep their
+       existing `sql_hash`/`dialect` evidence and do not get a
+       `transformation_reference`. See AT-19's tracker note.
+    """
     resource = await session.scalar(
         select(DbtResource)
         .join(DbtArtifactImport, DbtArtifactImport.id == DbtResource.artifact_import_id)
@@ -962,7 +993,7 @@ async def _transformation_detail(
         .limit(1)
     )
     if resource is None:
-        return None
+        return await _view_definition_transformation_detail(session, datasource, entity_id)
     artifact = await session.get(DbtArtifactImport, resource.artifact_import_id)
     # `resource.description` is source-controlled free text pulled from a dbt manifest
     # (a model/source `description:` in someone's YAML) and this tool call hands it
@@ -984,6 +1015,7 @@ async def _transformation_detail(
         if not is_eligible_for_model_context(verdict.status):
             description = None
     return {
+        "transformation_source": "DBT_COMPILED_SQL",
         "dbt_resource_id": str(resource.id),
         "lineage_node_id": (
             str(resource.matched_table_id)
@@ -1012,6 +1044,69 @@ async def _transformation_detail(
             "value_free": True,
             "compiled_sql_literals_redacted": True,
             "raw_artifact_persisted": False,
+        },
+    }
+
+
+async def _view_definition_transformation_detail(
+    session: AsyncSession,
+    datasource: DataSource,
+    entity_id: UUID,
+) -> dict[str, Any] | None:
+    """AT-19: transformation evidence sourced from envelope 1.1's connector-
+    discovered view DDL, for entities `_transformation_detail`'s dbt lookup
+    did not match.
+
+    `entity_id` is a `MetadataTable.id`; `MetadataViewDefinition.table_id` is
+    unique per table (see `envelope_models.py`), so this is a genuine 1:1
+    lookup -- the same `table_id` `unified_lineage_api.py`'s `VIEW_DEFINITION`
+    edges carry as `evidence.transformation_reference.entity_id`, so an edge's
+    reference and this read always describe the same underlying row, never
+    two representations that could drift apart.
+
+    `definition_sql_redacted` was already literal-redacted (INV-6) and
+    prompt-risk-screened (`ingest_screening.screen_text`) once, at write time
+    (`ingestion.py::_upsert_view_definition`) -- unlike a dbt resource's
+    free-text `description`, `MetadataViewDefinition` carries a *stored*
+    `screening_status`, so this read honours it rather than re-screening.
+    """
+    table = await session.get(MetadataTable, entity_id)
+    if (
+        table is None
+        or table.datasource_id != datasource.id
+        or table.organization_id != datasource.organization_id
+    ):
+        return None
+    view_definition = await session.scalar(
+        select(MetadataViewDefinition).where(MetadataViewDefinition.table_id == entity_id)
+    )
+    if view_definition is None:
+        return None
+
+    definition_sql = view_definition.definition_sql_redacted
+    eligible = is_eligible_for_model_context(view_definition.screening_status)
+    if not eligible:
+        definition_sql = None
+    return {
+        "transformation_source": "VIEW_DEFINITION",
+        "view_definition_id": str(view_definition.id),
+        "lineage_node_id": str(table.id),
+        "table_id": str(table.id),
+        "name": table.name,
+        "definition_sql_redacted": definition_sql,
+        "definition_fingerprint": view_definition.definition_fingerprint,
+        "redaction_status": view_definition.redaction_status,
+        "screening_status": view_definition.screening_status,
+        "screening_reason_codes": view_definition.screening_reason_codes,
+        "is_materialized": view_definition.is_materialized,
+        "is_updatable": view_definition.is_updatable,
+        "truncated": view_definition.truncated,
+        "availability": view_definition.availability,
+        "unavailable_reason": view_definition.unavailable_reason,
+        "governance": {
+            "value_free": True,
+            "definition_sql_literals_redacted": True,
+            "raw_definition_persisted": False,
         },
     }
 

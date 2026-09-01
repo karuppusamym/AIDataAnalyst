@@ -8,7 +8,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from aida.config import Settings
 from aida.db import Base
+from aida.envelope_models import MetadataViewDefinition
 from aida.main import app
+from aida.mcp_server import _transformation_detail
 from aida.models import (
     DataDomain,
     DataSource,
@@ -22,6 +24,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Organization,
+    ProcedureLineageEdge,
     Project,
     ViewLineageEdge,
 )
@@ -683,3 +686,241 @@ async def test_unified_lineage_impact_route_denies_a_caller_from_another_organiz
         )
 
     assert denied.value.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# AT-19 -- transformation code rendered on the lineage edge. A VIEW_DEFINITION
+# edge's evidence carries a resolvable `transformation_reference` plus
+# `redaction_status`, so a caller answers "why do you say so" and "is it
+# redacted" straight from the graph, without a blind extra round trip to
+# discover whether one exists. FOREIGN_KEY and PROCEDURE_DEFINITION edges must
+# never carry a fabricated one -- an FK is not transformation-code-backed at
+# all, and a ProcedureLineageEdge carries no stable identity back to the
+# specific MetadataRoutine row it was parsed from (see
+# `mcp_server.py::_view_definition_transformation_detail`'s docstring).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_view_definition_edge_carries_a_resolvable_transformation_reference(
+    db_session,
+) -> None:
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    vw_orders = await _seed_table(db_session, datasource, schema, "vw_orders")
+    fct_orders = await _seed_table(db_session, datasource, schema, "fct_orders")
+
+    db_session.add(
+        ViewLineageEdge(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            source_table="bank.public.raw_orders",
+            source_column="id",
+            target_table="bank.public.vw_orders",
+            target_column="order_id",
+            source_table_id=raw_orders.id,
+            target_table_id=vw_orders.id,
+            transformation_type="DIRECT",
+            confidence="FULL",
+            dialect="postgres",
+            sql_hash="h1",
+        )
+    )
+    db_session.add(
+        MetadataViewDefinition(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=vw_orders.id,
+            definition_sql_redacted=(
+                "CREATE VIEW vw_orders AS SELECT id AS order_id FROM raw_orders"
+            ),
+            definition_fingerprint="def-fp-1",
+            redaction_status="PARSED",
+            screening_status="CLEAN",
+            availability="AVAILABLE",
+            fingerprint="fp",
+        )
+    )
+    db_session.add(
+        MetadataConstraint(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=fct_orders.id,
+            name="fk_fct_orders_vw_orders",
+            constraint_type="FOREIGN_KEY",
+            columns=["vw_orders_id"],
+            referenced_table_id=vw_orders.id,
+            referenced_columns=["order_id"],
+            status="ACTIVE",
+            fingerprint="fp",
+        )
+    )
+    db_session.add(
+        ProcedureLineageEdge(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            source_table="bank.public.raw_orders",
+            source_column="id",
+            target_table="bank.public.fct_orders",
+            target_column="order_id",
+            source_table_id=raw_orders.id,
+            target_table_id=fct_orders.id,
+            transformation_type="DIRECT",
+            confidence="FULL",
+            dialect="postgres",
+            sql_hash="h2",
+        )
+    )
+    await db_session.flush()
+
+    graph = await build_unified_lineage_graph_payload(db_session, datasource, settings=None)
+    edges_by_source = {edge.edge_source: edge for edge in graph.edges}
+
+    view_edge = edges_by_source["VIEW_DEFINITION"]
+    assert view_edge.evidence["transformation_reference"] == {
+        "tool": "get_transformation_detail",
+        "entity_id": str(vw_orders.id),
+        "kind": "VIEW_DEFINITION",
+    }
+    assert view_edge.evidence["redaction_status"] == "PARSED"
+    assert view_edge.evidence["availability"] == "AVAILABLE"
+
+    fk_edge = edges_by_source["FOREIGN_KEY"]
+    assert "transformation_reference" not in fk_edge.evidence
+    assert "redaction_status" not in fk_edge.evidence
+
+    procedure_edge = edges_by_source["PROCEDURE_DEFINITION"]
+    assert "transformation_reference" not in procedure_edge.evidence
+    assert "redaction_status" not in procedure_edge.evidence
+
+
+@pytest.mark.asyncio
+async def test_view_definition_edge_omits_the_reference_when_no_definition_is_ingested_yet(
+    db_session,
+) -> None:
+    """No fabrication: a view target table with no `MetadataViewDefinition`
+    row (definition not yet discovered/ingested for that table) gets a
+    VIEW_DEFINITION edge with no `transformation_reference` at all, rather
+    than a reference that would 404 against `get_transformation_detail`."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    vw_orders = await _seed_table(db_session, datasource, schema, "vw_orders")
+
+    db_session.add(
+        ViewLineageEdge(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            source_table="bank.public.raw_orders",
+            source_column="id",
+            target_table="bank.public.vw_orders",
+            target_column="order_id",
+            source_table_id=raw_orders.id,
+            target_table_id=vw_orders.id,
+            transformation_type="DIRECT",
+            confidence="FULL",
+            dialect="postgres",
+            sql_hash="h1",
+        )
+    )
+    await db_session.flush()
+
+    graph = await build_unified_lineage_graph_payload(db_session, datasource, settings=None)
+    edges_by_source = {edge.edge_source: edge for edge in graph.edges}
+
+    view_edge = edges_by_source["VIEW_DEFINITION"]
+    assert "transformation_reference" not in view_edge.evidence
+    assert "redaction_status" not in view_edge.evidence
+
+
+@pytest.mark.asyncio
+async def test_view_definition_transformation_reference_round_trips_to_the_real_fragment(
+    db_session,
+) -> None:
+    """The edge's `transformation_reference.entity_id` must resolve, through
+    `get_transformation_detail` (`mcp_server._transformation_detail`), to the
+    *same* redacted SQL text and redaction status the edge's own evidence
+    reports -- one fact, not two representations that could drift apart."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    vw_orders = await _seed_table(db_session, datasource, schema, "vw_orders")
+
+    definition_sql = "CREATE VIEW vw_orders AS SELECT id AS order_id FROM raw_orders"
+    db_session.add(
+        ViewLineageEdge(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            source_table="bank.public.raw_orders",
+            source_column="id",
+            target_table="bank.public.vw_orders",
+            target_column="order_id",
+            source_table_id=raw_orders.id,
+            target_table_id=vw_orders.id,
+            transformation_type="DIRECT",
+            confidence="FULL",
+            dialect="postgres",
+            sql_hash="h1",
+        )
+    )
+    db_session.add(
+        MetadataViewDefinition(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=vw_orders.id,
+            definition_sql_redacted=definition_sql,
+            definition_fingerprint="def-fp-1",
+            redaction_status="PARSED",
+            screening_status="CLEAN",
+            availability="AVAILABLE",
+            fingerprint="fp",
+        )
+    )
+    await db_session.flush()
+
+    graph = await build_unified_lineage_graph_payload(db_session, datasource, settings=None)
+    view_edge = next(edge for edge in graph.edges if edge.edge_source == "VIEW_DEFINITION")
+    reference = view_edge.evidence["transformation_reference"]
+    assert reference["tool"] == "get_transformation_detail"
+
+    detail = await _transformation_detail(db_session, datasource, UUID(reference["entity_id"]))
+
+    assert detail is not None
+    assert detail["transformation_source"] == "VIEW_DEFINITION"
+    assert detail["definition_sql_redacted"] == definition_sql
+    assert detail["redaction_status"] == view_edge.evidence["redaction_status"]
+    assert detail["availability"] == view_edge.evidence["availability"]
+
+
+@pytest.mark.asyncio
+async def test_view_definition_transformation_detail_withholds_quarantined_text(
+    db_session,
+) -> None:
+    """`get_transformation_detail` honours `MetadataViewDefinition`'s stored
+    `screening_status` (computed once at ingestion, per `ingest_screening.py`)
+    the same way it already does for a dbt resource's live-screened
+    `description` -- quarantined text never reaches the calling LLM's
+    context, but the redaction/screening status themselves still do, so a
+    caller can tell *that* code exists and *why* it is withheld."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    vw_orders = await _seed_table(db_session, datasource, schema, "vw_orders")
+    db_session.add(
+        MetadataViewDefinition(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=vw_orders.id,
+            definition_sql_redacted="CREATE VIEW vw_orders AS SELECT 1",
+            definition_fingerprint="def-fp-2",
+            redaction_status="PARSED",
+            screening_status="QUARANTINED",
+            screening_reason_codes=["INJECTION_DEFENSE:MULTILINGUAL_INJECTION"],
+            availability="AVAILABLE",
+            fingerprint="fp",
+        )
+    )
+    await db_session.flush()
+
+    detail = await _transformation_detail(db_session, datasource, vw_orders.id)
+
+    assert detail is not None
+    assert detail["definition_sql_redacted"] is None
+    assert detail["screening_status"] == "QUARANTINED"
+    assert detail["redaction_status"] == "PARSED"
