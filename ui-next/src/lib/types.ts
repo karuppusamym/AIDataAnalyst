@@ -1875,6 +1875,18 @@ export interface GovernanceReviewBulkSelectionFilter {
   status?: string;
 }
 
+/** Structured version delta for one pending (or decided) governance review. */
+export interface GovernanceReviewDiffRead {
+  review_id: string;
+  object_type: string;
+  object_id: string;
+  diffable: boolean;
+  before?: Record<string, unknown> | null;
+  after?: Record<string, unknown> | null;
+  entries?: SemanticFieldDeltaRead[];
+  message?: string | null;
+}
+
 export interface GovernanceReviewRead {
   id: string;
   organization_id: string;
@@ -3144,6 +3156,14 @@ export interface SearchSuggestion {
   display_name: string;
   qualified_name?: string | null;
   score: number;
+}
+
+/** One field-level difference, as returned to a reviewer. */
+export interface SemanticFieldDeltaRead {
+  field: string;
+  change: "added" | "removed" | "changed";
+  before?: unknown;
+  after?: unknown;
 }
 
 export interface SemanticInferenceRequest {

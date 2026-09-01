@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,6 +56,7 @@ from aida.models import (
 from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
+    ApiModel,
     GovernanceDecisionRequest,
     GovernanceReviewBulkDecisionItemRead,
     GovernanceReviewBulkDecisionRequest,
@@ -76,6 +78,7 @@ from aida.security import (
     require_roles,
     require_roles_or_delegated,
 )
+from aida.semantic_diff import ChangeKind, diff_semantic_object
 from aida.semantic_inference import apply_enrichment_proposal
 from aida.stewardship_service import (
     apply_bulk_operation,
@@ -855,6 +858,213 @@ async def list_governance_reviews(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SM-7: structured version diffs for the governance review queue
+#
+# `diff_semantic_object` (aida.semantic_diff) is the pure, DB-free diff
+# engine -- see its module docstring. Everything below is the DB-facing half:
+# turning a pending review's target row(s) into plain-dict snapshots and
+# finding the currently published sibling version to diff against. Only the
+# object types with an established DRAFT/PUBLISHED-style version lineage are
+# supported today (SEMANTIC_MODEL_VERSION, GLOSSARY_TERM_VERSION); the
+# governance queue itself spans many more object types (see
+# `_apply_governance_review_decision` below), and a review for one of those
+# still returns 200 with `diffable=False` and an explanatory `message` rather
+# than a 404 or 422 -- the endpoint is meant to be safe to call for *any*
+# pending review a reviewer is looking at, not just the two supported kinds.
+# ---------------------------------------------------------------------------
+
+
+class SemanticFieldDeltaRead(ApiModel):
+    """One field-level difference, as returned to a reviewer.
+
+    Mirrors `aida.semantic_diff.FieldDelta` field-for-field; kept as its own
+    response model (rather than reusing the dataclass directly) so this
+    endpoint's wire shape is independent of the pure module's internals.
+    """
+
+    field: str
+    change: ChangeKind
+    before: Any = None
+    after: Any = None
+
+
+class GovernanceReviewDiffRead(ApiModel):
+    """Structured version delta for one pending (or decided) governance review."""
+
+    review_id: UUID
+    object_type: str
+    object_id: str
+    diffable: bool
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    entries: list[SemanticFieldDeltaRead] = Field(default_factory=list)
+    message: str | None = None
+
+
+async def _semantic_model_version_snapshot(
+    session: AsyncSession, model_id: UUID
+) -> dict[str, Any] | None:
+    """Flatten one `SemanticModelVersion` plus its `SemanticMetricVersion`s
+    into a plain-dict snapshot, keyed so a reviewer can see exactly what
+    changed at the model level and per metric (see `diff_semantic_object`'s
+    docstring on why metrics are keyed by slug rather than listed).
+    """
+    model = await session.get(SemanticModelVersion, model_id)
+    if model is None:
+        return None
+    rows = (
+        await session.execute(
+            select(SemanticMetricVersion, SemanticMetric)
+            .join(SemanticMetric, SemanticMetricVersion.metric_id == SemanticMetric.id)
+            .where(SemanticMetricVersion.semantic_model_version_id == model.id)
+        )
+    ).all()
+    return {
+        "name": model.name,
+        "change_summary": model.change_summary,
+        "metrics": {
+            metric.slug: {
+                "name": metric_version.name,
+                "description": metric_version.description,
+                "aggregation": metric_version.aggregation,
+                "grain": metric_version.grain,
+                "source_table_id": str(metric_version.source_table_id),
+                "measure_column_id": (
+                    str(metric_version.measure_column_id)
+                    if metric_version.measure_column_id
+                    else None
+                ),
+                "default_time_column_id": (
+                    str(metric_version.default_time_column_id)
+                    if metric_version.default_time_column_id
+                    else None
+                ),
+                "allowed_dimension_column_ids": sorted(
+                    metric_version.allowed_dimension_column_ids
+                ),
+            }
+            for metric_version, metric in rows
+        },
+    }
+
+
+async def _published_semantic_model_version_id(
+    session: AsyncSession, model: SemanticModelVersion
+) -> UUID | None:
+    published = await session.scalar(
+        select(SemanticModelVersion.id).where(
+            SemanticModelVersion.project_id == model.project_id,
+            SemanticModelVersion.status == "PUBLISHED",
+            SemanticModelVersion.id != model.id,
+        )
+    )
+    return published
+
+
+async def _glossary_term_version_snapshot(
+    session: AsyncSession, version_id: UUID
+) -> dict[str, Any] | None:
+    version = await session.get(GlossaryTermVersion, version_id)
+    if version is None:
+        return None
+    return {
+        "display_name": version.display_name,
+        "definition": version.definition,
+        "synonyms": sorted(version.synonyms),
+        "owner_principal": version.owner_principal,
+    }
+
+
+async def _published_glossary_term_version_id(
+    session: AsyncSession, version: GlossaryTermVersion
+) -> UUID | None:
+    published = await session.scalar(
+        select(GlossaryTermVersion.id).where(
+            GlossaryTermVersion.term_id == version.term_id,
+            GlossaryTermVersion.status == "APPROVED",
+            GlossaryTermVersion.id != version.id,
+        )
+    )
+    return published
+
+
+@router.get(
+    "/governance/reviews/{review_id}/diff",
+    response_model=GovernanceReviewDiffRead,
+)
+async def get_governance_review_diff(
+    review_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReviewDiffRead:
+    """The structured version delta for one governance review, alongside
+    (not instead of) the raw proposed content -- SM-7, "reviewers see version
+    deltas". `before` is the currently published version's snapshot (`{}` if
+    the object has never been published before, e.g. a brand-new metric),
+    `after` is the proposed version's snapshot, and `entries` is the
+    field-level diff between them.
+    """
+    review = await session.get(GovernanceReview, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="governance review not found")
+    enforce_organization(context, review.organization_id)
+
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    message: str | None = None
+
+    if review.object_type == "SEMANTIC_MODEL_VERSION":
+        model = await session.get(SemanticModelVersion, UUID(review.object_id))
+        if model is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        after = await _semantic_model_version_snapshot(session, model.id)
+        published_id = await _published_semantic_model_version_id(session, model)
+        before = (
+            await _semantic_model_version_snapshot(session, published_id)
+            if published_id is not None
+            else {}
+        )
+    elif review.object_type == "GLOSSARY_TERM_VERSION":
+        term_version = await session.get(GlossaryTermVersion, UUID(review.object_id))
+        if term_version is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        after = await _glossary_term_version_snapshot(session, term_version.id)
+        published_id = await _published_glossary_term_version_id(session, term_version)
+        before = (
+            await _glossary_term_version_snapshot(session, published_id)
+            if published_id is not None
+            else {}
+        )
+    else:
+        message = (
+            f"structured diffs are not yet available for {review.object_type}; "
+            "the raw proposed object is still reachable through its own read endpoint"
+        )
+
+    diff = diff_semantic_object(before, after) if after is not None else None
+    return GovernanceReviewDiffRead(
+        review_id=review.id,
+        object_type=review.object_type,
+        object_id=review.object_id,
+        diffable=diff is not None,
+        before=before,
+        after=after,
+        entries=[
+            SemanticFieldDeltaRead(
+                field=entry.field,
+                change=entry.change,
+                before=entry.before,
+                after=entry.after,
+            )
+            for entry in (diff.entries if diff is not None else [])
+        ],
+        message=message,
     )
 
 

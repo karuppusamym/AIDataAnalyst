@@ -11365,6 +11365,79 @@
         "title": "GovernanceReviewBulkSelectionFilter",
         "type": "object"
       },
+      "GovernanceReviewDiffRead": {
+        "additionalProperties": false,
+        "description": "Structured version delta for one pending (or decided) governance review.",
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After"
+          },
+          "before": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before"
+          },
+          "diffable": {
+            "title": "Diffable",
+            "type": "boolean"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticFieldDeltaRead"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "object_type",
+          "object_id",
+          "diffable"
+        ],
+        "title": "GovernanceReviewDiffRead",
+        "type": "object"
+      },
       "GovernanceReviewRead": {
         "additionalProperties": false,
         "properties": {
@@ -19036,6 +19109,37 @@
           "score"
         ],
         "title": "SearchSuggestion",
+        "type": "object"
+      },
+      "SemanticFieldDeltaRead": {
+        "additionalProperties": false,
+        "description": "One field-level difference, as returned to a reviewer.\n\nMirrors `aida.semantic_diff.FieldDelta` field-for-field; kept as its own\nresponse model (rather than reusing the dataclass directly) so this\nendpoint's wire shape is independent of the pure module's internals.",
+        "properties": {
+          "after": {
+            "title": "After"
+          },
+          "before": {
+            "title": "Before"
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "changed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "change"
+        ],
+        "title": "SemanticFieldDeltaRead",
         "type": "object"
       },
       "SemanticInferenceRequest": {
@@ -45277,6 +45381,135 @@
           }
         },
         "summary": "Decide Governance Review",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/{review_id}/diff": {
+      "get": {
+        "description": "The structured version delta for one governance review, alongside\n(not instead of) the raw proposed content -- SM-7, \"reviewers see version\ndeltas\". `before` is the currently published version's snapshot (`{}` if\nthe object has never been published before, e.g. a brand-new metric),\n`after` is the proposed version's snapshot, and `entries` is the\nfield-level diff between them.",
+        "operationId": "get_governance_review_diff_v1_governance_reviews__review_id__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewDiffRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Governance Review Diff",
         "tags": [
           "semantic-governance"
         ]
