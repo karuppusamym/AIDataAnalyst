@@ -7435,3 +7435,119 @@ proves the decomposition reproduces every one of the four previous fixed confide
 tests/test_relationship_intelligence_review.py -q` — 46 passed. `ruff check` clean on all four
 touched files. `test_doc_claims.py` and `test_openapi_diff_gate.py` clean (no route/schema
 change, so no baseline regeneration needed). No Alembic migration touched.
+
+---
+
+## 2026-09-01 — UX-17 closed: review-queue read model, scoped down from a single cross-type "run"
+
+### What the row asked for, and what the data model actually has
+
+The row wanted one request to return "a run's proposals" -- each carrying a rendered diff,
+numeric confidence and evidence, with counts derived from the returned list. Before writing any
+endpoint code, the row's own stop condition was checked against the real schema: **does a "review
+run" grouping -- a batch of governance-queue proposals from one inference/scan pass -- exist across
+every proposal type feeding `GovernanceReview`, or would building it need a new persisted field?**
+
+It exists for exactly one proposal type. `MetadataEnrichmentProposal` carries `inference_run_id` ->
+`SemanticInferenceRun`, a real persisted batch of proposals from one scan pass (SM-7's own inference
+endpoint, `semantic_intelligence_api.py`). No other proposal type in the unified governance queue is
+grouped this way:
+
+- `GlossaryLinkProposal`, `SemanticMetricProposal`, `AssetDescriptionDraft`, `TermSemanticBinding`
+  each carry `governance_review_id` as a 1:1 pointer to a single review -- submitted and reviewed
+  one at a time, no batch key.
+- `SEMANTIC_MODEL_VERSION`/`GLOSSARY_TERM_VERSION` reviews -- the *only* two object types SM-7 can
+  diff -- are created by an ad-hoc `submit_for_review` call, never a scan pass, and carry no
+  confidence field at all (human-authored content, not an inference).
+- `RelationshipCandidate`/`RelationshipCandidateGroup` (RL-3) don't even route through
+  `GovernanceReview` -- their own maker-checker fields decide them directly.
+
+So the type with a genuine run is never diffable under SM-7, and the two diffable types have no run
+and no confidence. A response scoped strictly to one `inference_run_id` could never demonstrate
+"diff + confidence + evidence together across proposal types" the row's test requirements ask for,
+and building a uniform cross-type run field would mean a new column on several tables -- out of
+scope (no `models.py` edit, no Alembic migration, per this row's own hard constraints).
+
+**Scoping decision** (per the row's own stop-condition instruction: "consider scoping the
+deliverable down to per-review... documenting that narrower scope honestly"): the endpoint composes
+at **review-queue granularity** -- organization + status + optional `object_type`, the same filters
+`GET /v1/governance/reviews` already uses -- rather than inventing a fake unifying "run". An
+additional optional `inference_run_id` query parameter *is* the genuine run view, for the one
+proposal type that has one; passing it filters to exactly that `SemanticInferenceRun`'s reviews.
+
+### What shipped
+
+`GET /v1/governance/reviews/queue` (`review_queue_api.py:get_review_queue`), composed by
+`aida.review_queue_read_model.compose_review_queue`:
+
+- **Diff**: reuses `aida.semantic_diff.diff_semantic_object` directly -- via SM-7's own
+  `compose_governance_review_diff`, extracted out of `get_governance_review_diff`
+  (`semantic_api.py`) into its own function so both routes call the identical code, never two
+  forks that could disagree on what's diffable or what a diff looks like. Proposal types SM-7
+  doesn't cover get `diffable=False` with the same fallback message SM-7's own endpoint already
+  returns -- no parallel diff mechanism.
+- **Confidence**: dispatched per `object_type` -- `MetadataEnrichmentProposal.confidence`,
+  `GlossaryLinkProposal.confidence`, `SemanticMetricProposal.overall_score`,
+  `AssetDescriptionDraft.overall_score` (GL-9's evidence-scored gate, the same score that gates
+  submission). `TermSemanticBinding` and the two diffable types get `confidence=None` -- honestly,
+  since neither carries a score.
+- **Evidence**: `EvidenceItemRead` (UX-13's shape: `category`/`claim`/`source`/`occurred_at`,
+  reused verbatim from `aida.schemas`, not re-derived). Each proposal's own `evidence` JSON payload
+  (already produced by `metric_suggestion_service.evidence_payload`,
+  `asset_description_service.evidence_payload`, or the inline dicts `stewardship_api`/
+  `semantic_inference` build) is fanned out to one item per fact, plus type-specific items (engine/
+  inference-run for `MetadataEnrichmentProposal`, term/object identity for `TermSemanticBinding`).
+- **Batched composition**: one query per distinct proposal `object_type` present in the response
+  (five typed `_*_by_id` helpers), independent of how many reviews are in the batch -- UX-12's
+  idiom, applied to the confidence/evidence side. The diff side calls SM-7's function once per
+  review -- unavoidable to reuse it unchanged rather than reimplement it batched.
+- **Counts are derived, not independently queryable**: `total_proposals`, `by_status`,
+  `by_object_type`, `diffable_count` on `ReviewQueueRead` (`review_queue_schemas.py`) are Pydantic
+  `computed_field`s over `proposals` -- not real `__init__` fields. Passing one explicitly (e.g.
+  `total_proposals=99`) is rejected by `ApiModel`'s `extra="forbid"` as an unknown field, proven by
+  `test_counts_are_not_independently_settable`; there is no code path that could set a count
+  independently of the list that produced it.
+
+### Tests
+
+6 in `tests/test_review_queue_read_model.py`, real in-memory SQLite (no mocks), following
+`test_semantic_diff_endpoint.py`/`test_asset_evidence.py`'s own rationale:
+
+- route registration;
+- composed-queue shape across two proposal types in one response -- `SEMANTIC_MODEL_VERSION`
+  (diffable, one real changed field against a seeded published predecessor) and
+  `METADATA_ENRICHMENT_PROPOSAL` (not diffable, real composed confidence and evidence, every
+  evidence item carrying a `source`);
+- `inference_run_id` filter scopes to exactly that run's reviews;
+- counts mathematically match `len()`/`Counter()` over a hand-built `proposals` list, and change
+  correctly when the list is trimmed;
+- counts are not independently settable (`ValidationError` on an explicit `total_proposals=` kwarg);
+- the diff embedded in a queue row for a review is asserted equal, field-for-field, to what SM-7's
+  own `get_governance_review_diff` returns for the same review -- proving the reuse, not just
+  asserting it in a docstring.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_review_queue_read_model.py
+tests/test_semantic_diff_endpoint.py tests/test_semantic_diff.py tests/test_asset_evidence.py
+tests/test_catalog_rows_read_model.py -q`: all green (6 new + all neighboring
+governance/diff/evidence/catalog suites unaffected by the `semantic_api.py` refactor). `ruff check
+src` and `uv run mypy src` (262 files, `strict = true`) clean. `uv run lint-imports`: 8/8 contracts
+kept. `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean. The new route
+changed `app.openapi()`: `tests/test_openapi_diff_gate.py` caught it,
+`Docs/90-reference/openapi-baseline.json` regenerated via `scripts/openapi_diff.py
+--accept-baseline` (392 additive lines, confirmed by `git diff --stat`); `ui-next/src/lib/types.ts`
+regenerated via `scripts/generate_ui_types.py --accept-baseline` (32 additive lines: the new
+`ReviewQueueRead`/`ReviewQueueProposalRead` schemas). No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
+Honest gaps: the broader `pytest tests/` full-suite run (beyond the targeted governance/diff/
+evidence/catalog + doc-claims + openapi-gate + import-linter subset above) was still in progress in
+this sandbox at the time this entry was written; if it surfaces an unrelated pre-existing failure,
+that is not this row's regression (the targeted subset directly exercising every file this row
+touched is green). `RelationshipCandidate`/`RelationshipCandidateGroup` (RL-3) confidence is not
+composed here -- confirmed those rows never carry a `governance_review_id` at all, so they are not
+part of the unified review queue this endpoint reads from `GovernanceReview`; a caller wanting their
+confidence still uses RL-3's own endpoints. No live-Postgres verification of the new batched
+proposal-type lookups (the same standing sandbox limitation several earlier rows this session
+already carry).

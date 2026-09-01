@@ -1190,29 +1190,20 @@ async def _published_glossary_term_version_id(
     return published
 
 
-@router.get(
-    "/governance/reviews/{review_id}/diff",
-    response_model=GovernanceReviewDiffRead,
-)
-async def get_governance_review_diff(
-    review_id: UUID,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
-    ),
-    session: AsyncSession = Depends(get_session),
+async def compose_governance_review_diff(
+    session: AsyncSession, review: GovernanceReview
 ) -> GovernanceReviewDiffRead:
-    """The structured version delta for one governance review, alongside
-    (not instead of) the raw proposed content -- SM-7, "reviewers see version
-    deltas". `before` is the currently published version's snapshot (`{}` if
-    the object has never been published before, e.g. a brand-new metric),
-    `after` is the proposed version's snapshot, and `entries` is the
-    field-level diff between them.
-    """
-    review = await session.get(GovernanceReview, review_id)
-    if review is None:
-        raise HTTPException(status_code=404, detail="governance review not found")
-    enforce_organization(context, review.organization_id)
+    """The DB-facing half of SM-7 for one already-fetched review: turns its
+    target row(s) into plain-dict snapshots and calls `diff_semantic_object`
+    (`aida.semantic_diff`) directly -- no reimplementation of the diff itself.
 
+    Factored out of `get_governance_review_diff` (below) so a caller that
+    already has a batch of reviews on hand -- UX-17's `review_queue_read_model`
+    composing a whole run's proposals in one response -- can reuse the exact
+    same object-type dispatch and fallback wording per review, rather than
+    forking it, so the two surfaces cannot disagree on what is diffable and
+    what a diff looks like for a given review.
+    """
     before: dict[str, Any] | None = None
     after: dict[str, Any] | None = None
     message: str | None = None
@@ -1264,6 +1255,31 @@ async def get_governance_review_diff(
         ],
         message=message,
     )
+
+
+@router.get(
+    "/governance/reviews/{review_id}/diff",
+    response_model=GovernanceReviewDiffRead,
+)
+async def get_governance_review_diff(
+    review_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReviewDiffRead:
+    """The structured version delta for one governance review, alongside
+    (not instead of) the raw proposed content -- SM-7, "reviewers see version
+    deltas". `before` is the currently published version's snapshot (`{}` if
+    the object has never been published before, e.g. a brand-new metric),
+    `after` is the proposed version's snapshot, and `entries` is the
+    field-level diff between them.
+    """
+    review = await session.get(GovernanceReview, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="governance review not found")
+    enforce_organization(context, review.organization_id)
+    return await compose_governance_review_diff(session, review)
 
 
 async def _apply_governance_review_decision(

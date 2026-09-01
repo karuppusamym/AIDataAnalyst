@@ -3127,6 +3127,38 @@ export interface RenameCandidateRead {
   updated_at: string;
 }
 
+/** One governance-review-queue proposal: its own review/decision fields */
+export interface ReviewQueueProposalRead {
+  review_id: string;
+  organization_id: string;
+  object_type: string;
+  object_id: string;
+  requested_action: string;
+  status: string;
+  requested_by: string;
+  decided_by: string | null;
+  decision_reason: string | null;
+  decided_at: string | null;
+  created_at: string;
+  confidence?: number | null;
+  evidence?: EvidenceItemRead[];
+  diff: GovernanceReviewDiffRead;
+}
+
+/** A composed batch of review-queue proposals plus the filters that */
+export interface ReviewQueueRead {
+  organization_id: string;
+  status_filter: string | null;
+  object_type_filter: string | null;
+  inference_run_id_filter: string | null;
+  generated_at: string;
+  proposals: ReviewQueueProposalRead[];
+  total_proposals: number;
+  by_status: Record<string, number>;
+  by_object_type: Record<string, number>;
+  diffable_count: number;
+}
+
 export interface ScanPolicyRead {
   id: string;
   organization_id: string;

@@ -18918,6 +18918,215 @@
         "title": "RenameCandidateRead",
         "type": "object"
       },
+      "ReviewQueueProposalRead": {
+        "additionalProperties": false,
+        "description": "One governance-review-queue proposal: its own review/decision fields\n(mirrors `GovernanceReviewRead` field-for-field), a numeric `confidence`\nwhere the proposal type carries one (`None` for a human-authored\nsubmission with no inference score), the evidence each rationale cites\n(`aida.asset_evidence`'s `EvidenceItemRead` shape), and a structured\n`diff` -- SM-7's own `compose_governance_review_diff`\n(`aida.semantic_api`), reused verbatim.",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "decision_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Reason"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/GovernanceReviewDiffRead"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "requested_action": {
+            "title": "Requested Action",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "organization_id",
+          "object_type",
+          "object_id",
+          "requested_action",
+          "status",
+          "requested_by",
+          "decided_by",
+          "decision_reason",
+          "decided_at",
+          "created_at",
+          "diff"
+        ],
+        "title": "ReviewQueueProposalRead",
+        "type": "object"
+      },
+      "ReviewQueueRead": {
+        "additionalProperties": false,
+        "description": "A composed batch of review-queue proposals plus the filters that\nselected it. See `aida.review_queue_read_model` module docstring for why\nthis is scoped to \"whatever batch of reviews the caller selected\" rather\nthan a single, uniform \"run\" concept the data model does not have for\nevery proposal type -- and for the one type that does (`inference_run_id`\non `MetadataEnrichmentProposal`), `inference_run_id_filter` reflects it\nwhen the caller used it.",
+        "properties": {
+          "by_object_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "readOnly": true,
+            "title": "By Object Type",
+            "type": "object"
+          },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "readOnly": true,
+            "title": "By Status",
+            "type": "object"
+          },
+          "diffable_count": {
+            "readOnly": true,
+            "title": "Diffable Count",
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "inference_run_id_filter": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inference Run Id Filter"
+          },
+          "object_type_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type Filter"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewQueueProposalRead"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "status_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Filter"
+          },
+          "total_proposals": {
+            "readOnly": true,
+            "title": "Total Proposals",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "status_filter",
+          "object_type_filter",
+          "inference_run_id_filter",
+          "generated_at",
+          "proposals",
+          "total_proposals",
+          "by_status",
+          "by_object_type",
+          "diffable_count"
+        ],
+        "title": "ReviewQueueRead",
+        "type": "object"
+      },
       "ScanPolicyRead": {
         "additionalProperties": false,
         "properties": {
@@ -45314,6 +45523,189 @@
         "summary": "Bulk Decide Governance Reviews",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/queue": {
+      "get": {
+        "description": "One request returns a batch of governance-review-queue proposals --\neach carrying its rendered diff (SM-7, reused verbatim), numeric\nconfidence and the evidence its rationale cites. Every count on the\nresponse (`total_proposals`, `by_status`, `by_object_type`,\n`diffable_count`) is a `computed_field` derived from `proposals` itself,\nnever a separately queried number that could disagree with what was\nactually returned.\n\n`status` (default `PENDING`, matching `GET /v1/governance/reviews`) and\n`object_type` narrow the batch the same way that list endpoint's own\n`status` filter does; pass `status=` (empty) for every status.\n`inference_run_id` additionally scopes to one `SemanticInferenceRun`'s\n`METADATA_ENRICHMENT_PROPOSAL` reviews -- the one proposal type the data\nmodel genuinely groups into a batch from one inference pass (see\n`aida.review_queue_read_model` module docstring).",
+        "operationId": "get_review_queue_v1_governance_reviews_queue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "PENDING",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "inference_run_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Inference Run Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQueueRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Queue",
+        "tags": [
+          "governance-review-queue"
         ]
       }
     },
