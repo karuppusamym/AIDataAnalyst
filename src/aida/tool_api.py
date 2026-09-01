@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,9 +27,16 @@ from aida.models import (
     ToolCertificationRun,
     ToolExecution,
 )
+from aida.multi_table_blueprint import (
+    MultiTableBlueprintError,
+    UnjoinableTablesError,
+    build_multi_table_blueprint,
+    resolve_blueprint_tables_and_edges,
+)
 from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
 from aida.schemas import (
+    ApiModel,
     GovernanceReviewRead,
     GovernedToolVersionCreate,
     GovernedToolVersionRead,
@@ -183,43 +191,22 @@ def _query_response(result: GatewayResult) -> QueryExecutionResponse:
     )
 
 
-@router.post(
-    "/projects/{project_id}/tools",
-    response_model=GovernedToolVersionRead,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_tool_version(
-    project_id: UUID,
+async def _persist_tool_version_draft(
+    project: Project,
+    datasource: DataSource,
     body: GovernedToolVersionCreate,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
-    ),
-    session: AsyncSession = Depends(get_session),
-    settings: Settings = Depends(get_settings),
+    *,
+    context: SecurityContext,
+    session: AsyncSession,
+    settings: Settings,
 ) -> GovernedToolVersionRead:
-    project = await session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    enforce_organization(context, project.organization_id)
-    datasource = await session.get(DataSource, body.datasource_id)
-    if (
-        datasource is None
-        or datasource.project_id != project.id
-        or datasource.organization_id != project.organization_id
-    ):
-        raise HTTPException(status_code=422, detail="datasource is outside this project")
-    if body.semantic_model_version_id:
-        semantic_model = await session.get(SemanticModelVersion, body.semantic_model_version_id)
-        if (
-            semantic_model is None
-            or semantic_model.project_id != project.id
-            or semantic_model.status != "PUBLISHED"
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="tool semantic model must be published and belong to this project",
-            )
-
+    """The shared draft-creation tail: validate `body.sql_template` the same
+    way regardless of whether it was hand-authored (`create_tool_version`)
+    or generated (`create_multi_table_tool_blueprint`), then persist a new
+    `GovernedToolVersion` in ``DRAFT`` status. Publication is unaffected by
+    which path created the draft -- both go through the same
+    `submit_tool_for_review` maker-checker flow afterwards.
+    """
     definitions = body.parameters
     declared = {definition.name for definition in definitions}
     try:
@@ -329,6 +316,151 @@ async def create_tool_version(
         await session.rollback()
         raise HTTPException(status_code=409, detail="tool version conflict; retry") from exc
     return _tool_read(tool, version)
+
+
+async def _load_project_and_datasource(
+    session: AsyncSession,
+    context: SecurityContext,
+    project_id: UUID,
+    datasource_id: UUID,
+) -> tuple[Project, DataSource]:
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    enforce_organization(context, project.organization_id)
+    datasource = await session.get(DataSource, datasource_id)
+    if (
+        datasource is None
+        or datasource.project_id != project.id
+        or datasource.organization_id != project.organization_id
+    ):
+        raise HTTPException(status_code=422, detail="datasource is outside this project")
+    return project, datasource
+
+
+@router.post(
+    "/projects/{project_id}/tools",
+    response_model=GovernedToolVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_tool_version(
+    project_id: UUID,
+    body: GovernedToolVersionCreate,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> GovernedToolVersionRead:
+    project, datasource = await _load_project_and_datasource(
+        session, context, project_id, body.datasource_id
+    )
+    if body.semantic_model_version_id:
+        semantic_model = await session.get(SemanticModelVersion, body.semantic_model_version_id)
+        if (
+            semantic_model is None
+            or semantic_model.project_id != project.id
+            or semantic_model.status != "PUBLISHED"
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="tool semantic model must be published and belong to this project",
+            )
+    return await _persist_tool_version_draft(
+        project, datasource, body, context=context, session=session, settings=settings
+    )
+
+
+class MultiTableToolBlueprintRequest(ApiModel):
+    """SM-5: request a deterministically-rendered multi-table JOIN tool
+    draft instead of hand-authoring `sql_template`. Everything below mirrors
+    `GovernedToolVersionCreate`'s equivalent fields exactly (same
+    slug/name/description/allowed_roles constraints) -- only `sql_template`
+    and `parameters` are replaced with `table_ids`, since those two are
+    generated from the tables' declared/approved relationships rather than
+    written by hand.
+    """
+
+    slug: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    name: str = Field(min_length=2, max_length=200)
+    description: str = Field(min_length=3, max_length=4000)
+    datasource_id: UUID
+    semantic_model_version_id: UUID | None = None
+    table_ids: list[UUID] = Field(min_length=2, max_length=8)
+    allowed_roles: list[str] = Field(min_length=1, max_length=100)
+
+
+@router.post(
+    "/projects/{project_id}/tool-blueprints/multi-table",
+    response_model=GovernedToolVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_multi_table_tool_blueprint(
+    project_id: UUID,
+    body: MultiTableToolBlueprintRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> GovernedToolVersionRead:
+    """SM-5: deterministically render a candidate multi-table JOIN tool from
+    `table_ids` and the relationships already declared/approved between them
+    (database foreign keys, or reviewer-approved `RelationshipCandidate`
+    rows -- see `multi_table_blueprint.py`), then persist it as an ordinary
+    ``DRAFT`` `GovernedToolVersion` through the exact same validation and
+    persistence path `create_tool_version` uses. Never guesses a join: two
+    selected tables with no declared relationship between them make the
+    whole request fail with 422 rather than fabricating a join key.
+    Publication still requires `submit_tool_for_review` and independent
+    approval, unchanged.
+    """
+    project, datasource = await _load_project_and_datasource(
+        session, context, project_id, body.datasource_id
+    )
+    if body.semantic_model_version_id:
+        semantic_model = await session.get(SemanticModelVersion, body.semantic_model_version_id)
+        if (
+            semantic_model is None
+            or semantic_model.project_id != project.id
+            or semantic_model.status != "PUBLISHED"
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="tool semantic model must be published and belong to this project",
+            )
+    try:
+        tables, edges = await resolve_blueprint_tables_and_edges(
+            session,
+            organization_id=project.organization_id,
+            datasource_id=datasource.id,
+            table_ids=body.table_ids,
+        )
+        blueprint = build_multi_table_blueprint(tables, edges, dialect=datasource.dialect)
+    except UnjoinableTablesError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "cannot join the selected tables: no declared or approved relationship "
+                f"connects: {', '.join(exc.unreachable_tables)}"
+            ),
+        ) from exc
+    except MultiTableBlueprintError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    create_body = GovernedToolVersionCreate(
+        slug=body.slug,
+        name=body.name,
+        description=body.description,
+        datasource_id=body.datasource_id,
+        semantic_model_version_id=body.semantic_model_version_id,
+        sql_template=blueprint.sql_template,
+        parameters=list(blueprint.parameters),
+        allowed_roles=body.allowed_roles,
+    )
+    return await _persist_tool_version_draft(
+        project, datasource, create_body, context=context, session=session, settings=settings
+    )
 
 
 @router.get("/projects/{project_id}/tools", response_model=Page)

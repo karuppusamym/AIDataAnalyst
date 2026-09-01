@@ -14941,6 +14941,75 @@
         "title": "ModelRouteConfigurationRead",
         "type": "object"
       },
+      "MultiTableToolBlueprintRequest": {
+        "additionalProperties": false,
+        "description": "SM-5: request a deterministically-rendered multi-table JOIN tool\ndraft instead of hand-authoring `sql_template`. Everything below mirrors\n`GovernedToolVersionCreate`'s equivalent fields exactly (same\nslug/name/description/allowed_roles constraints) -- only `sql_template`\nand `parameters` are replaced with `table_ids`, since those two are\ngenerated from the tables' declared/approved relationships rather than\nwritten by hand.",
+        "properties": {
+          "allowed_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Allowed Roles",
+            "type": "array"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 3,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Name",
+            "type": "string"
+          },
+          "semantic_model_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Model Version Id"
+          },
+          "slug": {
+            "pattern": "^[a-z][a-z0-9_]{1,99}$",
+            "title": "Slug",
+            "type": "string"
+          },
+          "table_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 2,
+            "title": "Table Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "datasource_id",
+          "table_ids",
+          "allowed_roles"
+        ],
+        "title": "MultiTableToolBlueprintRequest",
+        "type": "object"
+      },
       "NativePolicySyncDecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -64348,6 +64417,145 @@
         "summary": "Create Semantic Model Version",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/tool-blueprints/multi-table": {
+      "post": {
+        "description": "SM-5: deterministically render a candidate multi-table JOIN tool from\n`table_ids` and the relationships already declared/approved between them\n(database foreign keys, or reviewer-approved `RelationshipCandidate`\nrows -- see `multi_table_blueprint.py`), then persist it as an ordinary\n``DRAFT`` `GovernedToolVersion` through the exact same validation and\npersistence path `create_tool_version` uses. Never guesses a join: two\nselected tables with no declared relationship between them make the\nwhole request fail with 422 rather than fabricating a join key.\nPublication still requires `submit_tool_for_review` and independent\napproval, unchanged.",
+        "operationId": "create_multi_table_tool_blueprint_v1_projects__project_id__tool_blueprints_multi_table_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultiTableToolBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernedToolVersionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Multi Table Tool Blueprint",
+        "tags": [
+          "governed-tools"
         ]
       }
     },

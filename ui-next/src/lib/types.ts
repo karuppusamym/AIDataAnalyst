@@ -2442,6 +2442,17 @@ export interface ModelRouteConfigurationRead {
   updated_at: string;
 }
 
+/** SM-5: request a deterministically-rendered multi-table JOIN tool */
+export interface MultiTableToolBlueprintRequest {
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: string;
+  semantic_model_version_id?: string | null;
+  table_ids: string[];
+  allowed_roles: string[];
+}
+
 export interface NativePolicySyncDecisionRequest {
   decision: "APPROVE" | "REJECT";
   reason?: string | null;
