@@ -30,6 +30,9 @@
 .atlas-graph-btn:hover, .atlas-graph-btn:focus-visible { background: var(--blue-soft); color: var(--blue-dark); }
 .atlas-graph-zoom-readout { min-width: 36px; text-align: center; font-size: 9px; font-weight: 700; color: var(--muted); }
 .atlas-graph-sep { width: 1px; height: 16px; background: var(--line); margin: 0 3px; }
+/* LN-8: count of HTML node cards currently mounted vs. total graph nodes --
+   the same "showing X of Y" idiom as the virtualized catalog table. */
+.atlas-graph-window-readout { padding: 0 4px; font-size: 9px; font-weight: 700; color: var(--muted); white-space: nowrap; }
 
 .atlas-graph-minimap {
   position: absolute; right: 10px; bottom: 10px; z-index: 30;

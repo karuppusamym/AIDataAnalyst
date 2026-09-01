@@ -1,6 +1,7 @@
 /*
- * Shared graph rendering engine for Atlas's three lineage/relationship
- * surfaces (Knowledge graph, Transformations DAG, Unified lineage).
+ * Shared graph rendering engine for Atlas's four lineage/relationship
+ * surfaces (Knowledge graph, Transformations DAG, Unified lineage, AI
+ * dependency graph).
  *
  * Wraps Cytoscape.js (vendored in /vendor, no runtime CDN calls) with:
  *  - a dagre-based layered layout (falls back to cose if dagre is missing)
@@ -9,9 +10,40 @@
  *    card markup/behavior (data-* click targets) keeps working unchanged
  *  - styled, directional edges per relationship type
  *  - a lightweight built-in minimap and search dim/highlight
+ *  - LN-8: viewport-based virtualization of the HTML card layer (see
+ *    "Large-DAG virtualization" below)
  *
  * Each view supplies plain node/edge objects and an HTML template
  * function; this module owns layout, chrome, and interaction only.
+ *
+ * Large-DAG virtualization (LN-8)
+ * --------------------------------
+ * Cytoscape itself draws node shapes and edges on a <canvas>, which stays
+ * cheap regardless of graph size (drawing pixels, not DOM). The actual
+ * "full graph render" cost lives entirely in cytoscape-node-html-label:
+ * every node gets one real `<div>` (the rich, clickable card) mounted
+ * unconditionally, with no notion of viewport. At the platform's own
+ * bounded maxima (`node_limit` up to 4,000 / `edge_limit` up to 20,000 on
+ * `unified_lineage_api.py`'s full-graph route), that means thousands of
+ * cards mounted at once -- including on first load, since `runLayout()`
+ * fits the whole graph into view by default.
+ *
+ * This module keeps cytoscape-node-html-label's plugin but drives its
+ * membership dynamically instead of statically: the label query is
+ * `node[agWindowed]` (a boolean data flag cytoscape's own `[foo]`
+ * selector treats as "truthy"), and `_computeWindowedIds()` recomputes,
+ * on every pan/zoom/layout settle, which nodes are inside the current
+ * viewport extent (plus an overscan margin for smooth panning) and mounts
+ * an HTML card only for those -- capped at `_htmlWindowCap` regardless of
+ * how many nodes are nominally "in view" (covers the fit-all-nodes case,
+ * where the whole bounded graph is visible at once after a big load).
+ * Nodes outside the window fall back to a plain, uniform canvas-drawn
+ * rectangle (no DOM, no per-node styling decision) so pan/zoom still
+ * shows the graph's shape while cards lazily mount as you approach them.
+ * This is windowing of the render budget only -- it does not cluster,
+ * aggregate, or otherwise simplify the graph (that is KG-3's still-open
+ * level-of-detail work); every node keeps its real position and every
+ * edge is still drawn.
  */
 (function initializeAtlasGraphEngine() {
   function cytoAvailable() {
@@ -55,6 +87,57 @@
     { selector: "edge.ag-dim", style: { "opacity": 0.06 } }
   ];
 
+  // LN-8: default cap on simultaneously-mounted HTML node cards, independent
+  // of total graph size or zoom level -- bounds the fit-all-nodes case, not
+  // just off-screen panning. Callers may override via opts.htmlWindowCap.
+  const DEFAULT_HTML_WINDOW_CAP = 220;
+  // Extra viewport margin (as a fraction of the current viewport's own
+  // width/height) kept "windowed in" beyond the visible extent, so cards
+  // are already mounted just before they pan into view.
+  const WINDOW_OVERSCAN_RATIO = 0.35;
+
+  // LN-8: pure windowing decision, deliberately free of any Cytoscape/DOM
+  // dependency so it can run (and be unit-tested, see
+  // graph-engine.virtualization.test.mjs) outside a browser.
+  //
+  // `nodeBoxes` is a plain array of `{id, x, y, w, h}` (model-space center
+  // position and size, the same units `cy.extent()`/`node.position()` use).
+  // `extent` is `{x1, y1, x2, y2, w, h}`, the current viewport rectangle in
+  // those same model-space units. Returns the `Set` of node ids that should
+  // have an HTML card mounted: those whose bounding box intersects the
+  // extent (padded by `overscanRatio` of the viewport's own size), plus
+  // `pinnedId` unconditionally -- capped at `cap` total, nearest-to-center
+  // first, so a graph far larger than the cap (including "every node is
+  // nominally in view" after a full-graph fit) never mounts more than `cap`
+  // cards at once.
+  function computeWindowedNodeIds(nodeBoxes, extent, options = {}) {
+    const cap = Math.max(1, options.cap || DEFAULT_HTML_WINDOW_CAP);
+    const overscanRatio = options.overscanRatio == null ? WINDOW_OVERSCAN_RATIO : options.overscanRatio;
+    const pinnedId = options.pinnedId || null;
+    const result = new Set();
+    if (!nodeBoxes || !nodeBoxes.length) return result;
+
+    const padX = Math.max(1, extent.w) * overscanRatio;
+    const padY = Math.max(1, extent.h) * overscanRatio;
+    const bx1 = extent.x1 - padX, bx2 = extent.x2 + padX;
+    const by1 = extent.y1 - padY, by2 = extent.y2 + padY;
+    const cx = (extent.x1 + extent.x2) / 2, cyMid = (extent.y1 + extent.y2) / 2;
+
+    const candidates = [];
+    nodeBoxes.forEach(n => {
+      const isPinned = n.id === pinnedId;
+      const intersects = (n.x + n.w / 2) >= bx1 && (n.x - n.w / 2) <= bx2
+        && (n.y + n.h / 2) >= by1 && (n.y - n.h / 2) <= by2;
+      if (!intersects && !isPinned) return;
+      const dx = n.x - cx, dy = n.y - cyMid;
+      candidates.push({ id: n.id, pinned: isPinned, dist: dx * dx + dy * dy });
+    });
+
+    candidates.sort((a, b) => (b.pinned - a.pinned) || (a.dist - b.dist));
+    candidates.slice(0, cap).forEach(c => result.add(c.id));
+    return result;
+  }
+
   class AtlasGraph {
     constructor(mountEl, opts = {}) {
       this.el = typeof mountEl === "string" ? document.getElementById(mountEl) : mountEl;
@@ -64,6 +147,9 @@
       this.selectedId = null;
       this.searchQuery = "";
       this._mmTransform = null;
+      this._htmlWindowCap = Math.max(20, opts.htmlWindowCap || DEFAULT_HTML_WINDOW_CAP);
+      this._windowedIds = new Set();
+      this._windowRaf = null;
       if (this.el) this._buildChrome();
     }
 
@@ -77,6 +163,8 @@
           <span class="atlas-graph-sep"></span>
           <button type="button" class="atlas-graph-btn" data-ag="fit">Fit</button>
           <button type="button" class="atlas-graph-btn" data-ag="relayout">Re-layout</button>
+          <span class="atlas-graph-sep"></span>
+          <span class="atlas-graph-window-readout" data-ag="window-readout" role="status" aria-live="polite"></span>
         </div>
         <div class="atlas-graph-canvas" data-ag="canvas"></div>
         <canvas class="atlas-graph-minimap" data-ag="minimap" width="176" height="118" aria-hidden="true"></canvas>
@@ -85,6 +173,7 @@
       this.canvasEl = this.el.querySelector('[data-ag="canvas"]');
       this.minimapEl = this.el.querySelector('[data-ag="minimap"]');
       this.zoomReadout = this.el.querySelector('[data-ag="zoom-readout"]');
+      this.windowReadout = this.el.querySelector('[data-ag="window-readout"]');
       this.emptyEl = this.el.querySelector('[data-ag="empty"]');
       this.el.querySelectorAll("button[data-ag]").forEach(btn => {
         btn.addEventListener("click", () => this._toolbarAction(btn.dataset.ag));
@@ -138,10 +227,20 @@
 
     _stylesheet() {
       return [
+        // LN-8: every node always gets this cheap canvas-only placeholder
+        // (no DOM cost regardless of graph size) so pan/zoom shows the
+        // graph's real shape immediately; `node[agWindowed]` (see
+        // _computeWindowedIds/_applyWindow) then hides it in favor of the
+        // rich HTML card cytoscape-node-html-label mounts for that node.
         { selector: "node", style: {
             "shape": "round-rectangle",
             "width": "data(w)", "height": "data(h)",
-            "background-opacity": 0, "border-width": 0, "label": ""
+            "background-color": "#c7d2e0", "background-opacity": 0.55,
+            "border-width": 1, "border-color": "#93a4b8", "border-opacity": 0.6,
+            "label": ""
+        }},
+        { selector: "node[agWindowed]", style: {
+            "background-opacity": 0, "border-width": 0
         }},
         ...EDGE_STYLES
       ];
@@ -157,6 +256,8 @@
         if (this.cy) this.cy.elements().remove();
         if (this.emptyEl) { this.emptyEl.hidden = false; this.emptyEl.innerHTML = options.emptyHtml || ""; }
         this._refreshMinimap();
+        this._windowedIds = new Set();
+        if (this.windowReadout) this.windowReadout.textContent = "";
         return;
       }
       if (this.emptyEl) this.emptyEl.hidden = true;
@@ -183,6 +284,7 @@
       this._built = true;
       this.searchQuery = "";
       window.requestAnimationFrame(() => this._refreshMinimap());
+      this._scheduleWindowRefresh();
       if (options.selectId) this.select(options.selectId);
     }
 
@@ -190,7 +292,10 @@
       if (!this.cy || typeof this.cy.nodeHtmlLabel !== "function") return;
       const self = this;
       this.cy.nodeHtmlLabel([{
-        query: "node",
+        // LN-8: only nodes flagged `agWindowed` (current viewport window,
+        // see _computeWindowedIds) get a mounted HTML card; the plugin
+        // itself adds/removes the DOM element as this data flag flips.
+        query: "node[agWindowed]",
         halign: "center", valign: "center", halignBox: "center", valignBox: "center",
         tpl: data => {
           if (typeof self.opts.nodeHtml === "function") {
@@ -204,8 +309,9 @@
     }
 
     _wireEvents() {
-      this.cy.on("pan zoom", () => this._refreshMinimap());
+      this.cy.on("pan zoom", () => { this._refreshMinimap(); this._scheduleWindowRefresh(); });
       this.cy.on("zoom", () => { if (this.zoomReadout) this.zoomReadout.textContent = `${Math.round(this.cy.zoom() * 100)}%`; });
+      this.cy.on("layoutstop", () => this._scheduleWindowRefresh());
       this.cy.on("dbltap", "node", event => { if (typeof this.opts.onNodeExpand === "function") this.opts.onNodeExpand(event.target.data()); });
     }
 
@@ -227,6 +333,54 @@
         if (!id) return;
         const node = this.cy.getElementById(id);
         if (node && node.length) node.data("_agTouch", Date.now());
+      });
+      // LN-8: a freshly selected/focused node must get its HTML card even
+      // if it sits outside the current viewport window -- _computeWindowedIds
+      // always pins `this.selectedId` in ahead of the distance-ranked cap.
+      this._scheduleWindowRefresh();
+    }
+
+    // LN-8: which nodes should have a mounted HTML card right now. Pulls
+    // plain {id, x, y, w, h} boxes from the live Cytoscape graph and hands
+    // them to the pure, independently-tested `computeWindowedNodeIds`
+    // (module scope, above) -- this method is the only place that touches
+    // `this.cy`; the actual windowing decision has no Cytoscape dependency.
+    _computeWindowedIds() {
+      if (!this.cy) return new Set();
+      const nodes = this.cy.nodes();
+      if (!nodes.length) return new Set();
+      const boxes = [];
+      nodes.forEach(node => {
+        const pos = node.position();
+        boxes.push({ id: node.id(), x: pos.x, y: pos.y, w: node.width() || 190, h: node.height() || 92 });
+      });
+      return computeWindowedNodeIds(boxes, this.cy.extent(), { cap: this._htmlWindowCap, pinnedId: this.selectedId });
+    }
+
+    // LN-8: mount/unmount HTML cards to match `idsSet`, driving
+    // cytoscape-node-html-label purely through the `agWindowed` data flag
+    // (see _applyHtmlLabels's `node[agWindowed]` query) -- never touches
+    // the DOM directly here.
+    _applyWindow(idsSet) {
+      if (!this.cy) return;
+      this.cy.nodes().forEach(node => {
+        const shouldShow = idsSet.has(node.id());
+        if (shouldShow !== Boolean(node.data("agWindowed"))) node.data("agWindowed", shouldShow);
+      });
+      this._windowedIds = idsSet;
+      if (this.windowReadout) {
+        const total = this.cy.nodes().length;
+        this.windowReadout.textContent = total ? `${idsSet.size} of ${total} nodes rendered` : "";
+      }
+    }
+
+    // LN-8: coalesce bursts of pan/zoom/layout events (a drag fires many
+    // per second) into at most one recompute per animation frame.
+    _scheduleWindowRefresh() {
+      if (this._windowRaf || !this.cy) return;
+      this._windowRaf = window.requestAnimationFrame(() => {
+        this._windowRaf = null;
+        this._applyWindow(this._computeWindowedIds());
       });
     }
 
@@ -317,6 +471,7 @@
     }
 
     destroy() {
+      if (this._windowRaf) { window.cancelAnimationFrame(this._windowRaf); this._windowRaf = null; }
       if (this.cy) { this.cy.destroy(); this.cy = null; }
     }
   }
@@ -338,4 +493,8 @@
 
   window.AtlasUI = window.AtlasUI || {};
   window.AtlasUI.AtlasGraph = AtlasGraph;
+  // LN-8: exported for graph-engine.virtualization.test.mjs (pure function,
+  // no Cytoscape/DOM needed to exercise it).
+  window.AtlasUI.computeWindowedNodeIds = computeWindowedNodeIds;
+  window.AtlasUI.DEFAULT_HTML_WINDOW_CAP = DEFAULT_HTML_WINDOW_CAP;
 })();

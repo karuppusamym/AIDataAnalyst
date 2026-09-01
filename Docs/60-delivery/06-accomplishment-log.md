@@ -6733,3 +6733,100 @@ noise there); `tests/test_doc_claims.py` green.
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+---
+
+## 2026-09-01 — LN-8 closed: large-DAG virtualization for the shared lineage/knowledge-graph renderer
+
+Frontend-only. The lineage/relationship graph API surfaces (`unified_lineage_api.py`,
+`intelligence_api.py::get_knowledge_graph`/`get_knowledge_graph_neighborhood`) already return
+bounded node/edge sets with `node_limit`/`edge_limit`/`truncation_reasons` per EA.14, already DONE.
+LN-8's gap was purely on the render side: whatever bounded graph the API returned was mounted in
+full by the frontend, which becomes unusable at the API's own upper bound.
+
+There is exactly one graph-rendering component behind all four of Atlas's lineage/relationship
+surfaces -- `ui/scripts/graph-engine.js` (`AtlasGraph`), mounted by Knowledge graph (`#graph-stage`,
+`ui/app.js`), the dbt Transformations DAG (`#dbt-lineage`, `ui/scripts/features/transformation-
+workbench.js`), Unified lineage (`#unified-lineage-stage`, `ui/scripts/features/context-lineage-
+control-plane.js`), and the AI dependency graph (`#ai-dependency-stage`, `ui/scripts/features/
+product-ai-control-plane.js`). `ui-next` (the newer React app) has no lineage/graph component at
+all yet -- only its virtualized catalog table (UX-11, `ui-next/src/components/CatalogTable.tsx`,
+`@tanstack/react-virtual`) exists there.
+
+**What the renderer actually is.** `AtlasGraph` wraps vendored Cytoscape.js (`ui/vendor/
+cytoscape.min.js`) with a dagre layered layout and real pan/zoom/drag. Cytoscape itself draws node
+shapes and edges on a `<canvas>`, which stays cheap regardless of graph size -- pixels, not DOM. The
+actual "full graph render" cost was entirely in a separate vendored plugin, `cytoscape-node-html-
+label` (`ui/vendor/cytoscape-node-html-label.min.js`): every node gets one real, clickable HTML
+`<div>` card (the rich `nodeHtml` templates each surface supplies, wired to `data-graph-node`/
+`data-dbt-dag-node`/`data-lineage-node` click delegation in `ui/app.js`), and the vendored plugin
+mounted one unconditionally for every node in the graph, with no notion of viewport at all. At
+`unified_lineage_api.py`'s full-graph route (`GET /v1/datasources/{id}/unified-lineage`,
+`node_limit` up to 4,000 / `edge_limit` up to 20,000) that is thousands of DOM cards mounted at
+once -- including on first load, since `AtlasGraph.runLayout()` fits the whole graph into view by
+default (`_layoutOptions()`'s `fit: true`). So this was a real DOM-per-node problem, the same shape
+UX-11 solved for the catalog table, not a canvas hit-testing concern.
+
+**The fix.** `cytoscape-node-html-label` is kept (its click-delegation wiring, card markup, and
+column-popover/search-dim behavior all keep working unchanged), but its mounting is now driven
+dynamically instead of unconditionally: the plugin's query is `node[agWindowed]` (a boolean data
+flag; Cytoscape's `[foo]` selector treats it as "truthy"), and a new pure function,
+`computeWindowedNodeIds(nodeBoxes, extent, {cap, pinnedId, overscanRatio})` -- deliberately free of
+any Cytoscape or DOM dependency -- decides which node ids should carry that flag: those whose
+model-space bounding box intersects the current viewport extent (padded by a 35%-of-viewport
+overscan margin so cards are already mounted just before panning into view), plus the
+selected/focused node unconditionally, capped at `DEFAULT_HTML_WINDOW_CAP = 220` regardless of how
+many nodes are nominally "in view" -- this is what actually bounds the fit-all-nodes-on-load case a
+naive viewport-only culling would miss (after a big load, the whole bounded graph is fit into view
+by default, so "in the viewport" alone isn't a bound). `AtlasGraph._computeWindowedIds()` is a thin
+wrapper that pulls `{id, x, y, w, h}` boxes from `this.cy.nodes()`/`this.cy.extent()` and hands them
+to the pure function; `_applyWindow()` toggles the `agWindowed` data flag to match (the plugin's own
+`data`-event listener adds/removes the DOM element as that flag flips -- `AtlasGraph` never touches
+the label `<div>`s directly); `_scheduleWindowRefresh()` coalesces the resulting recompute into at
+most one per animation frame across pan/zoom/`layoutstop`/selection events. Nodes not currently
+windowed in fall back to a uniform, DOM-free canvas-drawn placeholder rectangle (`_stylesheet()`'s
+plain `node` selector; `node[agWindowed]` hides it once the HTML card is mounted on top) -- every
+node keeps its real position and every edge is still drawn, so pan/zoom shows the graph's actual
+shape immediately instead of blank space while cards lazily mount as you approach them. This is
+explicitly *windowing of the render budget only*: no clustering, aggregation, relabeling, or other
+structural simplification of the graph -- that is KG-3's separate, still-open level-of-detail work,
+and this row deliberately does not touch it (KG-3's own row still reads "API boundary unchanged";
+this entry adds nothing to it). A small toolbar readout (`"N of M nodes rendered"`, `data-ag=
+"window-readout"`) mirrors `virtual-table.js`'s "Showing X-Y of Z rows" live region for the
+virtualized catalog/result tables, applied to the same viewport-window idea in two dimensions
+instead of one scroll axis.
+
+**Proof of the bound.** `ui/` is a plain, un-bundled browser app with no JS test runner
+(`tests/test_ui_accessibility.py` established the convention of asserting against source text
+directly for it). Rather than stop at source-text assertions, the windowing decision was factored
+into the standalone pure function above specifically so it could be *executed*, not just read:
+`ui/scripts/graph-engine.virtualization.test.mjs` needs nothing beyond Node's stdlib (`node:vm` to
+load the plain-IIFE script against a bare `{window: {AtlasUI: {}}}` sandbox, `node:assert`) and runs
+directly via `node ui/scripts/graph-engine.virtualization.test.mjs`. It builds a synthetic 4,000-
+node grid (`unified_lineage_api.py`'s own full-graph `node_limit` ceiling) with a viewport extent
+covering every node -- the post-"Fit" default view after a max-bound load -- and asserts the
+windowed set is `<= 220` (`DEFAULT_HTML_WINDOW_CAP`) and `> 0`; a second case proves a caller-
+supplied cap (150 at 2,000 nodes) is honored; a third pans a small viewport into one corner of a
+3,000-node spread-out layout and asserts the windowed set is nonempty, smaller than the total, and
+explicitly excludes a node in the far corner -- proving this is real spatial culling, not just "the
+first N nodes"; a fourth proves a pinned/selected node in that same far corner is still windowed in
+regardless; a fifth proves an empty graph windows in nothing without dividing by zero on a
+degenerate `extent.w === 0`. `tests/test_ui_lineage_graph_virtualization.py` (6 tests, following
+`test_ui_accessibility.py`'s established convention) asserts the `node[agWindowed]` gating and
+`_computeWindowedIds -> computeWindowedNodeIds` delegation structurally, then shells out to the
+`.mjs` script (`subprocess.run(["node", ...])`, skipped if `node` is unavailable) and parses its
+JSON summary to assert the same numeric bounds under `pytest`, so the proof isn't only runnable by
+hand.
+
+**Verification.** `node --check ui/scripts/graph-engine.js` clean. `node ui/scripts/graph-
+engine.virtualization.test.mjs` clean (all 5 scenarios pass). `AIDA_ENVIRONMENT=development uv run
+pytest tests/test_ui_lineage_graph_virtualization.py tests/test_ui_accessibility.py -q`: 13 passed
+(6 new + 7 pre-existing, unmodified). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. No HTTP route added or changed (the frontend consumes the same
+already-bounded API responses per EA.14), so `tests/test_openapi_diff_gate.py` and the generated
+`ui-next/src/lib/types.ts` are untouched. `cd ui-next && npm run typecheck && npm run test && npm
+run build` all green -- `ui-next` itself has no lineage/graph component yet and was not otherwise
+touched by this row; this run only confirms no regression in the separate React frontend.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No database migration involved (a pure frontend/rendering change).
