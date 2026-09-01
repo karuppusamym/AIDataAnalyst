@@ -10,7 +10,6 @@ from aida.connectors.base import (
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
-    DiscoveredGrant,
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
@@ -19,13 +18,19 @@ from aida.connectors.base import (
     TableProfileSnapshot,
 )
 from aida.connectors.discovery import (
+    TableMap,
     append_grouped_foreign_key_rows,
     append_grouped_index_rows,
     append_grouped_key_rows,
     append_partition_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
     build_table_map_from_column_rows,
     normalize_object_type,
+    view_definition_row,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -398,32 +403,51 @@ def _envelope_routines(envelope: _OracleEnvelopeRows) -> dict[str, list[Discover
     return routines
 
 
-def _envelope_grants(envelope: _OracleEnvelopeRows) -> dict[str, list[DiscoveredGrant]]:
-    grants: dict[str, list[DiscoveredGrant]] = {}
-    for row in envelope.grants:
-        schema_name = str(row["TABLE_SCHEMA"])
-        grants.setdefault(schema_name, []).append(
-            DiscoveredGrant(
-                grantee=str(row["GRANTEE"]),
-                grantee_type=str(row.get("GRANTEE_TYPE") or "UNKNOWN"),
-                privilege=str(row["PRIVILEGE"]),
-                object_type=_optional_text(row.get("OBJECT_TYPE")) or "TABLE",
-                object_name=str(row["TABLE_NAME"]),
-                schema_name=schema_name,
-                is_grantable=str(row.get("GRANTABLE") or "NO").strip().upper() == "YES",
-            )
-        )
-    return grants
+def _table_description_rows(envelope: _OracleEnvelopeRows) -> list[dict[str, Any]]:
+    """Shape ALL_TAB_COMMENTS rows for the shared `apply_table_descriptions`.
+
+    `_optional_text` runs here, not in the shared helper: `apply_table_descriptions`
+    passes `description` through `str()` verbatim, with no blank-collapsing of its
+    own, so a whitespace-only Oracle comment has to be normalized to `None` before
+    it gets there or it would land on the table as literal whitespace.
+    """
+    return [
+        {
+            "table_schema": row["OWNER"],
+            "table_name": row["TABLE_NAME"],
+            "description": _optional_text(row.get("COMMENTS")),
+        }
+        for row in envelope.table_comments
+    ]
 
 
-def _apply_envelope(
-    catalogs: tuple[DiscoveredCatalog, ...], envelope: _OracleEnvelopeRows
-) -> tuple[DiscoveredCatalog, ...]:
-    """Fold envelope 1.1 rows onto an already-assembled catalog.
+def _column_description_rows(envelope: _OracleEnvelopeRows) -> list[dict[str, Any]]:
+    """Shape ALL_COL_COMMENTS rows for the shared `apply_column_descriptions`.
 
-    Written as a rebuild rather than as a change to `aida.connectors.discovery`
-    because the shared assembly helpers are on the v1.0 contract and are used by
-    connectors this workstream does not own.
+    See `_table_description_rows` for why `_optional_text` runs here rather than
+    being left to the shared helper.
+    """
+    return [
+        {
+            "table_schema": row["OWNER"],
+            "table_name": row["TABLE_NAME"],
+            "column_name": row["COLUMN_NAME"],
+            "description": _optional_text(row.get("COMMENTS")),
+        }
+        for row in envelope.column_comments
+    ]
+
+
+def _view_definition_rows(
+    tables: TableMap, envelope: _OracleEnvelopeRows
+) -> list[dict[str, Any]]:
+    """Build one `apply_view_definitions` row per view/materialized-view table.
+
+    Preserves Oracle's original precedence: a materialized view's ALL_MVIEWS row
+    wins regardless of the discovered `object_type`; a plain VIEW-typed table falls
+    back to its ALL_VIEWS row, and -- absent both -- to a synthetic row recording
+    that ALL_VIEWS exposed nothing for it. A table that is neither gets no row,
+    same as before.
     """
     view_definitions = {
         (str(row["OWNER"]), str(row["VIEW_NAME"])): _build_view_definition(
@@ -442,67 +466,47 @@ def _apply_envelope(
         )
         for row in envelope.materialized_views
     }
-    table_comments = {
-        (str(row["OWNER"]), str(row["TABLE_NAME"])): _optional_text(row.get("COMMENTS"))
-        for row in envelope.table_comments
-    }
-    column_comments = {
-        (str(row["OWNER"]), str(row["TABLE_NAME"]), str(row["COLUMN_NAME"])): _optional_text(
-            row.get("COMMENTS")
-        )
-        for row in envelope.column_comments
-    }
-    routines = _envelope_routines(envelope)
-    grants = _envelope_grants(envelope)
     views_reason = envelope.reason("views")
 
-    rebuilt: list[DiscoveredCatalog] = []
-    for catalog in catalogs:
-        schemas = []
-        for schema in catalog.schemas:
-            tables = []
-            for table in schema.tables:
-                key = (schema.name, table.name)
-                definition = materialized_definitions.get(key)
-                if definition is None and table.object_type == "VIEW":
-                    definition = view_definitions.get(key) or DiscoveredViewDefinition(
-                        definition_sql=None,
-                        unavailable_reason=views_reason
-                        or (
-                            f"ALL_VIEWS exposed no row for {schema.name}.{table.name}; "
-                            "its text was not visible to this session"
-                        ),
-                    )
-                columns = tuple(
-                    replace(
-                        column,
-                        source_description=column_comments.get(
-                            (schema.name, table.name, column.name)
-                        ),
-                    )
-                    for column in table.columns
+    rows: list[dict[str, Any]] = []
+    for schema_name, schema_tables in tables.items():
+        for table_name, table in schema_tables.items():
+            key = (schema_name, table_name)
+            definition = materialized_definitions.get(key)
+            if definition is None and table.object_type == "VIEW":
+                definition = view_definitions.get(key) or DiscoveredViewDefinition(
+                    definition_sql=None,
+                    unavailable_reason=views_reason
+                    or (
+                        f"ALL_VIEWS exposed no row for {schema_name}.{table_name}; "
+                        "its text was not visible to this session"
+                    ),
                 )
-                tables.append(
-                    replace(
-                        table,
-                        columns=columns,
-                        source_description=table_comments.get(key),
-                        view_definition=definition,
-                    )
-                )
-            schemas.append(
-                replace(
-                    schema,
-                    tables=tuple(tables),
-                    routines=tuple(routines.get(schema.name, ())),
-                    grants=tuple(grants.get(schema.name, ())),
-                )
-            )
-        attributes = dict(catalog.attributes)
-        if envelope.unavailable:
-            attributes["envelope_v11_unavailable"] = dict(envelope.unavailable)
-        rebuilt.append(replace(catalog, schemas=tuple(schemas), attributes=attributes))
-    return tuple(rebuilt)
+            if definition is not None:
+                rows.append(view_definition_row(schema_name, table_name, definition))
+    return rows
+
+
+def _grant_rows(envelope: _OracleEnvelopeRows) -> list[dict[str, Any]]:
+    """Shape ALL_TAB_PRIVS rows for the shared `build_grants`.
+
+    Defaults are computed here rather than left to `build_grants` so its generic
+    fallbacks (`"ROLE"`, `"TABLE"`) never silently replace Oracle's own
+    (`"UNKNOWN"`, `"TABLE"`) -- the values were already equal for `object_type`,
+    kept explicit for `grantee_type` since they are not.
+    """
+    return [
+        {
+            "schema_name": row["TABLE_SCHEMA"],
+            "grantee": row["GRANTEE"],
+            "grantee_type": row.get("GRANTEE_TYPE") or "UNKNOWN",
+            "privilege": row["PRIVILEGE"],
+            "object_type": row.get("OBJECT_TYPE") or "TABLE",
+            "object_name": row["TABLE_NAME"],
+            "is_grantable": row.get("GRANTABLE") or "NO",
+        }
+        for row in envelope.grants
+    ]
 
 
 async def _fetch_optional_rows(
@@ -1067,7 +1071,45 @@ def _assemble_catalog(
         append_grouped_index_rows(tables, index_rows)
     if partition_rows:
         append_partition_rows(tables, partition_rows)
-    catalogs = assemble_catalog(str(catalog_name), tables)
     if envelope is None:
-        return catalogs
-    return _apply_envelope(catalogs, envelope)
+        return assemble_catalog(str(catalog_name), tables)
+
+    apply_table_descriptions(tables, _table_description_rows(envelope))
+    apply_column_descriptions(tables, _column_description_rows(envelope))
+    apply_view_definitions(tables, _view_definition_rows(tables, envelope))
+
+    # Scoped to schemas `tables` already knows about, matching the previous
+    # rebuild-based assembly, which only ever walked `catalog.schemas` derived from
+    # `tables` and so never surfaced a schema holding only routines or only grants.
+    # `assemble_catalog`'s own routines=/grants= contract would happily synthesize
+    # such a schema (see `test_a_schema_with_only_routines_survives_assembly` in
+    # tests/test_connectors.py) -- correct for postgres/sqlserver, which pass it
+    # unfiltered, but a behavior change here that this dedup does not make silently.
+    routines = {
+        schema_name: routine_list
+        for schema_name, routine_list in _envelope_routines(envelope).items()
+        if schema_name in tables
+    }
+    grants = {
+        schema_name: grant_list
+        for schema_name, grant_list in build_grants(_grant_rows(envelope)).items()
+        if schema_name in tables
+    }
+    catalogs = assemble_catalog(
+        str(catalog_name),
+        tables,
+        routines=routines,
+        grants=grants,
+    )
+    if envelope.unavailable:
+        catalogs = tuple(
+            replace(
+                catalog,
+                attributes={
+                    **catalog.attributes,
+                    "envelope_v11_unavailable": dict(envelope.unavailable),
+                },
+            )
+            for catalog in catalogs
+        )
+    return catalogs

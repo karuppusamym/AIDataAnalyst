@@ -5928,3 +5928,96 @@ existing queries, no new persisted field was needed.
 than a real delta. `diff_semantic_object` itself is generic and DB-free, so extending coverage is
 adding another DB-facing snapshot-builder branch in `get_governance_review_diff` per object type,
 not a redesign; left for a follow-up row if a reviewer workflow actually needs it.
+
+---
+
+## 2026-09-01 — IN-5f closed: Oracle/Snowflake/BigQuery folded onto the shared envelope-1.1 helpers
+
+Oracle, Snowflake and BigQuery were each written against a local rebuild of the envelope-1.1
+assembly (view definitions, routines, comments, grants) while `connectors/discovery.py` was
+gaining its own `apply_view_definitions`/`apply_table_descriptions`/`apply_column_descriptions`/
+`build_routines`/`build_grants` helpers concurrently. Both paths agreed on the contract and both
+were tested, but each connector carried its own 90-130 line function
+(`_apply_envelope`/`_assemble_snowflake_catalog`) that assembled a v1.0 `DiscoveredCatalog` via
+`assemble_catalog(tables)`, then walked every schema/table/column a second time and rebuilt it
+with `dataclasses.replace()` to fold the 1.1 axes on — duplicating exactly the traversal-and-
+attachment logic `assemble_catalog` and the `apply_*` helpers already do in one pass.
+
+### What changed
+
+All three connectors now build the same `TableMap` (`build_table_map_from_column_rows` +
+`append_grouped_*`, unchanged) and, before ever calling `assemble_catalog`, mutate it with
+`apply_table_descriptions`, `apply_column_descriptions` and `apply_view_definitions`, then call
+`assemble_catalog(..., routines=..., grants=..., schema_descriptions=..., catalog_description=...)`
+exactly once — matching `postgres.py`/`sqlserver.py`'s existing pattern. The old
+`_apply_envelope`/`_assemble_snowflake_catalog` rebuild functions are gone; each connector's
+source-specific row-shaping (LONG-column handling, secure-view NULLs, GET_DDL fallbacks,
+GoogleSQL option-value unwrapping) survives untouched as small `_*_rows(...)` helpers that feed
+the shared helpers instead of hand-building `DiscoveredViewDefinition`/`DiscoveredGrant` and
+walking the frozen catalog tree.
+
+A new tiny shared function, `discovery.view_definition_row(table_schema, table_name, definition)`,
+adapts an already-built `DiscoveredViewDefinition` (each connector's per-dialect extraction still
+produces one) into the row shape `apply_view_definitions` expects, so all three connectors —
+which each needed the exact same ten-line adapter — share one copy instead of three.
+
+**Grants**: fold onto `build_grants` for Oracle and Snowflake (`_grant_rows`/`_grant_row` shape
+the source-specific columns into the generic `schema_name`/`grantee`/`grantee_type`/`privilege`/
+`object_type`/`object_name`/`is_grantable` row, computing each connector's own default —
+`"UNKNOWN"` grantee_type for Oracle, `"SCHEMA"` object_type for Snowflake — explicitly, rather
+than letting `build_grants`'s generic defaults (`"ROLE"`, `"TABLE"`) silently stand in for a
+different one). BigQuery has no grants axis at all (Cloud IAM, not SQL grants) so nothing to fold.
+
+**Routines stay local** — not a partial fold, a deliberate one. `build_routines` has no parameter
+for `DiscoveredRoutine.attributes`, which all three connectors populate with genuinely per-dialect
+facts: Oracle's `wrapped`/`packaged_subprogram_parameters` flags, Snowflake's `argument_signature`/
+`is_secure`, BigQuery's `routine_body`. Snowflake is a harder blocker on top of that: it has no
+`specific_name`/overload discriminator at all (arguments arrive as one signature *string* per
+routine, parsed by `_parse_argument_signature`, not as joinable rows), so `build_routines`'s
+`parameter_rows` grouping by `(routine_schema, specific_name)` — falling back to the routine name
+when `specific_name` is absent — would silently cross-attach one overload's parameters onto
+another same-named routine. Both are real per-dialect necessities, not incidental drift, so
+`_envelope_routines`/`_build_routine` are unchanged and simply passed to `assemble_catalog`'s
+`routines=` kwarg instead of being walked in afterward.
+
+### One incidental bug caught, one pre-existing gap deliberately not touched
+
+Caught: Oracle's local `_optional_text` collapsed a whitespace-only ALL_TAB_COMMENTS/
+ALL_COL_COMMENTS value to `None`; the shared `apply_table_descriptions`/`apply_column_descriptions`
+pass `description` through unchanged with no blank-collapsing of their own. `_optional_text` now
+runs on the row before it reaches the shared helper — `test_a_blank_comment_is_normalized_to_absent`
+caught the mismatch on the first pass.
+
+Found and left alone: all three connectors' *old* rebuild only ever walked `catalog.schemas`
+derived from the table query, so a schema holding only stored routines, only grants, or only a
+schema-level comment — no tables at all — was silently invisible to discovery on Oracle, Snowflake
+and BigQuery, and still is after this row. `assemble_catalog`'s own `routines=`/`grants=`/
+`schema_descriptions=` contract would correctly synthesize such a schema (its own docstring says
+so; `test_a_schema_with_only_routines_survives_assembly` in `tests/test_connectors.py` proves it,
+and `postgres.py`/`sqlserver.py` already rely on exactly that by passing those kwargs unfiltered).
+Fixing it here would have been a real behavior change smuggled into a dedup, so each connector's
+`_assemble_catalog`/`_assemble_snowflake_catalog` explicitly filters its routines/grants/
+schema_descriptions dicts back down to schema names already present in the table map, reproducing
+the old gap byte-for-byte. A follow-up task was queued (not this row) to decide whether to close it.
+
+### Verification
+
+`tests/test_connectors_oracle.py` (42), `tests/test_connectors_snowflake.py` (27),
+`tests/test_connectors_bigquery.py` (49) and `tests/test_connectors.py` (7, the shared discovery
+helpers) — 125 passed on the pre-refactor baseline and 125 passed after, identical count, identical
+set, re-confirmed via `git stash`/`stash pop` around the full-suite run below. `ruff
+check` and `mypy` clean on all four touched files (`connectors/oracle.py`, `connectors/snowflake.py`,
+`connectors/bigquery.py`, `connectors/discovery.py`). `lint-imports`: 7 kept, 0 broken. Full repo
+`pytest tests/`: one failure,
+`test_config.py::test_environment_must_be_explicit_outside_tests`, reproduced identically via
+`git stash` on unmodified `HEAD` — pre-existing, confirmed unrelated to this row's four files.
+`test_doc_claims.py`: 1877 passed, 5 skipped.
+
+### Scope discipline
+
+No file under `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` touched, no Alembic
+migration touched, per this row's hard constraints (ST-05/ST-06 owns those concurrently on this
+branch). Touched only `src/aida/connectors/{oracle,snowflake,bigquery,discovery}.py` — none of the
+four connectors' test files needed a single change, because `_build_view_definition`/
+`_build_routine`-style per-dialect functions kept their existing signatures and return types
+throughout; only what called them, and what happened to their output afterward, moved.

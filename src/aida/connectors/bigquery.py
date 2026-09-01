@@ -28,9 +28,14 @@ from aida.connectors.base import (
     TableProfileSnapshot,
 )
 from aida.connectors.discovery import (
+    TableMap,
     append_grouped_key_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
     build_table_map_from_column_rows,
+    view_definition_row,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -397,17 +402,13 @@ def _envelope_routines(envelope: _BigQueryEnvelopeRows) -> dict[str, list[Discov
     return routines
 
 
-def _apply_envelope(
-    catalogs: tuple[DiscoveredCatalog, ...], envelope: _BigQueryEnvelopeRows
-) -> tuple[DiscoveredCatalog, ...]:
-    """Fold envelope 1.1 rows onto an already-assembled catalog.
+def _view_definition_rows(
+    tables: TableMap, envelope: _BigQueryEnvelopeRows
+) -> list[dict[str, Any]]:
+    """Build one `apply_view_definitions` row per view/materialized-view table.
 
-    A rebuild rather than a change to `aida.connectors.discovery`, whose shared
-    helpers are on the v1.0 contract and are used by connectors this workstream does
-    not own.
-
-    The catalog's own `source_description` stays `None`: a GCP project has no
-    description in INFORMATION_SCHEMA.
+    A materialized view has no INFORMATION_SCHEMA.VIEWS row; TABLES.DDL is the only
+    place its statement appears.
     """
     view_definitions = {
         (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.views
@@ -416,80 +417,63 @@ def _apply_envelope(
         (str(row["table_schema"]), str(row["table_name"])): row.get("ddl")
         for row in envelope.tables
     }
+    views_reason = envelope.reason("views")
+    tables_reason = envelope.reason("tables")
+
+    rows: list[dict[str, Any]] = []
+    for schema_name, schema_tables in tables.items():
+        for table_name, table in schema_tables.items():
+            if table.object_type not in _VIEW_OBJECT_TYPES:
+                continue
+            is_materialized = table.object_type == "MATERIALIZED_VIEW"
+            key = (schema_name, table_name)
+            view_row: dict[str, Any] = view_definitions.get(key, {})
+            text = view_row.get("view_definition")
+            fallback_reason = None
+            if text is None and is_materialized:
+                text = table_ddl.get(key)
+                fallback_reason = tables_reason
+            elif text is None:
+                fallback_reason = views_reason
+            definition = _build_view_definition(
+                text,
+                object_label=f"{schema_name}.{table_name}",
+                is_materialized=is_materialized,
+                check_option=view_row.get("check_option"),
+                fallback_reason=fallback_reason,
+            )
+            rows.append(view_definition_row(schema_name, table_name, definition))
+    return rows
+
+
+def _table_description_rows(envelope: _BigQueryEnvelopeRows) -> list[dict[str, Any]]:
+    """Shape TABLE_OPTIONS descriptions for the shared `apply_table_descriptions`."""
     table_descriptions = _description_by_key(
         envelope.table_options, ("table_schema", "table_name")
     )
-    schema_descriptions = _description_by_key(envelope.schema_options, ("schema_name",))
-    column_descriptions = {
-        (
-            str(row["table_schema"]),
-            str(row["table_name"]),
-            str(row["column_name"]),
-        ): _optional_text(row.get("description"))
+    return [
+        {"table_schema": schema_name, "table_name": table_name, "description": description}
+        for (schema_name, table_name), description in table_descriptions.items()
+    ]
+
+
+def _column_description_rows(envelope: _BigQueryEnvelopeRows) -> list[dict[str, Any]]:
+    """Shape top-level COLUMN_FIELD_PATHS descriptions for `apply_column_descriptions`.
+
+    A nested struct field also has a COLUMN_FIELD_PATHS row (`field_path` deeper
+    than the column itself); only the column's own row -- `field_path` equal to
+    `column_name` -- is a column description.
+    """
+    return [
+        {
+            "table_schema": row["table_schema"],
+            "table_name": row["table_name"],
+            "column_name": row["column_name"],
+            "description": _optional_text(row.get("description")),
+        }
         for row in envelope.column_field_paths
         if str(row.get("field_path") or row.get("column_name")) == str(row["column_name"])
-    }
-    routines = _envelope_routines(envelope)
-    views_reason = envelope.reason("views")
-
-    rebuilt: list[DiscoveredCatalog] = []
-    for catalog in catalogs:
-        schemas = []
-        for schema in catalog.schemas:
-            tables = []
-            for table in schema.tables:
-                key = (schema.name, table.name)
-                definition: DiscoveredViewDefinition | None = None
-                if table.object_type in _VIEW_OBJECT_TYPES:
-                    is_materialized = table.object_type == "MATERIALIZED_VIEW"
-                    view_row: dict[str, Any] = view_definitions.get(key, {})
-                    text = view_row.get("view_definition")
-                    fallback_reason = None
-                    if text is None and is_materialized:
-                        # A materialized view has no INFORMATION_SCHEMA.VIEWS row;
-                        # TABLES.DDL is the only place its statement appears.
-                        text = table_ddl.get(key)
-                        fallback_reason = envelope.reason("tables")
-                    elif text is None:
-                        fallback_reason = views_reason
-                    definition = _build_view_definition(
-                        text,
-                        object_label=f"{schema.name}.{table.name}",
-                        is_materialized=is_materialized,
-                        check_option=view_row.get("check_option"),
-                        fallback_reason=fallback_reason,
-                    )
-                columns = tuple(
-                    replace(
-                        column,
-                        source_description=column_descriptions.get(
-                            (schema.name, table.name, column.name)
-                        ),
-                    )
-                    for column in table.columns
-                )
-                tables.append(
-                    replace(
-                        table,
-                        columns=columns,
-                        source_description=table_descriptions.get(key),
-                        view_definition=definition,
-                    )
-                )
-            schemas.append(
-                replace(
-                    schema,
-                    tables=tuple(tables),
-                    routines=tuple(routines.get(schema.name, ())),
-                    source_description=schema_descriptions.get((schema.name,)),
-                )
-            )
-        attributes = dict(catalog.attributes)
-        attributes["grants"] = _BIGQUERY_GRANTS_NOTE
-        if envelope.unavailable:
-            attributes["envelope_v11_unavailable"] = dict(envelope.unavailable)
-        rebuilt.append(replace(catalog, schemas=tuple(schemas), attributes=attributes))
-    return tuple(rebuilt)
+    ]
 
 
 def _information_schema_query(prefix: str, columns: str, view: str, where: str = "") -> str:
@@ -581,17 +565,58 @@ def _assemble_catalog(
     *,
     envelope: _BigQueryEnvelopeRows | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
-    """Assemble a standard DiscoveredCatalog from discovered columns and primary/unique key rows."""
+    """Assemble a standard DiscoveredCatalog from discovered columns and primary/unique key rows.
+
+    The catalog's own `source_description` stays `None`: a GCP project has no
+    description in INFORMATION_SCHEMA.
+    """
     tables = build_table_map_from_column_rows(column_rows)
     append_grouped_key_rows(
         tables,
         key_rows,
         constraint_type_map={"PRIMARY KEY": "PRIMARY_KEY", "UNIQUE": "UNIQUE"},
     )
-    catalogs = assemble_catalog(project_id, tables)
     if envelope is None:
-        return catalogs
-    return _apply_envelope(catalogs, envelope)
+        return assemble_catalog(project_id, tables)
+
+    apply_table_descriptions(tables, _table_description_rows(envelope))
+    apply_column_descriptions(tables, _column_description_rows(envelope))
+    apply_view_definitions(tables, _view_definition_rows(tables, envelope))
+
+    # Scoped to schemas `tables` already knows about, matching the previous
+    # rebuild-based assembly, which only ever walked `catalog.schemas` derived from
+    # `tables` and so never surfaced a schema holding only routines or only a
+    # SCHEMATA_OPTIONS description. `assemble_catalog`'s own routines=/
+    # schema_descriptions= contract would happily synthesize such a schema (see
+    # `test_a_schema_with_only_routines_survives_assembly` in tests/test_connectors.py)
+    # -- correct for postgres/sqlserver, which pass it unfiltered, but a behavior
+    # change here that this dedup does not make silently.
+    routines = {
+        schema_name: routine_list
+        for schema_name, routine_list in _envelope_routines(envelope).items()
+        if schema_name in tables
+    }
+    schema_descriptions = {
+        schema_name: description
+        for (schema_name,), description in _description_by_key(
+            envelope.schema_options, ("schema_name",)
+        ).items()
+        if schema_name in tables and description is not None
+    }
+
+    catalogs = assemble_catalog(
+        project_id,
+        tables,
+        routines=routines,
+        schema_descriptions=schema_descriptions,
+    )
+    attributes_patch: dict[str, Any] = {"grants": _BIGQUERY_GRANTS_NOTE}
+    if envelope.unavailable:
+        attributes_patch["envelope_v11_unavailable"] = dict(envelope.unavailable)
+    return tuple(
+        replace(catalog, attributes={**catalog.attributes, **attributes_patch})
+        for catalog in catalogs
+    )
 
 
 class BigQueryConnector(SqlExecutor):
