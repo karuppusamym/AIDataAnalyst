@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import (
@@ -415,6 +416,29 @@ async def create_multi_table_tool_blueprint(
     Publication still requires `submit_tool_for_review` and independent
     approval, unchanged.
     """
+    # PG-5: multi-table blueprint authoring is "Studio (semantic + tool
+    # authoring)" in Docs/00-product/07-packaging-and-editions.md §3 --
+    # Enterprise floor. Checked before any DB work, same as the role gate
+    # above it (`require_roles` already refused an ineligible role before this
+    # line runs at all).
+    entitlement = evaluate_entitlement(
+        organization_edition=settings.edition,
+        capability="studio_semantic_and_tool_authoring",
+    )
+    if not entitlement.allowed:
+        record_audit(
+            session,
+            context,
+            action="tool_blueprint.entitlement_denied",
+            resource_type="governed_tool_version",
+            resource_id=None,
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details=entitlement.snapshot(),
+        )
+        await session.commit()
+        raise HTTPException(status_code=403, detail=entitlement.reason_code)
+
     project, datasource = await _load_project_and_datasource(
         session, context, project_id, body.datasource_id
     )

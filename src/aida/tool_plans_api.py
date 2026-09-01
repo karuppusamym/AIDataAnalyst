@@ -13,8 +13,10 @@ from pydantic import Field
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit, record_outbox
 from aida.models import (
     ToolPlanExecutionRecord,
@@ -133,6 +135,42 @@ class ExecutionRead(ApiModel):
 # ---------------------------------------------------------------------------
 
 
+async def _deny_unless_entitled(
+    session: AsyncSession,
+    context: SecurityContext,
+    *,
+    settings: Settings,
+    action: str,
+    resource_id: str | None,
+) -> None:
+    """PG-5: multi-step tool plans are "Multi-step tool plans" in
+    `Docs/00-product/07-packaging-and-editions.md` §3 -- Enterprise floor,
+    and this router had no entitlement check at all before PG-5 (only the
+    `require_roles` above each endpoint). Raises `HTTPException(403)` and
+    commits an audit record of the denial (mirroring
+    `query_gateway.py`'s `AuthorizationDenied` handling) if the
+    organization's edition does not include the capability; otherwise
+    returns normally and the caller proceeds.
+    """
+    entitlement = evaluate_entitlement(
+        organization_edition=settings.edition, capability="multi_step_tool_plans"
+    )
+    if entitlement.allowed:
+        return
+    record_audit(
+        session,
+        context,
+        action=action,
+        resource_type="ToolPlan",
+        resource_id=resource_id,
+        outcome="DENIED",
+        correlation_id=get_correlation_id(),
+        details=entitlement.snapshot(),
+    )
+    await session.commit()
+    raise HTTPException(status_code=403, detail=entitlement.reason_code)
+
+
 @router.post(
     "/tool-plans",
     response_model=ToolPlanRead,
@@ -144,9 +182,13 @@ async def create_tool_plan(
         require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> ToolPlanRead:
     """Create a new tool plan."""
     org_id = context.require_organization()
+    await _deny_unless_entitled(
+        session, context, settings=settings, action="tool_plan.entitlement_denied", resource_id=None
+    )
 
     plan = ToolPlan(
         id=None,
@@ -316,9 +358,20 @@ async def execute_tool_plan(
         require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
     ),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> ExecutionRead:
     """Execute a validated tool plan."""
     org_id = context.require_organization()
+    # PG-5: checked again at execute, not only at create -- a plan created
+    # while the deployment held an Enterprise+ edition must not still be
+    # executable after a downgrade.
+    await _deny_unless_entitled(
+        session,
+        context,
+        settings=settings,
+        action="tool_plan.entitlement_denied",
+        resource_id=str(plan_id),
+    )
 
     plan_record = await session.get(ToolPlanRecord, plan_id)
     if plan_record is None:

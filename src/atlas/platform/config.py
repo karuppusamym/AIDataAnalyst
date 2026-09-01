@@ -281,6 +281,26 @@ class Settings(BaseSettings):
     # completion of the rollout, and until it happens the platform should say so (INV-9).
     unresolved_workspace_posture: Literal["SHADOW", "DENY"] = "SHADOW"
 
+    # PG-5: which product edition this deployment is licensed for
+    # (`Docs/00-product/07-packaging-and-editions.md` §3's capability matrix).
+    # Deployment-wide, not per-`Organization` -- `07-packaging-and-editions.md`
+    # §2 names self-hosted (BYOK), one customer per running deployment, as the
+    # primary and only "target for v1" model, and multi-tenant SaaS as "not
+    # planned"; a per-deployment license setting is therefore the accurate
+    # description of where an edition actually lives today, not a workaround.
+    # `aida.edition_entitlements.evaluate_entitlement` is the pure evaluator
+    # this feeds; `atlas.platform` must not import from `aida` (see the
+    # import-linter contract this module's docstring already documents), so
+    # the literal values are repeated here rather than importing `aida`'s
+    # `Edition` alias -- the two are kept in sync by
+    # `tests/test_edition_entitlements.py`. Defaults to the ceiling
+    # (`REGULATED`) so an unconfigured deployment's existing behaviour is
+    # unchanged by this setting's mere existence (PK-2, `07-packaging-and-
+    # editions.md` §6, is still an open product decision on whether a
+    # `FOUNDATION` edition is even offered; defaulting down would make this
+    # setting's addition alone start denying capability nobody asked to gate).
+    edition: Literal["FOUNDATION", "ENTERPRISE", "REGULATED"] = "REGULATED"
+
     entitlement_provider: Literal["outbox", "webhook"] = "outbox"
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None
