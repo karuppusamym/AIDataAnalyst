@@ -8640,3 +8640,51 @@ same-answer table pair connected only via a multi-hop chain (e.g. through an int
 entry here today; the graph build this reuses is itself bounded (`node_limit`/`edge_limit`, recorded in
 `graph_version.traversal`) per ADR-0010, an existing limitation of `build_unified_lineage_graph_payload`
 inherited here, not introduced by this row.
+
+---
+
+## 2026-09-01 — AT-14 closed: sampling-based bulk review for drafted prose
+
+A steward reviewing 500 AI-drafted asset descriptions one at a time does not scale; auto-publishing
+them without any human review breaks the 0.70 model-confidence cap. Acceptance sampling is the
+middle path: review a random, reproducible sample, apply that decision to exactly the sampled
+items.
+
+### Design
+
+`aida/sampling_review.py` — pure, DB-free. `draw_reproducible_sample` instantiates a fresh
+`random.Random(seed)` per call (never a shared RNG), so the same seed against the same batch
+membership (a set — input order never matters) draws the same ids, in the same order, in this
+process or any other. `resolve_sample_size` clamps to `[1, batch_size]` from either an explicit
+count or a fraction (rounded up, so a small fraction of a small batch still reviews something).
+
+Two endpoints on `asset_description_api.py`:
+- `POST .../asset-description-drafts/sample-review/draw` — preview only, mutates nothing.
+- `POST .../asset-description-drafts/sample-review/decide` — takes `(batch, sample_size, seed,
+  decision)`, **recomputes** the sample server-side rather than trusting a caller-supplied id
+  list (so the sample actually decided is provably the one a steward read), then applies the
+  decision to exactly those ids via `_apply_governance_review_decision` — the identical function
+  `decide_governance_review`/PG-3's bulk-decision path already use. No parallel, weaker decision
+  route exists for the sampled path.
+
+### The one real design decision, made explicit
+
+Sampled items are individually finalized (published on APPROVE, rejected on REJECT); unsampled
+items are left `PENDING_APPROVAL`, named explicitly in the response as `unsampled_draft_ids`. A
+batch-level "the sample passed, treat the rest as accepted too" outcome was considered and
+rejected — that would let a model's own drafted text become authoritative for items nobody ever
+actually read, exactly what the 0.70 cap (`Docs/90-reference/04-analysis-algorithms.md` §4,
+ADR-0001) exists to prevent. What sampling buys instead is real: reading and deciding ~50 of 500
+drafts in one call, with the seed and drawn ids recorded via `record_audit` (not only on the
+review row) so the verdict is reproducible and auditable after the fact.
+
+### Verification
+
+24 tests: `tests/test_sampling_review.py` (pure determinism — same seed/membership → same draw
+regardless of input order; different seed → generally different draw; `sample_size >= batch_size`
+returns the whole deduplicated batch) and `tests/test_asset_description_sample_review.py`
+(integration against real in-memory SQLite — recomputed-sample replay from a cited seed, audit
+payload carries seed + drawn ids, unsampled items provably untouched). `ruff check` clean.
+`test_doc_claims.py` and `test_openapi_diff_gate.py` clean (`Docs/90-reference/openapi-baseline.json`
+and `ui-next/src/lib/types.ts` regenerated for the two new additive routes). No `models.py`/
+`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration touched.

@@ -2277,6 +2277,425 @@
         "title": "AssetDescriptionDraftGenerate",
         "type": "object"
       },
+      "AssetDescriptionDraftRead": {
+        "additionalProperties": false,
+        "properties": {
+          "accuracy_score": {
+            "title": "Accuracy Score",
+            "type": "number"
+          },
+          "clarity_score": {
+            "title": "Clarity Score",
+            "type": "number"
+          },
+          "completeness_score": {
+            "title": "Completeness Score",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "drafted_text": {
+            "title": "Drafted Text",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "governance_review_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Governance Review Id"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "overall_score": {
+            "title": "Overall Score",
+            "type": "number"
+          },
+          "published_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published Version Id"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "style_score": {
+            "title": "Style Score",
+            "type": "number"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "table_id",
+          "table_name",
+          "drafted_text",
+          "accuracy_score",
+          "clarity_score",
+          "style_score",
+          "completeness_score",
+          "overall_score",
+          "evidence",
+          "status",
+          "governance_review_id",
+          "published_version_id",
+          "created_by",
+          "reviewed_by",
+          "reviewed_at",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AssetDescriptionDraftRead",
+        "type": "object"
+      },
+      "AssetDescriptionSampleDecide": {
+        "additionalProperties": false,
+        "description": "AT-14: apply ONE accept/reject decision to the reproducibly-drawn\nSAMPLE of a batch -- never to the whole batch. `seed` is required (not\ngenerated here): a controlled review cites a specific, already-known\nseed -- typically the one an earlier `AssetDescriptionSampleDraw` call\nreturned -- so the sample this decision is actually applied to is\nguaranteed to be the one the steward read, by recomputing it from the\nsame (batch, sample_size, seed) inputs server-side rather than trusting\na caller-supplied id list.",
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "draft_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Draft Ids",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "sample_fraction": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Fraction"
+          },
+          "sample_size": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Size"
+          },
+          "seed": {
+            "maximum": 9.223372036854776e+18,
+            "minimum": 0.0,
+            "title": "Seed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "draft_ids",
+          "seed",
+          "decision"
+        ],
+        "title": "AssetDescriptionSampleDecide",
+        "type": "object"
+      },
+      "AssetDescriptionSampleDecisionResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_size": {
+            "title": "Batch Size",
+            "type": "integer"
+          },
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "drawn_draft_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Drawn Draft Ids",
+            "type": "array"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/AssetDescriptionSampleItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "sample_size": {
+            "title": "Sample Size",
+            "type": "integer"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          },
+          "unsampled_draft_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Unsampled Draft Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "decision",
+          "seed",
+          "batch_size",
+          "sample_size",
+          "drawn_draft_ids",
+          "unsampled_draft_ids",
+          "succeeded_count",
+          "failed_count",
+          "results"
+        ],
+        "title": "AssetDescriptionSampleDecisionResultRead",
+        "type": "object"
+      },
+      "AssetDescriptionSampleDraw": {
+        "additionalProperties": false,
+        "description": "AT-14: draw a reproducible sample from a batch of PENDING_APPROVAL\ndrafts without deciding anything -- so a steward can see exactly which\ndrafts a sample-based decision would cover, and read their text, before\ncommitting to one. Safe to call repeatedly with the same seed (e.g. to\nrecall a prior draw): it is a preview, and mutates no draft.",
+        "properties": {
+          "draft_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10000,
+            "minItems": 1,
+            "title": "Draft Ids",
+            "type": "array"
+          },
+          "sample_fraction": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Fraction"
+          },
+          "sample_size": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sample Size"
+          },
+          "seed": {
+            "anyOf": [
+              {
+                "maximum": 9.223372036854776e+18,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seed"
+          }
+        },
+        "required": [
+          "draft_ids"
+        ],
+        "title": "AssetDescriptionSampleDraw",
+        "type": "object"
+      },
+      "AssetDescriptionSampleDrawRead": {
+        "additionalProperties": false,
+        "properties": {
+          "batch_size": {
+            "title": "Batch Size",
+            "type": "integer"
+          },
+          "drawn_draft_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Drawn Draft Ids",
+            "type": "array"
+          },
+          "drawn_drafts": {
+            "items": {
+              "$ref": "#/components/schemas/AssetDescriptionDraftRead"
+            },
+            "title": "Drawn Drafts",
+            "type": "array"
+          },
+          "sample_size": {
+            "title": "Sample Size",
+            "type": "integer"
+          },
+          "seed": {
+            "title": "Seed",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seed",
+          "batch_size",
+          "sample_size",
+          "drawn_draft_ids",
+          "drawn_drafts"
+        ],
+        "title": "AssetDescriptionSampleDrawRead",
+        "type": "object"
+      },
+      "AssetDescriptionSampleItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "format": "uuid",
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draft_id",
+          "status"
+        ],
+        "title": "AssetDescriptionSampleItemRead",
+        "type": "object"
+      },
       "AssetDocumentationVersionCreate": {
         "additionalProperties": false,
         "properties": {
@@ -53707,6 +54126,284 @@
           }
         },
         "summary": "Generate Asset Description Drafts",
+        "tags": [
+          "asset-description-drafting"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/asset-description-drafts/sample-review/decide": {
+      "post": {
+        "description": "Apply ONE decision to the reproducibly-drawn SAMPLE of a batch --\n`seed` is required so the sample this decision covers is exactly the one\nan earlier `.../sample-review/draw` call showed a steward (recomputed\nserver-side from (batch, sample_size, seed), never trusted from the\ncaller as a bare id list). Unsampled items are left PENDING_APPROVAL.\n\nReuses `_apply_governance_review_decision` -- the identical core\n`decide_governance_review` and `bulk_decide_governance_reviews` (PG-3)\ncall -- per sampled item, inside its own SAVEPOINT (PG-3's own partial-\nsuccess precedent): a precondition failure on one sampled item marks it\nFAILED and continues rather than aborting the whole sample.",
+        "operationId": "decide_asset_description_sample_review_v1_organizations__organization_id__asset_description_drafts_sample_review_decide_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetDescriptionSampleDecide"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetDescriptionSampleDecisionResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Asset Description Sample Review",
+        "tags": [
+          "asset-description-drafting"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/asset-description-drafts/sample-review/draw": {
+      "post": {
+        "description": "Preview a reproducible sample from a batch of pending drafts -- draws\nand audits the draw, but decides nothing. Mutates no draft; safe to call\nmore than once (e.g. with the same seed, to recall a prior draw).",
+        "operationId": "draw_asset_description_sample_review_v1_organizations__organization_id__asset_description_drafts_sample_review_draw_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssetDescriptionSampleDraw"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetDescriptionSampleDrawRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Draw Asset Description Sample Review",
         "tags": [
           "asset-description-drafting"
         ]

@@ -396,6 +396,72 @@ export interface AssetDescriptionDraftGenerate {
   table_ids: string[];
 }
 
+export interface AssetDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  table_id: string;
+  table_name: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  evidence: Record<string, unknown>;
+  status: string;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** AT-14: apply ONE accept/reject decision to the reproducibly-drawn */
+export interface AssetDescriptionSampleDecide {
+  draft_ids: string[];
+  sample_size?: number | null;
+  sample_fraction?: number | null;
+  seed: number;
+  decision: "APPROVE" | "REJECT";
+  reason?: string | null;
+}
+
+export interface AssetDescriptionSampleDecisionResultRead {
+  decision: "APPROVE" | "REJECT";
+  seed: number;
+  batch_size: number;
+  sample_size: number;
+  drawn_draft_ids: string[];
+  unsampled_draft_ids: string[];
+  succeeded_count: number;
+  failed_count: number;
+  results: AssetDescriptionSampleItemRead[];
+}
+
+/** AT-14: draw a reproducible sample from a batch of PENDING_APPROVAL */
+export interface AssetDescriptionSampleDraw {
+  draft_ids: string[];
+  sample_size?: number | null;
+  sample_fraction?: number | null;
+  seed?: number | null;
+}
+
+export interface AssetDescriptionSampleDrawRead {
+  seed: number;
+  batch_size: number;
+  sample_size: number;
+  drawn_draft_ids: string[];
+  drawn_drafts: AssetDescriptionDraftRead[];
+}
+
+export interface AssetDescriptionSampleItemRead {
+  draft_id: string;
+  status: "SUCCEEDED" | "FAILED";
+  reason?: string | null;
+}
+
 export interface AssetDocumentationVersionCreate {
   aliases?: string[];
   readme: string;
