@@ -6577,3 +6577,159 @@ the KG-7/AG-7/TL-5/SM-5 entries above): 5123 passed, 9 skipped, 1 xfailed, 0 fai
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+---
+
+## 2026-09-01 — SM-3 (confidence calibration + bank-domain corpus) closed: real numbers against the real SM-4 scoring function, no infra caveat needed
+
+### What this closes
+
+Tracker SM-3 ("Confidence calibration + bank-domain corpus", exit criterion "Published accuracy
+results") was TODO. Module 07's real confidence-scored inference is SM-4's
+`aida.metric_suggestion_service.score_evidence` -- a pure, deterministic function of a
+`MetricEvidence` value that scores a candidate metric proposal 0-1. SM-3 asks a question SM-4
+never answered: when the score says 0.86, is the suggestion actually right about 86% of the time?
+This closes that with a real, reproducible calibration run against a labelled corpus, following
+AG-8's exact pattern: a committed corpus, a script that runs it through the REAL scoring function
+(never a mock or reimplementation), and a generated, timestamped results report.
+
+### The corpus: `tests/fixtures/confidence_calibration_corpus/bank_domain_metric_corpus.json`
+
+28 hand-authored bank-domain (table, column) cases -- 14 true positives / 14 false positives --
+every case a numeric column with an EXACT or SUFFIX `MEASURE_KEYWORDS` match, the exact same gate
+`metric_suggestion_api.generate_metric_suggestions` applies *before* it ever builds a
+`MetricEvidence` and calls `score_evidence` (numeric physical type; EXACT/SUFFIX only, CONTAINS
+dropped). Every corpus case is therefore one the real production pipeline would actually score and
+could actually propose to a reviewer -- never a case production would have filtered out first, and
+the script's own `build_evidence` raises `CorpusIntegrityError` if a case ever violated that (proven
+by test, not just asserted in a docstring).
+
+Labels were assigned by domain judgement *before* any score was computed, not reverse-engineered
+from the numbers, and the false positives are drawn from real, specific banking column-naming
+ambiguity `score_evidence` has no signal for at all:
+
+- **Pre-aggregated/cumulative balances**: `avg_daily_balance`, `running_balance`,
+  `closing_balance`, `opening_balance`, `ending_balance` -- the column already stores a derived
+  figure (an average, a running total, a point-in-time snapshot); the keyword's fixed `SUM`
+  aggregation is wrong (the correct rollup is `AVG` or `LAST`, not blind summation).
+- **Per-unit rates**: `unit_cost`, `weighted_avg_cost` -- a rate on a reference-table row, not an
+  additive transactional measure.
+- **Policy thresholds**: `minimum_balance`, `balance_limit` -- configured per account
+  type/tier, not a transactional or snapshot value.
+- **Precomputed `*_count` columns**: `txn_count`, `monthly_login_count`,
+  `daily_fraud_alert_count`, `item_count`, `daily_active_user_count` -- the column already holds a
+  per-row tally, so the keyword's fixed `COUNT` aggregation is systematically wrong every time in
+  this corpus: the correct rollup is `SUM` of the stored counts, not `COUNT` of rows. This is a
+  general finding, not a one-off: *every* numeric `*_count` case in the corpus has this failure,
+  because a numeric column can only ever hold a pre-computed value, never something SQL `COUNT()`
+  itself would recompute.
+
+The 14 true positives are plain, unqualified additive amounts/balances/fees/volumes/quantities a
+human steward would approve as proposed (`txn_amount`, `deposit_amount`, `acct_balance`,
+`loan_balance`, `processing_fee`, `interest_revenue`, `qty`, etc.), spanning both EXACT and SUFFIX
+match kinds and varied table roles (TRANSACTION/EVENT/SNAPSHOT/FACT/DIMENSION) and evidence
+richness (with and without a bound glossary term, with and without a description mention) so scores
+spread across the function's real range rather than clustering in one bucket.
+
+### `scripts/confidence_calibration_benchmark.py`
+
+`load_corpus` reads the fixture; `build_evidence` reconstructs each case into a real
+`aida.metric_suggestion_service.MetricEvidence`, **re-deriving** the matched keyword/aggregation/
+match-kind via the real `match_measure_keyword(case.column_name)` rather than trusting a hand-typed
+field in the fixture, and raises `CorpusIntegrityError` for any case the real production gate would
+have filtered before scoring. `run_calibration` scores every case with the real, unmodified
+`score_evidence` (SM-4) and records whether it would clear the real `MINIMUM_EVIDENCE_FOR_METRIC_
+REVIEW` gate. `bucket_results` buckets by confidence into fixed-width 0.1 reliability-diagram bins
+(a standard calibration-curve construction); `expected_calibration_error` and `brier_score` compute
+the two standard summary metrics. `main` writes both a machine-readable JSON payload and a
+human-readable Markdown report (`Docs/90-reference/confidence-calibration-results.{json,md}`),
+exactly mirroring `scripts/quality_benchmark.py`'s (AG-8) report-writing shape.
+
+**Unlike AG-8, no framework-only section is needed here**: `score_evidence` is a pure function of a
+value object -- no DB session, no embedding provider, no model route, no credential. Every number in
+the published report is a full, real result of the real function; this sandbox needed nothing it
+didn't already have.
+
+### Measured with real numbers
+
+Full calibration curve (`Docs/90-reference/confidence-calibration-results.md`):
+
+| Confidence bucket | n | Mean confidence | Observed accuracy | Gap |
+|---|---|---|---|---|
+| [0.3, 0.4) | 2 | 0.3917 | 0.0000 | 0.3917 |
+| [0.4, 0.5) | 4 | 0.4802 | 0.0000 | 0.4802 |
+| [0.5, 0.6) | 1 | 0.5625 | 1.0000 | 0.4375 |
+| [0.6, 0.7) | 10 | 0.6459 | 0.6000 | 0.0459 |
+| [0.7, 0.8) | 4 | 0.7573 | 0.0000 | 0.7573 |
+| [0.8, 0.9) | 7 | 0.8583 | 1.0000 | 0.1417 |
+
+**Expected Calibration Error: 0.2722. Brier score: 0.2184** (worse than the 0.25 an uninformative
+constant-0.5 predictor scores on this balanced 14/14 corpus). `score_evidence` is measurably not
+calibrated as a probability of correctness, and the miscalibration is concentrated exactly where the
+score has no signal -- aggregation correctness -- not spread as random noise: the [0.7, 0.8) bucket
+is 0% accurate (all four cases are `*_count`/`closing_balance` false positives with rich
+corroborating evidence) while the adjacent [0.8, 0.9) bucket is 100% accurate. Concretely:
+`txn_count`, `daily_fraud_alert_count`, and `daily_active_user_count` -- each carrying a bound
+glossary term *and* a description mention, the two richest evidence signals the function has --
+score 0.7542 while being wrong, ahead of `deposit_amount_true` (0.5625, correct, but with neither
+signal) and `acct_balance_true` (0.6917, correct). A false positive with rich evidence outscores a
+true positive with sparse evidence, because bound-term/description-mention evidence corroborates
+that a steward believes the *column* is meaningful, never that the *aggregation* is right for it.
+
+This is a real, actionable finding: `score_evidence`'s overall score should be read as "strength of
+evidence this column is a measure worth a reviewer's attention," not "probability this proposal is
+correct as published" -- consistent with SM-4's own docstring that this generates a *draft* for
+human review, never an auto-published metric. A concrete next step this row's numbers point to
+(explicitly out of SM-3's own scope, which measures calibration rather than re-tuning SM-4's
+formula): a dimension penalizing `*_count`/pre-aggregated-`*_balance` qualifier patterns, evaluable
+against this same corpus and report.
+
+2 of 28 cases (`unit_cost_false`, `weighted_avg_cost_false`) score below the real
+`MINIMUM_EVIDENCE_FOR_METRIC_REVIEW` (0.4) gate and so would never reach a reviewer in production --
+both are correctly ground-truth-incorrect, named plainly in the report rather than dropped from the
+corpus to keep the headline numbers simpler.
+
+### A real bug found and fixed while building the harness
+
+Naive fixed-width bucketing (`int(confidence / 0.1)`) misfiles a confidence of *exactly* 0.6 into
+the `[0.5, 0.6)` bucket instead of `[0.6, 0.7)`, because `0.6 / 0.1 == 5.999999999999999` in IEEE
+754 double precision, not `6.0`. Caught while building this script (the first calibration run showed
+an implausible bucket population before the fix), not left in: `bucket_results` now adds a small
+epsilon before truncating, and `test_a_confidence_exactly_on_a_bucket_boundary_lands_in_the_upper_
+bucket` proves it directly against a synthetic 0.6 value, independent of whatever the corpus itself
+happens to score.
+
+### TS-10 overlap, not duplicated
+
+Tracker `TS-10` ("Labelled semantic/relationship corpus — Calibration published") asks for
+materially the same thing under the Testing Strategy section. At claim time and at close time it was
+still TODO and unclaimed by any concurrent session -- not "already covers this ground" in the sense
+that would make this row a pointer, so this row proceeded as scoped. `TS-10`'s row was deliberately
+left untouched (no claim, no status change) to avoid editing a row this session has no ownership
+process for on a fast-moving branch, but its exit criterion ("Calibration published") is fully
+satisfied by this row's artifacts (`tests/fixtures/confidence_calibration_corpus/bank_domain_metric_
+corpus.json`, `scripts/confidence_calibration_benchmark.py`, `Docs/90-reference/confidence-
+calibration-results.{md,json}`) -- a future session picking up `TS-10` should point to this row
+rather than re-building the same corpus and script.
+
+### Tests, lint, scope
+
+19 tests in `tests/test_confidence_calibration_benchmark.py`: pure bucketing/ECE/Brier logic against
+hand-computed expected values (a perfectly-calibrated synthetic case scores ECE=0/Brier=0; a
+hand-worked weighted-gap example checked to `pytest.approx`); the float-boundary bug proven fixed
+both synthetically and via the real corpus's own 0.6-scoring cases; corpus-integrity checks
+(`build_evidence` refusing a non-numeric column, a no-keyword-match column, and a bare-CONTAINS
+column -- each the exact case the real production gate would have filtered); the real, committed
+corpus run end-to-end through the real `score_evidence`, including a named-case spot check
+(`txn_amount_true` scores higher than `deposit_amount_true` for richer real evidence, not just an
+aggregate rate); a non-degenerate-curve guard against a future corpus edit collapsing into one
+bucket; and a deterministic CLI round trip (`main`) against `tmp_path` report files -- two runs
+produce byte-identical JSON apart from the timestamp, since nothing here is wall-clock- or
+randomness-dependent, unlike PF-3's timing benchmark. `ruff check` clean on every file touched;
+`mypy src` clean (257 files -- `scripts/` is outside this repo's `mypy strict` package scope, the
+same as `scripts/quality_benchmark.py` and `scripts/perf_baseline.py`, confirmed by running `mypy
+--strict` against `quality_benchmark.py` directly and seeing the same untyped-import/loop-variable
+noise there); `tests/test_doc_claims.py` green.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.

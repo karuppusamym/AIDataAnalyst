@@ -1,0 +1,504 @@
+{
+  "corpus_version": 1,
+  "description": "SM-3 bank-domain metric-suggestion corpus: labelled (table, column) evidence run through the real aida.metric_suggestion_service.score_evidence (SM-4). Every case is a numeric column with an EXACT or SUFFIX MEASURE_KEYWORDS match -- the same gate metric_suggestion_api.generate_metric_suggestions applies before it ever calls score_evidence, so every case here is one the real production pipeline would actually score and could actually propose. ground_truth.correct is a human (steward-level) judgement of whether the proposed (column, suggested_aggregation) pair is actually a valid, correctly-aggregated banking measure -- 14 true positives (plain additive amounts/balances/fees/volumes a human would approve as-is) and 14 false positives (pre-aggregated or cumulative balances, per-unit rates, policy thresholds, and precomputed *_count columns where the keyword-to-aggregation mapping is systematically wrong), chosen for realistic bank-domain ambiguity, not to hit a target score.",
+  "cases": [
+    {
+      "id": "txn_amount_true",
+      "table_name": "fact_card_transactions",
+      "table_role": "TRANSACTION",
+      "business_name": "Card Transactions",
+      "business_description": "Every card-present and card-not-present transaction. The amount column captures this.",
+      "grain_statement": "one row per card transaction",
+      "column_name": "txn_amount",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Transaction Amount"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Plain per-transaction dollar amount; summing across transactions is the standard total-spend metric."
+      }
+    },
+    {
+      "id": "deposit_amount_true",
+      "table_name": "fact_deposits",
+      "table_role": "TRANSACTION",
+      "business_name": "Deposit Transactions",
+      "business_description": "Cash and check deposits posted to customer accounts.",
+      "grain_statement": "one row per deposit",
+      "column_name": "deposit_amount",
+      "physical_type": "DECIMAL(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-deposit dollar amount; summing gives total deposits, a standard banking KPI."
+      }
+    },
+    {
+      "id": "withdrawal_amount_true",
+      "table_name": "fact_withdrawals",
+      "table_role": "TRANSACTION",
+      "business_name": "Withdrawal Transactions",
+      "business_description": "ATM and teller cash withdrawals. The amount column captures this.",
+      "grain_statement": "one row per withdrawal",
+      "column_name": "withdrawal_amount",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Withdrawal Amount"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-withdrawal dollar amount; summing gives total withdrawals."
+      }
+    },
+    {
+      "id": "acct_balance_true",
+      "table_name": "fact_account_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Account Balance Snapshots",
+      "business_description": "One row per account per day with its point-in-time balance.",
+      "grain_statement": "one row per account per snapshot date",
+      "column_name": "acct_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "A plain point-in-time balance (no avg/running/closing qualifier); summing across accounts for one snapshot date gives total book balance, a standard metric -- summing across dates would double count, but that is a query-time grouping concern, not a flaw in the base aggregation."
+      }
+    },
+    {
+      "id": "loan_balance_true",
+      "table_name": "fact_loan_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Loan Balance Snapshots",
+      "business_description": "Outstanding loan balance per loan per day. The balance column captures this.",
+      "grain_statement": "one row per loan per snapshot date",
+      "column_name": "loan_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Outstanding Loan Balance"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Plain outstanding balance per loan; summing across loans for one snapshot date is the standard 'total loan book' metric."
+      }
+    },
+    {
+      "id": "processing_fee_true",
+      "table_name": "fact_card_transactions",
+      "table_role": "EVENT",
+      "business_name": "Card Transactions",
+      "business_description": "Every processed card transaction. The fee column captures this.",
+      "grain_statement": "one row per transaction",
+      "column_name": "processing_fee",
+      "physical_type": "NUMERIC(10,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Fee"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-transaction fee charged; summing gives total fee revenue, a standard metric."
+      }
+    },
+    {
+      "id": "od_fee_true",
+      "table_name": "fact_overdraft_events",
+      "table_role": "EVENT",
+      "business_name": "Overdraft Events",
+      "business_description": "Overdraft occurrences and the fee assessed.",
+      "grain_statement": "one row per overdraft event",
+      "column_name": "od_fee",
+      "physical_type": "NUMERIC(10,2)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-event overdraft fee; summing gives total overdraft fee revenue."
+      }
+    },
+    {
+      "id": "late_fee_true",
+      "table_name": "fact_loan_payments",
+      "table_role": "TRANSACTION",
+      "business_name": "Loan Payments",
+      "business_description": "Loan payment transactions including any late fee assessed.",
+      "grain_statement": "one row per payment",
+      "column_name": "late_fee",
+      "physical_type": "NUMERIC(10,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-payment late fee; summing gives total late fee revenue."
+      }
+    },
+    {
+      "id": "interest_revenue_true",
+      "table_name": "fact_interest_accruals",
+      "table_role": "TRANSACTION",
+      "business_name": "Interest Accruals",
+      "business_description": "Interest accrued and recognized per account per period. The revenue column captures this.",
+      "grain_statement": "one row per account per accrual period",
+      "column_name": "interest_revenue",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Revenue"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-period interest revenue recognized; summing gives total interest revenue."
+      }
+    },
+    {
+      "id": "total_deposits_true",
+      "table_name": "fact_branch_daily_summary",
+      "table_role": "FACT",
+      "business_name": "Branch Daily Summary",
+      "business_description": "One row per branch per day with same-day deposit totals.",
+      "grain_statement": "one row per branch per day",
+      "column_name": "total_deposits",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "A per-branch-per-day total that is itself additive across branches/days for a coarser rollup (bank-wide daily deposits); this is a legitimate pre-aggregated fact, not a cumulative or averaged one."
+      }
+    },
+    {
+      "id": "merchant_fee_true",
+      "table_name": "fact_card_transactions",
+      "table_role": "EVENT",
+      "business_name": "Card Transactions",
+      "business_description": "Every processed card transaction. The fee column captures this.",
+      "grain_statement": "one row per transaction",
+      "column_name": "merchant_fee",
+      "physical_type": "NUMERIC(10,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Merchant Fee"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-transaction merchant discount fee; summing gives total merchant fee revenue."
+      }
+    },
+    {
+      "id": "fraud_loss_amount_true",
+      "table_name": "fact_fraud_alerts",
+      "table_role": "EVENT",
+      "business_name": "Fraud Alerts",
+      "business_description": "Confirmed fraud events and the loss amount incurred.",
+      "grain_statement": "one row per confirmed fraud event",
+      "column_name": "fraud_loss_amount",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [
+        "Fraud Loss"
+      ],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-event confirmed loss amount; summing gives total fraud loss."
+      }
+    },
+    {
+      "id": "card_txn_volume_true",
+      "table_name": "fact_card_transactions",
+      "table_role": "FACT",
+      "business_name": "Card Transactions",
+      "business_description": "Every processed card transaction with its dollar volume.",
+      "grain_statement": "one row per transaction",
+      "column_name": "card_txn_volume",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-transaction dollar volume; summing gives total processed volume, a standard card-processing metric."
+      }
+    },
+    {
+      "id": "qty_true",
+      "table_name": "fact_order_lines",
+      "table_role": "FACT",
+      "business_name": "Order Lines",
+      "business_description": "One row per line item on a customer order.",
+      "grain_statement": "one row per order line",
+      "column_name": "qty",
+      "physical_type": "INTEGER",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": true,
+        "expected_aggregation": "SUM",
+        "rationale": "Per-line-item unit quantity; summing gives total units ordered."
+      }
+    },
+    {
+      "id": "avg_daily_balance_false",
+      "table_name": "fact_account_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Account Balance Snapshots",
+      "business_description": "One row per account per month with the month's average daily balance.",
+      "grain_statement": "one row per account per month",
+      "column_name": "avg_daily_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "AVG",
+        "rationale": "Column already stores a pre-averaged figure; SUMming averages across accounts double-weights nothing meaningful and is not the standard rollup (a weighted AVG is)."
+      }
+    },
+    {
+      "id": "running_balance_false",
+      "table_name": "fact_account_transactions",
+      "table_role": "TRANSACTION",
+      "business_name": "Account Transactions",
+      "business_description": "Every posted transaction with the running account balance after posting.",
+      "grain_statement": "one row per transaction",
+      "column_name": "running_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "LAST",
+        "rationale": "A cumulative running total already; summing it across transactions is meaningless (compounds an already-cumulative figure)."
+      }
+    },
+    {
+      "id": "closing_balance_false",
+      "table_name": "fact_account_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Account Balance Snapshots",
+      "business_description": "One row per account per day with its end-of-day balance. The balance column captures this.",
+      "grain_statement": "one row per account per day",
+      "column_name": "closing_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": true,
+      "bound_term_names": [
+        "Balance"
+      ],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "LAST",
+        "rationale": "An end-of-day snapshot figure; summing across days for one account massively overstates balance (LAST/point-in-time is correct). High evidence (bound term + description mention) does not fix the aggregation being wrong -- this is the calibration-relevant failure case."
+      }
+    },
+    {
+      "id": "opening_balance_false",
+      "table_name": "fact_account_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Account Balance Snapshots",
+      "business_description": "One row per account per day with its start-of-day balance.",
+      "grain_statement": "one row per account per day",
+      "column_name": "opening_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "LAST",
+        "rationale": "Same failure mode as closing_balance: a point-in-time snapshot, not an additive measure."
+      }
+    },
+    {
+      "id": "unit_cost_false",
+      "table_name": "dim_product",
+      "table_role": "DIMENSION",
+      "business_name": "Product Catalog",
+      "business_description": "Reference data describing each product SKU.",
+      "grain_statement": "one row per product SKU",
+      "column_name": "unit_cost",
+      "physical_type": "NUMERIC(10,4)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "AVG",
+        "rationale": "A per-unit rate on a reference table, not a transactional measure; summing per-unit costs across unrelated SKUs has no business meaning."
+      }
+    },
+    {
+      "id": "minimum_balance_false",
+      "table_name": "dim_account_type",
+      "table_role": "DIMENSION",
+      "business_name": "Account Type Reference",
+      "business_description": "Policy configuration per account type/tier.",
+      "grain_statement": "one row per account type",
+      "column_name": "minimum_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "N/A",
+        "rationale": "A policy threshold configured per account type, not a transactional or snapshot balance; summing thresholds across unrelated tiers is not a meaningful metric."
+      }
+    },
+    {
+      "id": "txn_count_false",
+      "table_name": "fact_customer_activity_daily",
+      "table_role": "FACT",
+      "business_name": "Customer Daily Activity",
+      "business_description": "One row per customer per day with the day's transaction count. The count column captures this.",
+      "grain_statement": "one row per customer per day",
+      "column_name": "txn_count",
+      "physical_type": "INTEGER",
+      "nullable": false,
+      "bound_term_names": [
+        "Transaction Count"
+      ],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "SUM",
+        "rationale": "Column already holds a pre-computed count per row; the correct rollup is SUM (sum of counts), not COUNT (which would count rows, i.e. customer-days, not transactions). High evidence (bound term + description mention) does not fix this -- the keyword-to-aggregation mapping is wrong for any numeric *_count column."
+      }
+    },
+    {
+      "id": "monthly_login_count_false",
+      "table_name": "fact_customer_activity_monthly",
+      "table_role": "SNAPSHOT",
+      "business_name": "Customer Monthly Activity",
+      "business_description": "One row per customer per month with the month's login count.",
+      "grain_statement": "one row per customer per month",
+      "column_name": "monthly_login_count",
+      "physical_type": "INTEGER",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "SUM",
+        "rationale": "Same systematic failure: pre-computed count per row, COUNT(rows) is wrong, SUM(values) is correct."
+      }
+    },
+    {
+      "id": "daily_fraud_alert_count_false",
+      "table_name": "fact_branch_daily_summary",
+      "table_role": "SNAPSHOT",
+      "business_name": "Branch Daily Summary",
+      "business_description": "One row per branch per day with the day's fraud alert count. The count column captures this.",
+      "grain_statement": "one row per branch per day",
+      "column_name": "daily_fraud_alert_count",
+      "physical_type": "INTEGER",
+      "nullable": false,
+      "bound_term_names": [
+        "Alert Count"
+      ],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "SUM",
+        "rationale": "Same systematic *_count failure, again with high evidence (bound term + description mention) that does not correct it."
+      }
+    },
+    {
+      "id": "item_count_false",
+      "table_name": "fact_order_summary",
+      "table_role": "FACT",
+      "business_name": "Order Summary",
+      "business_description": "One row per order with the number of line items on it.",
+      "grain_statement": "one row per order",
+      "column_name": "item_count",
+      "physical_type": "INTEGER",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "SUM",
+        "rationale": "Same systematic *_count failure."
+      }
+    },
+    {
+      "id": "ending_balance_false",
+      "table_name": "fact_account_balances",
+      "table_role": "SNAPSHOT",
+      "business_name": "Account Balance Snapshots",
+      "business_description": "One row per account per statement period with its ending balance.",
+      "grain_statement": "one row per account per statement period",
+      "column_name": "ending_balance",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "LAST",
+        "rationale": "Same failure mode as closing_balance: a point-in-time statement figure, not additive across periods."
+      }
+    },
+    {
+      "id": "weighted_avg_cost_false",
+      "table_name": "dim_security_position",
+      "table_role": "DIMENSION",
+      "business_name": "Security Position Reference",
+      "business_description": "Reference data describing each held security position.",
+      "grain_statement": "one row per security position",
+      "column_name": "weighted_avg_cost",
+      "physical_type": "NUMERIC(18,4)",
+      "nullable": true,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "AVG",
+        "rationale": "Already an averaged figure per position; summing weighted averages across unrelated positions is not a meaningful total."
+      }
+    },
+    {
+      "id": "daily_active_user_count_false",
+      "table_name": "fact_platform_activity_daily",
+      "table_role": "SNAPSHOT",
+      "business_name": "Platform Daily Activity",
+      "business_description": "One row per day with that day's distinct active user count. The count column captures this.",
+      "grain_statement": "one row per day",
+      "column_name": "daily_active_user_count",
+      "physical_type": "INTEGER",
+      "nullable": false,
+      "bound_term_names": [
+        "Active Users"
+      ],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "N/A",
+        "rationale": "Doubly wrong: it is a pre-computed distinct-user count (SUM-not-COUNT failure) AND summing daily distinct-user counts across days double-counts returning users, so no single SQL aggregation over this column recovers a correct multi-day total. High evidence (bound term + description mention) does not fix either problem."
+      }
+    },
+    {
+      "id": "balance_limit_false",
+      "table_name": "dim_account_type",
+      "table_role": "DIMENSION",
+      "business_name": "Account Type Reference",
+      "business_description": "Policy configuration per account type/tier.",
+      "grain_statement": "one row per account type",
+      "column_name": "balance_limit",
+      "physical_type": "NUMERIC(18,2)",
+      "nullable": false,
+      "bound_term_names": [],
+      "ground_truth": {
+        "correct": false,
+        "expected_aggregation": "N/A",
+        "rationale": "A configured policy ceiling per account type/tier, not a transactional balance; summing ceilings across unrelated tiers is not a meaningful metric."
+      }
+    }
+  ]
+}

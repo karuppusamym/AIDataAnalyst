@@ -1,0 +1,336 @@
+{
+  "generated_at": "2026-09-01T07:53:24.614647+00:00",
+  "corpus": "tests/fixtures/confidence_calibration_corpus/bank_domain_metric_corpus.json",
+  "case_count": 28,
+  "positive_count": 14,
+  "negative_count": 14,
+  "below_review_gate_count": 2,
+  "expected_calibration_error": 0.2722,
+  "brier_score": 0.2184,
+  "buckets": [
+    {
+      "range": "[0.0, 0.1)",
+      "n": 0,
+      "mean_confidence": null,
+      "accuracy": null,
+      "gap": null
+    },
+    {
+      "range": "[0.1, 0.2)",
+      "n": 0,
+      "mean_confidence": null,
+      "accuracy": null,
+      "gap": null
+    },
+    {
+      "range": "[0.2, 0.3)",
+      "n": 0,
+      "mean_confidence": null,
+      "accuracy": null,
+      "gap": null
+    },
+    {
+      "range": "[0.3, 0.4)",
+      "n": 2,
+      "mean_confidence": 0.3917,
+      "accuracy": 0.0,
+      "gap": 0.3917
+    },
+    {
+      "range": "[0.4, 0.5)",
+      "n": 4,
+      "mean_confidence": 0.4802,
+      "accuracy": 0.0,
+      "gap": 0.4802
+    },
+    {
+      "range": "[0.5, 0.6)",
+      "n": 1,
+      "mean_confidence": 0.5625,
+      "accuracy": 1.0,
+      "gap": 0.4375
+    },
+    {
+      "range": "[0.6, 0.7)",
+      "n": 10,
+      "mean_confidence": 0.6459,
+      "accuracy": 0.6,
+      "gap": 0.0459
+    },
+    {
+      "range": "[0.7, 0.8)",
+      "n": 4,
+      "mean_confidence": 0.7573,
+      "accuracy": 0.0,
+      "gap": 0.7573
+    },
+    {
+      "range": "[0.8, 0.9)",
+      "n": 7,
+      "mean_confidence": 0.8583,
+      "accuracy": 1.0,
+      "gap": 0.1417
+    },
+    {
+      "range": "[0.9, 1.0)",
+      "n": 0,
+      "mean_confidence": null,
+      "accuracy": null,
+      "gap": null
+    }
+  ],
+  "cases": [
+    {
+      "id": "txn_amount_true",
+      "column_name": "txn_amount",
+      "table_role": "TRANSACTION",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "deposit_amount_true",
+      "column_name": "deposit_amount",
+      "table_role": "TRANSACTION",
+      "confidence": 0.5625,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "withdrawal_amount_true",
+      "column_name": "withdrawal_amount",
+      "table_role": "TRANSACTION",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "acct_balance_true",
+      "column_name": "acct_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.6917,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "loan_balance_true",
+      "column_name": "loan_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "processing_fee_true",
+      "column_name": "processing_fee",
+      "table_role": "EVENT",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "od_fee_true",
+      "column_name": "od_fee",
+      "table_role": "EVENT",
+      "confidence": 0.6,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "late_fee_true",
+      "column_name": "late_fee",
+      "table_role": "TRANSACTION",
+      "confidence": 0.6917,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "interest_revenue_true",
+      "column_name": "interest_revenue",
+      "table_role": "TRANSACTION",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "total_deposits_true",
+      "column_name": "total_deposits",
+      "table_role": "FACT",
+      "confidence": 0.6917,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "merchant_fee_true",
+      "column_name": "merchant_fee",
+      "table_role": "EVENT",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "fraud_loss_amount_true",
+      "column_name": "fraud_loss_amount",
+      "table_role": "EVENT",
+      "confidence": 0.8583,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "card_txn_volume_true",
+      "column_name": "card_txn_volume",
+      "table_role": "FACT",
+      "confidence": 0.6917,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "qty_true",
+      "column_name": "qty",
+      "table_role": "FACT",
+      "confidence": 0.6,
+      "reviewable": true,
+      "ground_truth_correct": true,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "avg_daily_balance_false",
+      "column_name": "avg_daily_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.6,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "AVG"
+    },
+    {
+      "id": "running_balance_false",
+      "column_name": "running_balance",
+      "table_role": "TRANSACTION",
+      "confidence": 0.6917,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "LAST"
+    },
+    {
+      "id": "closing_balance_false",
+      "column_name": "closing_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.7667,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "LAST"
+    },
+    {
+      "id": "opening_balance_false",
+      "column_name": "opening_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.6,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "LAST"
+    },
+    {
+      "id": "unit_cost_false",
+      "column_name": "unit_cost",
+      "table_role": "DIMENSION",
+      "confidence": 0.3917,
+      "reviewable": false,
+      "ground_truth_correct": false,
+      "expected_aggregation": "AVG"
+    },
+    {
+      "id": "minimum_balance_false",
+      "column_name": "minimum_balance",
+      "table_role": "DIMENSION",
+      "confidence": 0.4833,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "N/A"
+    },
+    {
+      "id": "txn_count_false",
+      "column_name": "txn_count",
+      "table_role": "FACT",
+      "confidence": 0.7542,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "monthly_login_count_false",
+      "column_name": "monthly_login_count",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.4958,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "daily_fraud_alert_count_false",
+      "column_name": "daily_fraud_alert_count",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.7542,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "item_count_false",
+      "column_name": "item_count",
+      "table_role": "FACT",
+      "confidence": 0.4583,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "SUM"
+    },
+    {
+      "id": "ending_balance_false",
+      "column_name": "ending_balance",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.6,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "LAST"
+    },
+    {
+      "id": "weighted_avg_cost_false",
+      "column_name": "weighted_avg_cost",
+      "table_role": "DIMENSION",
+      "confidence": 0.3917,
+      "reviewable": false,
+      "ground_truth_correct": false,
+      "expected_aggregation": "AVG"
+    },
+    {
+      "id": "daily_active_user_count_false",
+      "column_name": "daily_active_user_count",
+      "table_role": "SNAPSHOT",
+      "confidence": 0.7542,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "N/A"
+    },
+    {
+      "id": "balance_limit_false",
+      "column_name": "balance_limit",
+      "table_role": "DIMENSION",
+      "confidence": 0.4833,
+      "reviewable": true,
+      "ground_truth_correct": false,
+      "expected_aggregation": "N/A"
+    }
+  ]
+}
