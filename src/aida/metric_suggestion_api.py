@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import current_version_alias
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -115,10 +116,20 @@ async def generate_metric_suggestion_proposals(
     session: AsyncSession = Depends(get_session),
 ) -> Page:
     enforce_organization(context, organization_id)
-    annotations = (
-        await session.scalars(
-            select(MetadataBusinessAnnotation)
-            .where(MetadataBusinessAnnotation.organization_id == organization_id)
+    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
+    # not on `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
+    annotation_version_alias, annotation_version_ranked = current_version_alias()
+    annotation_rows = (
+        await session.execute(
+            select(MetadataBusinessAnnotation, annotation_version_alias)
+            .join(
+                annotation_version_alias,
+                annotation_version_alias.annotation_id == MetadataBusinessAnnotation.id,
+            )
+            .where(
+                MetadataBusinessAnnotation.organization_id == organization_id,
+                annotation_version_ranked.c.rn == 1,
+            )
             .order_by(MetadataBusinessAnnotation.id)
             .limit(_ANNOTATION_SCAN_LIMIT)
         )
@@ -148,7 +159,7 @@ async def generate_metric_suggestion_proposals(
     created: list[tuple[SemanticMetricProposal, str, str]] = []
     annotations_scanned = 0
     columns_scanned = 0
-    for annotation in annotations:
+    for annotation, annotation_version in annotation_rows:
         if len(created) >= body.limit:
             break
         annotations_scanned += 1
@@ -226,10 +237,10 @@ async def generate_metric_suggestion_proposals(
                 table_name=table.name,
                 project_id=datasource.project_id,
                 business_annotation_id=annotation.id,
-                business_name=annotation.business_name,
-                business_description=annotation.business_description,
-                table_role=annotation.table_role,
-                grain_statement=annotation.grain_statement,
+                business_name=annotation_version.business_name,
+                business_description=annotation_version.business_description,
+                table_role=annotation_version.table_role,
+                grain_statement=annotation_version.grain_statement,
                 column_id=column.id,
                 column_name=column.name,
                 physical_type=column.physical_type,
@@ -251,7 +262,7 @@ async def generate_metric_suggestion_proposals(
                 proposed_name=name,
                 proposed_description=description,
                 proposed_aggregation=aggregation,
-                proposed_grain=annotation.grain_statement,
+                proposed_grain=annotation_version.grain_statement,
                 accuracy_score=scores.accuracy,
                 clarity_score=scores.clarity,
                 style_score=scores.style,

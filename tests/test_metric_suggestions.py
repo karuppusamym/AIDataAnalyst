@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 import aida.metric_suggestion_api as metric_suggestion_api
 import aida.metric_suggestion_service as metric_suggestion_service
 import aida.semantic_api as semantic_api
+from aida.business_annotation_versions import AnnotationVersionContent, write_annotation_version
 from aida.db import Base
 from aida.main import app
 from aida.metric_suggestion_service import (
@@ -431,6 +432,8 @@ class _Scenario:
         db.add(self.weak_column)
         await db.flush()
 
+        # AT-6: content lives on `MetadataBusinessAnnotationVersion`, not on
+        # `MetadataBusinessAnnotation` itself -- see `business_annotation_versions.py`.
         self.weak_annotation = MetadataBusinessAnnotation(
             organization_id=self.organization.id,
             datasource_id=self.datasource.id,
@@ -438,20 +441,26 @@ class _Scenario:
             domain_id=uuid4(),
             entity_id=uuid4(),
             source_proposal_id=uuid4(),
-            version=1,
-            business_name="Reference Codes",
-            business_description="Approved static reference code list.",
-            table_role="REFERENCE",
-            grain_statement="One row per code.",
-            synonyms=[],
-            suggested_questions=[],
-            tags=[],
-            confidence=0.8,
-            approved_by="steward",
-            approved_at=datetime(2026, 8, 1, tzinfo=UTC),
         )
         db.add(self.weak_annotation)
         await db.flush()
+        await write_annotation_version(
+            db,
+            organization_id=self.organization.id,
+            annotation_id=self.weak_annotation.id,
+            content=AnnotationVersionContent(
+                business_name="Reference Codes",
+                business_description="Approved static reference code list.",
+                table_role="REFERENCE",
+                grain_statement="One row per code.",
+                synonyms=[],
+                suggested_questions=[],
+                tags=[],
+                confidence=0.8,
+            ),
+            approved_by="steward",
+            approved_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
 
         self.annotation = MetadataBusinessAnnotation(
             organization_id=self.organization.id,
@@ -460,23 +469,29 @@ class _Scenario:
             domain_id=uuid4(),
             entity_id=uuid4(),
             source_proposal_id=uuid4(),
-            version=1,
-            business_name="Customer Accounts",
-            business_description=(
-                "Approved deposit account records; tracks the current account balance "
-                "for each customer."
-            ),
-            table_role="FACT",
-            grain_statement="One row per account_id.",
-            synonyms=[],
-            suggested_questions=[],
-            tags=[],
-            confidence=0.95,
-            approved_by="steward",
-            approved_at=datetime(2026, 8, 1, tzinfo=UTC),
         )
         db.add(self.annotation)
         await db.flush()
+        await write_annotation_version(
+            db,
+            organization_id=self.organization.id,
+            annotation_id=self.annotation.id,
+            content=AnnotationVersionContent(
+                business_name="Customer Accounts",
+                business_description=(
+                    "Approved deposit account records; tracks the current account balance "
+                    "for each customer."
+                ),
+                table_role="FACT",
+                grain_statement="One row per account_id.",
+                synonyms=[],
+                suggested_questions=[],
+                tags=[],
+                confidence=0.95,
+            ),
+            approved_by="steward",
+            approved_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
 
         term = GlossaryTerm(organization_id=self.organization.id, term_key="account-balance")
         db.add(term)
