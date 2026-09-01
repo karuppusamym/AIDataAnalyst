@@ -6307,3 +6307,118 @@ above, not anything this row touched.
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+## 2026-09-01 — KG-7 closed: scheduled Postgres/Neo4j knowledge-graph reconciliation + drift alerting
+
+Module 10's Neo4j projection (RL-4/KG-1, `src/aida/projectors/graph_projector.py`) is
+event-driven: it only writes when it sees one of `UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` on the
+outbox stream. Nothing previously checked that a missed/lost event, or a Postgres row that
+changed after being projected, hadn't left Neo4j silently out of sync with the authoritative
+store. `src/aida/graph_reconciliation.py` closes that gap with a read-only, scheduled diff pass.
+
+### What "should exist" vs. "does exist" means here
+
+Never reinvented: the Postgres side of the diff calls the exact same
+`graph_projector.load_unified_lineage_projection(datasource_id, organization_id)` the event-driven
+projector itself calls to build what it writes (`load_should_exist_projection_keys`,
+`graph_reconciliation.py:258`), so reconciliation can never drift from the projector's own
+selection criteria. The Neo4j side (`load_actual_projection_keys`, `graph_reconciliation.py:272`)
+reads the same `organization_id`/`datasource_id`-tagged `UnifiedLineageNode`/`UNIFIED_LINEAGE` rows
+`project_unified_lineage`'s own stale-generation prune already targets. `diff_projection_keys`
+(pure, `graph_reconciliation.py:117`) is a plain set-difference over `projection_key`s in both
+directions: `missing_in_neo4j` (Postgres says it should be there; Neo4j doesn't have it — a
+missed/lost projection event) and `orphaned_in_neo4j` (Neo4j still has it; Postgres's current
+selection no longer includes it — e.g. a relationship candidate rejected/deleted after being
+projected). `reconcile_projection` combines node-drift + edge-drift into one
+`GraphReconciliationReport` per datasource; `drift_severity` is WARNING for any drift, CRITICAL at
+`total_drift_count >= 10` (configurable per call).
+
+### How it's scheduled
+
+Registered on the existing `workflows/scheduler.py` periodic-pass idiom, not a new cron mechanism:
+`run_graph_reconciliation_scheduler_pass` (`scheduler.py:459`) is called every tick from
+`run_scheduler_iteration` (`scheduler.py:592`, alongside `run_owner_routing_pass`/
+`run_custom_rule_pack_pass`), delegating to `graph_reconciliation.run_graph_reconciliation_pass`.
+Same in-process-memory due-tracking as GL-6/DQ-4 (`_graph_reconciliation_last_run_at`, keyed by
+datasource_id) — no per-datasource "next reconciled at" column exists to persist to without a new
+model/migration column, and the pass is read-only against both stores and safe to repeat, so a
+scheduler restart costs at most one redundant sweep. Cadence is
+`settings.graph_reconciliation_interval_minutes` (new field, `atlas/platform/config.py`, default
+360 minutes/6h, bounded 15m-7d). One datasource's failure (Neo4j unreachable, a bad rule) is
+logged and skipped, matching `run_owner_routing_pass`'s fault isolation.
+
+### How a detected drift becomes an alert
+
+Routed through DQ-1's unmodified notification engine exactly as GL-6 (`glossary_owner_routing.py`)
+already does for a different domain (unowned assets) — not a new notification channel:
+`incident_for_drift` builds the same `notification_routing.Incident` shape a data-quality incident
+routes as (fingerprint `GRAPH_PROJECTION_DRIFT:{org}:{datasource}`, severity, a bounded sample of
+drifted keys in the message); `reconcile_and_alert_datasource`
+(`graph_reconciliation.py:344`) then calls the real, unmodified `route_notification` against
+the org's actual `NotificationRuleRecord` rows (lazily creating a default catch-all
+"Knowledge graph projection drift (default)" rule the same way
+`ensure_default_unowned_backlog_notification_rule` does, for the same reason), and
+`format_itsm_payload` for an ITSM-channel match.
+
+Persistence deliberately does **not** add a new incident/escalation model. `DataQualityIncident
+.table_id` is a NOT NULL FK to `metadata_table` (most drifted graph nodes/edges are not one single
+table — columns, dbt resources, BI nodes, or an edge with no table subject at all) and
+`NotificationEventRecord.incident_id` is a NOT NULL FK to `data_quality_incident` — neither
+existing table can carry a datasource/graph-level drift finding without a schema change, the same
+wall GL-6 hit and worked around with its own `UnownedAssetEscalation` table (out of scope here per
+the collision-avoidance constraint on `models.py`/migrations for this worktree). Instead, every
+routed `NotificationEvent` (and, for ITSM, the formatted payload) is persisted through the
+existing `record_audit`/`record_outbox` tables under three new, cataloged event types
+(`knowledge_graph.drift_detected.v1`, `.drift_alert_routed.v1`, `.drift_itsm_payload.v1` — added to
+`Docs/30-contracts/04-event-catalog.md`'s "Graph and retrieval" section) — a real, queryable,
+actionable signal, not a log line, just not a stateful PENDING/ROUTED/ESCALATED row.
+Consequently `should_escalate`/`escalate` (which need a persisted `sent_at`/`acknowledged_at` to
+compute against) are not wired up; each due sweep re-detects and re-routes still-open drift at its
+own cadence instead. A documented, honest gap (see the module docstring), not a silent one — the
+same spirit as RL-4's own honestly-scoped "cross-source candidates still have no Neo4j projection
+path" gap.
+
+### Tests
+
+26 pure unit tests, `tests/test_graph_reconciliation.py` — no live Postgres/Neo4j, mirroring
+today's `query_memory`/`tool_first_rate`/`semantic_diff` pure-logic-first convention:
+`diff_projection_keys` (no drift, missing-only, orphaned-only, both directions, empty sets),
+`reconcile_projection` (node+edge combination, no-drift, `generated_at` default),
+`drift_severity` (HEALTHY/WARNING/CRITICAL threshold boundaries),
+`graph_reconciliation_due` (never-swept/not-yet-due/due), `incident_for_drift` (`None` on no
+drift, severity/fingerprint/message content, 20-key sample truncation on 100 drifted keys), an
+engine-reuse identity test mirroring GL-6's
+(`test_graph_reconciliation_reuses_dq1_engine_functions_directly` — asserts
+`graph_reconciliation.route_notification is notification_routing.route_notification`, same for
+`format_itsm_payload`/`Incident`/`NotificationRule`), two tests proving a built `Incident` really
+routes through the unmodified engine into a real `NotificationEvent`/ITSM payload and that a
+severity-scoped rule correctly does *not* match a WARNING incident, and three
+`run_graph_reconciliation_pass` sweep tests (per-datasource fault isolation, due/not-due skipping,
+runs-once-elapsed) using the same monkeypatch-the-per-item-worker technique
+`test_fleet_scheduling.py` already uses for `run_owner_routing_pass` so the sweep loop never
+touches a real session or Neo4j driver.
+
+### Fixed along the way
+
+This change tripped two Tier-0/gate tests, both fixed rather than worked around: the three new
+`record_outbox` event types needed rows in `Docs/30-contracts/04-event-catalog.md` (added, per
+`test_event_catalog_gate.py::test_every_emitted_event_type_is_documented_or_known_st14_drift`);
+and INV-1's closed `permitted_readers` allowlist
+(`tests/test_inv1_single_authoritative_store.py::test_request_path_graph_access_is_read_only_and_closed`)
+does not distinguish request-path from scheduled-background Neo4j readers by directory alone
+outside the `projectors/` package, so `graph_reconciliation.py` needed a reviewed entry — added
+with the same justification style as the existing `api.py`/`lineage_graph_store.py` rows: this
+module reads Neo4j only to diff it against PostgreSQL's own selection and alert on disagreement,
+never to answer a request or override PostgreSQL.
+
+### Verification
+
+`ruff check` clean and `mypy src` clean (`Success: no issues found in 256 source files`) on every
+touched/new file. `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+Full-repo `AIDA_ENVIRONMENT=development uv run pytest -q`: 2059 passed, 5 skipped, one deselected —
+`test_config.py::test_environment_must_be_explicit_outside_tests`, the same pre-existing
+sensitivity to `AIDA_ENVIRONMENT` being set for the *entire* suite already documented against this
+exact test in the AG-7/TL-5/SM-5 entries above, not anything this row touched.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
