@@ -8325,3 +8325,92 @@ on unilaterally: of the "real, unfinished feature scope" group, MG-3's private-e
 AT-7(b)'s consumer-binding registry, GL-6's multi-tier escalation, and TS-3's trace-span sentinel scan
 are all buildable in this sandbox without external infrastructure, unlike the rest of the list -- worth
 prioritizing explicitly rather than attempting all four unguided in one pass.
+
+---
+
+## 2026-09-01 — AT-19 closed: transformation code rendered on the lineage edge, view definitions fully wired, procedures a documented gap
+
+### What was already there vs. what was missing
+
+`get_transformation_detail` (EE.10, `mcp_server.py`) was read fully first, per the row's own framing.
+It resolves only against `DbtResource` -- dbt-compiled SQL, dependencies, tests, materialization,
+source artifact hash -- and never touches `MetadataViewDefinition`/`MetadataRoutine` at all (envelope
+1.1's connector-discovered view DDL / routine body storage, `envelope_models.py`); the one place it
+even mentions those two models is a comment explaining *why* it doesn't need to live-screen them (they
+already carry a stored `screening_status`, unlike a dbt resource's free-text `description`). So the
+premise that "the tool already delivers this row's content, only the graph pointer is missing" did not
+hold as stated -- the tool itself needed extending, not just the edge.
+
+Separately, `unified_lineage_api.py`'s `_build_unified_graph` already folds `ViewLineageEdge`/
+`ProcedureLineageEdge` (LN-2's SQL-parsed lineage) into `VIEW_DEFINITION`/`PROCEDURE_DEFINITION` edges,
+with `evidence` carrying `dialect`/`sql_hash`/`column_edge_count` -- real facts, but nothing a caller
+could resolve back to actual code text or a redaction status without knowing to go look elsewhere, and
+no "elsewhere" that worked existed anyway (previous paragraph).
+
+### The fix, and why it only covers views
+
+`VIEW_DEFINITION` edges' `target_table_id` **is** the view's own `MetadataTable.id`, and
+`MetadataViewDefinition.table_id` carries a `UniqueConstraint` -- a genuine 1:1 lookup, not a
+heuristic. That made a real, resolvable reference possible:
+
+- `unified_lineage_api.py`: each `VIEW_DEFINITION` edge's `evidence` now carries
+  `transformation_reference: {tool: "get_transformation_detail", entity_id, kind: "VIEW_DEFINITION"}`
+  plus `redaction_status`/`availability`, populated from one narrow, column-only
+  `MetadataViewDefinition` query (`table_id`, `redaction_status`, `availability` -- never
+  `definition_sql_redacted`) scoped to just the distinct view target-table ids the batch of edges
+  touches. Keeping the DDL text itself out of this query, and out of the graph response, is what keeps
+  ADR-0010's bounded-response contract intact -- the reference is an id, not inlined text. `FOREIGN_KEY`
+  and `PROCEDURE_DEFINITION` edges get neither field: verified by test that they don't.
+- `mcp_server.py`: `_transformation_detail` gained a fallback,
+  `_view_definition_transformation_detail`, run when the dbt lookup finds nothing. It resolves
+  `entity_id` as a `MetadataTable.id`, loads that table's `MetadataViewDefinition` (1:1), and returns
+  `definition_sql_redacted` (withheld, same as the dbt path already does for `description`, when the
+  row's own stored `screening_status` is not `CLEAN` -- `ingest_screening.is_eligible_for_model_context`),
+  `redaction_status`, `screening_status`, `screening_reason_codes`, `availability`/`unavailable_reason`,
+  `is_materialized`, under a `transformation_source: "VIEW_DEFINITION"` discriminator (the existing dbt
+  branch now tags itself `"DBT_COMPILED_SQL"` for symmetry, an additive, non-breaking key).
+  `NATIVE_LINEAGE_TOOL_DEFINITIONS`'s description string was updated to say so.
+
+**Procedures are a confirmed, deliberately un-fabricated gap, not an oversight.** `ProcedureLineageEdge`
+carries no FK, no `specific_name`, no identity field of any kind back to the `MetadataRoutine` row a
+given edge was parsed from -- `view_lineage_api.py`'s `parse_procedure_lineage_endpoint` takes only raw
+SQL text with no routine-identity parameter (the same pre-existing limitation AT-D2's exit note already
+named for `PROCEDURE_RESULT_TARGET`). `MetadataRoutine` is keyed on `(schema_id, name, signature)` with
+no link to any specific table either, so there is no way -- short of a `models.py` schema change adding
+routine identity to `ProcedureLineageEdge`, out of this row's scope -- to say *which* routine a given
+`PROCEDURE_DEFINITION` edge came from. Rather than pick an arbitrary routine and present it as fact,
+`PROCEDURE_DEFINITION` edges keep their existing `sql_hash`/`dialect` evidence and get no
+`transformation_reference`/`redaction_status`. Documented in both modules (`unified_lineage_api.py`'s
+module docstring and inline comment; `mcp_server.py`'s new function docstring) so the gap stays visible
+rather than silently absent.
+
+### Tests (`tests/test_unified_lineage.py`, 4 new)
+
+- `test_view_definition_edge_carries_a_resolvable_transformation_reference`: builds a graph with a
+  `VIEW_DEFINITION` edge (with a `MetadataViewDefinition` row), a sibling `FOREIGN_KEY` edge, and a
+  sibling `PROCEDURE_DEFINITION` edge in the *same* graph; asserts the view edge carries the exact
+  reference shape and `redaction_status`/`availability`, and that neither sibling edge carries either
+  field -- proving no cross-contamination and no fabrication.
+- `test_view_definition_edge_omits_the_reference_when_no_definition_is_ingested_yet`: a
+  `VIEW_DEFINITION` edge whose target table has no `MetadataViewDefinition` row yet gets no reference
+  at all, rather than one that would 404.
+- `test_view_definition_transformation_reference_round_trips_to_the_real_fragment`: takes the edge's
+  own `transformation_reference.entity_id`, calls the real `_transformation_detail` (not a mock) with
+  it, and asserts the returned `definition_sql_redacted`/`redaction_status`/`availability` are the
+  *same* values the edge's evidence already reported -- the graph and the tool describe one fact, not
+  two representations that could drift.
+- `test_view_definition_transformation_detail_withholds_quarantined_text`: a quarantined
+  `screening_status` withholds `definition_sql_redacted` while still surfacing
+  `screening_status`/`redaction_status`, mirroring the dbt path's existing description-screening
+  contract.
+
+### Verification
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/migration touched -- `UnifiedLink.evidence`/
+`UnifiedLineageEdgeRead.evidence` were already an untyped `dict[str, object]`/`dict[str, Any]`, extended
+in place; `get_transformation_detail`'s MCP return is a raw dict, not a pydantic contract. No HTTP route
+added or changed, so no OpenAPI baseline regen or `test_openapi_diff_gate.py` run needed. `ruff check`
+and `mypy` clean on both touched src files (`mcp_server.py`, `unified_lineage_api.py`).
+`tests/test_unified_lineage.py` (21 passed), `tests/test_mcp_server.py`, `tests/test_view_lineage_api.py`
+all green together; `AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py -q` passes (clean,
+only its usual skips).
