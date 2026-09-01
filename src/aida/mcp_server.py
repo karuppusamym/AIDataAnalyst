@@ -72,8 +72,12 @@ from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
     ContextProductQualityDecision,
+    can_serve_pinned_version,
+    current_published_version_number,
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
+    is_version_retired,
+    was_previously_authorized_consumer,
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -429,13 +433,19 @@ async def _resolve_context_product_scope(
                 ContextProduct.product_key == product_key,
                 ContextProduct.lifecycle_status == "ACTIVE",
                 ContextProductVersion.version == version_number,
-                ContextProductVersion.status == "PUBLISHED",
+                # AT-7(a): a SUPPORTED version (superseded, still inside its
+                # support window) resolves scope exactly like PUBLISHED --
+                # `can_serve_pinned_version` below rejects one whose window
+                # has elapsed.
+                ContextProductVersion.status.in_(("PUBLISHED", "SUPPORTED")),
             )
         )
     ).first()
     if row is None:
         return None
     product_version, product = row
+    if not can_serve_pinned_version(product_version):
+        return None
     if not _context_product_role_eligible(context.roles, product_version.allowed_consumer_roles):
         return None
     quality = await evaluate_context_product_quality_from_db(
@@ -1625,6 +1635,13 @@ async def _read_context_product_resource(
     if version_number < 1:
         return {"contents": [{"uri": uri, "text": "Malformed resource URI."}]}
 
+    # AT-7(a)/AT-D1: the status filter no longer excludes everything but the
+    # single current PUBLISHED version -- SUPERSEDED/DEPRECATED rows are
+    # fetched too, so a genuinely retired version can be told apart, below,
+    # from a version that never published at all. DRAFT/REVIEW_REQUIRED/
+    # REJECTED/DEPRECATION_REVIEW are filtered out right after the fetch,
+    # before any role check, so they read exactly as before: identical to
+    # "row not found".
     row = (
         await session.execute(
             select(ContextProductVersion, ContextProduct)
@@ -1635,7 +1652,6 @@ async def _read_context_product_resource(
                 ContextProduct.product_key == product_key,
                 ContextProduct.lifecycle_status == "ACTIVE",
                 ContextProductVersion.version == version_number,
-                ContextProductVersion.status == "PUBLISHED",
             )
         )
     ).first()
@@ -1643,6 +1659,10 @@ async def _read_context_product_resource(
         return inaccessible
 
     product_version, product = row
+    if product_version.status not in ("PUBLISHED", "SUPPORTED", "SUPERSEDED", "DEPRECATED"):
+        # Never published (or pending/rejected) -- indistinguishable from a
+        # version that never existed, same as before this fix.
+        return inaccessible
     if not _context_product_role_eligible(context.roles, product_version.allowed_consumer_roles):
         record_audit(
             session,
@@ -1673,6 +1693,64 @@ async def _read_context_product_resource(
         )
         await session.commit()
         return inaccessible
+
+    if not can_serve_pinned_version(product_version):
+        # AT-7(a)/AT-D1: retired -- SUPERSEDED/DEPRECATED, or a SUPPORTED
+        # version whose support window has elapsed. Only a caller who was
+        # actually, provably authorized for *this exact version* at some
+        # point (a real prior consumption edge -- not merely a role match,
+        # which everyone past the check above already has) gets told this is
+        # retirement rather than a bare denial; anyone else still gets the
+        # identical anti-enumeration response.
+        if not is_version_retired(product_version):
+            # Defensive only: exhaustive given the status filter above (every
+            # status that reaches here is PUBLISHED/SUPPORTED/SUPERSEDED/
+            # DEPRECATED, and `can_serve_pinned_version` already ruled out
+            # PUBLISHED and in-window SUPPORTED).
+            return inaccessible
+        authorized_before = await was_previously_authorized_consumer(
+            session, version_id=product_version.id, principal_id=context.principal_id
+        )
+        if not authorized_before:
+            return inaccessible
+        current_version = await current_published_version_number(session, product.id)
+        record_audit(
+            session,
+            context,
+            action="mcp.context_product.retired",
+            resource_type="context_product_version",
+            resource_id=str(product_version.id),
+            outcome="DENIED",
+            correlation_id=correlation_id,
+            details={
+                "product_key": product.product_key,
+                "version": product_version.version,
+                "current_version": current_version,
+            },
+        )
+        await session.commit()
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": json.dumps(
+                        {
+                            "status": "RETIRED",
+                            "message": (
+                                "This context product version has been retired. "
+                                "Re-pin to the current published version."
+                            ),
+                            "product_key": product.product_key,
+                            "version": product_version.version,
+                            "current_version": current_version,
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                }
+            ]
+        }
 
     purpose_decision = evaluate_context_product_purpose(
         context.business_purpose, product_version.policy_summary

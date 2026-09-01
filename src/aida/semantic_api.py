@@ -1,7 +1,7 @@
 import hashlib
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
@@ -1001,7 +1001,10 @@ async def _apply_governance_review_decision(
         if product_version is None or product_version.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if review.requested_action == "DEPRECATE":
-            if product_version.status != "PUBLISHED":
+            # AT-7(a): explicit early retirement -- a steward can retire a
+            # still-current PUBLISHED version, or cut a SUPPORTED version's
+            # support window short, rather than waiting it out.
+            if product_version.status not in ("PUBLISHED", "SUPPORTED"):
                 raise HTTPException(
                     status_code=409, detail="context product is no longer published"
                 )
@@ -1013,6 +1016,26 @@ async def _apply_governance_review_decision(
         elif product_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="context product is no longer pending")
         elif decision == "APPROVE":
+            # AT-7(a)/AT-D1: the version being replaced does not jump straight
+            # to fully-hidden SUPERSEDED in this same transaction -- it enters
+            # SUPPORTED for its own configured support window (that version's
+            # own `support_window_days`; `None` means supported until someone
+            # explicitly retires it), during which a version-pinned consumer
+            # can still read it. Discovery/`tools_list` keeps surfacing only
+            # the new PUBLISHED version as current -- unchanged, since those
+            # paths already filter to status == "PUBLISHED" only.
+            prior_support_window_days = await session.scalar(
+                select(ContextProductVersion.support_window_days).where(
+                    ContextProductVersion.product_id == product_version.product_id,
+                    ContextProductVersion.status == "PUBLISHED",
+                    ContextProductVersion.id != product_version.id,
+                )
+            )
+            support_window_ends_at = (
+                None
+                if prior_support_window_days is None
+                else now + timedelta(days=prior_support_window_days)
+            )
             await session.execute(
                 update(ContextProductVersion)
                 .where(
@@ -1020,7 +1043,13 @@ async def _apply_governance_review_decision(
                     ContextProductVersion.status == "PUBLISHED",
                     ContextProductVersion.id != product_version.id,
                 )
-                .values(status="SUPERSEDED", updated_at=now)
+                .values(
+                    status="SUPPORTED",
+                    updated_at=now,
+                    superseded_at=now,
+                    superseded_by_version_id=product_version.id,
+                    support_window_ends_at=support_window_ends_at,
+                )
             )
             product_version.status = "PUBLISHED"
             product_version.approved_by = context.principal_id

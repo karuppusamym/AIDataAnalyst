@@ -2860,6 +2860,11 @@ class ContextProductDefinition(ApiModel):
         default_factory=ContextProductQualityRequirements
     )
     policy_summary: ContextProductPolicySummary = Field(default_factory=ContextProductPolicySummary)
+    # AT-7(a)/AT-D1: how long *this* version stays SUPPORTED (still readable
+    # by a version-pinned consumer) after a later version supersedes it.
+    # `None` means supported until someone explicitly retires it rather than
+    # a fixed duration.
+    support_window_days: int | None = Field(default=30, ge=0, le=3650)
 
     @model_validator(mode="after")
     def validate_bounded_definition(self) -> "ContextProductDefinition":
@@ -2908,6 +2913,10 @@ class ContextProductVersionRead(ContextProductDefinition):
     based_on_version_id: UUID | None
     created_at: datetime
     updated_at: datetime
+    # AT-7(a)/AT-D1: system-set, not part of what a maker submits.
+    superseded_at: datetime | None = None
+    support_window_ends_at: datetime | None = None
+    superseded_by_version_id: UUID | None = None
 
 
 class ContextProductRead(ApiModel):

@@ -4719,3 +4719,149 @@ Stayed within the new benchmark script (`scripts/quality_benchmark.py`), its cor
 (`Docs/90-reference/quality-benchmark-{baseline.json,results.md}`), its own test file
 (`tests/test_quality_benchmark_gate.py`), and one CI workflow addition, per this item's own
 instruction. `retrieval.py` and the model-gateway code it benchmarks were read, not modified.
+
+## 2026-09-01 — AT-7(a)/AT-D1 (context-product support window, distinguishable retirement) closed; AT-7(b) left TODO
+
+### The defect, confirmed by tracing the actual code before touching it
+
+Module 19's maker-checker publication flow (`context_product_api.py`, `semantic_api.py`'s
+`_apply_governance_review_decision`) really did do exactly what AT-7/AT-D1 said: approving
+`CONTEXT_PRODUCT_VERSION` v(n+1) ran one bulk `UPDATE context_product_version SET
+status='SUPERSEDED' WHERE product_id=... AND status='PUBLISHED'` in the same transaction that
+flipped the new version to `PUBLISHED`, and every read path — the REST
+`GET /v1/context-product-versions/{id}`, the MCP `_read_context_product_resource` (the
+`atlas://context-products/{key}/versions/{n}` URI a version-pinned MCP consumer holds), and
+`_resolve_context_product_scope` (governed-tool eligibility scoped to a context product) — filtered
+strictly to `status == "PUBLISHED"`. A version-pinned consumer's next read after approval hit the
+identical anti-enumeration `"Resource not found or not accessible."` (MCP) / `404` (REST) that an
+entirely unauthorized caller gets — genuinely indistinguishable, exactly as the tracker described.
+`tests/test_context_products.py::test_mcp_resource_query_never_matches_an_unpublished_version` and
+`test_approval_publishes_candidate_and_supersedes_prior_version` (renamed below) already asserted
+this behavior as correct before this change — the defect had test coverage, just no test that it
+was a bug.
+
+### Part (a): `SUPPORTED` state, a version-scoped support window, and a two-sided retirement signal
+
+**Schema** (`models.py`, migration `c1a4d7e9f062_context_product_support_window.py`, chained onto
+head `09be3ab5b008`): `ContextProductVersion` gained `SUPPORTED` to its status check constraint,
+plus four columns — `support_window_days` (nullable `int`, the definition *this version* was
+submitted with; `None` means "supported until explicit retirement" rather than a fixed duration —
+travels with the version like every other field in `ContextProductDefinition`, so `schemas.py` and
+`context_product_api.py`'s `_apply_definition`/`_definition_from_version` carry it through create,
+version, and update the same way as `lineage_depth` or `quality_requirements`), `superseded_at`,
+`support_window_ends_at` (the derived deadline), and `superseded_by_version_id`. Verified against
+`Base.metadata` by `tests/test_migration_orm_drift.py` against a real local Postgres — zero drift.
+
+**The publish transition** (`semantic_api.py`): the `CONTEXT_PRODUCT_VERSION` `APPROVE` branch no
+longer sets the prior `PUBLISHED` row straight to `SUPERSEDED`. It now reads that row's own
+`support_window_days` (a `session.scalar` immediately before the bulk update — the update itself
+stays a single atomic `UPDATE ... WHERE status='PUBLISHED' AND id != :new_id`, unchanged in shape
+from before, just different `.values()`) and sets `status='SUPPORTED'`, `superseded_at=now`,
+`superseded_by_version_id=<new version>`, and `support_window_ends_at = now + support_window_days`
+days (or `NULL` when the window is indefinite). The `DEPRECATE` maker-checker flow (explicit early
+retirement — "or until explicit retirement" in the tracker's own exit text) was widened from
+`PUBLISHED`-only to also accept a currently-`SUPPORTED` version, in both the review-request endpoint
+(`context_product_api.py::request_context_product_deprecation`) and the decision handler, landing on
+the same `DEPRECATED` terminal state it already used for `PUBLISHED`.
+
+**Read-path policy** lives in one new shared module, `context_product_policy.py` (already the home
+of the existing purpose/quality policy functions both `context_product_api.py` and `mcp_server.py`
+import from — kept the new functions there rather than introducing a new cross-import edge):
+`can_serve_pinned_version(version)` — `True` for `PUBLISHED`, or `SUPPORTED` with
+`support_window_ends_at` still in the future (or unset — indefinite); `is_version_retired(version)`
+— `True` for `SUPERSEDED`/`DEPRECATED`, or a `SUPPORTED` version whose window has elapsed.
+Retirement is evaluated live on every read from `status` + `support_window_ends_at`, not by a
+scheduler flipping the stored `status` — there is no background sweep in this codebase to hang that
+on, and correctness this way never depends on one having run. `DRAFT`/`REVIEW_REQUIRED`/
+`REJECTED`/`DEPRECATION_REVIEW` are neither servable nor "retired" — they never published, so they
+stay indistinguishable from "never existed", unchanged from before.
+
+Three read paths now branch on this instead of a flat `status == "PUBLISHED"` filter:
+- `context_product_api.py::get_context_product_version` (REST) and `_can_read_context_product_version`
+- `mcp_server.py::_read_context_product_resource` (the version-pinned MCP resource URI read)
+- `mcp_server.py::_resolve_context_product_scope` (governed-tool eligibility scoped to a context
+  product — extended to `status IN ('PUBLISHED', 'SUPPORTED')` plus the window check, so a
+  version-pinned tool scope keeps resolving through the support window too)
+
+Discovery/listing (`list_context_products`, `list_context_product_versions`, and the two MCP
+`resources/list`/`prompts/list` queries) were deliberately **not** touched — they still filter to
+`status == "PUBLISHED"` only, so "surfaces only the new PUBLISHED version as current" holds exactly
+as the tracker asked. A `SUPPORTED` version is reachable only by a caller who already holds its
+specific pinned identifier, never by browsing.
+
+### The subtle part: telling retirement apart from denial without breaking anti-enumeration
+
+A retired version now returns a **distinguishable** response — REST: `410 Gone` with a JSON body
+naming the current published version to re-pin to; MCP: a `{"status": "RETIRED", ...}` JSON payload
+in the resource contents instead of the plain "not found" string — but only to a caller who can
+prove they were genuinely authorized for *this exact version* before. "Proof" is deliberately not a
+role match: a caller whose role is in `allowed_consumer_roles` today but who never actually read
+this version could otherwise fish version numbers against the retirement signal to learn which ones
+used to exist, which is exactly the enumeration channel MCP-3's anti-enumeration property exists to
+close. Proof is a real, previously recorded `ContextProductConsumptionEdge` — `policy_decision ==
+'ALLOW'` — for that `(principal_id, context_product_version_id)` pair
+(`was_previously_authorized_consumer` in `context_product_policy.py`). The gate order in both read
+paths is: row exists and ever published → role eligible (else the ordinary anti-enumeration 404,
+identical for "wrong role" and "retired", regardless of history) → not retired, serve normally → (if
+retired) had a real prior consumption edge → distinguishable retirement signal, else the identical
+anti-enumeration 404/"not found" everyone else gets. `current_published_version_number` resolves
+what to point the caller at.
+
+Three-way test coverage in `tests/test_context_products.py` (all against the actual production
+functions, not reimplementations):
+- `test_mcp_retired_read_signals_retirement_when_previously_authorized` /
+  `test_rest_retired_read_returns_410_when_previously_authorized` — pinned + retired + real prior
+  consumption edge → the distinguishable signal, with the current version number attached.
+- `test_mcp_retired_read_stays_anti_enumeration_when_never_authorized` /
+  `test_rest_read_of_a_retired_version_stays_404_for_a_never_authorized_consumer` — pinned + retired
+  + role-eligible but **no** prior consumption edge → the identical generic "not found"/404.
+- `test_mcp_retired_read_denies_ineligible_role_without_history_lookup` — role-ineligible caller
+  against a retired version gets the generic response *and* the fake session's consumption-history
+  lookup queue is left empty and never popped, proving the role gate short-circuits before the
+  history check is even attempted (an empty queue would raise `IndexError` if it were consulted).
+- `test_mcp_read_serves_a_supported_version_within_its_support_window` /
+  `test_rest_read_gate_accepts_supported_within_window_like_published` — the positive case: a
+  version-pinned read of a `SUPPORTED` (superseded-but-in-window) version succeeds exactly like
+  `PUBLISHED`, still records a consumption edge, and the payload's `_governance.status` correctly
+  reads `"SUPPORTED"` rather than lying that it's still current.
+- Pure unit coverage of `is_within_support_window`/`can_serve_pinned_version`/`is_version_retired`
+  for every status, an indefinite window, a not-yet-elapsed window, and an elapsed one; and of
+  `was_previously_authorized_consumer`/`current_published_version_number` directly.
+- `test_approval_publishes_candidate_and_supports_prior_version` (renamed from
+  `..._and_supersedes_prior_version`, which is no longer what happens) and
+  `test_approval_computes_a_fixed_support_window_from_the_prior_version` cover the publish
+  transition itself, including the deadline arithmetic; `test_a_supported_version_can_be_explicitly_
+  retired_early` covers the widened `DEPRECATE` guard.
+
+### Part (b): consumer-binding registry — not started, honestly TODO
+
+No code for a named `(consumer identity, context-product version)` binding table or staged-rollout
+endpoints exists yet. What it needs, sketched but not built: a `context_product_consumer_binding`
+table (`organization_id`, `product_id`, `consumer_principal_id`, `bound_version_id`, audit fields),
+a REST surface to create/list/move a binding (`PUT .../bindings/{consumer_id}` pinning to a specific
+version, deliberately singular and explicit — no percentage/weight field, since the tracker
+explicitly declines blind A/B splits), and a read-path hook so a bound consumer's *unversioned*
+resolution (`atlas://context-products/{key}/latest`, which does not exist as a concept yet either)
+consults its binding before falling back to "current `PUBLISHED`". Deferred entirely in favor of
+getting part (a) — the live correctness bug — solid and fully tested first, per the tracker's own
+"prioritize this" instruction; not attempted partially.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files; one pre-existing `no-any-return` surfaced in
+the new `current_published_version_number` and was fixed with an explicit local type, not
+suppressed). `tests/test_migration_orm_drift.py` passed against a real local Postgres — the new
+migration produces exactly `Base.metadata`, zero diff. Full `pytest` suite: exit code 0, no
+`FAILED`/`ERROR` lines. `Docs/90-reference/openapi-baseline.json` regenerated
+(`scripts/openapi_diff.py --accept-baseline`) — the diff is purely additive (`support_window_days`,
+`superseded_at`, `support_window_ends_at`, `superseded_by_version_id` added to the Context Product
+request/response schemas), confirmed via `scripts/openapi_diff.py`'s own "no breaking OpenAPI
+changes" report before accepting.
+
+### Scope note
+
+Stayed inside the Context Product versioning/publication module, its MCP/REST read paths,
+migrations, and tests, per instruction — no changes to Data Product versioning (`DataProductVersion`
+has its own, separate `SUPERSEDED`/`RETIRED` pair in the same `semantic_api.py` file, untouched),
+Governed Tool versioning, or Model Route configuration, even though all three share the identical
+"bulk `UPDATE ... SET status=SUPERSEDED`" shape this fix changed for Context Products specifically.

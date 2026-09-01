@@ -1,7 +1,7 @@
 """Contract and lifecycle coverage for governed Context Products."""
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -12,9 +12,17 @@ from aida.context_product_api import (
     _can_read_context_product_version,
     context_product_fingerprint,
     create_context_product_version,
+    get_context_product_version,
     update_context_product_version,
 )
-from aida.context_product_policy import evaluate_context_product_quality
+from aida.context_product_policy import (
+    can_serve_pinned_version,
+    current_published_version_number,
+    evaluate_context_product_quality,
+    is_version_retired,
+    is_within_support_window,
+    was_previously_authorized_consumer,
+)
 from aida.main import app
 from aida.mcp_server import _context_product_role_eligible, _read_context_product_resource
 from aida.models import (
@@ -343,11 +351,345 @@ async def test_mcp_read_hides_role_denial_behind_not_found_response() -> None:
     assert missing_session.added == []
 
 
-async def test_approval_publishes_candidate_and_supersedes_prior_version() -> None:
+# --- AT-7(a)/AT-D1: support window and distinguishable retirement -----------
+
+
+class _ContextProductRetiredReadSession:
+    """Fake session for `_read_context_product_resource` retirement-signal
+    coverage: `.execute()` returns the preset (version, product) row on its
+    first call and an empty result after (same shape as
+    `_ContextProductReadSession`); `.scalar()` pops preset values in call
+    order for `was_previously_authorized_consumer` and
+    `current_published_version_number`. An empty `scalar_results` queue that
+    is never popped from proves those DB lookups were never even attempted.
+    """
+
+    def __init__(self, row: object, *, scalar_results: list[object]) -> None:
+        self.row = row
+        self.execute_count = 0
+        self._scalar_queue = list(scalar_results)
+        self.added: list[object] = []
+        self.committed = False
+
+    async def execute(self, _statement: object) -> object:
+        row = self.row if self.execute_count == 0 else None
+        self.execute_count += 1
+
+        class _Result:
+            def first(self_inner) -> object:
+                return row
+
+        return _Result()
+
+    async def scalar(self, _statement: object) -> object:
+        return self._scalar_queue.pop(0)
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+class _ScalarQueueSession:
+    """Minimal fake session exposing only `.scalar()`, for testing the
+    context_product_policy helpers directly without a full read path."""
+
+    def __init__(self, values: list[object]) -> None:
+        self._queue = list(values)
+
+    async def scalar(self, _statement: object) -> object:
+        return self._queue.pop(0)
+
+
+def test_is_within_support_window_and_can_serve_pinned_version() -> None:
+    version, _ = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPPORTED"
+
+    version.support_window_ends_at = None
+    assert is_within_support_window(version) is True
+    assert can_serve_pinned_version(version) is True
+    assert is_version_retired(version) is False
+
+    version.support_window_ends_at = datetime.now(UTC) + timedelta(days=1)
+    assert is_within_support_window(version) is True
+    assert can_serve_pinned_version(version) is True
+
+    version.support_window_ends_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert is_within_support_window(version) is False
+    assert can_serve_pinned_version(version) is False
+    assert is_version_retired(version) is True
+
+
+def test_published_version_can_always_serve_and_is_never_retired() -> None:
+    version, _ = _published_product(allowed_roles=["Analyst"])
+    assert version.status == "PUBLISHED"
+    assert can_serve_pinned_version(version) is True
+    assert is_version_retired(version) is False
+
+
+def test_is_version_retired_covers_terminal_statuses_but_not_pending_ones() -> None:
+    version, _ = _published_product(allowed_roles=["Analyst"])
+    for terminal_status in ("SUPERSEDED", "DEPRECATED"):
+        version.status = terminal_status
+        assert is_version_retired(version) is True
+        assert can_serve_pinned_version(version) is False
+    for pending_status in ("DRAFT", "REVIEW_REQUIRED", "REJECTED", "DEPRECATION_REVIEW"):
+        version.status = pending_status
+        assert is_version_retired(version) is False
+        assert can_serve_pinned_version(version) is False
+
+
+async def test_was_previously_authorized_consumer_requires_a_real_prior_allow_edge() -> None:
+    """The subtle half of AT-7(a): proof of past authorization is an actual
+    recorded consumption edge, not a role match -- see the docstring on
+    `was_previously_authorized_consumer` itself for why a role match alone
+    would let a role-eligible-but-never-consumed caller fish version numbers
+    to discover which ones used to exist."""
+    proven_session = _ScalarQueueSession([uuid4()])
+    assert (
+        await was_previously_authorized_consumer(
+            proven_session, version_id=uuid4(), principal_id="analyst-agent"  # type: ignore[arg-type]
+        )
+        is True
+    )
+
+    unproven_session = _ScalarQueueSession([None])
+    assert (
+        await was_previously_authorized_consumer(
+            unproven_session, version_id=uuid4(), principal_id="analyst-agent"  # type: ignore[arg-type]
+        )
+        is False
+    )
+
+
+async def test_current_published_version_number_returns_the_live_version_or_none() -> None:
+    live_session = _ScalarQueueSession([3])
+    assert await current_published_version_number(live_session, uuid4()) == 3  # type: ignore[arg-type]
+
+    no_current_session = _ScalarQueueSession([None])
+    assert await current_published_version_number(no_current_session, uuid4()) is None  # type: ignore[arg-type]
+
+
+async def test_mcp_read_serves_a_supported_version_within_its_support_window() -> None:
+    """A version-pinned MCP URI keeps pinning after a newer version is
+    approved: the superseded version is SUPPORTED, not instantly hidden, and
+    reads exactly like PUBLISHED for an eligible, in-window consumer."""
+    version, product = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPPORTED"
+    version.support_window_ends_at = datetime.now(UTC) + timedelta(days=10)
+    context = SecurityContext(
+        principal_id="analyst-agent",
+        principal_type="SERVICE",
+        organization_id=product.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = _ContextProductReadSession((version, product))
+    uri = "atlas://context-products/revenue_context/versions/1"
+
+    result = await _read_context_product_resource(
+        uri, session, context, "corr-supported"  # type: ignore[arg-type]
+    )
+
+    payload = json.loads(result["contents"][0]["text"])
+    assert payload["version"] == 1
+    assert payload["_governance"]["status"] == "SUPPORTED"
+    assert any(isinstance(value, ContextProductConsumptionEdge) for value in session.added)
+    assert session.committed is True
+
+
+async def test_mcp_retired_read_signals_retirement_when_previously_authorized() -> None:
+    """Case 2 of AT-7(a)'s three-way test: pinned-and-retired, but the
+    caller genuinely read this exact version before it was retired -- they
+    get a distinguishable retirement signal, not the anti-enumeration
+    "not found"."""
+    version, product = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPERSEDED"
+    context = SecurityContext(
+        principal_id="analyst-agent",
+        principal_type="SERVICE",
+        organization_id=product.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    # scalar() call order: was_previously_authorized_consumer (proof found),
+    # then current_published_version_number.
+    session = _ContextProductRetiredReadSession(
+        (version, product), scalar_results=[uuid4(), 2]
+    )
+    uri = "atlas://context-products/revenue_context/versions/1"
+
+    result = await _read_context_product_resource(
+        uri, session, context, "corr-retired"  # type: ignore[arg-type]
+    )
+
+    payload = json.loads(result["contents"][0]["text"])
+    assert payload["status"] == "RETIRED"
+    assert payload["version"] == 1
+    assert payload["current_version"] == 2
+    assert any(
+        isinstance(value, AuditEvent) and value.action == "mcp.context_product.retired"
+        for value in session.added
+    )
+    assert session.committed is True
+
+
+async def test_mcp_retired_read_stays_anti_enumeration_when_never_authorized() -> None:
+    """Case 3 of AT-7(a)'s three-way test: a caller whose role would be
+    eligible but who never actually consumed this exact version gets the
+    identical anti-enumeration "not found" as always -- a role match alone is
+    not proof of prior authorization."""
+    version, product = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPERSEDED"
+    context = SecurityContext(
+        principal_id="never-consumed-agent",
+        principal_type="SERVICE",
+        organization_id=product.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = _ContextProductRetiredReadSession((version, product), scalar_results=[None])
+    uri = "atlas://context-products/revenue_context/versions/1"
+
+    result = await _read_context_product_resource(
+        uri, session, context, "corr-never-authorized"  # type: ignore[arg-type]
+    )
+
+    assert result["contents"][0]["text"] == "Resource not found or not accessible."
+
+
+async def test_mcp_retired_read_denies_ineligible_role_without_history_lookup() -> None:
+    """A role-ineligible caller gets the same anti-enumeration response as
+    always, and the retirement-authorization history lookup is never even
+    attempted for them -- an empty `scalar_results` queue that is never
+    popped from proves the role gate short-circuits first."""
+    version, product = _published_product(allowed_roles=["RiskAnalyst"])
+    version.status = "SUPERSEDED"
+    context = SecurityContext(
+        principal_id="viewer-agent",
+        principal_type="SERVICE",
+        organization_id=product.organization_id,
+        roles=frozenset({"Viewer"}),
+    )
+    session = _ContextProductRetiredReadSession((version, product), scalar_results=[])
+    uri = "atlas://context-products/revenue_context/versions/1"
+
+    result = await _read_context_product_resource(
+        uri, session, context, "corr-ineligible-retired"  # type: ignore[arg-type]
+    )
+
+    assert result["contents"][0]["text"] == "Resource not found or not accessible."
+
+
+def test_rest_read_gate_accepts_supported_within_window_like_published() -> None:
+    """`_can_read_context_product_version` (the REST gate) treats a SUPPORTED
+    version within its window exactly like PUBLISHED for an eligible role."""
+    version, _ = _published_product(allowed_roles=["Analyst"])
+    analyst = SecurityContext(
+        principal_id="analyst",
+        principal_type="USER",
+        organization_id=version.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+
+    version.status = "SUPPORTED"
+    version.support_window_ends_at = datetime.now(UTC) + timedelta(days=1)
+    assert _can_read_context_product_version(analyst, version)
+
+    version.support_window_ends_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert not _can_read_context_product_version(analyst, version)
+
+    version.status = "SUPERSEDED"
+    assert not _can_read_context_product_version(analyst, version)
+
+
+class _RestRetiredVersionReadSession:
+    """Fake session for the REST `get_context_product_version` retirement
+    branch: `.get()` serves `_version_scope`'s two lookups (the version,
+    then its product) in order; `.scalar()` serves the retirement-check
+    lookups (`was_previously_authorized_consumer`, then
+    `current_published_version_number`) in order.
+    """
+
+    def __init__(self, *, version: object, product: object, scalar_results: list[object]) -> None:
+        self._get_queue = [version, product]
+        self._scalar_queue = list(scalar_results)
+        self.added: list[object] = []
+        self.committed = False
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        return self._get_queue.pop(0)
+
+    async def scalar(self, _statement: object) -> object:
+        return self._scalar_queue.pop(0)
+
+    def add(self, value: object) -> None:
+        self.added.append(value)
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
+async def test_rest_retired_read_returns_410_when_previously_authorized() -> None:
+    """The REST twin of the MCP retirement-signal test: a caller who was
+    genuinely authorized for this exact version before gets a distinguishable
+    410, carrying the current published version to re-pin to -- not the same
+    404 an unauthorized caller or a nonexistent version gets."""
+    version, product = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPERSEDED"
+    context = SecurityContext(
+        principal_id="analyst-agent",
+        principal_type="USER",
+        organization_id=product.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = _RestRetiredVersionReadSession(
+        version=version, product=product, scalar_results=[uuid4(), 2]
+    )
+
+    with pytest.raises(HTTPException) as retired:
+        await get_context_product_version(
+            version.id, context, session  # type: ignore[arg-type]
+        )
+
+    assert retired.value.status_code == 410
+    assert retired.value.detail["error"] == "context_product_version_retired"
+    assert retired.value.detail["current_version"] == 2
+    assert session.committed is True
+
+
+async def test_rest_read_of_a_retired_version_stays_404_for_a_never_authorized_consumer() -> None:
+    version, product = _published_product(allowed_roles=["Analyst"])
+    version.status = "SUPERSEDED"
+    context = SecurityContext(
+        principal_id="never-consumed-user",
+        principal_type="USER",
+        organization_id=product.organization_id,
+        roles=frozenset({"Analyst"}),
+    )
+    session = _RestRetiredVersionReadSession(
+        version=version, product=product, scalar_results=[None]
+    )
+
+    with pytest.raises(HTTPException) as denied:
+        await get_context_product_version(
+            version.id, context, session  # type: ignore[arg-type]
+        )
+
+    assert denied.value.status_code == 404
+
+
+async def test_approval_publishes_candidate_and_supports_prior_version() -> None:
+    """AT-7(a)/AT-D1: the version being replaced enters SUPPORTED (still
+    readable by a version-pinned consumer for its support window), not
+    fully-hidden SUPERSEDED, in the same transaction that publishes the new
+    version."""
     organization_id = uuid4()
     candidate = _candidate(organization_id=organization_id, product_id=uuid4())
     review = _review(organization_id=organization_id, version_id=candidate.id)
-    session = _GovernanceDecisionSession(get_results=[review, candidate])
+    # get_results is popped in call order: GovernanceReview (outer lookup),
+    # then the candidate (`session.get`), then the prior PUBLISHED version's
+    # own `support_window_days` (`session.scalar`) -- `None` here models a
+    # product configured for "supported until explicit retirement".
+    session = _GovernanceDecisionSession(get_results=[review, candidate, None])
 
     result = await decide_governance_review(
         review.id,
@@ -364,8 +706,11 @@ async def test_approval_publishes_candidate_and_supersedes_prior_version() -> No
     assert len(session.executed_statements) == 1
     compiled = str(session.executed_statements[0].compile(compile_kwargs={"literal_binds": True}))
     assert "context_product_version" in compiled
-    assert "SUPERSEDED" in compiled
+    assert "SUPPORTED" in compiled
+    assert "SUPERSEDED" not in compiled
     assert "PUBLISHED" in compiled
+    assert "superseded_by_version_id" in compiled
+    assert "support_window_ends_at" in compiled
     assert candidate.id.hex in compiled
     assert any(
         isinstance(value, OutboxEvent) and value.event_type == "context.product_published.v1"
@@ -373,6 +718,31 @@ async def test_approval_publishes_candidate_and_supersedes_prior_version() -> No
     )
     assert any(isinstance(value, AuditEvent) for value in session.added)
     assert session.committed is True
+
+
+async def test_approval_computes_a_fixed_support_window_from_the_prior_version() -> None:
+    """When the version being replaced was itself submitted with a fixed
+    `support_window_days`, the new SUPPORTED deadline is computed from it
+    (`now + support_window_days`), not left indefinite."""
+    organization_id = uuid4()
+    candidate = _candidate(organization_id=organization_id, product_id=uuid4())
+    review = _review(organization_id=organization_id, version_id=candidate.id)
+    session = _GovernanceDecisionSession(get_results=[review, candidate, 30])
+
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _reviewer(organization_id=organization_id),
+        session,  # type: ignore[arg-type]
+    )
+
+    compiled = str(session.executed_statements[0].compile(compile_kwargs={"literal_binds": True}))
+    assert "support_window_ends_at" in compiled
+    set_clause = compiled.split("SET", 1)[1].split("WHERE", 1)[0]
+    ends_at_assignment = [
+        part for part in set_clause.split(",") if "support_window_ends_at" in part
+    ][0]
+    assert "NULL" not in ends_at_assignment
 
 
 async def test_rejection_does_not_modify_other_versions() -> None:
@@ -420,6 +790,30 @@ async def test_approved_deprecation_retires_published_context_product() -> None:
         isinstance(value, OutboxEvent) and value.event_type == "context.product_deprecated.v1"
         for value in session.added
     )
+
+
+async def test_a_supported_version_can_be_explicitly_retired_early() -> None:
+    """AT-7(a): "supported ... or until explicit retirement" -- a steward is
+    not forced to wait out a SUPPORTED version's support window; the same
+    DEPRECATE maker-checker flow that retires a PUBLISHED version also
+    accepts one that is currently SUPPORTED."""
+    organization_id = uuid4()
+    candidate = _candidate(organization_id=organization_id, product_id=uuid4())
+    candidate.status = "SUPPORTED"
+    candidate.support_window_ends_at = datetime(2030, 1, 1, tzinfo=UTC)
+    review = _review(organization_id=organization_id, version_id=candidate.id)
+    review.requested_action = "DEPRECATE"
+    session = _GovernanceDecisionSession(get_results=[review, candidate])
+
+    result = await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _reviewer(organization_id=organization_id),
+        session,  # type: ignore[arg-type]
+    )
+
+    assert result.status == "APPROVED"
+    assert candidate.status == "DEPRECATED"
 
 
 # --- CX-2: versioned, owned, approved ---------------------------------------
@@ -667,10 +1061,13 @@ async def test_context_product_self_approval_is_rejected() -> None:
 
 
 async def test_mcp_resource_query_never_matches_an_unpublished_version() -> None:
-    """CX-2 x CX-3: only an approved (`PUBLISHED`) version is exposed through
-    the MCP-facing read path -- the SQL predicate itself excludes DRAFT,
-    REVIEW_REQUIRED, REJECTED, SUPERSEDED, and DEPRECATED versions, so a
-    consumer can never race a pending approval or read a retired version.
+    """CX-2 x CX-3: governed-tool scope resolution only ever matches a
+    PUBLISHED or SUPPORTED version (AT-7(a) -- a version-pinned tool scope
+    keeps working through a version's support window, not just while it is
+    the single current PUBLISHED one) -- the SQL predicate itself excludes
+    DRAFT, REVIEW_REQUIRED, REJECTED, SUPERSEDED, and DEPRECATED versions, so
+    a consumer can never race a pending approval or resolve tool scope
+    against a fully retired version.
     """
     from aida.mcp_server import _resolve_context_product_scope
 
@@ -703,4 +1100,5 @@ async def test_mcp_resource_query_never_matches_an_unpublished_version() -> None
     assert result is None
     compiled = str(session.statements[0].compile(compile_kwargs={"literal_binds": True}))
     assert "PUBLISHED" in compiled
+    assert "SUPPORTED" in compiled
     assert "context_product_version.status" in compiled

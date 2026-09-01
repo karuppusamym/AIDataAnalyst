@@ -12,8 +12,12 @@ from sqlalchemy.sql.elements import ColumnElement
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
 from aida.context_product_policy import (
+    can_serve_pinned_version,
+    current_published_version_number,
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
+    is_version_retired,
+    was_previously_authorized_consumer,
 )
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
@@ -72,9 +76,12 @@ def context_product_fingerprint(body: ContextProductDefinition) -> str:
 def _can_read_context_product_version(
     context: SecurityContext, version: ContextProductVersion
 ) -> bool:
+    """AT-7(a): a version-pinned read is not gated to PUBLISHED alone any
+    more -- a SUPPORTED version still within its support window reads
+    exactly like PUBLISHED for an otherwise-eligible consumer."""
     if not context.roles.isdisjoint(CONTEXT_PRODUCT_LIFECYCLE_READERS):
         return True
-    return version.status == "PUBLISHED" and not context.roles.isdisjoint(
+    return can_serve_pinned_version(version) and not context.roles.isdisjoint(
         version.allowed_consumer_roles
     )
 
@@ -117,6 +124,7 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
             "lineage_depth": version.lineage_depth,
             "quality_requirements": version.quality_requirements,
             "policy_summary": version.policy_summary,
+            "support_window_days": version.support_window_days,
         }
     )
 
@@ -138,6 +146,7 @@ def _apply_definition(
     version.lineage_depth = body.lineage_depth
     version.quality_requirements = payload["quality_requirements"]
     version.policy_summary = payload["policy_summary"]
+    version.support_window_days = body.support_window_days
     version.fingerprint = context_product_fingerprint(body)
     return version
 
@@ -161,6 +170,9 @@ def _version_read(
         based_on_version_id=version.based_on_version_id,
         created_at=version.created_at,
         updated_at=version.updated_at,
+        superseded_at=version.superseded_at,
+        support_window_ends_at=version.support_window_ends_at,
+        superseded_by_version_id=version.superseded_by_version_id,
     )
 
 
@@ -478,7 +490,54 @@ async def get_context_product_version(
 ) -> ContextProductVersionRead:
     product, version = await _version_scope(session, version_id, context)
     if not _can_read_context_product_version(context, version):
-        raise HTTPException(status_code=404, detail="context product version not found")
+        # AT-7(a)/AT-D1: a retired version (SUPERSEDED/DEPRECATED, or a
+        # SUPPORTED version past its window) is not always the same "not
+        # found" as a role denial or a version that never published. Only a
+        # caller whose role would be eligible for this version AND who was
+        # actually, provably authorized for *this exact version* at some
+        # point (a real prior consumption edge, not merely a role match --
+        # see `was_previously_authorized_consumer`) gets the distinguishable
+        # retirement signal. Everyone else -- wrong role, or never actually
+        # read it before, or the version simply never published -- gets the
+        # identical anti-enumeration 404 as always.
+        if context.roles.isdisjoint(version.allowed_consumer_roles) or not is_version_retired(
+            version
+        ):
+            raise HTTPException(status_code=404, detail="context product version not found")
+        authorized_before = await was_previously_authorized_consumer(
+            session, version_id=version.id, principal_id=context.principal_id
+        )
+        if not authorized_before:
+            raise HTTPException(status_code=404, detail="context product version not found")
+        current_version = await current_published_version_number(session, product.id)
+        record_audit(
+            session,
+            context,
+            action="context_product.read.retired",
+            resource_type="context_product_version",
+            resource_id=str(version.id),
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details={
+                "product_key": product.product_key,
+                "version": version.version,
+                "current_version": current_version,
+            },
+        )
+        await session.commit()
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail={
+                "error": "context_product_version_retired",
+                "message": (
+                    "This context product version has been retired. "
+                    "Re-pin to the current published version."
+                ),
+                "product_key": product.product_key,
+                "version": version.version,
+                "current_version": current_version,
+            },
+        )
     if not _can_read_lifecycle(context):
         purpose_decision = evaluate_context_product_purpose(
             context.business_purpose, version.policy_summary
@@ -836,7 +895,7 @@ async def request_context_product_deprecation(
     )
     if existing is not None:
         return existing
-    if version.status != "PUBLISHED":
+    if version.status not in ("PUBLISHED", "SUPPORTED"):
         raise HTTPException(status_code=409, detail="only a published context product can retire")
     review = GovernanceReview(
         organization_id=product.organization_id,

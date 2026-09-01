@@ -3328,13 +3328,17 @@ class ContextProductVersion(Base, TimestampMixin):
         ),
         CheckConstraint("version > 0", name="ck_context_product_version_positive"),
         CheckConstraint(
-            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'PUBLISHED', 'SUPERSEDED', "
+            "status IN ('DRAFT', 'REVIEW_REQUIRED', 'PUBLISHED', 'SUPPORTED', 'SUPERSEDED', "
             "'REJECTED', 'DEPRECATION_REVIEW', 'DEPRECATED')",
             name="ck_context_product_version_status",
         ),
         CheckConstraint(
             "owner_type IN ('INDIVIDUAL', 'GROUP')",
             name="ck_context_product_version_owner_type",
+        ),
+        CheckConstraint(
+            "support_window_days IS NULL OR support_window_days >= 0",
+            name="ck_context_product_version_support_window_days",
         ),
     )
 
@@ -3368,6 +3372,22 @@ class ContextProductVersion(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     based_on_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="SET NULL"), index=True
+    )
+    # AT-7(a)/AT-D1: a PUBLISHED version that is replaced no longer jumps straight
+    # to fully-hidden SUPERSEDED -- it spends a support window as SUPPORTED, still
+    # readable by a version-pinned consumer, before it is treated as retired.
+    # `support_window_days` is the definition this *version* was submitted with
+    # (so it travels with the version, like every other field); `None` means
+    # "supported until explicit retirement" rather than a fixed duration.
+    support_window_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Set once, when this version stops being PUBLISHED (superseded by the next
+    # approval). `None` while still PUBLISHED/DRAFT/etc. `support_window_ends_at`
+    # is the derived deadline (`superseded_at + support_window_days`), or `None`
+    # for both "not yet superseded" and "supported indefinitely".
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    support_window_ends_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_by_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("context_product_version.id", ondelete="SET NULL"), index=True
     )
 

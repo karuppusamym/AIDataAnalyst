@@ -5876,6 +5876,20 @@
             "title": "Semantic Model Version Ids",
             "type": "array"
           },
+          "support_window_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 30,
+            "title": "Support Window Days"
+          },
           "table_ids": {
             "items": {
               "format": "uuid",
@@ -6168,6 +6182,20 @@
             "title": "Semantic Model Version Ids",
             "type": "array"
           },
+          "support_window_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 30,
+            "title": "Support Window Days"
+          },
           "table_ids": {
             "items": {
               "format": "uuid",
@@ -6356,6 +6384,56 @@
             "title": "Status",
             "type": "string"
           },
+          "superseded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded At"
+          },
+          "superseded_by_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By Version Id"
+          },
+          "support_window_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 30,
+            "title": "Support Window Days"
+          },
+          "support_window_ends_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Support Window Ends At"
+          },
           "table_ids": {
             "items": {
               "format": "uuid",
@@ -6483,6 +6561,20 @@
             "maxItems": 100,
             "title": "Semantic Model Version Ids",
             "type": "array"
+          },
+          "support_window_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 30,
+            "title": "Support Window Days"
           },
           "table_ids": {
             "items": {
