@@ -5138,3 +5138,88 @@ one entry added to `tests/test_doc_claims.py`'s `EXEMPT_CONTRACT_SLUGS` (this en
 status-matrix line that separately uses the word "contract" — same established pattern as
 `migration-drift`/`snowflake-connector-python` already in that set) were both necessary to get a
 clean verification run, not scope creep. SQL Server, Oracle, and the cloud connectors are untouched.
+
+---
+
+## 2026-09-01 — ST-05/ST-06 Phase 3 begins: `01 identity_tenancy` models and schemas moved out of the flat package
+
+The first of the five leaf modules in `40-engineering/06-refactor-plan.md` §6 (Phase 3) with real
+content: `identity_tenancy`'s ORM models and pydantic schemas physically relocated out of
+`aida.models`/`aida.schemas` into `atlas.modules.identity_tenancy.{models,schemas}`, following the
+`db.py`/`config.py`/`logging.py`/`context.py` move-with-shim pattern ST-04 already proved out for
+plain functions — this row is the same trick applied to ORM and pydantic classes.
+
+### What moved
+
+19 model classes: `Organization`, `OrganizationIntegrationPolicy`, `LineOfBusiness`, `DataDomain`,
+`CrossBoundaryGrant`, `IsolationBoundary`, `Workspace`, `WorkspaceMembership`, `WorkspaceAccessRule`,
+`AuthorizationShadowRecord`, `SourceBinding`, `BusinessNode`, `BusinessAssignment`,
+`BusinessAssignmentRule`, `BusinessNodeClosure`, `BusinessNodeRollup`, `Project`, `Delegation`,
+`RevokedToken`. 28 schema classes covering the same domain's request/response DTOs (organizations,
+LOBs, data domains, cross-boundary grants, projects, workspaces, workspace memberships, source
+bindings, the business-node classification tree, and OB-7 entitlement reporting).
+
+Deliberately **not** moved despite living in the same neighborhood in the old `aida.models`:
+`AccessPolicy` (module 17, policy-governance — it's a policy, not a tenancy structure) and
+`Embedding` (module 12, retrieval — generic vector storage with no tenancy semantics of its own).
+Both stay in `aida.models` pending their own modules' extraction passes.
+
+`TimestampMixin` and `utc_now` (previously defined inline in `aida.models`) moved to
+`atlas.platform.db` in the same pass, not into `identity_tenancy` — they're used by `TimestampMixin`
+subclasses across many modules that haven't been extracted yet (e.g. `aida.envelope_models`), so
+they're shared platform infrastructure, not identity-tenancy-owned. `aida.models` re-exports both.
+
+This is a **Python-source-location move only**. No class's `__table_args__` gained a `schema=`
+declaration; every moved table still lives in the single shared PostgreSQL schema. The database
+schema migration and the cross-module FK-to-plain-ID-column conversion (refactor plan §5 steps 2.3
+and 2.4 — the steps the plan itself flags as needing an orphan-detection reconciliation job and a
+dedicated, independently-revertible PR) are untouched and explicitly out of scope for this pass.
+
+### The circular-import wrinkle, and why it's safe
+
+`atlas.modules.identity_tenancy.schemas` imports `ApiModel` back from `aida.schemas` (the shared
+pydantic base every module's DTOs use — deliberately not moved anywhere in this pass, since it isn't
+identity-tenancy-owned either). That makes `aida.schemas -> atlas.modules.identity_tenancy.schemas
+-> aida.schemas` a real circular import. It resolves safely because `aida.schemas`' shim import of
+the moved module is placed textually *after* `class ApiModel` is defined in that file, so by the
+time Python starts executing the moved module (always triggered *from* `aida.schemas`, since nothing
+else imports the private module directly — the `module-privacy` contract, extended below, guarantees
+that stays true), `ApiModel` is already bound in `aida.schemas`'s namespace. Documented in both
+files' docstrings so a future editor doesn't reorder the import and break it silently.
+
+### Import-linter contract extended, not relaxed
+
+`identity_tenancy module privacy`'s `allowed_importers` gained exactly two entries: `aida.models`
+and `aida.schemas` — the two backward-compat shim files that exist expressly to re-export these
+classes at their old import path. Nothing else may import the module's private `models.py`/
+`schemas.py`; `lint-imports` is green (4 kept, 0 broken) with the extension in place.
+
+### Verification
+
+`ruff check .` clean (the two pre-existing `UP042` findings in `sql_lineage_parser.py` are
+untouched by this change — confirmed by diff, not in the file list this row modified). `mypy src`
+clean (strict, 201 files — `atlas.modules.identity_tenancy.{models,schemas}` are type-checked
+transitively through `aida.models`/`aida.schemas` even though `atlas/` isn't itself in mypy's
+`packages` list yet). `lint-imports` 4 kept, 0 broken. `alembic heads` still resolves — see the
+limitation below; migrations are untouched by this row regardless. Route count identical before and
+after (`uv run python -c "from aida.main import app; print(len(app.routes))"` → 51, both). Full
+`pytest` suite: one failure, `test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output`,
+confirmed pre-existing and identical via `git stash` against unmodified HEAD (a baseline drift from
+unrelated concurrent feature work, not from this row — regenerating it is someone else's row to
+close, not folded in here per the out-of-scope discipline earlier entries establish).
+
+### Known limitation carried forward, not fixed here
+
+`alembic heads` currently resolves **two** heads (`8f1e17ed2ba7`, `c1e64055ccdb`), confirmed
+pre-existing via the same `git stash` comparison — this row touches no migration. This is the same
+class of problem CN-3's entry above found and fixed once already (concurrent sessions landing
+migrations without a reconciling merge revision between them on this fast-moving branch); it has
+recurred since. Left for whichever row picks up migration hygiene next, since inventing a merge
+revision here would be scope creep unrelated to a models/schemas move and risks colliding with
+whichever concurrent session is already mid-migration.
+
+### Remaining in ST-05/ST-06
+
+`02 connectivity`, `03 ingestion`, `04 catalog`, and `20 observability_audit` (the last needs
+`python scripts/generate_module.py observability_audit` to scaffold first) are still TODO, per the
+Phase 3 sequencing in the refactor plan §6.

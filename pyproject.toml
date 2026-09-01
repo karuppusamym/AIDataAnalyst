@@ -111,6 +111,13 @@ ignore_missing_imports = true
 root_packages = ["aida", "atlas"]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`): `aida.models`
+# and `aida.schemas` are added to `allowed_importers` below because they are the
+# sanctioned backward-compat re-export shims for the classes just moved out of them
+# into `atlas.modules.identity_tenancy.{models,schemas}` -- the same pattern
+# `aida.db` already uses for `atlas.platform.db` (Phase 1, ST-04). Nothing else may
+# import these two private files; only the shim files that exist expressly to keep
+# every existing `from aida.models import Organization` (etc.) caller unchanged.
 name = "identity_tenancy module privacy"
 type = "protected"
 protected_modules = [
@@ -131,6 +138,8 @@ allowed_importers = [
   "atlas.modules.identity_tenancy.router",
   "atlas.modules.identity_tenancy.workers",
   "atlas.modules.identity_tenancy.tests",
+  "aida.models",
+  "aida.schemas",
 ]
 
 [[tool.importlinter.contracts]]

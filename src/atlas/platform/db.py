@@ -4,13 +4,21 @@
 Moved from `aida.db`, with its internal `config` import repointed at
 `atlas.platform.config`. `aida.db` now re-exports from here for backward
 compatibility; new code should import from this module directly.
+
+`TimestampMixin` and `utc_now` moved here from `aida.models` under tracker
+ST-05 (Phase 3 of the refactor plan): every per-module `models.py` needs
+them, including modules that have not been extracted yet, so they belong in
+`platform/` rather than in any one module. `aida.models` re-exports both for
+backward compatibility -- every existing `from aida.models import
+TimestampMixin` caller keeps working unchanged.
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
-from sqlalchemy import MetaData
+from sqlalchemy import DateTime, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from atlas.platform.config import get_settings
 
@@ -25,6 +33,19 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 
 settings = get_settings()
