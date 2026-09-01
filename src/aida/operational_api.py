@@ -12,7 +12,7 @@ from aida.connector_health import ConnectorHealthScore
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
-from aida.fleet import datasource_health, fleet_health
+from aida.fleet import datasource_health, fleet_health, tool_first_execution_rate
 from aida.models import (
     AnalysisRun,
     AuditEvent,
@@ -34,6 +34,7 @@ from aida.schemas import (
     ProjectRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, ToolFirstRate
 
 router = APIRouter(prefix="/v1", tags=["operations"])
 
@@ -83,6 +84,37 @@ class ConnectorHealthScoreRead(ApiModel):
             ],
             blockers=score.blockers,
             computed_at=score.computed_at,
+        )
+
+
+# --- TL-6: tool-first execution rate ------------------------------------------
+#
+# Same locally-scoped `ApiModel` rationale as CN-7 above.
+class ToolFirstRateRead(ApiModel):
+    organization_id: UUID
+    window_days: int
+    tool_first_executions: int
+    freeform_executions: int
+    total_executions: int
+    rate: float | None
+    by_source: dict[str, int]
+    target_rate: float
+    meets_target: bool | None
+    computed_at: datetime
+
+    @classmethod
+    def from_rate(cls, rate: ToolFirstRate) -> "ToolFirstRateRead":
+        return cls(
+            organization_id=rate.organization_id,
+            window_days=rate.window_days,
+            tool_first_executions=rate.tool_first_executions,
+            freeform_executions=rate.freeform_executions,
+            total_executions=rate.total_executions,
+            rate=rate.rate,
+            by_source=rate.by_source,
+            target_rate=rate.target_rate,
+            meets_target=rate.meets_target,
+            computed_at=rate.computed_at,
         )
 
 
@@ -438,6 +470,34 @@ async def organization_fleet_health(
     scores = await fleet_health(session, organization_id)
     items = [ConnectorHealthScoreRead.from_score(score) for score in scores]
     return Page(items=items, limit=len(items), offset=0, total=len(items))
+
+
+@router.get(
+    "/organizations/{organization_id}/tool-first-rate",
+    response_model=ToolFirstRateRead,
+)
+async def organization_tool_first_rate(
+    organization_id: UUID,
+    window_days: int = Query(default=DEFAULT_WINDOW_DAYS, ge=1, le=365),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "OrganizationAdmin", "Auditor", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ToolFirstRateRead:
+    """TL-6: what share of this organization's completed agent-run executions
+    went through a certified governed tool ("tool-first") rather than ad-hoc
+    generated SQL, over a rolling window.
+
+    Derived entirely from existing `AgentRun.generation_source` history --
+    see `aida.tool_first_rate` for the pure ratio computation and
+    `aida.fleet.tool_first_execution_rate` for how it's gathered. The
+    numerator (`tool_first_executions`), denominator (`total_executions`),
+    and the full per-source breakdown (`by_source`) are always returned
+    alongside the ratio so the number is never opaque.
+    """
+    await _require_organization(session, context, organization_id)
+    rate = await tool_first_execution_rate(session, organization_id, window_days=window_days)
+    return ToolFirstRateRead.from_rate(rate)
 
 
 @router.get("/organizations/{organization_id}/outbox-events", response_model=Page)

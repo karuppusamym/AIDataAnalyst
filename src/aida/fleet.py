@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -12,7 +12,8 @@ from aida.connector_health import (
     ConnectorRunSample,
     compute_connector_health,
 )
-from aida.models import AnalysisRun, DataSource, Organization, ScanPolicy
+from aida.models import AgentRun, AnalysisRun, DataSource, Organization, ScanPolicy
+from aida.tool_first_rate import DEFAULT_WINDOW_DAYS, ToolFirstRate, compute_tool_first_rate
 
 ACTIVE_ANALYSIS_STATUSES = frozenset({"QUEUED", "RUNNING", "PROFILING", "CANCELLATION_REQUESTED"})
 
@@ -229,3 +230,41 @@ async def fleet_health(
             )
         )
     return scores
+
+
+async def tool_first_execution_rate(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    now: datetime | None = None,
+) -> ToolFirstRate:
+    """Tool-first execution rate (TL-6) for one organization's rolling window.
+
+    Read-only aggregation over existing `AgentRun` rows -- no new persisted
+    state. Only `COMPLETED` runs are counted (mirrors TL-4's
+    `tool_usage.get_tool_usage_counts`: a rejected or failed attempt is not
+    evidence of tool-first *or* freeform execution, since it never finished
+    either way). See `aida.tool_first_rate` for the ratio itself, which is
+    pure and unit-tested without a database.
+    """
+    resolved_now = now or datetime.now(UTC)
+    since = resolved_now - timedelta(days=window_days)
+    rows = (
+        await session.execute(
+            select(AgentRun.generation_source, func.count())
+            .where(
+                AgentRun.organization_id == organization_id,
+                AgentRun.status == "COMPLETED",
+                AgentRun.created_at >= since,
+            )
+            .group_by(AgentRun.generation_source)
+        )
+    ).all()
+    counts = {str(source): int(count) for source, count in rows}
+    return compute_tool_first_rate(
+        organization_id=organization_id,
+        window_days=window_days,
+        generation_source_counts=counts,
+        now=resolved_now,
+    )

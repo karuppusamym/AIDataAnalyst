@@ -14,8 +14,10 @@ from aida.fleet import (
     ensure_datasource_enabled,
     fleet_health,
     reserve_analysis_run,
+    tool_first_execution_rate,
 )
 from aida.models import (
+    AgentRun,
     AnalysisRun,
     AuditEvent,
     DataDomain,
@@ -29,11 +31,13 @@ from aida.models import (
 from aida.operational_api import (
     get_datasource_health,
     organization_fleet_health,
+    organization_tool_first_rate,
     requeue_outbox_event,
 )
 from aida.projectors import graph_projector
 from aida.projectors.outbox_publisher import record_publish_failure, retry_delay_seconds
 from aida.security import SecurityContext, enforce_organization
+from aida.tool_first_rate import DEFAULT_WINDOW_DAYS
 from aida.workflows import scheduler
 from aida.workflows.scheduler import due_scan_policies_statement
 from tests.support.doubles import security_context
@@ -866,3 +870,166 @@ async def test_organization_fleet_health_endpoint_pages_every_datasource(
 
     assert page.total == 1
     assert page.items[0].datasource_id == datasource.id
+
+
+# ---------------------------------------------------------------------------
+# TL-6 -- tool-first execution rate metric.
+#
+# Runs the real `aida.fleet.tool_first_execution_rate` aggregation and the
+# real `aida.operational_api.organization_tool_first_rate` endpoint against
+# the same in-memory SQLite `health_session` fixture CN-7 already
+# established above. The ratio math itself is covered exhaustively, without
+# a database, in `tests/test_tool_first_rate.py`.
+# ---------------------------------------------------------------------------
+
+
+def _agent_run(
+    datasource: DataSource,
+    *,
+    generation_source: str,
+    status: str = "COMPLETED",
+    created_at: datetime | None = None,
+) -> AgentRun:
+    run = AgentRun(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
+        principal_id="analyst-1",
+        status=status,
+        question_hash=uuid4().hex,
+        generation_source=generation_source,
+    )
+    if created_at is not None:
+        run.created_at = created_at
+    return run
+
+
+async def test_tool_first_execution_rate_computes_ratio_from_completed_runs(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(datasource, generation_source="MODEL_GATEWAY"),
+        ]
+    )
+    await health_session.flush()
+
+    result = await tool_first_execution_rate(health_session, datasource.organization_id)
+
+    assert result.tool_first_executions == 2
+    assert result.freeform_executions == 1
+    assert result.total_executions == 3
+    assert result.rate is not None and abs(result.rate - (2 / 3)) < 1e-3
+
+
+async def test_tool_first_execution_rate_ignores_non_completed_runs(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(datasource, generation_source="MODEL_GATEWAY", status="REJECTED"),
+            _agent_run(datasource, generation_source="MODEL_GATEWAY", status="GENERATED"),
+        ]
+    )
+    await health_session.flush()
+
+    result = await tool_first_execution_rate(health_session, datasource.organization_id)
+
+    assert result.total_executions == 1
+    assert result.rate == 1.0
+
+
+async def test_tool_first_execution_rate_respects_the_rolling_window(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    now = datetime(2026, 9, 1, 12, tzinfo=UTC)
+    health_session.add_all(
+        [
+            _agent_run(datasource, generation_source="GOVERNED_TOOL", created_at=now),
+            _agent_run(
+                datasource,
+                generation_source="MODEL_GATEWAY",
+                created_at=now - timedelta(days=200),
+            ),
+        ]
+    )
+    await health_session.flush()
+
+    result = await tool_first_execution_rate(
+        health_session, datasource.organization_id, window_days=30, now=now
+    )
+
+    assert result.total_executions == 1
+    assert result.rate == 1.0
+
+
+async def test_tool_first_execution_rate_no_runs_returns_none_rate(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    await health_session.flush()
+
+    result = await tool_first_execution_rate(health_session, datasource.organization_id)
+
+    assert result.total_executions == 0
+    assert result.rate is None
+    assert result.meets_target is None
+
+
+async def test_tool_first_execution_rate_is_scoped_to_the_organization(health_session) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    other_datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(other_datasource, generation_source="MODEL_GATEWAY"),
+        ]
+    )
+    await health_session.flush()
+
+    result = await tool_first_execution_rate(health_session, datasource.organization_id)
+
+    assert result.total_executions == 1
+    assert result.tool_first_executions == 1
+
+
+async def test_organization_tool_first_rate_endpoint_returns_explainable_breakdown(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    health_session.add_all(
+        [
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(datasource, generation_source="GOVERNED_TOOL"),
+            _agent_run(datasource, generation_source="DEVELOPMENT_OVERRIDE"),
+        ]
+    )
+    await health_session.commit()
+
+    result = await organization_tool_first_rate(
+        datasource.organization_id,
+        window_days=DEFAULT_WINDOW_DAYS,
+        context=_health_context(datasource),
+        session=health_session,
+    )
+
+    assert result.organization_id == datasource.organization_id
+    assert result.tool_first_executions == 2
+    assert result.freeform_executions == 1
+    assert result.total_executions == 3
+    assert result.by_source == {"DEVELOPMENT_OVERRIDE": 1, "GOVERNED_TOOL": 2}
+    assert result.rate is not None and abs(result.rate - (2 / 3)) < 1e-3
+
+
+async def test_organization_tool_first_rate_endpoint_denies_cross_organization_access(
+    health_session,
+) -> None:
+    datasource = await _seed_health_datasource(health_session)
+    await health_session.commit()
+    other_org_context = security_context(organization_id=uuid4(), roles=frozenset({"Operations"}))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await organization_tool_first_rate(
+            datasource.organization_id, context=other_org_context, session=health_session
+        )
+    assert excinfo.value.status_code == 403

@@ -5722,3 +5722,49 @@ this row. `alembic heads` still the same pre-existing two heads, confirmed unrel
 `20 observability_audit` only -- the last of the five Phase 3 leaf modules. Needs
 `python scripts/generate_module.py observability_audit` to scaffold first, same as this row and the
 two before it did for their own modules.
+
+## 2026-09-01 — TL-6 closed: tool-first execution rate metric
+
+A governance-maturity signal the tracker asked for: what share of an organization's completed
+agent runs were served by a certified governed tool ("tool-first") rather than ad-hoc generated
+SQL, target >=40% in a mature tenant.
+
+### What it derives from
+
+`AgentRun.generation_source` already records this on every run
+(`agent_orchestrator.GovernedAgentOrchestrator._generate_sql`, ~lines 551-670) and
+`product_marketplace_api.py`'s portfolio-trend tiles already group by the same field — no new
+column, no migration. `GOVERNED_TOOL` counts as tool-first; `MODEL_GATEWAY` and
+`DEVELOPMENT_OVERRIDE` count as freeform (a raw SQL override is still non-governed, so crediting
+it as tool-first would misstate maturity); `PENDING`/`POLICY_BLOCK` are excluded outright since
+neither value survives onto a `COMPLETED` run.
+
+### Design
+
+`aida/tool_first_rate.py` — pure, DB-free (`compute_tool_first_rate`), unit-tested without a
+database, mirroring `aida.connector_health`/`aida.trust_scoring`'s "every factor inspectable"
+convention: the response always carries `tool_first_executions`, `freeform_executions`,
+`total_executions`, `by_source`, and `meets_target` against the named `MATURE_TENANT_TARGET_RATE`
+constant (0.40) alongside the ratio, never the ratio alone. `rate`/`meets_target` are `None` (not
+`0.0`/`False`) when there's no evidence yet, distinguishing "0% tool-first" from "nothing ran".
+
+`aida/fleet.py::tool_first_execution_rate` does the one DB-touching aggregation: `COMPLETED`
+`AgentRun` rows over a rolling window (`DEFAULT_WINDOW_DAYS = 30`), grouped by
+`generation_source` — same `COMPLETED`-only filter TL-4's `tool_usage.get_tool_usage_counts`
+already established (a rejected/failed attempt is not evidence of either path).
+
+`GET /v1/organizations/{id}/tool-first-rate` (`operational_api.py`) exposes it, role-gated the
+same as the existing fleet-health endpoints (`PlatformAdmin`/`OrganizationAdmin`/`Auditor`/
+`Operations`), `window_days` query-tunable (1-365).
+
+### Verification
+
+`uv run pytest tests/test_tool_first_rate.py tests/test_operational_behaviors.py -q` — 45 passed
+(pure-ratio edge cases: empty map, all-tool-first, all-freeform, excluded sources ignored even if
+present, rounding; integration tests against in-memory SQLite following `test_asset_evidence.py`'s
+pattern). `ruff check` clean on all four touched files. `test_openapi_diff_gate.py` green after
+regenerating `Docs/90-reference/openapi-baseline.json` for the one new additive route.
+`test_doc_claims.py` clean. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file
+or Alembic migration touched — this session finished the close-out after the implementing agent
+paused mid-task waiting on a long-running local test; the diff it left in the worktree was
+reviewed, tested fresh, and found sound before pushing.

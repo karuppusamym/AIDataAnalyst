@@ -3706,6 +3706,19 @@ export interface ToolExecutionResponse {
   quality_gate?: Record<string, unknown> | null;
 }
 
+export interface ToolFirstRateRead {
+  organization_id: string;
+  window_days: number;
+  tool_first_executions: number;
+  freeform_executions: number;
+  total_executions: number;
+  rate: number | null;
+  by_source: Record<string, number>;
+  target_rate: number;
+  meets_target: boolean | null;
+  computed_at: string;
+}
+
 export interface ToolParameterDefinition {
   name: string;
   parameter_type: "STRING" | "INTEGER" | "NUMBER" | "BOOLEAN" | "DATE";

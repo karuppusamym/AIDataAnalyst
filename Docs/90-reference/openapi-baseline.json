@@ -22274,6 +22274,84 @@
         "title": "ToolExecutionResponse",
         "type": "object"
       },
+      "ToolFirstRateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "by_source": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Source",
+            "type": "object"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "freeform_executions": {
+            "title": "Freeform Executions",
+            "type": "integer"
+          },
+          "meets_target": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Target"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "target_rate": {
+            "title": "Target Rate",
+            "type": "number"
+          },
+          "tool_first_executions": {
+            "title": "Tool First Executions",
+            "type": "integer"
+          },
+          "total_executions": {
+            "title": "Total Executions",
+            "type": "integer"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "window_days",
+          "tool_first_executions",
+          "freeform_executions",
+          "total_executions",
+          "rate",
+          "by_source",
+          "target_rate",
+          "meets_target",
+          "computed_at"
+        ],
+        "title": "ToolFirstRateRead",
+        "type": "object"
+      },
       "ToolParameterDefinition": {
         "additionalProperties": false,
         "properties": {
@@ -61231,6 +61309,147 @@
           }
         },
         "summary": "Bulk Tag Tables"
+      }
+    },
+    "/v1/organizations/{organization_id}/tool-first-rate": {
+      "get": {
+        "description": "TL-6: what share of this organization's completed agent-run executions\nwent through a certified governed tool (\"tool-first\") rather than ad-hoc\ngenerated SQL, over a rolling window.\n\nDerived entirely from existing `AgentRun.generation_source` history --\nsee `aida.tool_first_rate` for the pure ratio computation and\n`aida.fleet.tool_first_execution_rate` for how it's gathered. The\nnumerator (`tool_first_executions`), denominator (`total_executions`),\nand the full per-source breakdown (`by_source`) are always returned\nalongside the ratio so the number is never opaque.",
+        "operationId": "organization_tool_first_rate_v1_organizations__organization_id__tool_first_rate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window_days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolFirstRateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Organization Tool First Rate",
+        "tags": [
+          "operations"
+        ]
       }
     },
     "/v1/organizations/{organization_id}/workspaces": {
