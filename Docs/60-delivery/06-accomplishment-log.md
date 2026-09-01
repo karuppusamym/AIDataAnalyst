@@ -7912,3 +7912,63 @@ deliberately left for a separate pass rather than folded in here. The month-end 
 last 3 calendar days of a month) is a deliberate, untuned default, not fit to any real production
 close calendar. No live-Postgres verification of the query (already shared with DQ-6, same standing
 sandbox limitation as CN-1c/CN-2a/DQ-4).
+
+---
+
+## 2026-09-01 — AT-D4 closed: `PropagationLog.tsx`'s phantom mechanism gated behind a default-off flag
+
+`ui-next/src/screens/ReviewQueueScreen.tsx`'s "Why orders_raw is currently blocked" section rendered
+`PropagationLog` (`ui-next/src/components/PropagationLog.tsx`) with a hard-coded, four-step
+narrative — `raw_sales` fails quality rules, `orders_raw` "inherits the incident... via column
+lineage", `revenue_agg` "inherits the incident", `tool_revenue_by_lob` refused — unconditionally, on
+every load, for every user. It was not fed by any fetch, fixture generator, or backend endpoint: the
+`steps` array was literally inline JSX data. `PropagationLog.tsx` itself is a reusable, prop-driven
+list renderer with no backend calls of its own, so the phantom mechanism lived entirely in how its
+one call site used it.
+
+**Confirmed the row's claim of no backend mechanism**, on two counts:
+- No `classification_derived` column and no classification-propagation-along-lineage logic exists
+  anywhere in `src/aida` (`grep -ri classification.*propagat` / `propagat.*classification` across
+  `src` returns nothing) — AT-11, which would build it, is still `TODO`.
+- The rendered narrative's actual claim — multi-hop lineage propagation of a *quality* incident — is
+  also not real as depicted. The one real coupling mechanism, `quality_coupling.check_tool_gate`
+  (`src/aida/quality_coupling.py:153`, wired into `tool_api.py::execute_tool` at line ~800), only
+  gates a tool call on its own **declared** dependency tables (`version.referenced_tables`, resolved
+  by `resolve_table_ids`) having an open incident directly — a single-hop, direct-dependency check.
+  There is no lineage graph walk anywhere that makes "`orders_raw` inherits from `raw_sales` via
+  column lineage, `revenue_agg` inherits from `orders_raw`" a traversed, evidenced chain. The fixture
+  overstated even the mechanism it was nominally illustrating.
+
+**Fix (UI-honesty only, no AT-11 work attempted)**: gated the section behind a new
+`VITE_ENABLE_PROPAGATION_LOG` flag (`ui-next/src/vite-env.d.ts`), following the same
+`import.meta.env.VITE_*` convention as the existing `VITE_USE_FIXTURES` (`ui-next/src/lib/api.ts`),
+but inverted to default OFF (`=== "1"` to enable, vs. `VITE_USE_FIXTURES`'s `!== "0"` default-on) —
+no repo `.env` file sets it, so it renders nothing for a real user today. `PropagationLog.tsx` and
+its call site's JSX are left fully in place, unmodified in substance, for the day AT-11 (or an
+equivalent real, lineage-resolved read model) ships something honest to show there; a code comment
+directly above the new `PROPAGATION_LOG_ENABLED` constant in `ReviewQueueScreen.tsx` records why the
+gate exists and what would need to be true to remove it. Considered and declined: replacing the
+section with a "coming soon" placeholder — hiding it entirely is what the row's own wording asks for
+("hide it behind the AT-11 feature flag"), and there is no user-facing surface today that promises
+this narrative exists, so a placeholder would only be adding a new thing to explain rather than
+removing a false claim.
+
+**Test**: new `ui-next/src/screens/ReviewQueueScreen.test.tsx` (3 tests, `@testing-library/react` +
+`vi.stubEnv`/`vi.resetModules`, the same dynamic-reimport pattern `App.test.tsx` uses for env/module
+state): the propagation section and its text are absent from the rendered DOM with the flag unset,
+absent with it explicitly `"0"`, and present only once it is explicitly stubbed to `"1"` — proving
+the gate is real (a hidden-but-mounted node would still count as reachable) rather than asserting on
+internal component state.
+
+**Verification**: `ui-next` had no `node_modules` in this worktree; ran `npm install` first (185
+packages, from the committed `package.json`/no lockfile drift). `npm run typecheck` clean. `npm run
+test`: 15/15 tests pass across all three suites (`PersonaNav.test.tsx`, `App.test.tsx`, the new
+`ReviewQueueScreen.test.tsx`) — no existing test broken. `npm run build` succeeds (`tsc -b && vite
+build`, `dist/` produced, not committed per `ui-next/.gitignore`). `AIDA_ENVIRONMENT=development uv
+run pytest tests/test_doc_claims.py -q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — nothing here needed one; this was a frontend-only gate on an already-existing, purely
+presentational component. AT-11 itself (the `classification_derived` column, propagation along
+`DECLARED`/`VIEW_DDL`/`EXECUTED_QUERY`/`OPENLINEAGE` edges, review-queue-gated promotion) remains
+entirely unbuilt, as scoped — this entry closes the honesty gap, not the feature.
