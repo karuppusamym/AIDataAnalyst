@@ -5866,3 +5866,65 @@ declares no `schema=` in its `__table_args__` and still lives in the single shar
 -- this was a Python-source-location move only, at every step. Steps 2.3/2.4 are deliberately
 separate, later work needing their own orphan-detection reconciliation job, identical-count
 assertion, and dedicated PR, exactly as the plan itself specifies.
+
+---
+
+## 2026-09-01 (continued) — SM-7 closed: structured version diffs for the governance review queue
+
+"Reviewers see version deltas": a reviewer opening a pending `GovernanceReview` for a versioned
+semantic object previously saw only `GovernanceReviewRead`'s bare metadata (requester, status,
+decision fields) — no view of what the proposed change actually *changes* relative to what's
+currently published. Distinct from **ST-A3** (already `DONE`), which diffs a Studio change-set's
+`before_snapshot`/`after_snapshot` pair for module 18's form-based authoring flow; SM-7 is
+module 17's separate, generic maker-checker queue (`GovernanceReview.object_type` spans
+`SEMANTIC_MODEL_VERSION`, `GOVERNED_TOOL_VERSION`, `GLOSSARY_TERM_VERSION`,
+`CONTEXT_PRODUCT_VERSION`, and a dozen more), which had no diff view of any kind before this row.
+
+### Design
+
+`aida/semantic_diff.py` — pure, DB-free (`diff_semantic_object`), unit-tested without a database
+(`tests/test_semantic_diff.py`, 19 cases), mirroring the `aida.connector_health`/
+`aida.tool_first_rate` "pure logic, DB-facing half stays in the API module" convention. Takes two
+already-fetched `dict[str, Any]` snapshots and returns `SemanticDiff.entries: list[FieldDelta]`
+where each entry is `added` (in `after`, absent from `before`), `removed` (in `before`, absent from
+`after`), or `changed` (present in both, different value); unchanged fields are omitted entirely.
+Recurses into nested mappings so a semantic model version's `metrics` dict (keyed by metric slug,
+not listed — the point of the keying) reports an added/removed/changed *metric* as one entry at
+`metrics.<slug>[.field]`, not a whole-object replacement blob. `before=None`/`{}` (no published
+predecessor — a first-ever submission) reports every field `added`; both `None` produces no entries.
+
+`GET /v1/governance/reviews/{review_id}/diff` (`aida/semantic_api.py`,
+`get_governance_review_diff`) is the DB-facing half: builds the proposed (`after`) and currently
+published (`before`) snapshots for `SEMANTIC_MODEL_VERSION` (the draft's own metrics vs. the
+project's `PUBLISHED` sibling's) and `GLOSSARY_TERM_VERSION` (the draft vs. the term's `APPROVED`
+sibling), runs `diff_semantic_object`, and returns both the raw snapshots and the structured
+`entries` — the diff sits alongside the raw proposed content, not instead of it. Added as a new
+endpoint (mirroring ST-A3's own dedicated-`/diff`-route shape) rather than a field on
+`GovernanceReviewRead`, since that schema lives in the read-only `aida/schemas.py`
+(`GovernanceReviewDiffRead`/`SemanticFieldDeltaRead` are defined locally in `semantic_api.py`
+instead). A review for any other object type in the unified queue returns `200` with
+`diffable=false` and an explanatory `message`, never a 404/422 — the endpoint is safe to call for
+any pending review a reviewer has open, not just the two supported kinds.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_semantic_diff.py
+tests/test_semantic_diff_endpoint.py -q` — 28 passed (19 pure diff-logic cases: flat
+added/removed/changed, nested per-metric diffing, unchanged-fields-omitted, `None`/`{}`
+predecessor edge cases, `ignore_fields`; 9 integration cases against a real in-memory sqlite
+database seeded through the ORM — first-submission-vs-empty-before, changed-metric-field-against-a-
+real-published-predecessor, unchanged-metric-produces-no-diff, glossary synonym change,
+unsupported-object-type returns `diffable=False`, 404 for a missing review, 403 across an
+organization boundary). `ruff check` clean on all four touched/added files. `AIDA_ENVIRONMENT=development
+uv run mypy src` — clean, 242 files. `test_openapi_diff_gate.py` and `test_doc_claims.py` both green
+after regenerating `Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` for the
+one new additive route. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or
+Alembic migration touched — the diff is computed entirely from data already retrievable through
+existing queries, no new persisted field was needed.
+
+**Not attempted:** diff coverage for the remaining dozen-plus `GovernanceReview.object_type` values
+(`GOVERNED_TOOL_VERSION`, `CONTEXT_PRODUCT_VERSION`, `DATA_PRODUCT_VERSION`,
+`DATA_CONTRACT_VERSION`, `TERM_SEMANTIC_BINDING`, ...) — each returns `diffable=false` today rather
+than a real delta. `diff_semantic_object` itself is generic and DB-free, so extending coverage is
+adding another DB-facing snapshot-builder branch in `get_governance_review_diff` per object type,
+not a redesign; left for a follow-up row if a reviewer workflow actually needs it.
