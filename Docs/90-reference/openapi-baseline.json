@@ -2423,6 +2423,41 @@
         "title": "AssetDocumentationVersionRead",
         "type": "object"
       },
+      "AssetEvidenceRead": {
+        "additionalProperties": false,
+        "description": "UX-13: `GET /v1/metadata/tables/{id}/evidence` -- composes business\nmeaning, ownership/certification (GL-2/GL-5), data quality, consumption\nlineage (CX-4) and AI decision lineage including refusals (LN-3) for one\ntable. See `aida.asset_evidence` for how each `items` entry is sourced.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_id",
+          "table_name",
+          "generated_at",
+          "items"
+        ],
+        "title": "AssetEvidenceRead",
+        "type": "object"
+      },
       "AssetTermLinkCreate": {
         "additionalProperties": false,
         "properties": {
@@ -9819,6 +9854,43 @@
           "allowed"
         ],
         "title": "EvaluationResponse",
+        "type": "object"
+      },
+      "EvidenceItemRead": {
+        "additionalProperties": false,
+        "description": "UX-13: one claim in an asset's evidence pane.\n\nEvery fact composed onto `AssetEvidenceRead` -- an ownership assignment,\nan open incident, a consumption event, an AI decision -- is one of these,\ncarrying its own `source` string (the module and record the claim was\nread from) so nothing in the pane is asserted without a traceable origin.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "claim": {
+            "title": "Claim",
+            "type": "string"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "claim",
+          "source"
+        ],
+        "title": "EvidenceItemRead",
         "type": "object"
       },
       "ExecutionRead": {
@@ -23046,6 +23118,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -47920,6 +47999,134 @@
         "summary": "Create Asset Documentation Version",
         "tags": [
           "glossary-and-documentation"
+        ]
+      }
+    },
+    "/v1/metadata/tables/{table_id}/evidence": {
+      "get": {
+        "operationId": "get_asset_evidence_v1_metadata_tables__table_id__evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetEvidenceRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Asset Evidence",
+        "tags": [
+          "asset-evidence"
         ]
       }
     },

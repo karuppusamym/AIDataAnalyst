@@ -3253,6 +3253,35 @@ class CatalogRowRead(ApiModel):
     updated_at: datetime
 
 
+class EvidenceItemRead(ApiModel):
+    """UX-13: one claim in an asset's evidence pane.
+
+    Every fact composed onto `AssetEvidenceRead` -- an ownership assignment,
+    an open incident, a consumption event, an AI decision -- is one of these,
+    carrying its own `source` string (the module and record the claim was
+    read from) so nothing in the pane is asserted without a traceable origin.
+    """
+
+    # BUSINESS_MEANING | OWNERSHIP | CERTIFICATION | DATA_QUALITY | CONSUMPTION | AI_DECISION
+    category: str
+    claim: str
+    source: str
+    occurred_at: datetime | None = None
+
+
+class AssetEvidenceRead(ApiModel):
+    """UX-13: `GET /v1/metadata/tables/{id}/evidence` -- composes business
+    meaning, ownership/certification (GL-2/GL-5), data quality, consumption
+    lineage (CX-4) and AI decision lineage including refusals (LN-3) for one
+    table. See `aida.asset_evidence` for how each `items` entry is sourced.
+    """
+
+    table_id: UUID
+    table_name: str
+    generated_at: datetime
+    items: list[EvidenceItemRead]
+
+
 # --- ADR-0018: three-axis tenancy -------------------------------------------
 
 
