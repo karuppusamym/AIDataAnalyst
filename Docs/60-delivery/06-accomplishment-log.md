@@ -7239,6 +7239,24 @@ openapi-baseline.json` regenerated (`--accept-baseline`); `ui-next/src/lib/types
 the live schema (`scripts/generate_ui_types.py` reported no diff -- no new Pydantic schema was added,
 only two paths reusing `GlossaryConflictRead`/`Page`).
 
+A full-suite run afterward (`AIDA_ENVIRONMENT=development uv run pytest -q`) surfaced one real gap
+this row's own targeted runs above had not covered: `tests/test_event_catalog_gate.py`'s
+`test_every_emitted_event_type_is_documented_or_known_st14_drift` failed on the new
+`semantic.metric_conflict_raised.v1` literal, which `record_outbox()` in `semantic_api.py` emits but
+which had no row in `Docs/30-contracts/04-event-catalog.md`. Fixed by adding that row (Semantics and
+glossary section, next to `glossary.conflict_raised.v1`, noting it resolves through the same
+`glossary.conflict_resolved.v1` path) rather than adding it to the test's `KNOWN_ST14_DRIFT`
+exemption -- this is a genuinely new event, not a rename collision. `tests/test_event_catalog_gate.py`
+green afterward (exit 0, no `FAILED`/`ERROR` lines -- this environment's pytest prints no final summary
+count line, so exit code plus absence of failure lines is the check, same as AT-6's own note). The
+same full-suite run's other failure, `tests/test_config.py::test_environment_must_be_explicit_outside_tests`,
+was confirmed pre-existing and unrelated: it reproduces identically on a clean checkout of `14d2b6e`
+(the commit immediately before this row's own work began) run with the exact same
+`AIDA_ENVIRONMENT=development` invocation this repo's own test-running instructions require -- the
+test asserts `Settings` raises when `AIDA_ENVIRONMENT` is unset in the *process* environment, which
+conflicts with that invocation's own env var, not with anything this row changed. Left as-is,
+untouched, and reported rather than silently worked around.
+
 ---
 
 ## 2026-09-01 — AT-5 closed: query-history-ranked documentation worklist for stewards
