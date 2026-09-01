@@ -5330,3 +5330,80 @@ confirmed unrelated to this row too, untouched here.
 `03 ingestion`, `04 catalog`, and `20 observability_audit` (needs
 `python scripts/generate_module.py observability_audit` to scaffold, same as this row did for
 connectivity) are still TODO.
+
+## 2026-09-01 — UX-14: `ui-next` API types generated from the live OpenAPI document
+
+`ui-next/src/lib/types.ts` was hand-written, with its own header admitting the plan: "the moment
+this file drifts, the right fix is to generate it from the FastAPI OpenAPI document ... not to
+patch it by hand." This closes that gap, following the exact `--accept-baseline` baseline-diff-gate
+idiom `scripts/openapi_diff.py` (TS-4) and `scripts/perf_baseline.py` (PF-3) already established in
+this repo.
+
+### What was built
+
+`scripts/generate_ui_types.py` loads `app.openapi()` (same call `openapi_diff.py` uses) and converts
+every entry in `components.schemas` (360 today) to a TypeScript `export interface`, by mechanical
+JSON-Schema-to-TS conversion: `$ref` -> the referenced name, `enum`/`const` -> a literal union,
+`anyOf`/`oneOf` -> a `|` union (how pydantic v2 expresses `Optional[X]`), arrays, objects with
+`properties` or `additionalProperties`, and the four JSON primitive types. Default (check) mode
+diffs the generated text against the committed `ui-next/src/lib/types.ts` and exits 1 on any
+difference, printing a unified diff; `--accept-baseline` regenerates and writes the file for a
+deliberate, reviewed commit -- identical shape to the other two gates' own flag.
+
+One documented special case: `CursorPage.items` is `list[Any]` in `schemas.py` by the class's own
+design (its docstring explains why), and every route returning one declares
+`response_model=CursorPage` unparameterized -- so the OpenAPI document itself cannot say what
+populates any given endpoint's page. Rather than mechanically emit `items: unknown[]` and force a
+cast at every call site, the generator keeps `CursorPage<T = unknown>` generic while still rendering
+`limit`/`offset`/`total`/`next_cursor` mechanically from the live schema, so a real change to any of
+those four is still caught as drift.
+
+A more consequential honesty check came out of the same walk: `CatalogRowRead` and
+`MetadataTableRead` -- both exported by the old hand-written `types.ts` and used throughout
+`ui-next` -- are **not in `app.openapi()`'s `components.schemas` at all**. `GET
+/v1/organizations/{org}/catalog/rows` and `GET /v1/datasources/{id}/tables` (`src/aida/api.py:1874`,
+`:1815`) both declare `response_model=CursorPage` unparameterized, so FastAPI's schema walker never
+reaches either model even though both endpoints return exactly that shape at runtime. Fixing that is
+a `response_model` change in `src/aida/api.py` -- backend business logic outside this item's declared
+scope (`ui-next/**`, a codegen script, CI config). Rather than silently keep the old shape inside the
+"generated" file (which would defeat the entire point of the gate), those two types -- plus the
+front-end-only `Persona`, `CertificationStatus`, `QualityState`, and two narrowing helpers
+(`asPersona`, `asIdentityProvider`) -- now live by hand in a new, explicitly-labeled
+`ui-next/src/lib/ui-types.ts`, with the same explanation repeated in that file's banner comment and
+in `generate_ui_types.py`'s module docstring, so the gap is a documented, findable follow-up rather
+than something the generator quietly papers over.
+
+Regenerating from the live schema also surfaced a real, previously-undetected drift: the evidence
+pane's fixture and rendering code used a `label`/`value`/`kind` shape that never matched UX-13's
+actual `AssetEvidenceRead`/`EvidenceItemRead` wire shape (`category`/`claim`/`source`/`occurred_at`)
+-- `USE_FIXTURES` defaulting to true meant this had never been exercised against the real endpoint.
+Fixed in `EvidencePane.tsx` (renders `category`/`claim`/`source` directly, category-only styling
+since the payload carries no severity), `fixtures.ts` (`makeFixtureEvidence` now returns the real
+`AssetEvidenceRead` shape), and `api.ts` (`fetchAssetEvidence` typed as `Promise<AssetEvidenceRead>`).
+Every other consumer (`CatalogTable.tsx`, `CatalogScreen.tsx`, `App.tsx`, `PersonaNav.tsx`) now
+imports the right type from the right file (`./types` for generated, `./ui-types` for hand-written).
+
+CI: `.github/workflows/ci.yml` gets two new jobs. `ui-types-diff` runs
+`uv run python scripts/generate_ui_types.py` (check mode) -- fails the build on any drift between
+`schemas.py`/`platform_schemas.py` and the committed `types.ts`. `ui-next` runs `npm ci` then
+`tsc --noEmit`, `vitest run`, and `vite build` against the committed generated types -- `ui-next` had
+no CI coverage at all before this row, so this also closes that separate, adjacent gap the same PR
+touches.
+
+### Verification
+
+`uv run python scripts/generate_ui_types.py` (default/check mode) against the current schema:
+`ui-next/src/lib/types.ts matches the current OpenAPI schema (360 schemas).`, exit 0. Confirmed the
+gate actually gates: appended a bogus `export interface Bogus {...}` to the committed file, re-ran
+the script -- printed a unified diff and `::error::.../types.ts is stale against the current OpenAPI
+schema.`, exit 1 -- then restored the file and re-ran to confirm exit 0 again. `cd ui-next && npm run
+typecheck` clean (`tsc --noEmit`, strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`).
+`npm run test` -- 12/12 tests pass (`PersonaNav.test.tsx`, `App.test.tsx`). `npm run build` --
+`tsc -b && vite build` clean, `dist/` produced. All four commands re-run clean after rebasing onto
+the concurrently-landed ST-05/ST-06 `connectivity` schema split (`48456be`), with
+`generate_ui_types.py` re-confirmed still matching post-rebase (no drift introduced by that
+concurrent change). `ruff check scripts/generate_ui_types.py` clean; `mypy` on it standalone reports
+only the same `aida.main` untyped-import note `scripts/openapi_diff.py` reports standalone too (CI's
+`mypy` job scopes to `mypy src` only, so neither script is gated there -- pre-existing, unrelated to
+this row, confirmed by running the same check against `openapi_diff.py`). No `models.py`/
+`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
