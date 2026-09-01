@@ -49,7 +49,13 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aida", "src/atlas"]
+# TL-5: `sdk/aida_tool_sdk` is the public Tool SDK -- a separate top-level
+# package from `aida`/`atlas` (third-party developers only need it, not the
+# rest of the platform), colocated here the same way `src/atlas` already is,
+# since there is no established "public SDK as its own distribution"
+# precedent yet in this repo (CN-6, the sibling public-connector-SDK tracker
+# row, is itself still TODO).
+packages = ["src/aida", "src/atlas", "sdk/aida_tool_sdk"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"

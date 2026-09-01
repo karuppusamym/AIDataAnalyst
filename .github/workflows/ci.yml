@@ -134,7 +134,11 @@ jobs:
         run: uv run ruff check .
 
       - name: mypy
-        run: uv run mypy src
+        # `sdk/aida_tool_sdk` (TL-5) is checked in the same invocation as `src`
+        # rather than separately: run alone it resolves `aida` from the
+        # installed (stub-less) package instead of local source and fails
+        # with import-untyped errors, since it isn't under `src`.
+        run: uv run mypy src sdk/aida_tool_sdk
 
       - name: import-linter (architecture contracts)
         run: uv run lint-imports

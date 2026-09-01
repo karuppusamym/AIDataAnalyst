@@ -6021,3 +6021,92 @@ branch). Touched only `src/aida/connectors/{oracle,snowflake,bigquery,discovery}
 four connectors' test files needed a single change, because `_build_view_definition`/
 `_build_routine`-style per-dialect functions kept their existing signatures and return types
 throughout; only what called them, and what happened to their output afterward, moved.
+
+---
+
+## 2026-09-01 (continued) — TL-5 closed: Public Tool SDK
+
+A dependency-light SDK so a third-party developer can author a governed-tool candidate offline
+and get it into the existing review/publish pipeline as a DRAFT — never able to bypass
+maker-checker and publish or execute anything itself.
+
+### What it is
+
+New top-level package `sdk/aida_tool_sdk/` (no existing "public SDK" precedent in this repo yet —
+CN-6, the sibling public-connector-SDK row, is itself still TODO — so it's colocated in the same
+wheel as `src/aida`/`src/atlas`, added to `[tool.hatch.build.targets.wheel] packages` in
+`pyproject.toml`):
+
+* `candidate.py` — `ToolCandidate`, a typed dataclass builder (slug, name, description,
+  `datasource_id`, `sql_template`, `dialect`, `parameters`, `allowed_roles`,
+  `semantic_model_version_id`, `example_values`). Its `parameter()` helper is a direct alias for
+  `aida.schemas.ToolParameterDefinition` — not a copy of it — so the same pydantic bounds
+  validation (name pattern, min/max, "sensitive parameters cannot define persisted defaults")
+  already runs at construction time.
+* `validation.py::validate_candidate` — local, offline checks, all reusing real server code:
+  `aida.sql_guard.SqlGuard.validate` for SQL safety (single read-only statement, no mutation, no
+  `SELECT *`, dialect-specific forbidden-function denylist, bounded joins), and
+  `aida.tool_rendering.template_placeholders`/`render_tool_sql` for placeholder-parity checking
+  and a rendering dry-run against `example_values`. The only reimplemented logic is the ~2-line
+  placeholder-vs-declared-parameter set-equality comparison itself, mirrored from
+  `tool_api.py::create_tool_version` (lines ~223-233) since it lives inline in that endpoint
+  function, not in an importable helper — the thing being compared (`template_placeholders`) is
+  still the server's own function.
+* `serialization.py::candidate_to_wire_model`/`candidate_to_draft_payload` — builds the real
+  `aida.schemas.GovernedToolVersionCreate` directly from the candidate (not a hand-assembled dict
+  matching its shape) and calls `.model_dump(mode="json")` on it. This *is* the JSON body
+  `POST /v1/projects/{project_id}/tools` (`aida.tool_api.create_tool_version`) parses — the SDK's
+  serialized draft cannot structurally drift from the wire contract without a pydantic error
+  surfacing in the SDK's own test suite.
+* `client.py::ToolDraftClient.submit_draft` — the SDK's only network-writing method. Validates
+  locally first, then POSTs to the draft-submission endpoint and nothing else. `httpx` is imported
+  lazily inside the method so pure local validation never needs it installed.
+
+### The governance boundary
+
+There is no `publish()`, `approve()`, `certify()`, or `execute()` anywhere on the SDK's public
+surface — checked directly in
+`tests/test_aida_tool_sdk.py::test_sdk_has_no_publish_approve_certify_or_execute_surface`, which
+walks every public member of the package and its exported classes for those words. A drafted tool
+still has to go through `POST /tool-versions/{id}/submit` and the checker's decision on the
+governance-review endpoint (`aida.semantic_api`), both untouched by and unreachable from this SDK.
+
+### Verification
+
+19 tests in `tests/test_aida_tool_sdk.py`: pure local validation/serialization (invalid slug and
+duplicate-parameter-name errors surfacing from the real `GovernedToolVersionCreate` model,
+undeclared/unused placeholder mismatches, three real `SqlGuard` violations including a
+dialect-specific forbidden function `pg_sleep`, a rendering-dry-run type error, and a payload
+round-trip through the real wire model); the HTTP client with `httpx.post` mocked (exact URL/JSON
+payload/auth header sent, a typed `ToolDraftSubmissionError` on server rejection, and proof the
+network is never touched when local validation already failed); the governance-boundary surface
+scan; and two real-database integration tests (in-memory SQLite, mirrors
+`tests/test_tool_registry_ranking_and_impact.py`'s harness) calling the actual
+`create_tool_version` endpoint — one proving a locally-valid SDK payload is genuinely accepted as
+a `DRAFT` (never `approved_by`/`approved_at`), the other proving a table outside the datasource's
+allowlist — the one thing local validation cannot check without live server state — is still
+rejected server-side with HTTP 422, exactly as documented.
+
+`ruff check .` clean. `mypy src sdk/aida_tool_sdk` clean (CI's `mypy` step in `.github/workflows/ci.yml`
+updated to check both directories in one invocation — run alone, `sdk/aida_tool_sdk` resolves
+`aida` from the installed, stub-less package instead of local source and fails on
+`import-untyped`). `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` and
+`tests/test_openapi_diff_gate.py` both clean — no HTTP route added or changed, so neither
+`openapi-baseline.json` nor `ui-next/src/lib/types.ts` needed regenerating. Full-repo
+`uv run pytest` afterward: one failure, `test_config.py::test_environment_must_be_explicit_outside_tests`
+— reproduced identically via `git stash`/`stash pop` on unmodified `HEAD`, the same pre-existing,
+unrelated failure already documented against this exact test in the IN-5f entry above. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+### Known caveat, documented in the package's own docstring
+
+`aida.sql_guard` really is dependency-light on its own (pure `sqlglot`). But `aida.tool_rendering`
+and `aida.schemas` — reused for rendering and the wire-shape model — transitively import
+`aida.models` → `aida.db` → `atlas.platform.db`, which builds a SQLAlchemy async engine and
+validates an `AIDA_ENVIRONMENT`-driven `Settings` object at *import* time (though it never opens a
+connection). Concretely: importing this SDK outside of `pytest` today still requires
+`AIDA_ENVIRONMENT` set and the platform's full dependency set installed, even though nothing in
+the SDK touches a database, the network, or a credential. Pre-existing coupling in
+`aida.schemas`/`aida.tool_rendering`, not introduced here, and out of scope for this row
+(`models.py`/`schemas.py` are read-only for TL-5) — flagged as a follow-up task rather than fixed
+in place.
