@@ -332,7 +332,7 @@ maintained as status.
 | N13 | Federation planner + DuckDB join layer | 8 | **High** | TODO | Must preserve INV-2 — a leaf query per source, each through the gateway |
 | N14 | `validate_sql` tool | 2 | Low | **DONE** | Shares `_run_validation` with `execute`, so validation and execution cannot drift |
 | N15 | Agent registry + evaluation-gated publication | 5 | Medium | TODO | Makes "production-grade agent" evidenced rather than asserted |
-| N16 | Negative knowledge as a context-product section | 2 | Low | TODO | Nearly free — the data is a by-product of review workflows already running |
+| N16 | Negative knowledge as a context-product section | 2 | Low | IN PROGRESS | **Claude (worktree feature/snowflake-dbt-lineage-mcp, claimed 2026-09-01).** Nearly free — the data is a by-product of review workflows already running |
 | N17 | Exemplar store + benchmark suites | 4 | Low | TODO | Accuracy is a curation loop, not a model choice |
 | N18 | Ingestion-time prompt-risk screening | 2 | Low | **DONE** | `src/aida/ingest_screening.py`. Screened once at write; flagged text quarantined, not deleted |
 | N19 | UI rebuild on a real framework | 12+ | Medium | TODO | The one place "start from scratch" is the right call |
