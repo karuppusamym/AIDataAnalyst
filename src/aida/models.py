@@ -50,6 +50,15 @@ from atlas.modules.identity_tenancy.models import (
     WorkspaceAccessRule as WorkspaceAccessRule,
     WorkspaceMembership as WorkspaceMembership,
 )
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.connectivity.models` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.models import DataSource` (etc.) caller keeps working unchanged.
+from atlas.modules.connectivity.models import (
+    ConnectorCertificationRun as ConnectorCertificationRun,
+    DataSource as DataSource,
+)
 from atlas.platform.db import TimestampMixin as TimestampMixin, utc_now as utc_now
 
 
@@ -146,34 +155,6 @@ class AccessPolicy(Base, TimestampMixin):
     origin: Mapped[str] = mapped_column(String(20), default="MANUAL", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class DataSource(Base, TimestampMixin):
-    __tablename__ = "datasource"
-    __table_args__ = (UniqueConstraint("project_id", "name"),)
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    line_of_business_id: Mapped[UUID] = mapped_column(
-        ForeignKey("line_of_business.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    data_domain_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_domain.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    project_id: Mapped[UUID] = mapped_column(
-        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    connector_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    dialect: Mapped[str] = mapped_column(String(50), nullable=False)
-    environment: Mapped[str] = mapped_column(String(30), nullable=False)
-    network_zone: Mapped[str] = mapped_column(String(100), default="default", nullable=False)
-    credential_reference: Mapped[str] = mapped_column(String(500), nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="REGISTERED", nullable=False)
-    max_concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
-    capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class MetadataCatalog(Base, TimestampMixin):
@@ -2771,32 +2752,6 @@ class MetadataIngestionChunk(Base, TimestampMixin):
     change_counts: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="RECEIVED", nullable=False)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class ConnectorCertificationRun(Base, TimestampMixin):
-    """Immutable, attributable connector conformance evidence for one source."""
-
-    __tablename__ = "connector_certification_run"
-    __table_args__ = (
-        Index("ix_connector_cert_source_created", "datasource_id", "created_at"),
-        Index("ix_connector_cert_org_status", "organization_id", "status"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    datasource_id: Mapped[UUID] = mapped_column(
-        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    connector_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    connector_version: Mapped[str] = mapped_column(String(50), nullable=False)
-    suite_version: Mapped[str] = mapped_column(String(50), nullable=False)
-    status: Mapped[str] = mapped_column(String(30), nullable=False)
-    score: Mapped[int] = mapped_column(Integer, nullable=False)
-    checks: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list, nullable=False)
-    initiated_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ContextProduct(Base, TimestampMixin):

@@ -5278,3 +5278,55 @@ touching; grep found only these two.
 `uv run pytest tests/test_connectors_databricks.py tests/test_doc_claims.py -q` — all pass, no
 test asserted `query_history=True` for Databricks. `ruff check src/aida/connectors/databricks.py`
 clean. No `models.py`/`schemas.py`/`contracts.py` touched; no migration added.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `02 connectivity` scaffolded and populated
+
+Second of the five leaf modules. Unlike `identity_tenancy` (scaffolded under ST-01, populated with
+real content here), `connectivity` had no scaffold at all yet -- `scripts/generate_module.py
+connectivity` ran first, generating the standard 13-file anatomy, then it was populated in the same
+pass rather than left empty for a later PR to discover.
+
+### What moved
+
+Two model classes from `aida.models` to `atlas.modules.connectivity.models`: `DataSource` (the
+connector registration -- connection config plus declared `capabilities`) and
+`ConnectorCertificationRun` (immutable conformance evidence per source). Nine schema classes plus
+one constant from `aida.schemas` to `atlas.modules.connectivity.schemas`: `DataSourceCreate`,
+`DataSourceRead`, `DataSourceSummaryRead`, `DataSourceUpdate`, `DataSourceBulkOnboardRequest`,
+`DataSourceBulkOnboardItemRead`, `DataSourceBulkOnboardResultRead`, `ConnectorCapabilityRead`,
+`ConnectorCertificationRead`, and `DATASOURCE_BULK_ONBOARD_MAX_ITEMS` (IN-1's bulk-onboarding cap --
+re-exported because `tests/test_bulk_source_onboarding.py` imports it directly from `aida.schemas`,
+not through a class, so it would otherwise have been a silent breakage the class-only shim pattern
+doesn't catch).
+
+Deliberately **not** moved despite living in the connector-adjacent neighborhood of the old
+`aida.models`: every dbt (`DbtProject`, `DbtArtifactImport`, `DbtResource`, `DbtLineageEdge`),
+OpenLineage (`OpenLineageRunEvent`, `OpenLineageDataset`, `OpenLineageTableEdge`,
+`OpenLineageColumnEdge`), and BI (`BiConnection`, `BiArtifactImport`, `BiReportNode`,
+`BiMetricNode`, `BiReportMetricEdge`, `BiMetricColumnEdge`) class. `04-module-decomposition.md` §9
+is explicit that "dbt is a lineage source, not its own domain" and assigns it to module 09
+(lineage), and the same reasoning covers OpenLineage and BI ingestion -- they stay in `aida.models`
+pending module 09's own extraction pass, not this one.
+
+Same Python-source-location-only scope as the identity_tenancy row: no `schema=` change, no FK
+conversion. Same shim pattern: `aida.models`/`aida.schemas` re-export everything at the old path.
+Added a `connectivity module privacy` import-linter contract, same shape as identity_tenancy's,
+naming `aida.models`/`aida.schemas` as the two sanctioned importers of the private files.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 215 files). `lint-imports` 5 kept, 0 broken (the new
+connectivity contract plus the four pre-existing ones). Route count identical before/after this
+row's change (52/52, confirmed via `git stash` against the identity_tenancy-only commit). Full
+`pytest` suite: zero failures (the OpenAPI baseline drift the identity_tenancy entry noted was
+already fixed upstream and picked up by that row's own rebase, before this row started). `alembic
+heads` still resolves the same pre-existing two heads noted in the identity_tenancy entry --
+confirmed unrelated to this row too, untouched here.
+
+### Remaining in ST-05/ST-06
+
+`03 ingestion`, `04 catalog`, and `20 observability_audit` (needs
+`python scripts/generate_module.py observability_audit` to scaffold, same as this row did for
+connectivity) are still TODO.

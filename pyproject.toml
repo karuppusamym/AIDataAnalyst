@@ -143,6 +143,36 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), connectivity's
+# turn. Same shape and same rationale as the `identity_tenancy module privacy` contract
+# above -- this module was scaffolded (`scripts/generate_module.py connectivity`) and
+# populated with real content in the same pass, so its privacy contract is added here
+# rather than trailing behind as a later, separate PR.
+name = "connectivity module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.connectivity.service",
+  "atlas.modules.connectivity.repository",
+  "atlas.modules.connectivity.models",
+  "atlas.modules.connectivity.schemas",
+  "atlas.modules.connectivity.router",
+  "atlas.modules.connectivity.workers",
+]
+allowed_importers = [
+  "atlas.modules.connectivity.api",
+  "atlas.modules.connectivity.contracts",
+  "atlas.modules.connectivity.service",
+  "atlas.modules.connectivity.repository",
+  "atlas.modules.connectivity.models",
+  "atlas.modules.connectivity.schemas",
+  "atlas.modules.connectivity.router",
+  "atlas.modules.connectivity.workers",
+  "atlas.modules.connectivity.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
 # INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
 # ADR-0004 both name as the enforcement mechanism for the execution choke point.
 # Until now it did not exist, so the platform's most-marketed property was a
