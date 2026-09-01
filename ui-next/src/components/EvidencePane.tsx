@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { CatalogAssetEvidence, CatalogRowRead } from "../lib/types";
+import type { AssetEvidenceRead } from "../lib/types";
+import type { CatalogRowRead } from "../lib/ui-types";
 import { fetchAssetEvidence } from "../lib/api";
 import { Button, Empty, Pill } from "./primitives";
 import "./EvidencePane.css";
@@ -22,7 +23,7 @@ export function EvidencePane({
   row: CatalogRowRead | null;
   onClose: () => void;
 }) {
-  const [evidence, setEvidence] = useState<CatalogAssetEvidence | null>(null);
+  const [evidence, setEvidence] = useState<AssetEvidenceRead | null>(null);
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -74,10 +75,10 @@ export function EvidencePane({
           <div className="evp__load" role="status">Loading evidence…</div>
         ) : (
           <ol className="evl">
-            {evidence.items.map((it) => (
-              <li key={it.label} className={`evi evi--${it.kind ?? "info"}`}>
-                <div className="evi__label">{it.label}</div>
-                <div className="evi__value">{it.value}</div>
+            {evidence.items.map((it, i) => (
+              <li key={`${it.category}-${i}`} className="evi evi--info">
+                <div className="evi__label">{it.category.replace(/_/g, " ")}</div>
+                <div className="evi__value">{it.claim}</div>
                 <div className="evi__source">{it.source}</div>
               </li>
             ))}

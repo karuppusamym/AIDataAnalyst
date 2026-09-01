@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CatalogRowRead } from "../lib/types";
+import type { CatalogRowRead } from "../lib/ui-types";
 import { ApiError, fetchCatalogRows } from "../lib/api";
 import { CatalogTable } from "../components/CatalogTable";
 import { EvidencePane } from "../components/EvidencePane";
@@ -64,8 +64,8 @@ export function CatalogScreen() {
       );
       if (seq !== reqSeq.current) return;
       setRows(page.items);
-      setCursor(page.next_cursor);
-      setTotal(page.total);
+      setCursor(page.next_cursor ?? null);
+      setTotal(page.total ?? null);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       if (seq !== reqSeq.current) return;
@@ -93,7 +93,7 @@ export function CatalogScreen() {
         limit: 100,
       });
       setRows((prev) => [...prev, ...page.items]);
-      setCursor(page.next_cursor);
+      setCursor(page.next_cursor ?? null);
     } catch {
       /* a failed next page leaves what is already loaded intact */
     } finally {

@@ -1,4 +1,4 @@
-import type { Persona } from "../lib/types";
+import type { Persona } from "../lib/ui-types";
 
 /* ---------------------------------------------------------------------------
    UX-1 / module 21 §5: persona navigation bound to the OIDC group contract.

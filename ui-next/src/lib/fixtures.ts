@@ -1,11 +1,5 @@
-import type {
-  CatalogAssetEvidence,
-  CatalogRowRead,
-  CertificationStatus,
-  CursorPage,
-  MeRead,
-  QualityState,
-} from "./types";
+import type { AssetEvidenceRead, EvidenceItemRead, MeRead } from "./types";
+import type { CatalogRowRead, CertificationStatus, CursorPage, QualityState } from "./ui-types";
 import type { CatalogQuery } from "./api";
 
 /* ---------------------------------------------------------------------------
@@ -128,21 +122,25 @@ export async function makeFixtureCatalog(
   };
 }
 
-export async function makeFixtureEvidence(tableId: string): Promise<CatalogAssetEvidence> {
+/** Mirrors the real `AssetEvidenceRead` / `EvidenceItemRead` shape
+ *  (UX-13, ./types.ts — generated from schemas.py) rather than the ad hoc
+ *  label/value/kind shape this fixture used before UX-14: fixture mode and
+ *  live mode now return the same wire shape, so `EvidencePane` renders
+ *  identically regardless of `VITE_USE_FIXTURES`. */
+export async function makeFixtureEvidence(tableId: string): Promise<AssetEvidenceRead> {
   const i = parseInt(tableId.replace("t_", ""), 36);
   const row = rowAt(i);
   await new Promise((r) => setTimeout(r, 70));
 
-  const items: CatalogAssetEvidence["items"] = [
+  const items: EvidenceItemRead[] = [
     {
-      label: "Structure",
-      value: `${8 + (h(i, 71) % 40)} columns · fingerprint ${row.id.slice(2, 8)}`,
+      category: "STRUCTURE",
+      claim: `${8 + (h(i, 71) % 40)} columns · fingerprint ${row.id.slice(2, 8)}`,
       source: "connector discovery · certified adapter",
-      kind: "info",
     },
     {
-      label: "Description",
-      value: row.description
+      category: "BUSINESS_MEANING",
+      claim: row.description
         ? row.description_is_proposed
           ? "Model-proposed, awaiting steward approval"
           : "Approved by steward"
@@ -150,11 +148,10 @@ export async function makeFixtureEvidence(tableId: string): Promise<CatalogAsset
       source: row.description_is_proposed
         ? "semantic_inference.py · ADR-0001: proposal only"
         : "governance review · maker-checker",
-      kind: row.description ? (row.description_is_proposed ? "warn" : "ok") : "bad",
     },
     {
-      label: "Certification",
-      value:
+      category: "CERTIFICATION",
+      claim:
         row.certification === "CERTIFIED"
           ? `Certified, expires ${row.certification_expires_at?.slice(0, 10)}`
           : row.certification === "EXPIRED"
@@ -163,12 +160,10 @@ export async function makeFixtureEvidence(tableId: string): Promise<CatalogAsset
               ? "Revoked after review"
               : "Never certified",
       source: "GL-5 bulk certification lifecycle",
-      kind:
-        row.certification === "CERTIFIED" ? "ok" : row.certification === "NONE" ? "info" : "bad",
     },
     {
-      label: "Quality",
-      value:
+      category: "DATA_QUALITY",
+      claim:
         row.quality === "PASSING"
           ? "All checks passing"
           : row.quality === "INCIDENT_OPEN"
@@ -177,32 +172,33 @@ export async function makeFixtureEvidence(tableId: string): Promise<CatalogAsset
               ? "No observation in 14 days"
               : "No checks configured",
       source: "data_quality.py · ADR-0016 fails closed",
-      kind: row.quality === "PASSING" ? "ok" : row.quality === "UNKNOWN" ? "info" : "bad",
     },
     {
-      label: "Ownership",
-      value: row.owner ?? "Unowned",
+      category: "OWNERSHIP",
+      claim: row.owner ?? "Unowned",
       source: row.owner ? "GL-2 ownership lifecycle" : "GL-6 unowned-asset backlog",
-      kind: row.owner ? "ok" : "warn",
     },
     {
-      label: "Used by",
-      value: `${h(i, 73) % 40} tools · ${h(i, 79) % 12} context products`,
+      category: "CONSUMPTION",
+      claim: `${h(i, 73) % 40} tools · ${h(i, 79) % 12} context products`,
       source: "consumption_lineage.py · CX-4",
-      kind: "info",
     },
   ];
 
   if (row.quality === "INCIDENT_OPEN") {
     items.push({
-      label: "Agent behaviour",
-      value: "Declined for analytical use while the incident is open",
+      category: "AI_DECISION",
+      claim: "Declined for analytical use while the incident is open",
       source: "ai_decision_lineage.py · LN-3 refusal edge",
-      kind: "bad",
     });
   }
 
-  return { table_id: tableId, items };
+  return {
+    table_id: tableId,
+    table_name: row.name,
+    generated_at: new Date().toISOString(),
+    items,
+  };
 }
 
 /* ---------------------------------------------------------------------------

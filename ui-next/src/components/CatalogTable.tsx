@@ -1,6 +1,6 @@
 import { useRef, useCallback } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import type { CatalogRowRead } from "../lib/types";
+import type { CatalogRowRead } from "../lib/ui-types";
 import { Pill, StateDot } from "./primitives";
 import type { Tone } from "./primitives";
 import "./CatalogTable.css";

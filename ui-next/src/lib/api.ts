@@ -1,10 +1,5 @@
-import type {
-  CatalogRowRead,
-  CatalogAssetEvidence,
-  CursorPage,
-  MeRead,
-  MetadataTableRead,
-} from "./types";
+import type { AssetEvidenceRead, MeRead } from "./types";
+import type { CatalogRowRead, CursorPage, MetadataTableRead } from "./ui-types";
 import { makeFixtureCatalog, makeFixtureEvidence, makeFixtureMe } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -115,9 +110,9 @@ export async function fetchTablesLegacy(
 export async function fetchAssetEvidence(
   tableId: string,
   signal?: AbortSignal,
-): Promise<CatalogAssetEvidence> {
+): Promise<AssetEvidenceRead> {
   if (USE_FIXTURES) return makeFixtureEvidence(tableId);
-  return get<CatalogAssetEvidence>(`/v1/metadata/tables/${tableId}/evidence`, signal);
+  return get<AssetEvidenceRead>(`/v1/metadata/tables/${tableId}/evidence`, signal);
 }
 
 /**

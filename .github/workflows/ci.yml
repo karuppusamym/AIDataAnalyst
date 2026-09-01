@@ -19,6 +19,20 @@
 #                    removed response field, narrowed enum, ...) fails CI
 #                    unless acknowledged with an API version bump. See
 #                    `scripts/openapi_diff.py`.
+#   ui-types-diff -- tracker UX-14: `ui-next/src/lib/types.ts` is generated
+#                    from `app.openapi()`'s `components.schemas` by
+#                    `scripts/generate_ui_types.py`; a drift between it and
+#                    what's committed (i.e. a `schemas.py`/`platform_schemas.py`
+#                    change that never regenerated the TypeScript side) fails
+#                    CI instead of surfacing as a runtime `undefined` in the
+#                    browser. Same `--accept-baseline` idiom as `openapi-diff`
+#                    and `perf-baseline` above.
+#   ui-next        -- tracker UX-14: `ui-next` had no CI coverage at all --
+#                    `tsc --noEmit`, `vitest run` and `vite build` never ran
+#                    anywhere but a developer's own machine. This job runs
+#                    all three against the committed (generated) types.ts, so
+#                    a type that doesn't actually match how the app uses it
+#                    fails here even when `ui-types-diff` above is green.
 #   perf-baseline -- tracker PF-3: a small set of fast, deterministic
 #                    in-process hot paths (the SQL guard pipeline, ABAC
 #                    evaluation, hybrid-retrieval fusion ranking, OpenAPI
@@ -184,6 +198,61 @@ jobs:
 
       - name: Breaking-change check against committed baseline
         run: uv run python scripts/openapi_diff.py
+
+  ui-types-diff:
+    name: ui-next OpenAPI type generation gate (UX-14)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Same reason as openapi-diff above: this job imports `aida.main`
+    # outside pytest (to generate the OpenAPI schema `generate_ui_types.py`
+    # converts to TypeScript) and needs this scoped, job-level env var.
+    env:
+      AIDA_ENVIRONMENT: "development"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: ui-next/src/lib/types.ts matches the current OpenAPI schema
+        run: uv run python scripts/generate_ui_types.py
+
+  ui-next:
+    name: ui-next typecheck, build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ui-next
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: ui-next/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: tsc --noEmit (strict, against the committed generated types)
+        run: npm run typecheck
+
+      - name: vitest
+        run: npm run test
+
+      - name: vite build
+        run: npm run build
 
   perf-baseline:
     name: Perf regression gate

@@ -3,7 +3,9 @@ import { CatalogScreen } from "./screens/CatalogScreen";
 import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
 import { PersonaNav } from "./components/PersonaNav";
 import { fetchMe } from "./lib/api";
-import type { MeRead, Persona } from "./lib/types";
+import type { MeRead } from "./lib/types";
+import { asIdentityProvider, asPersona } from "./lib/ui-types";
+import type { Persona } from "./lib/ui-types";
 import "./App.css";
 
 /* ---------------------------------------------------------------------------
@@ -59,8 +61,8 @@ export default function App() {
     return () => controller.abort();
   }, []);
 
-  const identityProvider = me?.identity_provider ?? null;
-  const persona = identityProvider === "OIDC" ? (me?.persona ?? null) : devPersona;
+  const identityProvider = asIdentityProvider(me?.identity_provider);
+  const persona = identityProvider === "OIDC" ? asPersona(me?.persona) : devPersona;
 
   const groups = [...new Set(NAV.map((n) => n.group))];
   const current = NAV.find((n) => n.id === view);
