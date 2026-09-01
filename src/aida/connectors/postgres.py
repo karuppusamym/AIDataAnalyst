@@ -58,6 +58,44 @@ _VIEW_DEFINITION_SQL = """
 # a schema and a name, so the name alone is not an identity and the parameter
 # join has to be on the oid. Restricted to prokind 'f'/'p' because
 # `pg_get_functiondef` raises on aggregate and window functions.
+# CN-3. `information_schema.tables`/`.columns` never list materialized views
+# (relkind 'm') -- that is a documented Postgres limitation of the SQL-standard
+# information_schema, not a version difference -- so a materialized view was
+# never entering `tables` via the primary column query below, and
+# `apply_view_definitions` (`_lookup_table` returning None) was silently
+# dropping its columns *and* its view_definition even though `_VIEW_DEFINITION_SQL`
+# below reads it and DEFAULT_CAPABILITIES.views's own docstring claims coverage
+# of relkind 'v' *and* 'm'. Found by building a real live fixture with a
+# materialized view (tests/test_postgres_version_fixtures.py) -- every existing
+# unit test drives `build_table_map_from_column_rows` directly with hand-built
+# rows, so this gap was invisible to all of them. Reconstructed from
+# `pg_attribute`/`pg_attrdef` in the same row shape `build_table_map_from_column_rows`
+# expects, so the existing assembly pipeline needs no changes -- only this query
+# and the two lines in `discover()` that merge its rows in.
+_MATERIALIZED_VIEW_COLUMN_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        'MATERIALIZED VIEW' AS table_type,
+        a.attname AS column_name,
+        a.attnum AS ordinal_position,
+        format_type(a.atttypid, a.atttypmod) AS data_type,
+        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+        pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef ad
+      ON ad.adrelid = c.oid
+     AND ad.adnum = a.attnum
+    WHERE c.relkind = 'm'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+
 _ROUTINE_SQL = """
     SELECT
         n.nspname AS routine_schema,
@@ -345,6 +383,9 @@ class PostgresConnector(SqlExecutor):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
+            materialized_view_column_rows = await connection.fetch(
+                _MATERIALIZED_VIEW_COLUMN_SQL
+            )
             view_rows = await connection.fetch(_VIEW_DEFINITION_SQL)
             routine_rows = await connection.fetch(_ROUTINE_SQL)
             routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
@@ -359,7 +400,11 @@ class PostgresConnector(SqlExecutor):
         finally:
             await connection.close()
 
-        tables = build_table_map_from_column_rows(rows)
+        # CN-3: materialized-view rows are appended, not merged separately -- they
+        # share the exact row shape `information_schema.columns` rows have, so one
+        # call to `build_table_map_from_column_rows` populates both. See
+        # `_MATERIALIZED_VIEW_COLUMN_SQL` above for why this is necessary at all.
+        tables = build_table_map_from_column_rows([*rows, *materialized_view_column_rows])
         append_aggregated_constraint_rows(tables, constraint_rows)
         apply_table_descriptions(tables, table_description_rows)
         apply_column_descriptions(tables, column_description_rows)

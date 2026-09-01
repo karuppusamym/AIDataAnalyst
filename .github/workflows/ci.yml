@@ -36,6 +36,11 @@
 #                    fails CI. Also (re)publishes `Docs/90-reference/quality-benchmark-
 #                    results.md`. Not the bank-scale 1M-object benchmark tracked
 #                    separately as RT-8/PF-1. See `scripts/quality_benchmark.py`.
+#   connector-version-fixtures -- tracker CN-3: two real PostgreSQL service
+#                    containers (16 and 14), against IN-5d's standing gap that
+#                    no 1.1 discovery statement on any connector had run
+#                    against a live source. See
+#                    tests/test_postgres_version_fixtures.py.
 #   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
 #   migration-drift -- tracker AU-8: Docs/60-delivery/04-end-to-end-audit-2026-08-30.md
 #                    Section 5 found that every DB-backed test builds schema from the ORM
@@ -289,6 +294,69 @@ jobs:
 
       - name: Apply every migration to an empty database and diff against Base.metadata
         run: uv run python -m pytest tests/test_migration_orm_drift.py -v
+
+  connector-version-fixtures:
+    name: Connector version fixtures (CN-3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # tracker CN-3: "at least 2 versions per adapter", against IN-5d's standing
+    # gap that no 1.1 discovery statement on any connector had ever run
+    # against a live source. Same service-container pattern `migration-drift`
+    # above already established, doubled: one container per PostgreSQL major
+    # this pass covers (16 -- current default everywhere else in this repo;
+    # 14 -- oldest still-supported major), each on its own host port since
+    # both live in the same job. See
+    # tests/test_postgres_version_fixtures.py's module docstring for the rest
+    # of this row's scope (PostgreSQL only this pass; SQL Server/Oracle and
+    # the cloud connectors remain) and
+    # tests/fixtures/postgres_versions/compose.yml for the equivalent
+    # standalone local setup.
+    services:
+      postgres16:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: aida
+          POSTGRES_PASSWORD: aida-local-only
+          POSTGRES_DB: aida
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      postgres14:
+        image: postgres:14-alpine
+        env:
+          POSTGRES_USER: aida
+          POSTGRES_PASSWORD: aida-local-only
+          POSTGRES_DB: aida
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AIDA_CN3_POSTGRES16_FIXTURE_DATABASE_URL: "postgresql://aida:aida-local-only@localhost:5432/aida"
+      AIDA_CN3_POSTGRES14_FIXTURE_DATABASE_URL: "postgresql://aida:aida-local-only@localhost:5433/aida"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Discover the real fixture schema against both live Postgres versions
+        run: uv run python -m pytest tests/test_postgres_version_fixtures.py -v
 
   tests:
     name: Tests

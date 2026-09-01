@@ -5036,3 +5036,104 @@ AT-D2, LN-2, LN-5, and N2 (a stale roadmap duplicate of LN-2 that was never flip
 shipped) updated in `03-tracker.md`; `Docs/review-2026-08/atlan-context/03-lineage.md`'s dated
 review of defects (b) and (d) annotated with a "Resolved by AT-D2" note rather than rewritten, to
 keep the historical record honest about what was found and when.
+
+## 2026-09-01 — CN-3 (executable vendor/version fixtures): PostgreSQL 16 live, 14 configured; found and fixed a real materialized-view discovery gap
+
+Tracker row CN-3 asks for "≥2 versions per adapter". Honest scope for this pass: PostgreSQL only,
+of the on-prem adapters (PostgreSQL, SQL Server, Oracle) — the status matrix already credits SQL
+Server with a real Docker fixture and 100-point certification and Oracle with a compose fixture,
+neither with the *version* leg this row is about; BigQuery/Snowflake/Databricks (CN-1c/CN-2a/CN-2b)
+genuinely cannot be version-fixture-tested without live cloud credentials and are unchanged by this
+entry.
+
+### What actually runs
+
+`tests/test_postgres_version_fixtures.py` calls `PostgresConnector.discover()` — the real
+`asyncpg`-driven SQL in `src/aida/connectors/postgres.py`, not a hand-built row like every existing
+test in `tests/test_connectors.py` — against a real fixture schema
+(`tests/fixtures/postgres_versions/schema.sql`) that deliberately exercises every envelope 1.1 axis
+the connector claims in one pass: PRIMARY KEY/UNIQUE/FOREIGN KEY constraints, a secondary index, a
+range-partitioned table with two real partitions, a view, a materialized view, a SQL function, a SQL
+procedure, schema/table/column comments, and a `GRANT ... TO PUBLIC`. This closes tracker row
+`IN-5d`'s standing gap — no 1.1 discovery statement on any connector had ever run against a live
+source before this.
+
+Two versions, both wired through the same DSN-resolution/skip convention
+`tests/test_migration_orm_drift.py` (AU-8) already established — an explicit env-var override wins,
+absence is a `pytest.skip` with a specific reason, never a silent pass:
+
+- **16** ran for real, in the sandbox that built this. This sandbox has a native `postgresql-16`
+  install already reachable at `localhost:5432` with the same `aida`/`aida-local-only` credentials
+  `Settings.database_url` defaults to (the exact same server the AU-8 migration-drift test already
+  uses locally) — no Docker involved at all. `test_postgres_16_version_fixture_discovers_every_axis`
+  and the narrower `test_materialized_view_columns_and_definition_are_discovered` both pass against
+  it.
+- **14** is configured identically but has **not executed live in this pass**. Checked, not assumed:
+  `dockerd` cannot be started in this sandbox (starting it was denied outright by the sandbox's own
+  command classifier — a nested-daemon restriction, not a missing binary: `docker version`'s client
+  half works fine), and this branch's egress proxy returns `403` for `apt.postgresql.org`, so there
+  is no way to install a second Postgres major here either. `tests/fixtures/postgres_versions/compose.yml`
+  is a real, standalone two-service Compose file (`postgres:16-alpine` + `postgres:14-alpine`,
+  distinct host ports so it can run alongside the repo-root dev stack) — syntactically validated with
+  `docker compose config` (works without a daemon) since it could not be brought up. The new
+  `connector-version-fixtures` job in `.github/workflows/ci.yml` provides the same two versions as
+  real GitHub Actions service containers, the identical pattern the `migration-drift` job (AU-8)
+  already established for a single Postgres 16 container — this *will* execute for real on this
+  branch's next CI push; the 14 leg's test locally just skips with a message pointing at both.
+
+### A real bug, found by building a live fixture
+
+`information_schema.tables`/`.columns` never list materialized views (`relkind = 'm'`) — a
+documented Postgres limitation of the SQL-standard `information_schema`, true on every version, not
+a 14-vs-16 difference. `PostgresConnector.discover()` builds its entire table map from exactly those
+two views, so a materialized view's columns and its `view_definition` were being silently dropped
+from every discovered catalog — even though `_VIEW_DEFINITION_SQL` genuinely reads it (`pg_class`
+`relkind IN ('v', 'm')`) and `DEFAULT_CAPABILITIES.views`'s own docstring claims coverage of both.
+No existing unit test could have caught this: every one of them drives `build_table_map_from_column_rows`
+directly with hand-built rows, so the gap only exists in the connection between a *real*
+`information_schema` query and the assembly pipeline, which nothing before this exercised.
+
+Fixed with one added query, `_MATERIALIZED_VIEW_COLUMN_SQL` in `postgres.py`, reconstructing the
+missing rows from `pg_attribute`/`pg_attrdef` in the exact shape `build_table_map_from_column_rows`
+already expects — `discover()` now merges its output into the same row list before building the
+table map, so the rest of the pipeline needed no changes at all. Verified both directions: reverted
+the fix via `git stash` and confirmed the fixture test fails with an unambiguous assertion (the
+materialized view goes missing from `discover()`'s output entirely), then restored it and confirmed
+green again.
+
+### A blocker found and fixed along the way (not this row's own scope, but blocking its exit criterion)
+
+Getting a clean full-suite run hit two Alembic heads: `09be3ab5b008` (AU-8's own ORM-drift
+reconciliation) and `626211c0e077` (an SM-4/PG-4/OB-7 merge point), landed by unrelated concurrent
+sessions on this fast-moving branch without a reconciling merge revision between them. This blocks
+`alembic upgrade head` outright (`test_migration_orm_drift.py` and anything else that runs
+migrations), so it was fixed here even though it has nothing to do with connectors:
+`migrations/versions/9f8d1e8e0134_merge_au_8_orm_drift_reconciliation_.py`, a no-op merge revision,
+generated with `alembic merge` and reformatted to match this repo's existing merge-migration style
+exactly (`str | Sequence[str] | None`, not the raw-template `Union`/unused `op`/`sa` imports).
+
+### Verification
+
+`ruff check .`, `mypy src` (198 files, strict) and `lint-imports` (4 kept) all clean. This row's own
+tests (`tests/test_postgres_version_fixtures.py`, `tests/test_connectors.py`) pass cleanly and
+repeatedly, standalone and inside the full suite. The full `pytest` suite carries two pre-existing
+failures, both confirmed unrelated by diff (neither touches `src/aida/connectors/` or any file this
+row changed) and both flagged as separate follow-up tasks rather than fixed here, out of scope
+discipline: `test_doc_claims.py`'s stale bare-filename citation on tracker row PG-4 (wording left
+over from that row's own ABAC-removal cleanup, unrelated to CN-3), and
+`test_au7_behavioural_authz.py`'s route-gating allowlist not yet reconciled with five routes the
+concurrent OB-6/OB-7/PG-4 work added or re-gated. Beyond those two, the full suite passed cleanly on
+repeated runs; a residual flake — always a *different* single test, reproduced identically on a
+clean stash of every change in this entry — traces to shared-Postgres resource contention under
+4200+ tests in one process, not to anything here.
+
+### Scope note
+
+`src/aida/connectors/postgres.py`, `tests/test_postgres_version_fixtures.py`,
+`tests/fixtures/postgres_versions/`, and the new CI job in `.github/workflows/ci.yml` were the
+intended surface for this row. `migrations/versions/9f8d1e8e0134_...` (the Alembic head merge) and
+one entry added to `tests/test_doc_claims.py`'s `EXEMPT_CONTRACT_SLUGS` (this entry's own CI job name,
+`connector-version-fixtures`, false-positived as an import-linter contract slug by sitting on a
+status-matrix line that separately uses the word "contract" — same established pattern as
+`migration-drift`/`snowflake-connector-python` already in that set) were both necessary to get a
+clean verification run, not scope creep. SQL Server, Oracle, and the cloud connectors are untouched.

@@ -120,6 +120,9 @@ EXEMPT_SRC_PATH_PREFIXES = ("src/atlas",)
 # python` (AU-13 follow-up) is a PyPI package name pinned in `pyproject.toml`, mentioned on
 # the same tracker row that separately explains this very false-positive pattern (using the
 # word "contract" to describe this test), same shape as `python-tds` elsewhere in this file.
+# `connector-version-fixtures` (CN-3) is another CI job name (`.github/workflows/ci.yml`),
+# cited on `02-connectivity.md`'s PostgreSQL status-matrix row, which separately says
+# "Implemented for the current contract" about the adapter itself.
 EXEMPT_CONTRACT_SLUGS = {
     "lint-imports",
     "import-linter",
@@ -129,6 +132,7 @@ EXEMPT_CONTRACT_SLUGS = {
     "docker-build",
     "migration-drift",
     "snowflake-connector-python",
+    "connector-version-fixtures",
 }
 
 # A bare `test_xxx` mention that is a real, non-test artefact, verified by hand:
