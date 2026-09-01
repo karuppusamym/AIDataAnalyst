@@ -5257,3 +5257,24 @@ change only appends new test functions.
 
 Epic backlog EE.10's last **not met** line flipped to **met**; no other acceptance line in that row
 changed.
+
+## 2026-09-01 — AT-D3 closed: Databricks's `query_history` copy of the INV-9 breach
+
+Snowflake's `query_history` capability flag was already fixed to `False` by an earlier row, but
+the tracker row itself stayed open because Databricks's `DEFAULT_CAPABILITIES` still advertised
+`query_history=True` — grep confirms `get_query_history()` does not exist on any connector,
+Databricks included. Same INV-9 failure: a capability flag advertised without an implementation
+behind it.
+
+### Fix
+
+`src/aida/connectors/databricks.py`: flipped `query_history` to `False`, with the same
+explanatory comment Snowflake's copy already carries (why it's `False`, and that it returns to
+`True` only when AT-12 — query-history mining — certifies it). No other connector's flag needed
+touching; grep found only these two.
+
+### Verification
+
+`uv run pytest tests/test_connectors_databricks.py tests/test_doc_claims.py -q` — all pass, no
+test asserted `query_history=True` for Databricks. `ruff check src/aida/connectors/databricks.py`
+clean. No `models.py`/`schemas.py`/`contracts.py` touched; no migration added.
