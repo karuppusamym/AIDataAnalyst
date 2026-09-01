@@ -1,7 +1,7 @@
 # ui-next — Atlas experience shell
 
 The React rebuild of the portal, per
-`Docs/10-architecture/adr/ADR-0020-experience-shell-stack-and-strangle-migration.md`.
+`Docs/10-architecture/adr/ADR-0021-experience-shell-stack-and-strangle-migration.md`.
 
 `ui/` still serves every screen not yet migrated. This app owns routing, navigation,
 persona and chrome from day one; screens marked `legacy` in the nav have not moved
@@ -14,6 +14,22 @@ npm install
 npm run dev        # http://localhost:5174
 ```
 
+## Docker live development
+
+From the repository root, start the platform with the development overlay:
+
+```powershell
+docker compose -f compose.yaml -f compose.dev.yaml up --build -d
+```
+
+Open <http://localhost:5174>. Changes under `ui-next/` are applied through
+Vite hot-module reload; changes under `src/` restart the API automatically.
+The full legacy portal stays available at <http://localhost:3000>; edits under
+`ui/` are served straight from the bind mount after a browser refresh. The
+overlay uses polling so HMR also works reliably with Windows bind mounts.
+Use `docker compose up --build -d` (without the overlay) to return to the
+production-like setup.
+
 Fixtures are on by default, so the Catalog runs without a backend: it generates a
 1,000,000-row catalog lazily and mirrors the server's keyset cursor contract.
 
@@ -21,8 +37,8 @@ Fixtures are on by default, so the Catalog runs without a backend: it generates 
 VITE_USE_FIXTURES=0 npm run dev    # proxies /v1 to the API on :8000
 ```
 
-Fixtures-off needs `GET /v1/organizations/{org}/catalog/rows` (tracker UX-12), which
-does not exist yet. `src/lib/types.ts` is already typed against it.
+Fixtures-off works against `GET /v1/organizations/{org}/catalog/rows` (tracker UX-12).
+The remaining cutover work is migrating the screens that still live under `ui/`.
 
 ```bash
 npm run build      # tsc -b && vite build -> dist/, served by the existing nginx

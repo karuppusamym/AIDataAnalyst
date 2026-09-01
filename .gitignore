@@ -9,6 +9,8 @@ __pycache__/
 htmlcov/
 dist/
 build/
+*.tsbuildinfo
+vite.config.ts.timestamp-*.mjs
 *.egg-info/
 .idea/
 .vscode/
@@ -18,6 +20,7 @@ artifacts/
 
 # Local scratch space for ad hoc reports and repo bundles - never commit these
 scratch/
+_to_delete/
 
 # Claude Code session-local tooling (agent worktrees, etc.) - never commit these
 .claude/
