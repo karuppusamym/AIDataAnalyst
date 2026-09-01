@@ -8777,3 +8777,83 @@ regenerated (purely additive route) and `test_openapi_diff_gate.py` green; `ui-n
 generated types keyed off this baseline (checked — no `openapi-typescript`/similar consumer of
 `openapi-baseline.json` exists in `ui-next`), and this row shipped no UI component, so no
 `ui-next` change was needed.
+
+---
+
+## 2026-09-01 — UX-18 closed: version-specific consumer footer on semantic edit surfaces
+
+"No semantic edit is made blind": a steward opening a metric, glossary term, or semantic model
+version for edit can now see who/what currently consumes *that exact version*, sourced from CX-4
+consumption lineage, without a separate lookup.
+
+### What was checked before anything was built
+
+The row's own stop condition was to verify version-specificity against real data first, not
+assume it. `ConsumptionRecord` (`aida/models.py`) has no separate version column. That could have
+been a blocker, but it isn't: every CX-4 write for a versioned resource already keys `resource_id`
+on that *version row's own primary key*, not a logical/parent id — proven by the existing,
+in-production `context_product_api.py`/`mcp_server.py` writes:
+`resource_type="context_product_version"`, `resource_id=str(version.id)`. `SemanticModelVersion`,
+`SemanticMetricVersion`, and `GlossaryTermVersion` all share that exact shape (a UUID primary key
+per version row, plus a separate integer `version` field and a foreign key back to the logical
+parent), so scoping `get_consumption_for_resource` by `resource_id=str(version.id)` is exactly as
+version-specific as the already-proven context-product case: two versions of the same object are
+two different rows with two different primary keys.
+
+A second finding, stated honestly rather than hidden: no MCP or REST route today records a direct
+per-object consumption edge for a metric/glossary-term/model-version read in isolation — CX-4
+currently only writes `metadata_table` and `context_product_version` reads. A semantic object
+consumed only inside a bundled, published context product is attributed to that
+`context_product_version`, not decomposed back to the object it came from. This means a freshly
+authored draft legitimately shows an empty footer today — the honest answer for a version nothing
+has consumed yet, not a defect in the composition. Populating direct per-object consumption writes
+at MCP/REST read time is future instrumentation work, out of this row's scope (composition +
+wiring, no new persisted state).
+
+### Design
+
+`aida/consumer_footer.py` — `compose_consumer_footer` is a pure aggregation over
+`consumption_lineage.get_consumption_for_resource` (reused verbatim, no new persisted state,
+no new resource_type strings beyond the ones `semantic_api.py`/`glossary_api.py` already write to
+the audit log for these same three version tables). Collapses `ConsumptionRecord` rows to one
+entry per distinct consumer (`consumer_id` + `consumer_type`), keeping the most recent
+channel/timestamp and a per-consumer event count, newest-consumer-first; `total_consumption_events`
+is the exact unbounded count from the same helper's own `COUNT(*)`, `total_consumers` a
+`computed_field` over the (bounded) `consumers` list. Response models
+(`ConsumerFooterRead`/`ConsumerFooterEntryRead`) live in this new module rather than in the
+read-only `aida/schemas.py` — the same precedent SM-7's `GovernanceReviewDiffRead`
+(`aida/semantic_api.py`) and UX-17's `ReviewQueueRead` (`aida/review_queue_schemas.py`) already
+established for this tracker.
+
+Wired as three sidecar `GET .../consumers` endpoints, not embedded into an existing list/read
+response: `/v1/semantic-model-versions/{id}/consumers`, `/v1/semantic-metric-versions/{id}/consumers`
+(`semantic_api.py`), `/v1/glossary-term-versions/{id}/consumers` (`glossary_api.py`). This follows
+UX-13's own "a dedicated small composed endpoint, not folded into a batched list row" idiom rather
+than UX-12's batched-into-the-list pattern: there is no single canonical "get one version for
+edit" response to embed into for any of the three object kinds today (editing happens through the
+`POST .../versions` create-draft flow and the `list_*`/`GET .../metrics` collection endpoints), so
+adding a footer field to every row of those list endpoints would cost a query fan-out on every
+list call for data only relevant while actually editing one object — the same reasoning UX-13
+already applied when it kept evidence out of `catalog_read_model`'s batched list rows.
+
+### Verification
+
+`tests/test_consumer_footer.py`, 11 tests against real in-memory SQLite:
+- pure-composition aggregation (per-consumer event count, most-recent channel/timestamp, total
+  counts, empty-footer-when-never-consumed);
+- `test_does_not_leak_consumers_of_a_different_version` — the row's central claim, tested
+  directly: two version rows, two different consumers each recorded against one version's own
+  `resource_id`, and each composed footer reports only its own version's consumer, never the
+  sibling's;
+- integration tests calling the real wired-in route functions for all three object kinds
+  (version-specific footer end to end, 404 for a missing version, cross-org 403, route
+  registration in `app.openapi()`).
+
+`ruff check` and `uv run mypy src` clean on every touched file (same 44 pre-existing "object not
+callable" errors in unrelated files both before and after this change, confirmed via `git stash`);
+`uv run lint-imports` 8/8 kept; `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q`
+clean. New routes changed `app.openapi()`: `Docs/90-reference/openapi-baseline.json` (480 lines) and
+`ui-next/src/lib/types.ts` (20 lines) regenerated via each script's `--accept-baseline`, both purely
+additive; `cd ui-next && npm run typecheck && npm run test && npm run build` all green (`npm install`
+was needed first — `node_modules` was absent in this worktree). No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
