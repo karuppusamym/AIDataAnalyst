@@ -7392,3 +7392,46 @@ Honest gaps: no live-Postgres verification of the new grouped-aggregate or per-d
 `DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT` and the reused `agent_retrieval_scan_limit` scan bound are
 deliberate cost caps mirroring existing precedent (GL-6, RT-6), not independently tuned against a real
 production query-history size.
+
+## 2026-09-01 — AT-15 closed: relationship-candidate confidence decomposed into named signals
+
+Module 06's own concession: a steward reviewing a `RelationshipCandidate` saw one opaque
+confidence float with no way to tell which underlying signal produced it. This decomposes that
+number into named, budgeted, evidence-attached components rather than inventing a new
+explanation layer on top of it.
+
+### What the real code actually computes
+
+Read `intelligence_api.py`'s two discovery functions before writing anything: `confidence` was
+a plain if/elif ladder — `discover_relationship_candidates` (same-source) always assigned 0.90
+after requiring an exact case-insensitive name match and exact type match;
+`discover_cross_source_relationship_candidates` assigned 0.75/0.65/0.55 depending on how many of
+those two same signals matched only canonically/by type-family instead of exactly. Exactly two
+real comparison signals exist in this code, plus one always-true structural fact (the target
+column is a declared PRIMARY KEY — the discovery loops never pair against anything else). No
+cardinality, FK-corroboration, or query-co-occurrence signal exists in this scoring path, so none
+were invented for the breakdown, per AT-15's own warning against a plausible-sounding but
+fabricated explanation.
+
+### Design
+
+`aida/relationship_intelligence.py` — `RelationshipSignal` (name, score, maximum, reason) and
+`RelationshipCandidateScore` (confidence + `signals: tuple[RelationshipSignal, ...]`,
+`as_evidence()` serializing to a JSON-safe dict), mirroring `aida.connector_health.HealthFactor`.
+`score_relationship_candidate_signals(*, same_source, name_match_exact, type_match_exact)` is
+pure and value-free — every input is a fact already resolved by the caller.
+
+`intelligence_api.py`'s two discovery functions now call it and merge `as_evidence()` additively
+into the `RelationshipCandidate.evidence` JSON field already being built — `evidence["signals"]`
+is new; every existing evidence key is untouched. No `models.py`/`schemas.py` change: `evidence`
+was already a free-form JSON column.
+
+### Verification
+
+`tests/test_relationship_intelligence.py`'s `test_score_relationship_candidate_signals_matches_*`
+proves the decomposition reproduces every one of the four previous fixed confidence values
+(0.90, 0.75, 0.65, 0.55) exactly — this is a decomposition, not a scoring-behavior change.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_relationship_intelligence.py
+tests/test_relationship_intelligence_review.py -q` — 46 passed. `ruff check` clean on all four
+touched files. `test_doc_claims.py` and `test_openapi_diff_gate.py` clean (no route/schema
+change, so no baseline regeneration needed). No Alembic migration touched.

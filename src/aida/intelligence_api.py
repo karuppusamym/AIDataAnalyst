@@ -57,6 +57,7 @@ from aida.relationship_intelligence import (
     ColumnMeta,
     generate_composite_relationship_candidates,
     resolve_canonical_table_id,
+    score_relationship_candidate_signals,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.schemas import (
@@ -1193,6 +1194,17 @@ async def discover_relationship_candidates(
                 or pair in existing_candidate_pairs
             ):
                 continue
+            # AT-15: same-source discovery only ever reaches here after an exact
+            # case-insensitive name match (columns_by_name lookup, above) and an
+            # exact physical-type match (the `continue` above), so both signals
+            # are always at their strongest tier -- score_relationship_candidate_signals
+            # reproduces the previous fixed confidence=0.90 exactly (see
+            # tests/test_relationship_intelligence.py), now with a named
+            # per-signal breakdown a steward can read from `evidence["signals"]`
+            # instead of trusting the bare 0.90.
+            candidate_score = score_relationship_candidate_signals(
+                same_source=True, name_match_exact=True, type_match_exact=True
+            )
             candidate = RelationshipCandidate(
                 organization_id=datasource.organization_id,
                 datasource_id=datasource.id,
@@ -1202,12 +1214,13 @@ async def discover_relationship_candidates(
                 target_table_id=target.table_id,
                 target_column_id=target.id,
                 detection_rule="EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
-                confidence=0.90,
+                confidence=candidate_score.confidence,
                 evidence={
                     "column_name_match": "EXACT",
                     "physical_type_match": "EXACT",
                     "target_is_primary_key": True,
                     "source_values_inspected": False,
+                    **candidate_score.as_evidence(),
                 },
                 created_by=context.principal_id,
             )
@@ -1447,13 +1460,23 @@ async def discover_cross_source_relationship_candidates(
                     )
                     if name_is_literal_exact and type_is_literal_exact:
                         detection_rule = "EXACT_NAME_TYPE_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.75
                     elif name_is_literal_exact or type_is_literal_exact:
                         detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.65
                     else:
                         detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.55
+                    # AT-15: previously this if/elif ladder assigned confidence
+                    # (0.75 / 0.65 / 0.55) directly with no way for a steward to
+                    # see which of the two signals -- name match, type match --
+                    # earned it. score_relationship_candidate_signals reproduces
+                    # each of those three values exactly (see
+                    # tests/test_relationship_intelligence.py) while also
+                    # returning the named per-signal breakdown stored below in
+                    # `evidence["signals"]`.
+                    candidate_score = score_relationship_candidate_signals(
+                        same_source=False,
+                        name_match_exact=name_is_literal_exact,
+                        type_match_exact=type_is_literal_exact,
+                    )
                     candidate = RelationshipCandidate(
                         organization_id=domain.organization_id,
                         datasource_id=other.id,
@@ -1463,7 +1486,7 @@ async def discover_cross_source_relationship_candidates(
                         target_table_id=target.table_id,
                         target_column_id=target.id,
                         detection_rule=detection_rule,
-                        confidence=confidence,
+                        confidence=candidate_score.confidence,
                         evidence={
                             "column_name_match": "EXACT" if name_is_literal_exact else "CANONICAL",
                             "physical_type_match": (
@@ -1474,6 +1497,7 @@ async def discover_cross_source_relationship_candidates(
                             "source_values_inspected": False,
                             "source_datasource": other.name,
                             "target_datasource": pk_owner.name,
+                            **candidate_score.as_evidence(),
                         },
                         created_by=context.principal_id,
                     )
