@@ -1904,6 +1904,7 @@ class UnownedAssetEscalationRead(ApiModel):
     dedup_key: str | None
     routed_at: datetime | None
     escalated_at: datetime | None
+    escalated_tier2_at: datetime | None
     resolved_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -1919,6 +1920,7 @@ class UnownedAssetBacklogRouteResult(ApiModel):
     organization_id: UUID
     routed: list[UnownedAssetEscalationRead]
     escalated: list[UnownedAssetEscalationRead]
+    escalated_tier2: list[UnownedAssetEscalationRead]
     resolved_count: int
 
 

@@ -1766,6 +1766,25 @@ async def route_unowned_asset_backlog(
             event_type="stewardship.unowned_asset_escalated.v1",
             payload={"table_id": str(entry.table_id)},
         )
+    for entry in result.escalated_tier2:
+        record_audit(
+            session,
+            audit_context,
+            action="stewardship.unowned_asset.escalated_tier2",
+            resource_type="unowned_asset_escalation",
+            resource_id=str(entry.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"table_id": str(entry.table_id)},
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_escalated_tier2.v1",
+            payload={"table_id": str(entry.table_id)},
+        )
     for entry in result.resolved:
         record_outbox(
             session,
@@ -1783,6 +1802,9 @@ async def route_unowned_asset_backlog(
         routed=[UnownedAssetEscalationRead.model_validate(entry) for entry in result.routed],
         escalated=[
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
+        ],
+        escalated_tier2=[
+            UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated_tier2
         ],
         resolved_count=len(result.resolved),
     )

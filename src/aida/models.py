@@ -2208,6 +2208,11 @@ class UnownedAssetEscalation(Base, TimestampMixin):
     dedup_key: Mapped[str | None] = mapped_column(String(64))
     routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # GL-6: second escalation tier. An entry still unaddressed this long after its
+    # first (tier-1) escalation is escalated again, unconditionally through ITSM
+    # regardless of what channel tier 1 used -- distinct from `escalated_at`, which
+    # only ever records the tier-1 timestamp.
+    escalated_tier2_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 

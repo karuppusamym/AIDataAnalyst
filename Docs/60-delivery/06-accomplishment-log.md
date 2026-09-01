@@ -9029,3 +9029,76 @@ New route changed `app.openapi()` — `Docs/90-reference/openapi-baseline.json` 
 `ui-next/src/lib/types.ts` regenerated (`MarketplaceFilterResolution`/`MarketplaceDiscoveryResponse`
 added, 18 insertions, 0 deletions). No `models.py`/`schemas.py`/`platform_schemas.py`/
 `contracts.py` file touched and no Alembic migration.
+
+---
+
+## 2026-09-01 — GL-6 closed: multi-tier escalation for the unowned-asset backlog
+
+The unowned-asset backlog's escalation was single-tier: `PENDING` -> `ROUTED` -> `ESCALATED`, then
+nothing. If the tier-1 notification channel had no real delivery configured -- exactly the situation
+the scheduler's own lazily-created default rule leaves an organization in until it configures a real
+channel (`ensure_default_unowned_backlog_notification_rule`'s `channel="EMAIL", recipients=[]`) -- an
+`ESCALATED` entry could sit there indefinitely with no further action, ever.
+
+### Design: tier 2 lives in this module, not the shared engine
+
+`glossary_owner_routing.py` deliberately reuses DQ-1's `aida.notification_routing` engine as-is rather
+than forking it (its own module docstring says so). Extending that shared engine itself to understand
+multiple tiers would have meant touching code `data_quality`'s own incident routing also depends on,
+for a need that is specific to this module's backlog. Instead, tier 2 is a fixed backstop implemented
+entirely in `glossary_owner_routing.sync_unowned_asset_backlog`: an entry still `ESCALATED` and
+unaddressed for `DEFAULT_ESCALATE_TIER2_AFTER` (7 days, configurable via a new keyword parameter) past
+its *own* `escalated_at` -- not from first-detected -- moves to `ESCALATED_TIER_2` and unconditionally
+produces an ITSM payload via the already-shared `format_itsm_payload`, regardless of what channel tier
+1 used. "Unconditional ITSM" was picked over a second configurable notification rule because a second
+rule needs its own condition-matching semantics decision (does it use the *same* matched rule, a
+different one, a new rule shape entirely?) that the exit condition does not ask for and that would
+expand this into designing a second routing dimension; a fixed operational-ticket backstop is what
+"make sure a human owns this" concretely means once tier 1 has already failed to get a response.
+
+### What changed
+
+- `models.py`: new `UnownedAssetEscalation.escalated_tier2_at` column, mirroring the shape of the
+  existing `escalated_at`/`resolved_at` columns -- a genuinely new persisted fact (when tier 2 fired),
+  not something an existing column could carry.
+- `schemas.py`: `UnownedAssetEscalationRead.escalated_tier2_at` (read-through) and a new
+  `UnownedAssetBacklogRouteResult.escalated_tier2` list, alongside the existing `routed`/`escalated`.
+- `glossary_owner_routing.py`: new `DEFAULT_ESCALATE_TIER2_AFTER` constant, new
+  `BacklogRoutingResult.escalated_tier2` list, and the tier-2 check itself -- a new `if entry.status ==
+  "ESCALATED" and entry.escalated_at is not None:` branch after the existing `ROUTED` branch (which
+  gained a `continue` so a same-pass ROUTED->ESCALATED transition can't also fall through to the tier-2
+  check in the same iteration; harmless either way since a freshly-set `escalated_at == now` can never
+  already be past the tier-2 deadline, but the `continue` makes the intent explicit).
+- `scheduler.py` / `stewardship_api.py`: both callers gained a `for entry in result.escalated_tier2:`
+  block emitting the same audit-then-outbox pair the existing `routed`/`escalated` loops already do,
+  and `stewardship_api.py`'s response construction now populates the new `escalated_tier2` field.
+- `Docs/30-contracts/04-event-catalog.md`: documented the new `stewardship.unowned_asset_escalated_tier2.v1`
+  event before it could ever be flagged as undocumented by TS-11's event-catalog gate.
+- `migrations/versions/75838f5c1cea_gl6_tier2_escalation_column.py`: single nullable-column `ALTER
+  TABLE`, generated via `alembic revision` then hand-written (not autogenerate, since no live Postgres
+  was reachable to diff against), verified offline with `alembic upgrade eb8987ff4f66:75838f5c1cea
+  --sql` -- produced exactly the expected single statement, no live database touched.
+
+### Tests
+
+`tests/test_glossary_owner_routing.py` gained
+`test_sync_escalates_to_tier2_past_the_second_deadline` (an `ESCALATED` entry whose `escalated_at` is
+pinned to `2000-01-02` -- unambiguously past the 7-day tier-2 window regardless of when the test runs,
+the same anchor-in-the-past style the existing tier-1 escalation test already uses -- moves to
+`ESCALATED_TIER_2`, produces exactly one ITSM payload, and sets `escalated_tier2_at == now`) and
+`test_sync_does_not_escalate_to_tier2_before_the_second_deadline` (an `ESCALATED` entry whose
+`escalated_at` is `now` stays `ESCALATED`, no ITSM payload, `escalated_tier2_at` stays `None`).
+
+### Verification
+
+`pytest tests/test_glossary_owner_routing.py tests/test_glossary_stewardship.py
+tests/test_fleet_scheduling.py`: 57 passed (55 baseline, +2 new), zero changes in outcome for any
+existing assertion. `ruff check` clean on every touched file. `mypy --strict` clean on every touched
+file except one pre-existing, confirmed-unrelated finding in `scheduler.py`
+(`"object" not callable` on `session_factory()` calls at lines outside this change's diff, present
+both before and after -- checked via `git diff` that none of the flagged lines were touched).
+
+Honest gap: no live Postgres in this sandbox to run the migration for real -- same standing limitation
+as CN-1c/CN-2a/DQ-4/QG-5/QG-6/MG-3 above. The offline `--sql` check confirms the migration is
+syntactically correct and produces the intended DDL, not that it applies cleanly against a real,
+populated `unowned_asset_escalation` table.
