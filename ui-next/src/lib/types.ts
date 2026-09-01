@@ -4090,6 +4090,7 @@ export interface UnownedAssetBacklogRouteResult {
   organization_id: string;
   routed: UnownedAssetEscalationRead[];
   escalated: UnownedAssetEscalationRead[];
+  escalated_tier2: UnownedAssetEscalationRead[];
   resolved_count: number;
 }
 
@@ -4106,6 +4107,7 @@ export interface UnownedAssetEscalationRead {
   dedup_key: string | null;
   routed_at: string | null;
   escalated_at: string | null;
+  escalated_tier2_at: string | null;
   resolved_at: string | null;
   created_at: string;
   updated_at: string;

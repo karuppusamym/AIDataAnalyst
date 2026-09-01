@@ -24480,6 +24480,13 @@
             "title": "Escalated",
             "type": "array"
           },
+          "escalated_tier2": {
+            "items": {
+              "$ref": "#/components/schemas/UnownedAssetEscalationRead"
+            },
+            "title": "Escalated Tier2",
+            "type": "array"
+          },
           "organization_id": {
             "format": "uuid",
             "title": "Organization Id",
@@ -24501,6 +24508,7 @@
           "organization_id",
           "routed",
           "escalated",
+          "escalated_tier2",
           "resolved_count"
         ],
         "title": "UnownedAssetBacklogRouteResult",
@@ -24558,6 +24566,18 @@
               }
             ],
             "title": "Escalated At"
+          },
+          "escalated_tier2_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Escalated Tier2 At"
           },
           "first_detected_unowned_at": {
             "format": "date-time",
@@ -24645,6 +24665,7 @@
           "dedup_key",
           "routed_at",
           "escalated_at",
+          "escalated_tier2_at",
           "resolved_at",
           "created_at",
           "updated_at"
