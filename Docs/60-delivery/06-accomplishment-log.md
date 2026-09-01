@@ -4600,3 +4600,122 @@ the tracker row's file scope — no tool-selection or model-call logic in the or
 The wider blast radius (five extra `src/` files reading the old content columns) was not optional
 scope creep: it is what "the model is identity/pointer only" *means* once enforced by the type
 checker rather than left as an aspiration.
+
+## 2026-09-01 — AG-8 (retrieval and model benchmarks) closed: PF-3's quality/accuracy counterpart, real numbers for what's model-free, honestly framework-only for what needs a live route
+
+### What this closes
+
+Tracker AG-8 ("Retrieval and model benchmarks", exit criterion "Published") was TODO. Explicitly
+out of scope: the bank-scale 1M-object retrieval benchmark tracked separately as RT-8/PF-1, which
+this sandbox has no infrastructure (a populated warehouse-scale catalog, a soak rig) to run. In
+scope: reproducible *quality/accuracy* benchmarks — PF-3 already covers latency — for the two paths
+this fast-moving branch already made genuinely live earlier the same day: the hybrid retrieval stack
+(`retrieval.py::hybrid_retrieve_enhanced`, wired into the real orchestrator per RT-1/RT-2/RT-3/RT-9/
+SM-2) and the model-gateway/agent-generation decision path (module 13's PLANNED/GENERATED states).
+
+### `scripts/quality_benchmark.py` — the same ratchet pattern as `scripts/perf_baseline.py` (PF-3)
+
+`seed_catalog()` builds a small, deterministic, synthetic-but-structured retail-bank catalog —
+`uuid5`-derived ids (not `uuid4()`-random, so it is byte-for-byte reproducible across machines and
+runs, the same technique PF-3's own policy-engine benchmark already uses), ten tables across
+distinct subject areas, one real `MetadataConstraint` foreign key (`fact_orders` → `dim_customer`,
+so graph expansion has a real edge to walk), and one governed tool bound to `dim_customer` — the
+same seeded-scenario shape `tests/test_rt7_quality_trust_ranking.py` and
+`tests/test_agent_orchestrator_retrieval_wiring.py` already use, just broader. No production data is
+read or required.
+
+Two corpora are committed as fixtures, matching QG-1's own `tests/fixtures/adversarial_sql_corpus/
+*.json` convention:
+
+- `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` — 12 (question, expected
+  object, acceptable-rank-bound) cases, run through the *real* live
+  `aida.agent_intelligence.GovernedRetriever.retrieve` (→ `hybrid_retrieve_enhanced`), never a mock
+  or a reimplementation. Every expected rank in the corpus was captured empirically (a real run
+  against the real code), not hand-guessed — including a couple of deliberately-not-rank-1 cases
+  (a lexically-strong governed-tool match legitimately outranking the table a query is "about"),
+  because a corpus where every case is a trivial rank-1 hit would not be exercising the fusion
+  ranking it claims to benchmark.
+- `tests/fixtures/quality_benchmark_corpus/tool_selection_corpus.json` — 5 cases run through the real
+  `aida.agent_intelligence.GovernedPlanner.plan` (the same tool-first/generation-fallback decision
+  the live orchestrator's PLANNED state makes): approved-tool selection, role-denial falling back to
+  controlled SQL, role-denial requiring `MODEL_GENERATION` when no SQL candidate exists, and the
+  equivalent pair when no tool is eligible at all. This needs no live model route — tool-first
+  selection happens entirely upstream of GENERATED — so it is real, model-free evidence for exactly
+  the "expected tool/answer selection" half of AG-8's ask that credentials cannot gate.
+
+### Measured with real numbers
+
+Retrieval: hit@1 **0.8333**, recall-within-corpus-bound **1.0**, MRR **0.9028** (12 cases). Tool/
+generation-path selection: pass rate **1.0** (5 cases). Both compared against a committed, ratcheted
+baseline (`Docs/90-reference/quality-benchmark-baseline.json`, 5-percentage-point threshold,
+`--accept-baseline` to update deliberately and auditably, exactly like PF-3's and TS-4's own
+baselines) and published in a generated, timestamped, reproducible results report
+(`Docs/90-reference/quality-benchmark-results.md`) — re-running `uv run python
+scripts/quality_benchmark.py` regenerates it byte-for-byte identically except for the timestamp,
+since nothing in the corpus or the seeded catalog is random or wall-clock-dependent.
+
+The vector-similarity signal is real, genuinely-invoked code (`retrieval.py`'s Stage 2 really runs
+`resolve_embedding_provider` and really tries to embed), not stubbed out — but this sandbox has no
+`OPENAI_API_KEY`/`GEMINI_API_KEY` embedding credentials configured, so it is honestly skipped
+(`EMBEDDING_PROVIDER_NOT_CONFIGURED`) and the report says so explicitly rather than presenting a
+partial run as a complete one. The measured numbers above are the real fused result of lexical +
+graph + fusion with that one signal absent.
+
+### Honestly framework-only: model-generation *text* quality
+
+Scoring actual generated SQL/answer quality requires an approved, selected, credentialed,
+adapter-registered, explicitly-enabled model route — module 15's five independent activation
+conditions, all required. `check_model_generation_posture()` checks the `Settings`-level
+prerequisites (`model_generation_enabled`, `model_route`, an OpenAI or Gemini credential) and reports
+plainly: this sandbox has `model_generation_enabled=False` and neither credential configured, so
+`activatable=False`. No generation numbers are fabricated to fill the gap — the results report says
+so in as many words, and names the deliberate next step (running scenarios through
+`model_gateway.ProviderNeutralModelGateway.structured_completion` against a real approved route) as
+future work once one exists, rather than attempting an uncontrolled live network call from a routine
+benchmark script. `studio_eval.py`'s (ST-A8) mined eval questions were evaluated as a source and
+found not directly reusable for this half: by design (ADR-0014) `StudioEvalQuestion` is value-free —
+it references a real object by id, never the question text or a raw answer — so it cannot supply the
+natural-language questions this half would need even with a live route. Its *pattern* (mine real
+structure into a deterministic, value-free regression corpus rather than inventing one) is exactly
+what this item's own corpora follow instead.
+
+### CI and tests
+
+Wired as a new `quality-baseline` job in `.github/workflows/ci.yml`, alongside `perf-baseline`,
+running `scripts/quality_benchmark.py` as its own gate (same job shape: checkout, `uv sync --extra
+dev`, run). 15 tests in `tests/test_quality_benchmark_gate.py`: pure `find_regressions()` threshold/
+edge-case coverage; named-case spot checks against the real harness (not just an aggregate rate —
+e.g. asserting `governed-tool-top1` resolves at rank 1 and `customer-lookup-tool-outranks` at rank 2,
+by id, not just "the aggregate looks fine"); a real-regression-catching proof
+(`test_gate_catches_retrieval_genuinely_returning_nothing`, monkeypatching
+`GovernedRetriever.retrieve` to return `[]` and confirming `find_regressions` flags the resulting
+`hit_at_1_rate` drop — mirroring PF-3's and `test_openapi_diff_gate.py`'s own "prove the gate catches
+a real regression, not just a synthetic one" definition of done); a deterministic CLI
+accept-baseline/compare round trip (no wall-clock stubbing needed, unlike PF-3 — these metrics don't
+have timing noise); and baseline-freshness checks.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (198 files; `scripts/quality_benchmark.py` itself is outside
+`mypy src`'s `packages = ["aida"]` scope, same as `scripts/perf_baseline.py` — neither is gated by
+this command, matching the existing convention). Full `pytest` suite (`uv run pytest -q`, foreground,
+never backgrounded, run repeatedly across two rebases onto this fast-moving branch's latest commits):
+clean except two pre-existing failures verified unrelated to this diff and left untouched per this
+item's own scope discipline — `test_au7_behavioural_authz.py::test_the_not_role_gated_route_list_stays_closed`
+(new access-review/governance-review routes an in-flight sibling session hasn't added to the
+allowlist yet) and `test_doc_claims.py`'s stale bare `abac.py` citation on the tracker's own PG-4 row
+(left behind by a same-day "Refresh OpenAPI baseline after ABAC removal" commit from another
+session) — neither route gating, ABAC, nor tracker citations are files this item touches. A third,
+genuinely transient failure (`test_migration_orm_drift`'s "multiple head revisions", from a
+concurrent sibling session's in-flight migration) was observed once and resolved itself after that
+session's own "merge migration heads" fix landed and this branch was re-fetched and rebased onto it
+— consistent with this branch's documented many-concurrent-sessions reality, not a bug in this item's
+own code (no migration or model file was touched here).
+
+### Scope note
+
+Stayed within the new benchmark script (`scripts/quality_benchmark.py`), its corpus fixtures
+(`tests/fixtures/quality_benchmark_corpus/`), its baseline/results files
+(`Docs/90-reference/quality-benchmark-{baseline.json,results.md}`), its own test file
+(`tests/test_quality_benchmark_gate.py`), and one CI workflow addition, per this item's own
+instruction. `retrieval.py` and the model-gateway code it benchmarks were read, not modified.
