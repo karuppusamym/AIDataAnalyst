@@ -78,7 +78,7 @@ flowchart TB
 | Agent-vs-human context attribute | **Not implemented** — P0, now a market baseline |
 | Entitlement (edition) | Not implemented |
 | Source-system authorization | **Always ultimately authoritative** — Atlas adds a second, stricter layer and never grants what the source would deny |
-| Row/column policy | Conservative masking; source-native policy synchronization is P0 |
+| Row/column policy | Conservative masking; source-native policy synchronization for unconditional obligations shipped for Postgres RLS (row) and SQL Server DDM (column) — preview + maker-checker apply (QG-2), apply not yet certified against a live source; subject-conditional policies and other sources remain application-level only |
 | Decision logging | Partial — full logging required for auditors |
 
 ## 6. Secrets

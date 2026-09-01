@@ -1,0 +1,63 @@
+# CN-3: standalone, real PostgreSQL version fixtures for
+# tests/test_postgres_version_fixtures.py.
+#
+# Separate from the repo-root `compose.yaml` (the full dev stack) on purpose:
+# this is just the two servers a version-fixture test needs, nothing else, so
+# it can start in seconds and doesn't collide with anything the dev stack
+# already binds on 5432/55432. Distinct host ports (55416/55414) mean it can
+# run alongside the dev stack, not instead of it.
+#
+# Usage:
+#   docker compose -f tests/fixtures/postgres_versions/compose.yml up -d
+#   export AIDA_CN3_POSTGRES16_FIXTURE_DATABASE_URL=postgresql://aida:aida-local-only@localhost:55416/aida
+#   export AIDA_CN3_POSTGRES14_FIXTURE_DATABASE_URL=postgresql://aida:aida-local-only@localhost:55414/aida
+#   uv run pytest tests/test_postgres_version_fixtures.py -v
+#
+# The test applies `schema.sql` itself over asyncpg on every run (idempotent:
+# it DROPs and recreates its own schema first), so no init-script mount is
+# required for the test to pass -- `schema.sql` is mounted below purely for
+# convenience when poking at either server by hand with `psql`.
+#
+# In CI, the `connector-version-fixtures` job in `.github/workflows/ci.yml`
+# provides the same two versions as real GitHub Actions service containers
+# (the same pattern the `migration-drift` job already established for a
+# single Postgres 16 container) rather than using this file directly --
+# Actions services don't support compose files -- but the image tags and
+# credentials are kept identical to this file so "does it behave the same
+# locally and in CI" stays true by construction, not by coincidence.
+name: aida-cn3-postgres-version-fixtures
+
+services:
+  postgres16:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aida
+      POSTGRES_PASSWORD: aida-local-only
+      POSTGRES_DB: aida
+    ports:
+      - "55416:5432"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aida -d aida"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+  postgres14:
+    image: postgres:14-alpine
+    environment:
+      POSTGRES_USER: aida
+      POSTGRES_PASSWORD: aida-local-only
+      POSTGRES_DB: aida
+    ports:
+      - "55414:5432"
+    volumes:
+      - ./schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aida -d aida"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"

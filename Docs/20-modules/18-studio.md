@@ -120,6 +120,7 @@ Studio is **entirely unbuilt**. Current authoring is form-based inside the Atlas
 | Diff view | Not implemented | Required for reviewers |
 | Impact preview | Partial (module 09) | Integrated into submission |
 | Git binding | Not implemented | Optional, Phase C |
+| Usage-derived eval suite | Implemented (ST-A8) | Mined from consumption + BI lineage edges; gates change-set submission |
 
 ## 13. Open work
 
@@ -132,3 +133,13 @@ Studio is **entirely unbuilt**. Current authoring is form-based inside the Atlas
 | ST-5 | Impact preview at submission | P1 |
 | ST-6 | Git binding with Atlas-authoritative sync | P2 |
 | ST-7 | Context product builder | P1 |
+| ST-8 | Usage-derived answer eval suite: mine BI dashboards and query logs for real question patterns, turn them into a regression suite that must pass before a change set can publish | P1 |
+
+**ST-8, added 2026-08-30.** Atlan's Context Engineering Studio auto-generates "hundreds of questions your AI agent needs to answer correctly" from existing BI dashboards and SQL queries, and gates deployment on them passing ([atlan.com/context-engineering-studio](https://atlan.com/context-engineering-studio/) — atlan.com is blocked by this environment's egress proxy; read via search-result summaries, not fetched directly, so verify the exact mechanics before scoping). Studio's test harness (§7) already validates that a semantic object *compiles and executes correctly*; it does not yet validate that an *agent's answer* stays correct as usage evolves — that's the model-risk evaluation-corpus gap already flagged in `00-product/04-competitive-feature-matrix.md` §6 (`Atlas: ◐ control evals only`). ST-8 is the concrete mechanism to close it: derive the eval corpus from real usage (query logs, saved BI questions) rather than hand-authoring it, and re-run it as a regression gate on every change set — the same shape as TS-12's doc-claim regression gate, applied to answer correctness instead of documentation claims.
+
+**ST-8, delivered 2026-08-30 (tracker ID ST-A8).** Built as an extension of the existing change-set/test-harness machinery, not a parallel system — no free-text LLM grading, matching the module's deterministic, value-free shape (ADR-0014). Three new tables (`studio_eval_question`, `studio_eval_run`, `studio_eval_result`; migration `d3f8a1c56e90`) and a mining module (`studio_eval.py`):
+
+- **Mining** (`POST /v1/studio/eval/mine`, org-scoped, idempotent): scans recent `ConsumptionRecord` rows (`resource_type="governed_tool_version"`) into TOOL questions, and BI `BiReportMetricEdge` rows into METRIC questions by resolving the BI field's already-matched physical column (`BiMetricColumnEdge.matched_table_id`/`matched_column_id`, populated by `bi_api.py` at import time) against a `PUBLISHED` `SemanticMetricVersion` defined on the same table+column. One question per distinct object; each stores only an evidence *edge id* and a label built from governed object names (never raw query text or result values).
+- **The gate**: `run_tests` re-validates every mined question a change set's touched items cover, reusing `_validate_metric_item`/`_validate_tool_item` from §7 unchanged, and persists `StudioEvalRun`/`StudioEvalResult`. `submit_change_set` blocks (409, naming the specific regressed question ids) if the latest eval run failed — on top of, not a substitute for, the existing per-item test-status gate.
+- **Proof**: `tests/test_studio_eval.py::test_mined_eval_question_blocks_regressing_change_set` mines a question from a seeded BI edge, submits a change set that sets the metric's aggregation to an invalid value, and asserts the rejection is attributable to the specific mined question (via `StudioEvalResult` evidence and the submit detail), not merely a generic test failure.
+- **Honest gaps**: mining is an explicit API call, not a scheduled sweep. Regression re-checking is the existing structural/shape validator (§7's "Compilation"/"Validation" rows) applied to a usage-backed snapshot — it is not the deeper "Fixture execution"/"Join validity" kind of check, and a DELETE of an object with a mined question is not itself flagged as a regression (deletes pass unconditionally today, same as any other item). This makes §7's "Regression" row real for the first time — previously nothing re-checked a *previously working* object against anything but its own edit.

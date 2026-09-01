@@ -7,9 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import current_version_alias
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.glossary_owner_routing import TableFacts, sync_unowned_asset_backlog
 from aida.models import (
     AssetCertification,
     AssetDocumentation,
@@ -31,14 +33,15 @@ from aida.models import (
     MetadataColumn,
     MetadataSchema,
     MetadataTable,
+    NotificationRuleRecord,
     OwnershipAssignment,
     OwnershipRule,
     Project,
+    UnownedAssetEscalation,
 )
 from aida.schemas import (
     BulkStewardshipOperationCreate,
     BulkStewardshipOperationRead,
-    CoverageDimensionRead,
     CoverageSnapshotRead,
     GlossaryCategoryCreate,
     GlossaryCategoryRead,
@@ -49,13 +52,18 @@ from aida.schemas import (
     GlossaryLinkProposalRead,
     GlossaryTermDeprecationRequest,
     GovernanceReviewRead,
+    LeaverReassignmentRequest,
     OwnershipAssignmentRead,
     OwnershipRuleCreate,
     OwnershipRuleRead,
     Page,
     StewardshipCoverageRead,
+    UnownedAssetBacklogRouteRequest,
+    UnownedAssetBacklogRouteResult,
+    UnownedAssetEscalationRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -71,6 +79,10 @@ READ_ROLES = (
     "Auditor",
 )
 WRITE_ROLES = ("PlatformAdmin", "MetadataAdmin", "SemanticAdmin", "DataSteward")
+
+# GL-6: matches the 500-row bound coverage scoring already applies to the
+# unowned-table backlog it returns.
+UNOWNED_BACKLOG_ROUTE_LIMIT = 500
 
 
 def _audit_context(context: SecurityContext, organization_id: UUID) -> SecurityContext:
@@ -367,6 +379,170 @@ async def list_bulk_stewardship_operations(
     )
 
 
+# GL-7: matches the 500-item cap every other bulk stewardship contract in
+# this module already enforces (`BulkStewardshipOperationCreate.subject_ids`,
+# CT-1's own `CATALOG_BULK_ACTION_MAX_ITEMS`).
+LEAVER_REASSIGNMENT_MAX_ITEMS = 500
+
+
+@router.post(
+    "/organizations/{organization_id}/stewardship/leaver-reassignment",
+    response_model=BulkStewardshipOperationRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_leaver_reassignment(
+    organization_id: UUID,
+    body: LeaverReassignmentRequest,
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> BulkStewardshipOperation:
+    """GL-7: reassign a leaving principal's *whole* active ownership
+    portfolio -- every ACTIVE `OwnershipAssignment` row it holds, table and
+    glossary-term stewardship alike (any subject_type GL-2's ownership model
+    covers) -- to a successor in one governed action, reusing the exact
+    `BulkStewardshipOperation` / `GovernanceReview` maker-checker contract
+    GL-2/GL-5/GL-8 already established (module 08 SS7) rather than a
+    bespoke mechanism: `_apply_governance_review_decision`'s existing
+    `BULK_STEWARDSHIP_OPERATION` dispatch (`semantic_api.py`) requires no
+    change at all -- it already calls `apply_bulk_operation` generically for
+    whatever `operation_type` the row carries.
+
+    Selection mirrors CT-1's explicit-vs-filter split: an explicit
+    `assignment_ids` list must name only ACTIVE assignments currently owned
+    by `leaving_principal` (409 otherwise), and is capped at
+    `LEAVER_REASSIGNMENT_MAX_ITEMS` by the request schema itself (a 422 over
+    the limit, exactly CT-1's explicit-selection behavior); omitting it
+    discovers the leaving principal's whole current portfolio server-side,
+    capped at the same limit with `truncated=True` recorded in the
+    operation's own parameters -- never silently dropped, CT-1's
+    filter-selection behavior.
+
+    A validated `OwnershipAssignment.id` list is exactly what
+    `BulkStewardshipOperation.subject_ids` holds here
+    (`subject_type="OWNERSHIP_ASSIGNMENT"`), which is what lets one operation
+    span every asset kind the leaver owned -- table *and* term -- in a
+    single governed decision; the other three operation types this module
+    defines are each constrained to one subject_type per operation because
+    their subjects are bare catalog/glossary ids, not already-typed
+    assignment rows.
+
+    Certifications (`AssetCertification.certified_by`) are a historical
+    attestation, not an ownership assignment, and are deliberately out of
+    scope -- consistent with this module's "never last-write-wins"
+    retained-evidence principle (module 08 SS6): reassigning who currently
+    owns a table must never rewrite the historical record of who certified
+    it.
+    """
+    enforce_organization(context, organization_id)
+    if body.assignment_ids is not None:
+        rows = (
+            await session.scalars(
+                select(OwnershipAssignment).where(
+                    OwnershipAssignment.organization_id == organization_id,
+                    OwnershipAssignment.id.in_(body.assignment_ids),
+                    OwnershipAssignment.owner_type == body.owner_type,
+                    OwnershipAssignment.owner_principal == body.leaving_principal,
+                    OwnershipAssignment.status == "ACTIVE",
+                )
+            )
+        ).all()
+        found_ids = {row.id for row in rows}
+        missing = set(body.assignment_ids) - found_ids
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "one or more assignment_ids are not active ownership assignments "
+                    "currently held by leaving_principal"
+                ),
+            )
+        subject_ids = [row.id for row in rows]
+        selection_mode = "EXPLICIT"
+        truncated = False
+    else:
+        candidate_ids = (
+            await session.scalars(
+                select(OwnershipAssignment.id)
+                .where(
+                    OwnershipAssignment.organization_id == organization_id,
+                    OwnershipAssignment.owner_type == body.owner_type,
+                    OwnershipAssignment.owner_principal == body.leaving_principal,
+                    OwnershipAssignment.status == "ACTIVE",
+                )
+                .order_by(OwnershipAssignment.id)
+                .limit(LEAVER_REASSIGNMENT_MAX_ITEMS + 1)
+            )
+        ).all()
+        truncated = len(candidate_ids) > LEAVER_REASSIGNMENT_MAX_ITEMS
+        subject_ids = list(candidate_ids[:LEAVER_REASSIGNMENT_MAX_ITEMS])
+        selection_mode = "FILTER"
+        if not subject_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="leaving_principal has no active ownership assignments to reassign",
+            )
+
+    review = GovernanceReview(
+        organization_id=organization_id,
+        object_type="BULK_STEWARDSHIP_OPERATION",
+        object_id="pending",
+        requested_action="REASSIGN_LEAVER",
+        requested_by=context.principal_id,
+    )
+    session.add(review)
+    await session.flush()
+    operation = BulkStewardshipOperation(
+        organization_id=organization_id,
+        operation_type="REASSIGN_LEAVER",
+        subject_type="OWNERSHIP_ASSIGNMENT",
+        subject_ids=[str(value) for value in subject_ids],
+        parameters={
+            "leaving_principal": body.leaving_principal,
+            "successor_principal": body.successor_principal,
+            "owner_type": body.owner_type,
+            "rationale": body.rationale,
+            "selection_mode": selection_mode,
+            "selection_truncated": truncated,
+        },
+        governance_review_id=review.id,
+        requested_by=context.principal_id,
+    )
+    session.add(operation)
+    await session.flush()
+    review.object_id = str(operation.id)
+    record_audit(
+        session,
+        _audit_context(context, organization_id),
+        action="stewardship.leaver_reassignment.request",
+        resource_type="bulk_stewardship_operation",
+        resource_id=str(operation.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "leaving_principal": body.leaving_principal,
+            "successor_principal": body.successor_principal,
+            "subject_count": len(subject_ids),
+            "selection_mode": selection_mode,
+            "selection_truncated": truncated,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=organization_id,
+        aggregate_type="governance_review",
+        aggregate_id=str(review.id),
+        event_type="governance.review_requested.v1",
+        payload={
+            "review_id": str(review.id),
+            "object_type": review.object_type,
+            "object_id": str(operation.id),
+            "requested_action": "REASSIGN_LEAVER",
+        },
+    )
+    await session.commit()
+    return operation
+
+
 @router.post(
     "/glossary-terms/{term_id}/deprecate",
     response_model=BulkStewardshipOperationRead,
@@ -482,8 +658,15 @@ async def apply_ownership_rule(
     enforce_organization(context, rule.organization_id)
     rows = (
         await session.execute(
-            select(MetadataTable, MetadataSchema)
+            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .outerjoin(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.table_id == MetadataTable.id,
+            )
+            .outerjoin(
+                BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id
+            )
             .where(
                 MetadataTable.organization_id == rule.organization_id,
                 MetadataTable.status == "ACTIVE",
@@ -492,14 +675,22 @@ async def apply_ownership_rule(
             .limit(10_000)
         )
     ).all()
+    pattern = rule.match_pattern.casefold()
     matched: list[UUID] = []
-    for table, schema in rows:
-        candidates = {
-            "TABLE_NAME": table.name,
-            "SCHEMA_NAME": schema.name,
-            "QUALIFIED_NAME": f"{schema.name}.{table.name}",
-        }
-        if fnmatchcase(candidates[rule.match_field].casefold(), rule.match_pattern.casefold()):
+    for table, schema, annotation, domain in rows:
+        if rule.match_field == "TAG":
+            tags = annotation.tags if annotation is not None else []
+            is_match = any(fnmatchcase(tag.casefold(), pattern) for tag in tags)
+        else:
+            candidates = {
+                "TABLE_NAME": table.name,
+                "SCHEMA_NAME": schema.name,
+                "QUALIFIED_NAME": f"{schema.name}.{table.name}",
+                "DOMAIN_KEY": domain.domain_key if domain is not None else None,
+            }
+            value = candidates[rule.match_field]
+            is_match = value is not None and fnmatchcase(value.casefold(), pattern)
+        if is_match:
             matched.append(table.id)
         if len(matched) == 500:
             break
@@ -829,10 +1020,20 @@ async def generate_glossary_link_proposals(
         labels.extend((synonym, "SYNONYM") for synonym in version.synonyms)
         for label, kind in labels:
             label_index.setdefault(label.strip().casefold(), []).append((term, version, kind))
-    annotations = (
-        await session.scalars(
-            select(MetadataBusinessAnnotation)
-            .where(MetadataBusinessAnnotation.organization_id == organization_id)
+    # AT-6: content lives on the current `MetadataBusinessAnnotationVersion`,
+    # not on `MetadataBusinessAnnotation` -- see `business_annotation_versions.py`.
+    annotation_version_alias, annotation_version_ranked = current_version_alias()
+    annotation_rows = (
+        await session.execute(
+            select(MetadataBusinessAnnotation, annotation_version_alias)
+            .join(
+                annotation_version_alias,
+                annotation_version_alias.annotation_id == MetadataBusinessAnnotation.id,
+            )
+            .where(
+                MetadataBusinessAnnotation.organization_id == organization_id,
+                annotation_version_ranked.c.rn == 1,
+            )
             .order_by(MetadataBusinessAnnotation.id)
             .limit(10_000)
         )
@@ -864,9 +1065,11 @@ async def generate_glossary_link_proposals(
             )
         ).all()
     }
-    for annotation in annotations:
-        annotation_labels = [(annotation.business_name, "BUSINESS_NAME")]
-        annotation_labels.extend((value, "ANNOTATION_SYNONYM") for value in annotation.synonyms)
+    for annotation, content_version in annotation_rows:
+        annotation_labels = [(content_version.business_name, "BUSINESS_NAME")]
+        annotation_labels.extend(
+            (value, "ANNOTATION_SYNONYM") for value in content_version.synonyms
+        )
         candidates: dict[UUID, tuple[GlossaryTerm, GlossaryTermVersion, float, str, str]] = {}
         for annotation_label, annotation_kind in annotation_labels:
             normalized = annotation_label.strip().casefold()
@@ -905,7 +1108,7 @@ async def generate_glossary_link_proposals(
                     "strategy": "APPROVED_LABEL_EXACT_MATCH",
                     "matched_label": matched_label,
                     "term_label_kind": term_kind,
-                    "annotation_version": annotation.version,
+                    "annotation_version": content_version.version,
                 },
                 created_by=context.principal_id,
             )
@@ -926,7 +1129,7 @@ async def generate_glossary_link_proposals(
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={
-            "annotations_scanned": len(annotations),
+            "annotations_scanned": len(annotation_rows),
             "approved_terms_scanned": len(term_rows),
             "proposals_created": len(created),
         },
@@ -1007,14 +1210,15 @@ async def submit_glossary_link_proposal(
     return review
 
 
-async def _coverage(
+async def _scope_table_ids(
     session: AsyncSession,
     *,
     organization_id: UUID,
     datasource_id: UUID | None,
     domain_id: UUID | None,
     line_of_business_id: UUID | None,
-) -> StewardshipCoverageRead:
+) -> set[UUID]:
+    """Active table IDs within an organization/source/domain/LOB coverage scope."""
     filters = [
         MetadataTable.organization_id == organization_id,
         MetadataTable.status == "ACTIVE",
@@ -1038,43 +1242,16 @@ async def _coverage(
         )
         filters.append(MetadataTable.datasource_id.in_(lob_source_ids))
     tables = (await session.scalars(select(MetadataTable).where(*filters).limit(10_000))).all()
-    table_ids = {table.id for table in tables}
+    return {table.id for table in tables}
+
+
+async def _owned_table_ids(
+    session: AsyncSession, *, organization_id: UUID, table_ids: set[UUID]
+) -> set[UUID]:
+    """Table IDs within ``table_ids`` that have an active owner, by assignment or
+    approved documentation naming one -- the GL-4 "owned" coverage dimension."""
     if not table_ids:
-        empty = CoverageDimensionRead(covered=0, total=0, percentage=0.0)
-        return StewardshipCoverageRead(
-            organization_id=organization_id,
-            datasource_id=datasource_id,
-            domain_id=domain_id,
-            line_of_business_id=line_of_business_id,
-            table_count=0,
-            overall_score=0.0,
-            dimensions={
-                name: empty
-                for name in (
-                    "documented",
-                    "owned",
-                    "classified",
-                    "certified",
-                    "quality_monitored",
-                    "semantically_mapped",
-                )
-            },
-            unowned_table_ids=[],
-            computed_at=datetime.now(UTC),
-        )
-    documented = set(
-        await session.scalars(
-            select(AssetDocumentation.table_id)
-            .join(
-                AssetDocumentationVersion,
-                AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
-            )
-            .where(
-                AssetDocumentation.table_id.in_(table_ids),
-                AssetDocumentationVersion.status == "APPROVED",
-            )
-        )
-    )
+        return set()
     owned = {
         UUID(value)
         for value in await session.scalars(
@@ -1100,6 +1277,48 @@ async def _coverage(
             )
         )
     )
+    return owned
+
+
+async def _coverage(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID | None,
+    domain_id: UUID | None,
+    line_of_business_id: UUID | None,
+) -> StewardshipCoverageRead:
+    table_ids = await _scope_table_ids(
+        session,
+        organization_id=organization_id,
+        datasource_id=datasource_id,
+        domain_id=domain_id,
+        line_of_business_id=line_of_business_id,
+    )
+    if not table_ids:
+        return build_stewardship_coverage(
+            organization_id=organization_id,
+            datasource_id=datasource_id,
+            domain_id=domain_id,
+            line_of_business_id=line_of_business_id,
+            table_ids=set(),
+            evidence_sets={},
+            computed_at=datetime.now(UTC),
+        )
+    documented = set(
+        await session.scalars(
+            select(AssetDocumentation.table_id)
+            .join(
+                AssetDocumentationVersion,
+                AssetDocumentationVersion.documentation_id == AssetDocumentation.id,
+            )
+            .where(
+                AssetDocumentation.table_id.in_(table_ids),
+                AssetDocumentationVersion.status == "APPROVED",
+            )
+        )
+    )
+    owned = await _owned_table_ids(session, organization_id=organization_id, table_ids=table_ids)
     classified = set(
         await session.scalars(
             select(MetadataColumn.table_id)
@@ -1110,15 +1329,18 @@ async def _coverage(
             .distinct()
         )
     )
-    certified = set(
+    certification_rows = (
         await session.scalars(
-            select(AssetCertification.table_id).where(
+            select(AssetCertification).where(
                 AssetCertification.table_id.in_(table_ids),
-                AssetCertification.status == "ACTIVE",
-                AssetCertification.expires_at > datetime.now(UTC),
+                # CT-5: certification is now also column-scoped; a column's
+                # certification denormalizes its parent table_id but must not
+                # count toward the table's own "certified" coverage dimension.
+                AssetCertification.asset_type != "COLUMN",
             )
         )
-    )
+    ).all()
+    certified = active_certified_table_ids(list(certification_rows), now=datetime.now(UTC))
     policies = (
         await session.scalars(
             select(DataQualityPolicy).where(
@@ -1133,7 +1355,19 @@ async def _coverage(
     ).all()
     quality_monitored = {policy.table_id for policy in policies if policy.table_id in table_ids}
     source_wide = {policy.datasource_id for policy in policies if policy.table_id is None}
-    quality_monitored.update(table.id for table in tables if table.datasource_id in source_wide)
+    if source_wide:
+        table_datasources = (
+            await session.execute(
+                select(MetadataTable.id, MetadataTable.datasource_id).where(
+                    MetadataTable.id.in_(table_ids)
+                )
+            )
+        ).all()
+        quality_monitored.update(
+            table_id
+            for table_id, datasource_id in table_datasources
+            if datasource_id in source_wide
+        )
     semantically_mapped = set(
         await session.scalars(
             select(MetadataBusinessAnnotation.table_id).where(
@@ -1149,24 +1383,13 @@ async def _coverage(
         "quality_monitored": quality_monitored,
         "semantically_mapped": semantically_mapped,
     }
-    dimensions: dict[str, CoverageDimensionRead] = {}
-    for name, evidence in evidence_sets.items():
-        count = len(evidence & table_ids)
-        dimensions[name] = CoverageDimensionRead(
-            covered=count,
-            total=len(table_ids),
-            percentage=round(count * 100 / len(table_ids), 2),
-        )
-    overall = round(sum(value.percentage for value in dimensions.values()) / len(dimensions), 2)
-    return StewardshipCoverageRead(
+    return build_stewardship_coverage(
         organization_id=organization_id,
         datasource_id=datasource_id,
         domain_id=domain_id,
         line_of_business_id=line_of_business_id,
-        table_count=len(table_ids),
-        overall_score=overall,
-        dimensions=dimensions,
-        unowned_table_ids=sorted(table_ids - owned, key=str)[:500],
+        table_ids=table_ids,
+        evidence_sets=evidence_sets,
         computed_at=datetime.now(UTC),
     )
 
@@ -1324,4 +1547,225 @@ async def list_stewardship_coverage_snapshots(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# --- GL-6: unowned-asset backlog routing and escalation --------------------
+
+
+async def _unowned_asset_table_facts(
+    session: AsyncSession, *, organization_id: UUID, table_ids: list[UUID]
+) -> dict[UUID, TableFacts]:
+    if not table_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema, MetadataBusinessAnnotation, BusinessDomain)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .outerjoin(
+                MetadataBusinessAnnotation,
+                MetadataBusinessAnnotation.table_id == MetadataTable.id,
+            )
+            .outerjoin(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.id.in_(table_ids),
+            )
+        )
+    ).all()
+    facts: dict[UUID, TableFacts] = {}
+    for table, schema, annotation, domain in rows:
+        facts[table.id] = TableFacts(
+            table_id=table.id,
+            datasource_id=table.datasource_id,
+            table_name=table.name,
+            schema_name=schema.name,
+            domain_key=domain.domain_key if domain is not None else None,
+            tags=tuple(annotation.tags) if annotation is not None else (),
+        )
+    return facts
+
+
+@router.get(
+    "/organizations/{organization_id}/stewardship/unowned-backlog",
+    response_model=Page,
+)
+async def list_unowned_asset_backlog(
+    organization_id: UUID,
+    backlog_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """The current unowned-asset backlog and where each entry stands in routing."""
+    enforce_organization(context, organization_id)
+    filters = [UnownedAssetEscalation.organization_id == organization_id]
+    if backlog_status:
+        filters.append(UnownedAssetEscalation.status == backlog_status.upper())
+    else:
+        filters.append(UnownedAssetEscalation.status != "RESOLVED")
+    total = await session.scalar(
+        select(func.count()).select_from(UnownedAssetEscalation).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(UnownedAssetEscalation)
+            .where(*filters)
+            .order_by(UnownedAssetEscalation.first_detected_unowned_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[UnownedAssetEscalationRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/stewardship/unowned-backlog/route",
+    response_model=UnownedAssetBacklogRouteResult,
+)
+async def route_unowned_asset_backlog(
+    organization_id: UUID,
+    body: UnownedAssetBacklogRouteRequest = UnownedAssetBacklogRouteRequest(),  # noqa: B008
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> UnownedAssetBacklogRouteResult:
+    """Reconcile the unowned-asset backlog: route aged entries to a candidate
+    owner or stewardship-lead contact, escalate ones still unaddressed, and
+    resolve entries whose table has since been owned.
+
+    Reuses DQ-1's notification-routing engine end to end (see
+    ``aida.glossary_owner_routing``) against this organization's own
+    ``notification-rules`` -- a rule scoped to unowned-asset routing (e.g.
+    ``{"domain": "unowned_asset_backlog"}`` in its conditions) is what makes
+    routing actually dispatch; without one, tables are still tracked and
+    escalation-aged but nothing is routed anywhere.
+    """
+    enforce_organization(context, organization_id)
+    await _validate_coverage_scope(
+        session,
+        organization_id=organization_id,
+        datasource_id=body.datasource_id,
+        domain_id=body.domain_id,
+        line_of_business_id=body.line_of_business_id,
+    )
+    table_ids = await _scope_table_ids(
+        session,
+        organization_id=organization_id,
+        datasource_id=body.datasource_id,
+        domain_id=body.domain_id,
+        line_of_business_id=body.line_of_business_id,
+    )
+    owned = await _owned_table_ids(session, organization_id=organization_id, table_ids=table_ids)
+    unowned_table_ids = table_ids - owned
+
+    existing_rows = (
+        await session.scalars(
+            select(UnownedAssetEscalation).where(
+                UnownedAssetEscalation.organization_id == organization_id,
+                UnownedAssetEscalation.status != "RESOLVED",
+            )
+        )
+    ).all()
+    existing_entries = {row.table_id: row for row in existing_rows}
+
+    ownership_rules = list(
+        await session.scalars(
+            select(OwnershipRule).where(
+                OwnershipRule.organization_id == organization_id,
+                OwnershipRule.status == "ACTIVE",
+            )
+        )
+    )
+    notification_rules = list(
+        await session.scalars(
+            select(NotificationRuleRecord).where(
+                NotificationRuleRecord.organization_id == organization_id,
+                NotificationRuleRecord.enabled.is_(True),
+            )
+        )
+    )
+
+    route_candidates = sorted(unowned_table_ids, key=str)[:UNOWNED_BACKLOG_ROUTE_LIMIT]
+    table_facts = await _unowned_asset_table_facts(
+        session, organization_id=organization_id, table_ids=route_candidates
+    )
+
+    result = sync_unowned_asset_backlog(
+        organization_id=organization_id,
+        unowned_table_ids=unowned_table_ids,
+        existing_entries=existing_entries,
+        table_facts=table_facts,
+        ownership_rules=ownership_rules,
+        notification_rules=notification_rules,
+        now=datetime.now(UTC),
+        route_limit=UNOWNED_BACKLOG_ROUTE_LIMIT,
+    )
+    for entry in result.created:
+        session.add(entry)
+    await session.flush()
+
+    audit_context = _audit_context(context, organization_id)
+    for entry in result.routed:
+        record_audit(
+            session,
+            audit_context,
+            action="stewardship.unowned_asset.routed",
+            resource_type="unowned_asset_escalation",
+            resource_id=str(entry.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_routed.v1",
+            payload={"table_id": str(entry.table_id), "candidate_owner": entry.candidate_owner},
+        )
+    for entry in result.escalated:
+        record_audit(
+            session,
+            audit_context,
+            action="stewardship.unowned_asset.escalated",
+            resource_type="unowned_asset_escalation",
+            resource_id=str(entry.id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={"table_id": str(entry.table_id)},
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_escalated.v1",
+            payload={"table_id": str(entry.table_id)},
+        )
+    for entry in result.resolved:
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="unowned_asset_escalation",
+            aggregate_id=str(entry.id),
+            event_type="stewardship.unowned_asset_resolved.v1",
+            payload={"table_id": str(entry.table_id)},
+        )
+
+    await session.commit()
+
+    return UnownedAssetBacklogRouteResult(
+        organization_id=organization_id,
+        routed=[UnownedAssetEscalationRead.model_validate(entry) for entry in result.routed],
+        escalated=[
+            UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
+        ],
+        resolved_count=len(result.resolved),
     )

@@ -1,0 +1,25 @@
+# Gitleaks configuration -- AU-13 CI secret scanning.
+#
+# Extends gitleaks' built-in ruleset unchanged (every default rule stays
+# active) and adds one narrow, path-based allowlist for the fixture files
+# already in the repo that embed synthetic, obviously-fake token/key-shaped
+# strings for connector-DSN-parsing unit tests (e.g. Databricks
+# "dapi0123456789abcdef", a placeholder BigQuery service-account JSON, and a
+# literal env-var *name* containing "TEST_DSN" that trips the generic-entropy
+# rule). Nothing else is excluded: a real secret anywhere else in the repo,
+# in any commit, still fails the `secret-scan` CI job.
+#
+# Path allowlisting (not commit/fingerprint allowlisting) is deliberate: this
+# branch is rebased frequently by concurrent sessions, which rewrites commit
+# hashes and would silently invalidate a fingerprint-based allowlist.
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Synthetic connector-auth fixtures in unit tests, not real credentials"
+  paths = [
+    '''tests/test_connectors_databricks\.py''',
+    '''tests/test_connectors_bigquery\.py''',
+    '''tests/test_inv6_value_freedom\.py''',
+  ]

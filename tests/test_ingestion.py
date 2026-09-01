@@ -78,6 +78,12 @@ def test_metadata_envelope_is_canonical_and_counted() -> None:
         "tables": 1,
         "columns": 2,
         "constraints": 1,
+        # Envelope 1.1 axes. Always reported, zero for a 1.0 payload, so a
+        # consumer never has to tell "sent none" from "not counted".
+        "views": 0,
+        "routines": 0,
+        "routine_parameters": 0,
+        "grants": 0,
     }
     assert envelope_fingerprint(envelope) == envelope_fingerprint(_envelope(emitted_at=emitted_at))
     discovery = envelope_to_discovery(envelope)
@@ -132,11 +138,30 @@ def test_connector_certification_is_deterministic() -> None:
 
 
 def test_registry_exposes_planned_connectors_without_claiming_implementation() -> None:
+    teradata = connector_registry.definition("teradata")
+
+    assert teradata.implementation_status == "PLANNED"
+    assert "teradata" not in connector_registry.supported_types
+    assert teradata.transports == ("PUSH",)
+
+
+def test_registry_exposes_snowflake_as_implemented() -> None:
     snowflake = connector_registry.definition("snowflake")
 
-    assert snowflake.implementation_status == "PLANNED"
-    assert "snowflake" not in connector_registry.supported_types
-    assert snowflake.transports == ("PUSH",)
+    assert snowflake.implementation_status == "IMPLEMENTED"
+    assert "snowflake" in connector_registry.supported_types
+    assert "PULL" in snowflake.transports
+    assert "PUSH" in snowflake.transports
+
+
+def test_registry_exposes_databricks_as_implemented() -> None:
+    """CN-2b: Databricks moved from `declare_planned` to a real pull adapter."""
+    databricks = connector_registry.definition("databricks")
+
+    assert databricks.implementation_status == "IMPLEMENTED"
+    assert "databricks" in connector_registry.supported_types
+    assert "PULL" in databricks.transports
+    assert "PUSH" in databricks.transports
 
 
 def test_registry_exposes_bigquery_as_implemented() -> None:
@@ -171,6 +196,10 @@ def test_chunked_ingestion_contract_is_order_independent_and_checksum_safe() -> 
         "tables": 2,
         "columns": 4,
         "constraints": 2,
+        "views": 0,
+        "routines": 0,
+        "routine_parameters": 0,
+        "grants": 0,
     }
     assert chunk_fingerprint(first) == chunk_fingerprint(
         MetadataIngestionChunkCreate.model_validate(first.model_dump(mode="json"))
@@ -202,4 +231,6 @@ def test_snapshot_scope_reports_cross_chunk_inventory() -> None:
         "tables": 3,
         "columns": 1,
         "constraints": 0,
+        "indexes": 0,
+        "partitions": 0,
     }

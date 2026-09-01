@@ -100,11 +100,12 @@ Certification v1 records six deterministic control-plane checks: implementation 
 
 | Adapter | Now | Target |
 |---|---|---|
-| PostgreSQL | Implemented for the current contract | Version fixtures, load/cancellation/recovery certification, delegated identity |
+| PostgreSQL | Implemented for the current contract. CN-3: real, executable version fixture for 16 (`tests/test_postgres_version_fixtures.py`, run live against this sandbox's own Postgres 16.13 — found and fixed a real gap, materialized-view columns/definitions silently dropped from `discover()`); 14 configured identically (`tests/fixtures/postgres_versions/compose.yml`, `connector-version-fixtures` CI job) but not yet executed live — no Docker daemon and no PGDG apt access in this pass's sandbox | 14 leg's first live CI run, load/cancellation/recovery certification, delegated identity |
 | Microsoft SQL Server | `BETA` — real Docker fixture, discovery, bounded profiling, SHOWPLAN cost, governed query/masking, 100-point certification | Multi-version, TLS/private-network, delegated-identity certification |
-| Oracle | Adapter code present, `PLANNED` maturity | Complete and certify — Phase A priority |
+| Oracle | `BETA` — native async adapter (`python-oracledb` thin mode), `ALL_TAB_COLUMNS`/`ALL_CONSTRAINTS` discovery, real session-ID capture, LOB-aware bounded profiling, compose fixture. `explain=False` (least-privilege `PLAN_TABLE` path uncertified). Live container verification outstanding | Live container verification, certified EXPLAIN path, delegated identity |
 | BigQuery | `BETA` — discovery via region-qualified INFORMATION_SCHEMA (primary keys; foreign keys honestly omitted, uncertified), dry-run byte estimation gated by a dedicated gateway byte budget, bounded profiling, governed query. Live GCP verification outstanding | Live project verification, multi-region projects, delegated/workload-identity certification |
-| Snowflake, Databricks | `PLANNED` | Phase A |
+| Snowflake | `BETA` — multi-database INFORMATION_SCHEMA discovery, partition-pruned EXPLAIN-JSON cost estimate, approximate-distinct bounded profiling, real `sfqid` capture. Live account verification outstanding | Live account verification, certification, version fixtures |
+| Databricks | `PLANNED` — no adapter code | Phase A |
 | Teradata, Db2 | `PLANNED` | Phase B |
 | Files / APIs / BI | `PLANNED` | Phase B |
 | Connector agents | Not implemented | Phase B — required for restricted zones (whitespace W9) |
@@ -113,8 +114,9 @@ Certification v1 records six deterministic control-plane checks: implementation 
 
 | ID | Item | Priority |
 |---|---|---|
-| CN-1 | Oracle and BigQuery adapters to certified state | P0 |
-| CN-2 | Snowflake and Databricks adapters | P0 |
+| CN-1 | Oracle and BigQuery adapters to certified state (code done; live verification outstanding) | P0 |
+| CN-2a | Snowflake adapter to certified state (code done; live verification outstanding) | P0 |
+| CN-2b | Databricks adapter (no code yet) | P0 |
 | CN-3 | Executable vendor/version certification fixtures | P0 |
 | CN-4 | Source-side connector agent with mTLS | P1 |
 | CN-5 | Delegated / read-only source identities | P0 |

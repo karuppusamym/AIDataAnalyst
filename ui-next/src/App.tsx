@@ -1,0 +1,124 @@
+import { useEffect, useState } from "react";
+import { CatalogScreen } from "./screens/CatalogScreen";
+import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
+import { PersonaNav } from "./components/PersonaNav";
+import { fetchMe } from "./lib/api";
+import type { MeRead, Persona } from "./lib/types";
+import "./App.css";
+
+/* ---------------------------------------------------------------------------
+   The shell.
+
+   Module 21 §5: in production the persona is DERIVED from OIDC group claims,
+   via `GET /v1/me` (persona_api.py), which itself derives it from
+   `oidc.context_from_claims` -- the same configurable claim-path mechanism
+   module 01 already uses for role mapping, extended to groups. The switcher
+   in `PersonaNav` is a development convenience, gated by the identity
+   provider `/v1/me` reports (module 01's existing prod-vs-dev-identity
+   switch): it renders only under the development identity provider, and
+   never under OIDC, where persona is not a user-selectable value. See
+   `PersonaNav.tsx` for the enforcement point itself.
+
+   Nav marked "legacy" still renders from ui/ (the existing portal). This is
+   the strangle seam: the new shell owns routing and chrome from day one, and
+   each screen moves across on its own schedule without a cutover.
+--------------------------------------------------------------------------- */
+
+const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
+  { id: "home", label: "Overview", group: "Work" },
+  { id: "analyst", label: "Ask", group: "Work" },
+  { id: "catalog", label: "Catalog", group: "Discover", ready: true },
+  { id: "marketplace", label: "Marketplace", group: "Discover" },
+  { id: "relationships", label: "Relationships", group: "Discover" },
+  { id: "lineage", label: "Lineage", group: "Understand" },
+  { id: "semantics", label: "Semantics", group: "Understand" },
+  { id: "meaning", label: "Business meaning", group: "Understand" },
+  { id: "governance", label: "Review queue", group: "Govern", ready: true },
+  { id: "quality", label: "Quality", group: "Govern" },
+  { id: "audit", label: "Audit ledger", group: "Govern" },
+  { id: "sources", label: "Sources", group: "Operate" },
+  { id: "operations", label: "Operations", group: "Operate" },
+];
+
+export default function App() {
+  const [view, setView] = useState("catalog");
+  const [me, setMe] = useState<MeRead | null>(null);
+  // The dev switcher's own choice. Irrelevant, and never read, once `me` reports
+  // OIDC -- PersonaNav ignores `onPersonaChange` in that mode -- but kept as
+  // state (rather than derived) so a dev's selection survives re-renders.
+  const [devPersona, setDevPersona] = useState<Persona>("Steward");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchMe(controller.signal)
+      .then(setMe)
+      .catch(() => {
+        // Fail closed (module 01 INV-4): an unreachable /v1/me leaves `me` null,
+        // which PersonaNav renders as nothing rather than guessing a mode.
+      });
+    return () => controller.abort();
+  }, []);
+
+  const identityProvider = me?.identity_provider ?? null;
+  const persona = identityProvider === "OIDC" ? (me?.persona ?? null) : devPersona;
+
+  const groups = [...new Set(NAV.map((n) => n.group))];
+  const current = NAV.find((n) => n.id === view);
+
+  return (
+    <div className="shell">
+      <nav className="snav" aria-label="Main">
+        <div className="snav__brand">
+          <span className="snav__mark" aria-hidden="true" />
+          <span className="snav__name">Atlas</span>
+        </div>
+
+        <PersonaNav
+          identityProvider={identityProvider}
+          persona={persona}
+          onPersonaChange={setDevPersona}
+        />
+
+        {groups.map((g) => (
+          <div key={g} className="snav__group">
+            <div className="snav__ghead">{g}</div>
+            {NAV.filter((n) => n.group === g).map((n) => (
+              <button
+                key={n.id}
+                className="snav__item"
+                data-nav={n.id}
+                aria-current={n.id === view ? "page" : undefined}
+                onClick={() => setView(n.id)}
+              >
+                <span>{n.label}</span>
+                {n.ready ? null : <span className="snav__legacy">legacy</span>}
+              </button>
+            ))}
+          </div>
+        ))}
+      </nav>
+
+      <main className="smain">
+        {view === "catalog" ? (
+          <CatalogScreen />
+        ) : view === "governance" ? (
+          <ReviewQueueScreen />
+        ) : (
+          <div className="stub">
+            <h1>{current?.label}</h1>
+            <p>
+              Still served by the existing portal. Under the strangle plan this screen
+              renders inside the new shell until it is rebuilt — the nav, persona and
+              chrome above are already the new ones.
+            </p>
+            <p className="stub__hint">
+              Catalog is the reference implementation. Every screen that moves across
+              copies its pattern: URL-held state, one abortable request in flight,
+              virtualized list, evidence pane with a permalink.
+            </p>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}

@@ -3,27 +3,12 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
-from aida.models import (
-    BusinessDomain,
-    BusinessEntity,
-    DataSource,
-    DbtArtifactImport,
-    DbtProject,
-    DbtResource,
-    GovernedTool,
-    GovernedToolVersion,
-    MetadataBusinessAnnotation,
-    MetadataColumn,
-    MetadataTable,
-    SemanticMetric,
-    SemanticMetricVersion,
-    SemanticModelVersion,
-)
+from aida.models import DataSource
 from aida.prompt_risk import PromptRiskAssessment
+from aida.retrieval import hybrid_retrieve_enhanced
 
 STOP_WORDS = frozenset(
     {
@@ -81,21 +66,27 @@ class AgentPlan:
     required_parameters: list[str]
     retrieval_object_ids: list[str]
     prompt_risk: dict[str, object] = field(default_factory=dict)
+    tool_decisions: list[dict[str, str]] = field(default_factory=list)
 
     def evidence(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _score(terms: tuple[str, ...], text: str, *, boost: float = 0.0) -> float:
-    if not terms:
-        return 0.0
-    normalized = text.lower().replace("_", " ")
-    matched = sum(term in normalized for term in terms)
-    return min(1.0, round((matched / len(terms)) + boost, 4))
-
-
 class GovernedRetriever:
-    """Value-free lexical retrieval over organization-scoped governed metadata."""
+    """Organization-scoped governed metadata retrieval.
+
+    Delegates to `aida.retrieval.hybrid_retrieve_enhanced` -- lexical BM25 +
+    vector similarity + graph expansion + fusion ranking (RT-1, RT-2, RT-3,
+    RT-9, SM-2) -- rather than the narrower hand-rolled lexical scan this class
+    used to run itself. That scan and this class had drifted into two parallel
+    retrieval implementations: `retrieval.py` was fully built, independently
+    tested, and never called from here, the exact gap
+    `Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` §2 found. Only the
+    result shape is translated back to `RetrievalHit` here; every org/status
+    scoping filter and the business-annotation/glossary-binding reading this
+    class already did correctly now lives in `retrieval.py` (SM-2's own
+    hand-off comment), unchanged.
+    """
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -108,300 +99,78 @@ class GovernedRetriever:
         question: str,
         preferred_tool_version_id: UUID | None = None,
     ) -> list[RetrievalHit]:
-        terms = normalized_terms(question)
-        if not terms:
-            return []
-        name_filters = [func.lower(MetadataTable.name).contains(term) for term in terms]
-        table_rows = (
-            await session.scalars(
-                select(MetadataTable)
-                .where(
-                    MetadataTable.datasource_id == datasource.id,
-                    MetadataTable.organization_id == datasource.organization_id,
-                    MetadataTable.status == "ACTIVE",
-                    or_(*name_filters),
-                )
-                .limit(self.settings.agent_retrieval_scan_limit)
-            )
-        ).all()
-        column_filters = [func.lower(MetadataColumn.name).contains(term) for term in terms]
-        column_rows = list(
-            await session.scalars(
-                select(MetadataColumn)
-                .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
-                .where(
-                    MetadataTable.datasource_id == datasource.id,
-                    MetadataTable.organization_id == datasource.organization_id,
-                    MetadataTable.status == "ACTIVE",
-                    MetadataColumn.status == "ACTIVE",
-                    or_(*column_filters),
-                )
-                .limit(self.settings.agent_retrieval_scan_limit)
-            )
+        """The bounded, read-only retrieval path: every scored candidate, capped
+        at ``agent_retrieval_limit``. Never writes -- used by the retrieval-preview
+        endpoint and the control-evaluation suite as well as the live orchestrator.
+        """
+        hits = await hybrid_retrieve_enhanced(
+            session,
+            datasource=datasource,
+            question=question,
+            settings=self.settings,
+            preferred_tool_version_id=preferred_tool_version_id,
         )
+        return [
+            RetrievalHit(
+                object_type=hit.object_type,
+                object_id=hit.object_id,
+                display_name=hit.display_name,
+                score=hit.score,
+                reason_codes=hit.reason_codes,
+                metadata=hit.metadata,
+            )
+            for hit in hits
+        ]
 
-        metric_rows = (
-            await session.execute(
-                select(SemanticMetricVersion, SemanticMetric)
-                .join(SemanticMetric, SemanticMetric.id == SemanticMetricVersion.metric_id)
-                .join(
-                    SemanticModelVersion,
-                    SemanticModelVersion.id == SemanticMetricVersion.semantic_model_version_id,
-                )
-                .join(MetadataTable, MetadataTable.id == SemanticMetricVersion.source_table_id)
-                .where(
-                    SemanticModelVersion.project_id == datasource.project_id,
-                    SemanticModelVersion.status == "PUBLISHED",
-                    SemanticMetricVersion.status == "PUBLISHED",
-                    MetadataTable.datasource_id == datasource.id,
-                )
-                .limit(self.settings.agent_retrieval_scan_limit)
-            )
-        ).all()
-        tool_rows = (
-            await session.execute(
-                select(GovernedToolVersion, GovernedTool)
-                .join(GovernedTool, GovernedTool.id == GovernedToolVersion.tool_id)
-                .where(
-                    GovernedToolVersion.datasource_id == datasource.id,
-                    GovernedToolVersion.organization_id == datasource.organization_id,
-                    GovernedToolVersion.status == "PUBLISHED",
-                )
-                .limit(self.settings.agent_retrieval_scan_limit)
-            )
-        ).all()
-        dbt_project_ids = list(
-            await session.scalars(
-                select(DbtProject.id).where(
-                    DbtProject.datasource_id == datasource.id,
-                    DbtProject.organization_id == datasource.organization_id,
-                    DbtProject.status == "ACTIVE",
-                )
-            )
-        )
-        latest_artifact_ids: list[UUID] = []
-        if dbt_project_ids:
-            artifact_rows = (
-                await session.scalars(
-                    select(DbtArtifactImport)
-                    .where(DbtArtifactImport.dbt_project_id.in_(dbt_project_ids))
-                    .order_by(
-                        DbtArtifactImport.dbt_project_id,
-                        DbtArtifactImport.created_at.desc(),
-                    )
-                )
-            ).all()
-            seen_projects: set[UUID] = set()
-            for artifact in artifact_rows:
-                if artifact.dbt_project_id not in seen_projects:
-                    latest_artifact_ids.append(artifact.id)
-                    seen_projects.add(artifact.dbt_project_id)
-        dbt_rows = (
-            list(
-                await session.scalars(
-                    select(DbtResource)
-                    .where(DbtResource.artifact_import_id.in_(latest_artifact_ids))
-                    .limit(self.settings.agent_retrieval_scan_limit)
-                )
-            )
-            if latest_artifact_ids
-            else []
-        )
-        business_rows = (
-            await session.execute(
-                select(
-                    MetadataBusinessAnnotation,
-                    BusinessDomain,
-                    BusinessEntity,
-                    MetadataTable,
-                )
-                .join(
-                    BusinessDomain,
-                    BusinessDomain.id == MetadataBusinessAnnotation.domain_id,
-                )
-                .join(
-                    BusinessEntity,
-                    BusinessEntity.id == MetadataBusinessAnnotation.entity_id,
-                )
-                .join(MetadataTable, MetadataTable.id == MetadataBusinessAnnotation.table_id)
-                .where(
-                    MetadataBusinessAnnotation.datasource_id == datasource.id,
-                    MetadataBusinessAnnotation.organization_id == datasource.organization_id,
-                    MetadataTable.status == "ACTIVE",
-                )
-                .limit(self.settings.agent_retrieval_scan_limit)
-            )
-        ).all()
+    async def score_candidates(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        question: str,
+        preferred_tool_version_id: UUID | None = None,
+    ) -> list[RetrievalHit]:
+        """Every candidate the fusion stage ranked, unbounded -- also read-only.
 
-        hits: list[RetrievalHit] = []
-        for annotation, domain, entity, table in business_rows:
-            score = _score(
-                terms,
-                " ".join(
-                    [
-                        annotation.business_name,
-                        annotation.business_description,
-                        domain.display_name,
-                        entity.display_name,
-                        annotation.grain_statement,
-                        " ".join(annotation.synonyms),
-                        " ".join(annotation.suggested_questions),
-                    ]
-                ),
-                boost=0.16,
+        AU-5: the live orchestrator calls this directly (rather than ``retrieve``)
+        so it can see the candidates ``retrieve``'s ``agent_retrieval_limit`` cap
+        would otherwise discard, and record them as ``RETRIEVAL_REJECTED``
+        decision edges itself. Recording lives in the orchestrator, not here, so
+        this module -- also used by the read-only retrieval-preview endpoint --
+        stays free of any write the INV-7 read-only-route gate would trip on.
+
+        `hybrid_retrieve_enhanced` takes no result-limit override of its own --
+        every stage (the lexical scan, the fusion cut) reads
+        ``settings.agent_retrieval_limit`` directly -- so rather than adding one
+        to `retrieval.py` (owned by RT-1/RT-2/RT-3/RT-9/SM-2, landed the same day
+        as this change), a `Settings` copy with `agent_retrieval_limit` widened to
+        `agent_retrieval_scan_limit` (the same bound `hybrid_retrieve`'s own
+        per-object-type candidate fetch already uses) is passed in its place, so
+        nothing the fusion stage ranked is silently dropped before the
+        orchestrator gets a chance to record it as rejected. Every other setting
+        (embedding provider, secrets, fusion weights) is untouched.
+        """
+        widened_settings = self.settings.model_copy(
+            update={"agent_retrieval_limit": self.settings.agent_retrieval_scan_limit}
+        )
+        hits = await hybrid_retrieve_enhanced(
+            session,
+            datasource=datasource,
+            question=question,
+            settings=widened_settings,
+            preferred_tool_version_id=preferred_tool_version_id,
+        )
+        return [
+            RetrievalHit(
+                object_type=hit.object_type,
+                object_id=hit.object_id,
+                display_name=hit.display_name,
+                score=hit.score,
+                reason_codes=hit.reason_codes,
+                metadata=hit.metadata,
             )
-            if score > 0:
-                hits.append(
-                    RetrievalHit(
-                        "BUSINESS_ENTITY",
-                        str(annotation.id),
-                        annotation.business_name,
-                        score,
-                        ["APPROVED_BUSINESS_SEMANTIC_MATCH", "VALUE_FREE_METADATA"],
-                        {
-                            "table_id": str(table.id),
-                            "domain_key": domain.domain_key,
-                            "domain_name": domain.display_name,
-                            "entity_key": entity.entity_key,
-                            "entity_name": entity.display_name,
-                            "table_role": annotation.table_role,
-                            "grain": annotation.grain_statement,
-                            "annotation_version": annotation.version,
-                        },
-                    )
-                )
-        for table_row in table_rows:
-            score = _score(
-                terms,
-                f"{table_row.name} {table_row.source_description or ''}",
-                boost=0.05,
-            )
-            if score > 0:
-                hits.append(
-                    RetrievalHit(
-                        "TABLE",
-                        str(table_row.id),
-                        table_row.name,
-                        score,
-                        ["LEXICAL_NAME_MATCH", "ACTIVE_METADATA"],
-                        {"object_type": table_row.object_type},
-                    )
-                )
-        for column_row in column_rows:
-            score = _score(terms, column_row.name)
-            if score > 0:
-                hits.append(
-                    RetrievalHit(
-                        "COLUMN",
-                        str(column_row.id),
-                        column_row.name,
-                        score,
-                        ["LEXICAL_NAME_MATCH", "CLASSIFICATION_AWARE"],
-                        {
-                            "classification": column_row.classification,
-                            "table_id": str(column_row.table_id),
-                        },
-                    )
-                )
-        for version, metric in metric_rows:
-            score = _score(
-                terms,
-                f"{metric.slug} {version.name} {version.description} {version.grain}",
-                boost=0.12,
-            )
-            if score > 0:
-                hits.append(
-                    RetrievalHit(
-                        "SEMANTIC_METRIC",
-                        str(version.id),
-                        version.name,
-                        score,
-                        ["PUBLISHED_SEMANTIC_MATCH"],
-                        {
-                            "slug": metric.slug,
-                            "aggregation": version.aggregation,
-                            "grain": version.grain,
-                            "source_table_id": str(version.source_table_id),
-                            "measure_column_id": (
-                                str(version.measure_column_id)
-                                if version.measure_column_id
-                                else None
-                            ),
-                            "default_time_column_id": (
-                                str(version.default_time_column_id)
-                                if version.default_time_column_id
-                                else None
-                            ),
-                        },
-                    )
-                )
-        for version, tool in tool_rows:
-            score = _score(
-                terms,
-                f"{tool.slug} {version.name} {version.description}",
-                boost=0.2,
-            )
-            if score > 0 or version.id == preferred_tool_version_id:
-                parameters = version.parameter_schema
-                hits.append(
-                    RetrievalHit(
-                        "GOVERNED_TOOL",
-                        str(version.id),
-                        version.name,
-                        max(score, 1.0 if version.id == preferred_tool_version_id else 0.0),
-                        [
-                            "EXPLICIT_TOOL_SELECTION"
-                            if version.id == preferred_tool_version_id
-                            else "PUBLISHED_TOOL_MATCH"
-                        ],
-                        {
-                            "slug": tool.slug,
-                            "version": version.version,
-                            "allowed_roles": version.allowed_roles,
-                            "required_parameters": [
-                                item["name"]
-                                for item in parameters
-                                if item.get("required", True) and item.get("default") is None
-                            ],
-                        },
-                    )
-                )
-        for resource in dbt_rows:
-            score = _score(
-                terms,
-                " ".join(
-                    [
-                        resource.name,
-                        resource.description or "",
-                        " ".join(resource.column_names),
-                        " ".join(resource.tags),
-                    ]
-                ),
-                boost=0.10 if resource.resource_type in {"MODEL", "SOURCE"} else 0.0,
-            )
-            if score > 0:
-                hits.append(
-                    RetrievalHit(
-                        f"DBT_{resource.resource_type}",
-                        str(resource.id),
-                        resource.name,
-                        score,
-                        ["LATEST_DBT_ARTIFACT_MATCH", "VALUE_SAFE_TRANSFORMATION_METADATA"],
-                        {
-                            "unique_id": resource.unique_id,
-                            "materialization": resource.materialization,
-                            "table_id": (
-                                str(resource.matched_table_id)
-                                if resource.matched_table_id
-                                else None
-                            ),
-                            "depends_on": resource.depends_on_unique_ids[:50],
-                            "sql_fingerprint": resource.compiled_sql_hash,
-                        },
-                    )
-                )
-        hits.sort(key=lambda hit: (-hit.score, hit.object_type, hit.display_name))
-        return hits[: self.settings.agent_retrieval_limit]
+            for hit in hits
+        ]
 
 
 class GovernedPlanner:
@@ -431,15 +200,43 @@ class GovernedPlanner:
             )
         tools = [hit for hit in retrieval_hits if hit.object_type == "GOVERNED_TOOL"]
         eligible: list[RetrievalHit] = []
+        tool_decisions: list[dict[str, str]] = []
         for hit in tools:
             allowed = set(hit.metadata["allowed_roles"])
             role_allowed = "PlatformAdmin" in roles or not roles.isdisjoint(allowed)
             explicitly_selected = str(preferred_tool_version_id) == hit.object_id
-            if role_allowed and (
+            meets_threshold = (
                 explicitly_selected or hit.score >= self.settings.agent_tool_match_threshold
-            ):
+            )
+            if role_allowed and meets_threshold:
                 eligible.append(hit)
+            else:
+                reason = (
+                    "role not in tool allowed_roles"
+                    if not role_allowed
+                    else "score below the governed-tool match threshold"
+                )
+                tool_decisions.append(
+                    {"tool_version_id": hit.object_id, "decision": "REJECTED", "reason": reason}
+                )
         selected = eligible[0] if eligible else None
+        for hit in eligible:
+            if selected is not None and hit.object_id == selected.object_id:
+                tool_decisions.append(
+                    {
+                        "tool_version_id": hit.object_id,
+                        "decision": "SELECTED",
+                        "reason": "highest-ranked eligible governed tool for this question",
+                    }
+                )
+            else:
+                tool_decisions.append(
+                    {
+                        "tool_version_id": hit.object_id,
+                        "decision": "REJECTED",
+                        "reason": "eligible but ranked below the selected governed tool",
+                    }
+                )
         if selected:
             required = list(selected.metadata["required_parameters"])
             missing = sorted(set(required) - set(tool_parameters))
@@ -452,6 +249,7 @@ class GovernedPlanner:
                     [],
                     [hit.object_id for hit in retrieval_hits],
                     risk_evidence,
+                    tool_decisions,
                 )
             if not candidate_sql_available or preferred_tool_version_id:
                 return AgentPlan(
@@ -462,6 +260,7 @@ class GovernedPlanner:
                     missing,
                     [hit.object_id for hit in retrieval_hits],
                     risk_evidence,
+                    tool_decisions,
                 )
         if candidate_sql_available:
             return AgentPlan(
@@ -472,6 +271,7 @@ class GovernedPlanner:
                 [],
                 [hit.object_id for hit in retrieval_hits],
                 risk_evidence,
+                tool_decisions,
             )
         return AgentPlan(
             "MODEL_GENERATION",
@@ -481,4 +281,5 @@ class GovernedPlanner:
             [],
             [hit.object_id for hit in retrieval_hits],
             risk_evidence,
+            tool_decisions,
         )

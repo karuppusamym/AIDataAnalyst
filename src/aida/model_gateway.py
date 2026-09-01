@@ -4,15 +4,23 @@ import json
 from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 from urllib.parse import quote
+from uuid import UUID
 
 import httpx
 from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
+from aida.models import KillSwitchState
 from aida.secrets import SecretResolutionError, SecretResolver
 
 StructuredModel = TypeVar("StructuredModel", bound=BaseModel)
 SUPPORTED_MODEL_PROVIDERS = frozenset({"OPENAI", "GOOGLE_GEMINI"})
+
+# Sentinel `route_key` for an organization-wide kill switch row in `KillSwitchState`
+# (MG-2), as opposed to a row scoped to one specific route_key.
+GLOBAL_KILL_SWITCH_SCOPE = "*"
 
 
 class SqlGenerationOutput(BaseModel):
@@ -32,6 +40,13 @@ class ModelRouteNotApproved(ModelGatewayError):
 
 class ModelOutputInvalid(ModelGatewayError):
     pass
+
+
+class KillSwitchEngaged(ModelGatewayError):
+    """Raised by `ProviderNeutralModelGateway.structured_completion` when an
+    organization-wide or route-scoped kill switch (MG-2) is engaged. Checked first,
+    before route/credential/adapter/budget conditions, so it fails closed even when
+    every other activation condition is otherwise satisfied."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +75,7 @@ class StructuredModelProvider(Protocol):
     ) -> dict[str, Any]: ...
 
 
-async def _post_with_retry(
+async def post_with_retry(
     *,
     client: httpx.AsyncClient,
     url: str,
@@ -171,7 +186,7 @@ class OpenAIResponsesProvider:
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
-            response = await _post_with_retry(
+            response = await post_with_retry(
                 client=client,
                 url=f"{self.settings.openai_base_url.rstrip('/')}/responses",
                 headers={
@@ -235,7 +250,7 @@ class GeminiGenerateContentProvider:
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
-            response = await _post_with_retry(
+            response = await post_with_retry(
                 client=client,
                 url=(
                     f"{self.settings.gemini_base_url.rstrip('/')}/models/{model_id}:generateContent"
@@ -274,6 +289,34 @@ def route_adapter_available(
     except SecretResolutionError:
         return False
     return True
+
+
+async def kill_switch_blocking_state(
+    session: AsyncSession, organization_id: UUID, route_key: str | None
+) -> KillSwitchState | None:
+    """The engaged `KillSwitchState` row (organization-wide or matching `route_key`)
+    that blocks generation for this organization right now, or `None` if neither is
+    engaged. A live, per-request query against the governed table -- not a cached or
+    eventually-consistent read -- so a just-engaged switch blocks the very next call.
+    """
+    scopes = [GLOBAL_KILL_SWITCH_SCOPE]
+    if route_key:
+        scopes.append(route_key)
+    rows = (
+        await session.scalars(
+            select(KillSwitchState).where(
+                KillSwitchState.organization_id == organization_id,
+                KillSwitchState.route_key.in_(scopes),
+                KillSwitchState.engaged.is_(True),
+            )
+        )
+    ).all()
+    if not rows:
+        return None
+    for row in rows:
+        if row.route_key == GLOBAL_KILL_SWITCH_SCOPE:
+            return row
+    return rows[0]
 
 
 def _resolve_model_credential(reference: str, settings: Settings, resolver: SecretResolver) -> str:
@@ -319,11 +362,28 @@ class ProviderNeutralModelGateway:
     async def structured_completion(
         self,
         *,
+        session: AsyncSession,
+        organization_id: UUID,
         route: ApprovedModelRoute | None,
         system_instruction: str,
         payload: dict[str, Any],
         output_schema: type[StructuredModel],
     ) -> tuple[StructuredModel, ModelCallEvidence]:
+        # Checked first, ahead of every other activation condition (MG-2): a kill
+        # switch engaged through the governed API is a live DB read on this call,
+        # not cached config, so it blocks the very next generation request.
+        blocking = await kill_switch_blocking_state(
+            session, organization_id, route.route_key if route is not None else None
+        )
+        if blocking is not None:
+            scope_desc = (
+                "organization-wide"
+                if blocking.route_key == GLOBAL_KILL_SWITCH_SCOPE
+                else f"route {blocking.route_key!r}"
+            )
+            raise KillSwitchEngaged(
+                f"kill switch engaged ({scope_desc}): {blocking.reason or 'no reason given'}"
+            )
         if not self.settings.model_generation_enabled or not self.settings.model_route:
             raise ModelRouteNotApproved("no policy-approved model route is configured")
         if route is None or route.route_key != self.settings.model_route:

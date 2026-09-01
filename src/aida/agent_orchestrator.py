@@ -1,15 +1,26 @@
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass
-from typing import Any
+import math
+from dataclasses import asdict, dataclass
+from typing import Any, NoReturn
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.agent_intelligence import GovernedPlanner, GovernedRetriever
+from aida.agent_intelligence import GovernedPlanner, GovernedRetriever, RetrievalHit
 from aida.agent_runtime import RuntimeStage, RuntimeState
+from aida.ai_decision_lineage import (
+    DECISION_LINEAGE_VERSION,
+    AiDecisionEdge,
+    record_decision,
+    record_decisions,
+)
+from aida.business_annotation_versions import (
+    annotation_version_content_digest,
+    resolve_annotation_version,
+)
 from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.model_gateway import (
@@ -32,10 +43,18 @@ from aida.models import (
     ToolExecution,
 )
 from aida.prompt_risk import DeterministicPromptRiskClassifier
+from aida.quality_coupling import (
+    check_quality_gate,
+    demote_in_retrieval,
+    fetch_open_incidents,
+    get_trust_warning,
+    resolve_table_ids,
+)
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.tool_rendering import ToolParameterError, render_tool_sql
+from aida.trust_scoring import AssetContext, compute_trust_score
 
 
 class ModelRouteUnavailable(RuntimeError):
@@ -68,6 +87,115 @@ def _trace(
     if details:
         trace["details"] = details
     return trace
+
+
+def _record_retrieval_decisions(
+    session: AsyncSession,
+    organization_id: UUID,
+    run_id: UUID,
+    selected: list[RetrievalHit],
+    rejected: list[RetrievalHit],
+) -> None:
+    """AU-5: RETRIEVAL_SELECTED for the hits handed to the planner, RETRIEVAL_REJECTED
+    for candidates ranked below ``agent_retrieval_limit``. Value-free: identifiers,
+    scores and reason codes only, never the question or matched content.
+    """
+    total = len(selected) + len(rejected)
+    edges = [
+        AiDecisionEdge(
+            run_id=run_id,
+            decision_type="RETRIEVAL_SELECTED",
+            source_node="governed_retriever",
+            target_node=f"{hit.object_type.lower()}:{hit.object_id}",
+            reason=f"ranked #{rank} of {total} candidates (score={hit.score})",
+            evidence={
+                "score": hit.score,
+                "reason_codes": hit.reason_codes,
+                "object_type": hit.object_type,
+                "rank": rank,
+            },
+            control_version=DECISION_LINEAGE_VERSION,
+        )
+        for rank, hit in enumerate(selected, start=1)
+    ]
+    edges.extend(
+        AiDecisionEdge(
+            run_id=run_id,
+            decision_type="RETRIEVAL_REJECTED",
+            source_node="governed_retriever",
+            target_node=f"{hit.object_type.lower()}:{hit.object_id}",
+            reason=f"ranked below the retrieval limit ({len(selected)}); score={hit.score}",
+            evidence={
+                "score": hit.score,
+                "reason_codes": hit.reason_codes,
+                "object_type": hit.object_type,
+            },
+            control_version=DECISION_LINEAGE_VERSION,
+        )
+        for hit in rejected
+    )
+    if edges:
+        record_decisions(session, organization_id, edges)
+
+
+def _canonical_json(value: Any) -> bytes:
+    """Deterministic byte encoding for content hashing (AT-6): sorted keys, no
+    incidental whitespace, so the same content always digests identically.
+    """
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+
+
+async def _compute_grounding_fragment_digests(
+    session: AsyncSession, retrieval_hits: list[RetrievalHit]
+) -> list[dict[str, Any]]:
+    """AT-6: hash every grounding fragment assembled into this run's context --
+    the same set of retrieval hits `retrieval_evidence` already records -- and
+    return one value-free entry per fragment for `AgentRun.grounding_fragment_digests`.
+
+    A `BUSINESS_ANNOTATION` hit's fragment is the exact content of the current
+    `MetadataBusinessAnnotationVersion` it resolved to at retrieval time
+    (`retrieval.py` stamps `metadata["annotation_version_id"]`), so the digest
+    is computed from that versioned content and the version id is recorded
+    alongside it -- letting `agent_run_replay.resolve_grounding` point back at
+    precisely this content even after a later approval supersedes it
+    (`business_annotation_versions.write_annotation_version` never mutates a
+    superseded row, so it stays resolvable by id). Every other hit type has no
+    separately versioned content in this codebase yet, so its fragment is its
+    own value-free identifiers (`object_type`, `object_id`, `display_name`,
+    `metadata`) -- still a real digest of what was assembled, just not one that
+    survives a change to the underlying object's free text.
+    """
+    entries: list[dict[str, Any]] = []
+    for hit in retrieval_hits:
+        annotation_version_id: str | None = None
+        fragment_digest: str | None = None
+        if hit.object_type == "BUSINESS_ANNOTATION":
+            raw_version_id = hit.metadata.get("annotation_version_id")
+            version = (
+                await resolve_annotation_version(session, UUID(str(raw_version_id)))
+                if raw_version_id
+                else None
+            )
+            if version is not None:
+                annotation_version_id = str(version.id)
+                fragment_digest = annotation_version_content_digest(version)
+        if fragment_digest is None:
+            content: dict[str, Any] = {
+                "object_type": hit.object_type,
+                "object_id": hit.object_id,
+                "display_name": hit.display_name,
+                "metadata": hit.metadata,
+            }
+            fragment_digest = f"sha256:{hashlib.sha256(_canonical_json(content)).hexdigest()}"
+        entries.append(
+            {
+                "object_type": hit.object_type,
+                "object_id": hit.object_id,
+                "fragment_digest": fragment_digest,
+                "annotation_version_id": annotation_version_id,
+            }
+        )
+    return entries
 
 
 class GovernedAgentOrchestrator:
@@ -305,14 +433,35 @@ class GovernedAgentOrchestrator:
             else f"technical-metadata:{latest_analysis.id}"
         )
         agent_run.semantic_version = semantic_version
-        retrieval_hits = await self.retriever.retrieve(
+        # `score_candidates` (unbounded, sorted, read-only) rather than `retrieve`
+        # (its bounded public wrapper) so the candidates the `agent_retrieval_limit`
+        # cap discards are visible here too, as RETRIEVAL_REJECTED evidence -- the
+        # recording itself lives here, not in `agent_intelligence.py`, so that
+        # module (also used by the read-only retrieval-preview endpoint) stays free
+        # of any write the INV-7 read-only-route gate would trip on.
+        scored_candidates = await self.retriever.score_candidates(
             session,
             datasource=datasource,
             question=question,
             preferred_tool_version_id=preferred_tool_version_id,
         )
+        retrieval_hits = scored_candidates[: self.settings.agent_retrieval_limit]
+        rejected_candidates = scored_candidates[self.settings.agent_retrieval_limit :]
+        _record_retrieval_decisions(
+            session,
+            datasource.organization_id,
+            agent_run.id,
+            retrieval_hits,
+            rejected_candidates,
+        )
         retrieval_evidence = [hit.evidence() for hit in retrieval_hits]
         agent_run.retrieval_evidence = retrieval_evidence
+        # AT-6: fragment-level content receipts, computed at the moment these
+        # hits are assembled as this run's grounding -- see
+        # `_compute_grounding_fragment_digests` for what gets hashed and why.
+        agent_run.grounding_fragment_digests = await _compute_grounding_fragment_digests(
+            session, retrieval_hits
+        )
         state = state.transition(RuntimeStage.RESOLVED, semantic_version=semantic_version)
         trace.append(
             _trace(
@@ -335,6 +484,26 @@ class GovernedAgentOrchestrator:
         )
         plan_evidence = plan.evidence()
         agent_run.plan_evidence = plan_evidence
+        if plan.tool_decisions:
+            record_decisions(
+                session,
+                datasource.organization_id,
+                [
+                    AiDecisionEdge(
+                        run_id=agent_run.id,
+                        decision_type=(
+                            "TOOL_SELECTED"
+                            if decision["decision"] == "SELECTED"
+                            else "TOOL_REJECTED"
+                        ),
+                        source_node="governed_planner",
+                        target_node=f"tool:{decision['tool_version_id']}",
+                        reason=decision["reason"],
+                        control_version=DECISION_LINEAGE_VERSION,
+                    )
+                    for decision in plan.tool_decisions
+                ],
+            )
         agent_run.recommended_tool_version_id = (
             UUID(plan.selected_tool_version_id) if plan.selected_tool_version_id else None
         )
@@ -455,6 +624,8 @@ class GovernedAgentOrchestrator:
                     retrieval_hits=retrieval_hits,
                 )
                 output, model_evidence = await self.model_gateway.structured_completion(
+                    session=session,
+                    organization_id=datasource.organization_id,
                     route=approved_route,
                     system_instruction=(
                         "Return exactly one read-only SQL SELECT statement for the supplied "
@@ -526,25 +697,165 @@ class GovernedAgentOrchestrator:
                 tool_execution.status = "REJECTED"
                 tool_execution.query_execution_id = exc.execution_id
                 tool_execution.error_message = str(exc)[:1000]
+            record_decision(
+                session,
+                agent_run.organization_id,
+                AiDecisionEdge(
+                    run_id=agent_run.id,
+                    decision_type="REFUSAL",
+                    source_node="query_execution_gateway",
+                    target_node=f"agent_run:{agent_run.id}",
+                    reason=str(exc)[:1000] or "QUERY_GATEWAY_DENIED",
+                    evidence={
+                        "stage": state.stage.value,
+                        "correlation_id": correlation_id,
+                        "datasource_id": str(agent_run.datasource_id),
+                        "query_execution_id": (
+                            str(exc.execution_id) if exc.execution_id else None
+                        ),
+                    },
+                    control_version=DECISION_LINEAGE_VERSION,
+                ),
+            )
             await session.commit()
             raise
 
-        for stage, control_type in (
-            (RuntimeStage.VALIDATED, "DETERMINISTIC"),
-            (RuntimeStage.COSTED, "DETERMINISTIC"),
-            (RuntimeStage.EXECUTED, "DETERMINISTIC"),
-            (RuntimeStage.EXPLAINED, "DETERMINISTIC"),
-            (RuntimeStage.COMPLETED, "DETERMINISTIC"),
-        ):
-            state = state.transition(stage)
-            trace.append(_trace(state, control_type))
+        # C3: VALIDATED, COSTED, EXECUTED, EXPLAINED and COMPLETED are five
+        # independently-gated checkpoints, each able to refuse the run in its
+        # own right, rather than a single `for` loop stamping the trace after
+        # `query_gateway.execute()` had already returned. The work each state
+        # names (AST/allowlist validation, the cost ceiling, read-only bounded
+        # masked execution) genuinely already happened inside that one
+        # `execute()` call -- INV-2 keeps SQL execution to that single choke
+        # point, so it cannot be re-run five times -- but until now the
+        # orchestrator never independently checked any of it, and had no way
+        # to refuse on any of the five separately. Every checkpoint below is
+        # the orchestrator's own re-verification of that work's *result*
+        # against policy it holds independently of the gateway, so a defect
+        # in the gateway's internal enforcement does not silently pass
+        # through as a governed answer. See `Docs/20-modules/13-agent-runtime.md`
+        # section 3 for the target this closes.
+        validated_failure = await self._checkpoint_validated(
+            session, datasource=datasource, gateway_result=gateway_result
+        )
+        if validated_failure:
+            await self._deny_after_execution(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                gateway_result=gateway_result,
+                tool_execution=tool_execution,
+                target_stage=RuntimeStage.REJECTED,
+                checkpoint="VALIDATED",
+                reason=validated_failure,
+            )
+        state = state.transition(RuntimeStage.VALIDATED)
+        trace.append(_trace(state, "CHECKPOINT_VALIDATED"))
+
+        costed_failure = self._checkpoint_costed(gateway_result=gateway_result)
+        if costed_failure:
+            await self._deny_after_execution(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                gateway_result=gateway_result,
+                tool_execution=tool_execution,
+                target_stage=RuntimeStage.REJECTED,
+                checkpoint="COSTED",
+                reason=costed_failure,
+            )
+        state = state.transition(RuntimeStage.COSTED)
+        trace.append(_trace(state, "CHECKPOINT_COSTED"))
+
+        executed_failure = self._checkpoint_executed(
+            gateway_result=gateway_result, requested_limit=requested_limit
+        )
+        if executed_failure:
+            await self._deny_after_execution(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                gateway_result=gateway_result,
+                tool_execution=tool_execution,
+                target_stage=RuntimeStage.REJECTED,
+                checkpoint="EXECUTED",
+                reason=executed_failure,
+            )
+        state = state.transition(RuntimeStage.EXECUTED)
+        trace.append(_trace(state, "CHECKPOINT_EXECUTED"))
+
+        # AG-6/EXPLAINED: assemble the answer's quality/trust signals and --
+        # new in this change -- actually gate on them. TL-3 already blocks a
+        # *governed tool* before it runs when a dependency has an open
+        # CRITICAL incident (`check_quality_gate`); a model-generated or
+        # development-override answer had no equivalent, only a warning after
+        # the fact. This checkpoint closes that gap by applying the same
+        # gate TL-3 uses to the tables the answer actually came from.
+        explained_failure, trust_evidence = await self._checkpoint_explained(
+            session, datasource=datasource, gateway_result=gateway_result
+        )
+        if explained_failure:
+            await self._deny_after_execution(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                gateway_result=gateway_result,
+                tool_execution=tool_execution,
+                target_stage=RuntimeStage.FAILED,
+                checkpoint="EXPLAINED",
+                reason=explained_failure,
+            )
+        state = state.transition(RuntimeStage.EXPLAINED)
+        trace.append(_trace(state, "CHECKPOINT_EXPLAINED"))
+        if trust_evidence:
+            plan_evidence["trust"] = trust_evidence
+            agent_run.plan_evidence = plan_evidence
+
+        completed_failure = self._checkpoint_completed(
+            agent_run=agent_run, gateway_result=gateway_result
+        )
+        if completed_failure:
+            await self._deny_after_execution(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                gateway_result=gateway_result,
+                tool_execution=tool_execution,
+                target_stage=RuntimeStage.FAILED,
+                checkpoint="COMPLETED",
+                reason=completed_failure,
+            )
+        state = state.transition(RuntimeStage.COMPLETED)
+        trace.append(_trace(state, "CHECKPOINT_COMPLETED"))
         agent_run.status = state.stage.value
         agent_run.query_execution_id = gateway_result.execution.id
         agent_run.step_trace = trace
         if tool_execution:
             tool_execution.status = "COMPLETED"
             tool_execution.query_execution_id = gateway_result.execution.id
+
         explanation = self._deterministic_explanation(gateway_result)
+        if trust_evidence and trust_evidence["warnings"]:
+            explanation += (
+                f" TRUST WARNING (grade {trust_evidence['trust_grade']}, "
+                f"score {trust_evidence['trust_score']}/100): "
+                + " ".join(warning["message"] for warning in trust_evidence["warnings"])
+            )
         record_audit(
             session,
             context,
@@ -606,6 +917,23 @@ class GovernedAgentOrchestrator:
         agent_run.status = state.stage.value
         agent_run.failure_reason = reason
         agent_run.step_trace = trace
+        record_decision(
+            session,
+            agent_run.organization_id,
+            AiDecisionEdge(
+                run_id=agent_run.id,
+                decision_type="REFUSAL",
+                source_node="governed_agent_orchestrator",
+                target_node=f"agent_run:{agent_run.id}",
+                reason=reason,
+                evidence={
+                    "stage": state.stage.value,
+                    "correlation_id": correlation_id,
+                    "datasource_id": str(agent_run.datasource_id),
+                },
+                control_version=DECISION_LINEAGE_VERSION,
+            ),
+        )
         record_audit(
             session,
             context,
@@ -617,6 +945,235 @@ class GovernedAgentOrchestrator:
             details={"reason": reason},
         )
         await session.commit()
+
+    async def _checkpoint_validated(
+        self,
+        session: AsyncSession,
+        *,
+        datasource: DataSource,
+        gateway_result: GatewayResult,
+    ) -> str | None:
+        """VALIDATED: independently re-derive the table allowlist and confirm
+        every table the executed statement actually touched is still in it.
+
+        `QueryExecutionGateway.execute()` already ran the deterministic
+        AST/allowlist pass internally (`_run_validation`) before the
+        connector was ever opened -- this calls the same public
+        `allowed_tables` it used, again, from the orchestrator, against the
+        table list the execution actually recorded. A defect that let the
+        gateway's internal enforcement drift from what `allowed_tables`
+        itself reports (or a stale/mutated allowlist between validation and
+        this point) is caught here rather than trusted silently -- "the
+        model's influence ends here" holds even if the first check had a
+        bug.
+        """
+        allowed = await self.query_gateway.allowed_tables(session, datasource)
+        unauthorized = sorted(
+            {
+                table
+                for table in gateway_result.execution.referenced_tables
+                if table.lower() not in allowed
+            }
+        )
+        if unauthorized:
+            return f"VALIDATED_TABLE_NOT_ALLOWLISTED:{','.join(unauthorized)}"
+        return None
+
+    def _checkpoint_costed(self, *, gateway_result: GatewayResult) -> str | None:
+        """COSTED: independently re-verify the persisted cost evidence.
+
+        `execute()` already gated the estimate against whichever budget
+        applied -- cost-shaped (`max_query_estimate_cost`) or byte-shaped
+        (`max_query_estimate_bytes`), selected by `gate_query_estimate`
+        structurally from the connector's own estimate shape. `QueryExecution`
+        does not persist which shape applied, so re-deriving the *exact*
+        budget here is not possible without a second connector call, which
+        INV-2 forbids. This checkpoint instead independently re-checks the
+        failure modes that would matter regardless of shape: the evidence
+        must be a finite, non-negative number, and it must never exceed the
+        more permissive of the two configured ceilings -- a plan cost above
+        that is wrong under any interpretation of the estimate.
+        """
+        plan_cost = gateway_result.execution.plan_cost
+        if plan_cost is None:
+            return None
+        if not math.isfinite(plan_cost) or plan_cost < 0:
+            return f"COSTED_EVIDENCE_INVALID:{plan_cost}"
+        ceiling = max(self.settings.max_query_estimate_cost, self.settings.max_query_estimate_bytes)
+        if plan_cost > ceiling:
+            return f"COSTED_PLAN_COST_EXCEEDS_POLICY:{plan_cost}>{ceiling}"
+        return None
+
+    def _checkpoint_executed(
+        self, *, gateway_result: GatewayResult, requested_limit: int | None
+    ) -> str | None:
+        """EXECUTED: independently re-verify the row bound held.
+
+        `SqlGuard` already computed and applied a `LIMIT` clause for exactly
+        this bound before the statement reached the connector -- this is the
+        orchestrator's own check that the rows which actually came back
+        respect it, the same defence-in-depth shape as VALIDATED and COSTED:
+        a source that ignores its own `LIMIT` clause, or a future bug in how
+        the bound is threaded through, is caught here rather than handed to
+        the caller as a governed, bounded answer.
+        """
+        row_count = gateway_result.execution.row_count
+        if row_count is None:
+            return "EXECUTED_ROW_COUNT_MISSING"
+        cap = min(
+            requested_limit or self.settings.default_query_row_limit,
+            self.settings.hard_query_row_limit,
+        )
+        if row_count > cap:
+            return f"EXECUTED_ROW_COUNT_EXCEEDS_BOUND:{row_count}>{cap}"
+        return None
+
+    async def _checkpoint_explained(
+        self, session: AsyncSession, *, datasource: DataSource, gateway_result: GatewayResult
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """EXPLAINED: assemble quality/trust signals for the answer's own
+        source tables (AG-6), and gate on them.
+
+        Reads the same `IncidentSummary` rows TL-3's tool gate checks, via
+        the shared `quality_coupling` wiring helpers, so gating and warning
+        cannot silently disagree about which incidents are active. Unlike
+        the pre-existing AG-6 behaviour (warning only), an open CRITICAL
+        incident on a table the answer actually came from now refuses the
+        run via the same `check_quality_gate` TL-3 already uses to block a
+        governed tool before it runs -- closing the gap where a
+        model-generated or development-override answer could surface data
+        from a critically incident-affected table with nothing stronger than
+        a warning appended after the fact.
+        """
+        answer_table_ids = await resolve_table_ids(
+            session,
+            datasource=datasource,
+            table_names=gateway_result.execution.referenced_tables,
+        )
+        if not answer_table_ids:
+            return None, None
+        answer_incidents = await fetch_open_incidents(
+            session, datasource=datasource, table_ids=list(answer_table_ids.values())
+        )
+        if not answer_incidents:
+            return None, None
+        distinct_asset_ids = {str(table_id) for table_id in answer_table_ids.values()}
+        blocking = sorted(
+            asset_id
+            for asset_id in distinct_asset_ids
+            if (gate_result := check_quality_gate(asset_id, answer_incidents)) is not None
+            and gate_result.gate_action == "BLOCK"
+        )
+        if blocking:
+            return f"EXPLAINED_QUALITY_INCIDENT_BLOCK:{','.join(blocking)}", None
+        warnings = [
+            warning
+            for asset_id in sorted(distinct_asset_ids)
+            if (warning := get_trust_warning(asset_id, answer_incidents)) is not None
+        ]
+        worst_factor = min(
+            (demote_in_retrieval(asset_id, answer_incidents) for asset_id in distinct_asset_ids),
+            default=1.0,
+        )
+        trust_score = compute_trust_score(AssetContext(quality_score=round(worst_factor * 100)))
+        trust_evidence = {
+            "trust_score": trust_score.overall_score,
+            "trust_grade": trust_score.grade,
+            "factors": [asdict(factor) for factor in trust_score.factors],
+            "warnings": [asdict(warning) for warning in warnings],
+        }
+        return None, trust_evidence
+
+    def _checkpoint_completed(
+        self, *, agent_run: AgentRun, gateway_result: GatewayResult
+    ) -> str | None:
+        """COMPLETED: the run may only be marked complete, and its evidence
+        handed back as the system of record, once every field that evidence
+        depends on is actually present. A future coding error that reaches
+        this point with a hollow record is refused here rather than silently
+        persisted as a governed, auditable success.
+        """
+        if not gateway_result.execution.sql_hash:
+            return "COMPLETED_EVIDENCE_MISSING:sql_hash"
+        if not agent_run.semantic_version:
+            return "COMPLETED_EVIDENCE_MISSING:semantic_version"
+        if not agent_run.plan_evidence:
+            return "COMPLETED_EVIDENCE_MISSING:plan_evidence"
+        return None
+
+    async def _deny_after_execution(
+        self,
+        session: AsyncSession,
+        agent_run: AgentRun,
+        state: RuntimeState,
+        trace: list[dict[str, object]],
+        context: SecurityContext,
+        correlation_id: str,
+        *,
+        gateway_result: GatewayResult,
+        tool_execution: ToolExecution | None,
+        target_stage: RuntimeStage,
+        checkpoint: str,
+        reason: str,
+    ) -> NoReturn:
+        """Shared denial path for a post-execution checkpoint that refuses.
+
+        Mirrors the bookkeeping the pre-execution `_persist_rejection` and
+        the `QueryRejected` handler above both do -- run status, failure
+        reason, trace, tool-execution status, a `REFUSAL` decision-lineage
+        edge, an audit record, commit -- but attributes the refusal to the
+        specific checkpoint that fired (via `source_node` and the
+        `checkpoint` audit detail) and keeps `query_execution_id` set,
+        because unlike a pre-execution rejection, the query genuinely ran.
+        `target_stage` is caller-supplied rather than always `REJECTED`
+        because the runtime state machine only allows `REJECTED` from
+        `GENERATED`/`VALIDATED`/`COSTED`; `EXECUTED`/`EXPLAINED` may only
+        advance to `FAILED`.
+        """
+        state = state.transition(target_stage, failure_reason=reason)
+        trace.append(_trace(state, f"CHECKPOINT_{checkpoint}", {"reason_code": reason}))
+        agent_run.status = state.stage.value
+        agent_run.failure_reason = reason[:1000]
+        agent_run.query_execution_id = gateway_result.execution.id
+        agent_run.step_trace = trace
+        if tool_execution:
+            tool_execution.status = "REJECTED"
+            tool_execution.query_execution_id = gateway_result.execution.id
+            tool_execution.error_message = reason[:1000]
+        outcome = "DENIED" if target_stage == RuntimeStage.REJECTED else "FAILURE"
+        record_decision(
+            session,
+            agent_run.organization_id,
+            AiDecisionEdge(
+                run_id=agent_run.id,
+                decision_type="REFUSAL",
+                source_node=f"checkpoint:{checkpoint.lower()}",
+                target_node=f"agent_run:{agent_run.id}",
+                reason=reason,
+                evidence={
+                    "stage": state.stage.value,
+                    "checkpoint": checkpoint,
+                    "correlation_id": correlation_id,
+                    "datasource_id": str(agent_run.datasource_id),
+                    "query_execution_id": str(gateway_result.execution.id),
+                },
+                control_version=DECISION_LINEAGE_VERSION,
+            ),
+        )
+        record_audit(
+            session,
+            context,
+            action="agent.analysis",
+            resource_type="agent_run",
+            resource_id=str(agent_run.id),
+            outcome=outcome,
+            correlation_id=correlation_id,
+            details={"reason": reason, "checkpoint": checkpoint},
+        )
+        await session.commit()
+        rejected = QueryRejected(reason)
+        rejected.execution_id = gateway_result.execution.id
+        raise rejected
 
     @staticmethod
     def _deterministic_explanation(result: GatewayResult) -> str:

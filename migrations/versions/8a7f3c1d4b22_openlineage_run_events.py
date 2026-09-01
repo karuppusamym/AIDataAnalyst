@@ -118,10 +118,24 @@ def upgrade() -> None:
             name=op.f("uq_openlineage_dataset_run_event_id"),
         ),
     )
-    op.create_index(op.f("ix_openlineage_dataset_organization_id"), "openlineage_dataset", ["organization_id"])
-    op.create_index(op.f("ix_openlineage_dataset_run_event_id"), "openlineage_dataset", ["run_event_id"])
-    op.create_index(op.f("ix_openlineage_dataset_matched_table_id"), "openlineage_dataset", ["matched_table_id"])
-    op.create_index("ix_openlineage_dataset_run_direction", "openlineage_dataset", ["run_event_id", "direction"])
+    op.create_index(
+        op.f("ix_openlineage_dataset_organization_id"),
+        "openlineage_dataset",
+        ["organization_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_dataset_run_event_id"), "openlineage_dataset", ["run_event_id"]
+    )
+    op.create_index(
+        op.f("ix_openlineage_dataset_matched_table_id"),
+        "openlineage_dataset",
+        ["matched_table_id"],
+    )
+    op.create_index(
+        "ix_openlineage_dataset_run_direction",
+        "openlineage_dataset",
+        ["run_event_id", "direction"],
+    )
 
     op.create_table(
         "openlineage_table_edge",
@@ -171,11 +185,29 @@ def upgrade() -> None:
             name="uq_openlineage_table_edge_run_input_output",
         ),
     )
-    op.create_index(op.f("ix_openlineage_table_edge_organization_id"), "openlineage_table_edge", ["organization_id"])
-    op.create_index(op.f("ix_openlineage_table_edge_run_event_id"), "openlineage_table_edge", ["run_event_id"])
-    op.create_index(op.f("ix_openlineage_table_edge_input_table_id"), "openlineage_table_edge", ["input_table_id"])
-    op.create_index(op.f("ix_openlineage_table_edge_output_table_id"), "openlineage_table_edge", ["output_table_id"])
-    op.create_index("ix_openlineage_table_edge_run", "openlineage_table_edge", ["run_event_id"])
+    op.create_index(
+        op.f("ix_openlineage_table_edge_organization_id"),
+        "openlineage_table_edge",
+        ["organization_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_table_edge_run_event_id"),
+        "openlineage_table_edge",
+        ["run_event_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_table_edge_input_table_id"),
+        "openlineage_table_edge",
+        ["input_table_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_table_edge_output_table_id"),
+        "openlineage_table_edge",
+        ["output_table_id"],
+    )
+    op.create_index(
+        "ix_openlineage_table_edge_run", "openlineage_table_edge", ["run_event_id"]
+    )
 
     op.create_table(
         "openlineage_column_edge",
@@ -231,36 +263,78 @@ def upgrade() -> None:
             name="uq_openlineage_column_edge_run_input_output",
         ),
     )
-    op.create_index(op.f("ix_openlineage_column_edge_organization_id"), "openlineage_column_edge", ["organization_id"])
-    op.create_index(op.f("ix_openlineage_column_edge_run_event_id"), "openlineage_column_edge", ["run_event_id"])
-    op.create_index(op.f("ix_openlineage_column_edge_input_table_id"), "openlineage_column_edge", ["input_table_id"])
-    op.create_index(op.f("ix_openlineage_column_edge_output_table_id"), "openlineage_column_edge", ["output_table_id"])
-    op.create_index("ix_openlineage_column_edge_run", "openlineage_column_edge", ["run_event_id"])
+    op.create_index(
+        op.f("ix_openlineage_column_edge_organization_id"),
+        "openlineage_column_edge",
+        ["organization_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_column_edge_run_event_id"),
+        "openlineage_column_edge",
+        ["run_event_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_column_edge_input_table_id"),
+        "openlineage_column_edge",
+        ["input_table_id"],
+    )
+    op.create_index(
+        op.f("ix_openlineage_column_edge_output_table_id"),
+        "openlineage_column_edge",
+        ["output_table_id"],
+    )
+    op.create_index(
+        "ix_openlineage_column_edge_run", "openlineage_column_edge", ["run_event_id"]
+    )
 
 
 def downgrade() -> None:
     op.drop_index("ix_openlineage_column_edge_run", table_name="openlineage_column_edge")
-    op.drop_index(op.f("ix_openlineage_column_edge_output_table_id"), table_name="openlineage_column_edge")
-    op.drop_index(op.f("ix_openlineage_column_edge_input_table_id"), table_name="openlineage_column_edge")
-    op.drop_index(op.f("ix_openlineage_column_edge_run_event_id"), table_name="openlineage_column_edge")
-    op.drop_index(op.f("ix_openlineage_column_edge_organization_id"), table_name="openlineage_column_edge")
+    op.drop_index(
+        op.f("ix_openlineage_column_edge_output_table_id"),
+        table_name="openlineage_column_edge",
+    )
+    op.drop_index(
+        op.f("ix_openlineage_column_edge_input_table_id"), table_name="openlineage_column_edge"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_column_edge_run_event_id"), table_name="openlineage_column_edge"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_column_edge_organization_id"),
+        table_name="openlineage_column_edge",
+    )
     op.drop_table("openlineage_column_edge")
 
     op.drop_index("ix_openlineage_table_edge_run", table_name="openlineage_table_edge")
-    op.drop_index(op.f("ix_openlineage_table_edge_output_table_id"), table_name="openlineage_table_edge")
-    op.drop_index(op.f("ix_openlineage_table_edge_input_table_id"), table_name="openlineage_table_edge")
-    op.drop_index(op.f("ix_openlineage_table_edge_run_event_id"), table_name="openlineage_table_edge")
-    op.drop_index(op.f("ix_openlineage_table_edge_organization_id"), table_name="openlineage_table_edge")
+    op.drop_index(
+        op.f("ix_openlineage_table_edge_output_table_id"), table_name="openlineage_table_edge"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_table_edge_input_table_id"), table_name="openlineage_table_edge"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_table_edge_run_event_id"), table_name="openlineage_table_edge"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_table_edge_organization_id"), table_name="openlineage_table_edge"
+    )
     op.drop_table("openlineage_table_edge")
 
     op.drop_index("ix_openlineage_dataset_run_direction", table_name="openlineage_dataset")
-    op.drop_index(op.f("ix_openlineage_dataset_matched_table_id"), table_name="openlineage_dataset")
+    op.drop_index(
+        op.f("ix_openlineage_dataset_matched_table_id"), table_name="openlineage_dataset"
+    )
     op.drop_index(op.f("ix_openlineage_dataset_run_event_id"), table_name="openlineage_dataset")
     op.drop_index(op.f("ix_openlineage_dataset_organization_id"), table_name="openlineage_dataset")
     op.drop_table("openlineage_dataset")
 
     op.drop_index("ix_openlineage_event_org_created", table_name="openlineage_run_event")
     op.drop_index("ix_openlineage_event_source_created", table_name="openlineage_run_event")
-    op.drop_index(op.f("ix_openlineage_run_event_datasource_id"), table_name="openlineage_run_event")
-    op.drop_index(op.f("ix_openlineage_run_event_organization_id"), table_name="openlineage_run_event")
+    op.drop_index(
+        op.f("ix_openlineage_run_event_datasource_id"), table_name="openlineage_run_event"
+    )
+    op.drop_index(
+        op.f("ix_openlineage_run_event_organization_id"), table_name="openlineage_run_event"
+    )
     op.drop_table("openlineage_run_event")

@@ -9,7 +9,7 @@
 
 **Boundary.** This research compares Atlas to **vendor-stated public positioning** — product pages, engineering blogs, and analyst-review summaries. It does not compare against private roadmaps, customer-specific deployments, or non-public capability. Where a vendor describes a capability as preview or private preview, that qualifier is carried into the analysis.
 
-**Bias to be aware of.** Vendor product pages overstate. The matrix is therefore deliberately generous to competitors and honest about Atlas — a competitor claim is scored as stated, while Atlas is scored against `60-delivery/04-status-matrix.md`. A capability Atlas scores `◐` on may be scored `●` for a competitor on weaker evidence. This asymmetry is intentional: it prevents the analysis flattering the home team.
+**Bias to be aware of.** Vendor product pages overstate. The matrix is therefore deliberately generous to competitors and honest about Atlas — a competitor claim is scored as stated, while Atlas is scored against `60-delivery/00-status.md`. A capability Atlas scores `◐` on may be scored `●` for a competitor on weaker evidence. This asymmetry is intentional: it prevents the analysis flattering the home team.
 
 ## Primary vendor sources
 
@@ -18,6 +18,8 @@
 - [Atlan — The Context Layer for AI](https://atlan.com/)
 - [Alation — Agentic Data Intelligence Platform](https://www.alation.com/product/agentic-data-intelligence-platform/)
 - [Collibra Platform](https://www.collibra.com/products/collibra-platform)
+- [Collibra Data Lineage](https://www.collibra.com/products/data-lineage) — reviewed 2026-08-29; see `review-2026-08/research/05-collibra-lineage-and-platform.md`
+- [Collibra Data Marketplace](https://www.collibra.com/products/data-marketplace), [Data Catalog](https://www.collibra.com/products/data-catalog), [Integrations & APIs](https://www.collibra.com/products/integrations-apis), [MCP Server](https://www.collibra.com/products/mcp-server), [Data Governance](https://www.collibra.com/products/data-governance) — reviewed 2026-08-29; see `review-2026-08/research/06-collibra-marketplace-and-mcp.md`
 - [Microsoft Purview Data Governance](https://www.microsoft.com/en-us/security/business/risk-management/microsoft-purview-data-governance)
 
 ### Warehouse-native context planes
@@ -48,6 +50,14 @@
 
 - [Alation Agentic Data Intelligence Platform — Gartner Peer Insights](https://www.gartner.com/reviews/market/metadata-management-solutions/vendor/alation/product/alation-agentic-data-intelligence-platform)
 
+### Independent practitioner reviews
+
+Added 2026-08-30. Unlike the vendor pages above, these are hands-on accounts from people who ran the tools in production — they surface UX friction and real-world capability gaps that vendor marketing does not admit to. Treated as corroborating color, not re-scored into the matrix on their own (single-author accounts are not a statistically reliable sample). The Collibra lineage-complexity claim below is already covered in more depth, with primary sourcing, in `review-2026-08/research/01-collibra.md` §5 and §14 (AWS Marketplace / G2 reviewer quotes) — nothing further was added there. The Atlan collaboration-hub claim corroborates and is folded into `review-2026-08/research/02-atlan.md` §10, and whitespace item W11 in `00-product/05-differentiation-and-whitespace.md`.
+
+- [Atlan 101 | Chapter 1: What, Why, and How of Atlan — A Comparative Look: Atlan vs Collibra vs Alation vs Informatica — Shubham Shardul, Medium](https://medium.com/@shubham.shardul2019/atlan-101-chapter-1-what-why-and-how-of-atlan-a-comparative-look-atlan-vs-collibra-vs-a2fb05dc21a1) — practitioner account; central claims: Atlan positions as a data-team *collaboration hub* (Slack-native notifications, in-context AI suggestions) rather than a standalone catalog portal, and Collibra's lineage is comparatively incomplete with a more complex interface. (medium.com is blocked by this environment's egress proxy; read via search-result summaries and corroborated against the two sources below, not fetched directly — reconfirm firsthand at the next refresh.)
+- [Data Catalog Tool Comparison: Collibra vs. Atlan — CastorDoc](https://www.castordoc.com/tool-comparison/data-catalog-tool-comparison-collibra-vs-atlan) — notes Collibra's Lineage Harvester has user-reported performance/accuracy issues despite Collibra edging Atlan on G2 lineage-visualization scores (8.0 vs 7.3).
+- [Atlan vs Collibra Platform comparison — PeerSpot](https://www.peerspot.com/products/comparisons/atlan_vs_collibra-platform)
+
 ## How to refresh this research
 
 The competitive picture in this segment moves on roughly a quarterly cadence, driven by vendor conferences.
@@ -56,7 +66,7 @@ The competitive picture in this segment moves on roughly a quarterly cadence, dr
 |---|---|
 | 1 | Re-fetch each primary vendor product page; diff against the capability set recorded in `00-product/03-market-landscape.md` |
 | 2 | Check the most recent Databricks Data + AI Summit and Snowflake Summit announcements — these move the warehouse-native segment fastest |
-| 3 | Re-score `00-product/04-competitive-feature-matrix.md`, updating the Atlas column from `60-delivery/04-status-matrix.md` |
+| 3 | Re-score `00-product/04-competitive-feature-matrix.md`, updating the Atlas column from `60-delivery/00-status.md` |
 | 4 | Re-evaluate the strategic clock in `00-product/05-differentiation-and-whitespace.md` §6 — has anyone shipped governed agent execution for heterogeneous estates? |
 | 5 | Update the baseline date in every affected document |
 

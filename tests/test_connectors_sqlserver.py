@@ -1,5 +1,8 @@
+import inspect
+
 import pytest
 
+from aida.connectors import sqlserver
 from aida.connectors.registry import connector_registry
 from aida.connectors.sqlserver import (
     SqlServerConnector,
@@ -201,3 +204,198 @@ def test_assemble_catalog_orders_foreign_key_columns_by_position() -> None:
     assert constraint.referenced_table == "customer"
     assert constraint.columns == ("customer_id",)
     assert constraint.referenced_columns == ("customer_id",)
+
+
+# --- envelope 1.1 axes (gap/02 N1) ------------------------------------------
+
+
+def test_sqlserver_advertises_exactly_the_11_axes_it_implements() -> None:
+    """INV-9 for the four capability flags envelope 1.1 adds.
+
+    Each `True` is paired with the system view that backs it. `indexes` and
+    `partitions` stay `False`: SQL Server exposes both, but this connector does
+    not read them, and a flag that describes the source rather than the connector
+    is exactly the optimism INV-9 forbids.
+    """
+    connector = SqlServerConnector(_VALID_DSN)
+    capabilities = connector.capabilities
+
+    assert capabilities.views is True
+    assert capabilities.routines is True
+    assert capabilities.object_comments is True
+    assert capabilities.grants is True
+    assert capabilities.indexes is False
+    assert capabilities.partitions is False
+
+    source = inspect.getsource(sqlserver)
+    assert "sys.sql_modules" in source
+    assert "sys.parameters" in source
+    assert "sys.extended_properties" in source
+    assert "sys.database_permissions" in source
+
+
+def test_routine_bodies_are_read_from_sys_sql_modules_not_information_schema() -> None:
+    """`INFORMATION_SCHEMA.ROUTINES.ROUTINE_DEFINITION` is nvarchar(4000) and
+    silently truncates every longer body -- which is precisely the long ETL
+    procedure whose text is worth parsing (gap/02 N3, N12).
+
+    `sys.sql_modules.definition` is nvarchar(max). This connector therefore
+    reports `truncated = false` because it checked, not because it did not, and
+    this test is what stops a later edit from reintroducing the truncating view.
+    """
+    # Asserted against the statement constants rather than the module source, so
+    # that the explanatory comment beside them cannot satisfy its own test.
+    statements = (
+        sqlserver._ROUTINE_SQL,
+        sqlserver._VIEW_DEFINITION_SQL,
+        sqlserver._ROUTINE_PARAMETER_SQL,
+    )
+    for statement in statements:
+        assert "ROUTINE_DEFINITION" not in statement.upper()
+        assert "SYSCOMMENTS" not in statement.upper()
+    assert "m.definition AS body" in sqlserver._ROUTINE_SQL
+    assert "m.definition AS definition" in sqlserver._VIEW_DEFINITION_SQL
+
+
+def test_assemble_catalog_carries_the_11_axes() -> None:
+    """Row shapes from `_discover_sync` through to the envelope.
+
+    An encrypted module is included deliberately: SQL Server returns NULL for
+    `sys.sql_modules.definition` on `WITH ENCRYPTION`, and that must arrive as
+    unavailable-with-a-reason rather than as a view with an empty body.
+    """
+    column_rows = [
+        {
+            "table_schema": "retail",
+            "table_name": "open_account",
+            "table_type": "VIEW",
+            "column_name": "account_id",
+            "ordinal_position": 1,
+            "data_type": "bigint",
+            "is_nullable": "NO",
+            "column_default": None,
+        }
+    ]
+
+    catalogs = _assemble_catalog(
+        "bank_demo",
+        column_rows,
+        [],
+        [],
+        view_rows=[
+            {
+                "table_schema": "retail",
+                "table_name": "open_account",
+                "definition": None,
+                "is_materialized": 0,
+                "is_updatable": 1,
+                "check_option": None,
+                "unavailable_reason": "module is encrypted",
+            }
+        ],
+        routine_rows=[
+            {
+                "routine_schema": "retail",
+                "routine_name": "usp_close_account",
+                "specific_name": "1234",
+                "routine_type": "PROCEDURE",
+                "language": "SQL",
+                "body": "BEGIN SET NOCOUNT ON; END",
+                "return_type": None,
+                "is_deterministic": 0,
+                "security_mode": "INVOKER",
+                "description": "closes a deposit account",
+                "unavailable_reason": None,
+            }
+        ],
+        routine_parameter_rows=[
+            {
+                "routine_schema": "retail",
+                "specific_name": "1234",
+                "parameter_name": "@account_id",
+                "ordinal_position": 1,
+                "parameter_mode": "IN",
+                "data_type": "bigint",
+                "parameter_default": None,
+            }
+        ],
+        table_description_rows=[
+            {
+                "table_schema": "retail",
+                "table_name": "open_account",
+                "description": "accounts that are still open",
+            }
+        ],
+        column_description_rows=[
+            {
+                "table_schema": "retail",
+                "table_name": "open_account",
+                "column_name": "account_id",
+                "description": "surrogate key",
+            }
+        ],
+        schema_description_rows=[
+            {"schema_name": "retail", "description": "retail banking objects"}
+        ],
+        catalog_description_row={"description": "the demo bank database"},
+        grant_rows=[
+            {
+                "schema_name": "retail",
+                "grantee": "risk_reader",
+                "grantee_type": "ROLE",
+                "privilege": "SELECT",
+                "object_type": "VIEW",
+                "object_name": "open_account",
+                "is_grantable": 0,
+            }
+        ],
+    )
+
+    catalog = catalogs[0]
+    schema = catalog.schemas[0]
+    table = schema.tables[0]
+    assert catalog.source_description == "the demo bank database"
+    assert schema.source_description == "retail banking objects"
+    assert table.source_description == "accounts that are still open"
+    assert table.columns[0].source_description == "surrogate key"
+    assert table.view_definition is not None
+    assert table.view_definition.definition_sql is None
+    assert table.view_definition.unavailable_reason == "module is encrypted"
+    assert table.view_definition.is_updatable is True
+    assert table.view_definition.is_materialized is False
+    routine = schema.routines[0]
+    assert routine.routine_type == "PROCEDURE"
+    assert routine.truncated is False
+    assert routine.parameters[0].name == "@account_id"
+    assert schema.grants[0].object_type == "VIEW"
+    assert schema.grants[0].is_grantable is False
+
+
+def test_the_10_assembly_signature_still_works_unchanged() -> None:
+    """The 1.1 row sets are keyword-only with `None` defaults, so a caller that
+    knows nothing about 1.1 -- including the two assembly tests above this one --
+    produces an envelope where the new axes are absent rather than empty.
+    """
+    catalogs = _assemble_catalog(
+        "bank_demo",
+        [
+            {
+                "table_schema": "retail",
+                "table_name": "customer",
+                "table_type": "BASE TABLE",
+                "column_name": "customer_id",
+                "ordinal_position": 1,
+                "data_type": "bigint",
+                "is_nullable": "NO",
+                "column_default": None,
+            }
+        ],
+        [],
+        [],
+    )
+
+    schema = catalogs[0].schemas[0]
+    assert schema.routines == ()
+    assert schema.grants == ()
+    assert schema.source_description is None
+    assert schema.tables[0].view_definition is None

@@ -5,7 +5,7 @@ import asyncpg
 
 from aida.connectors.base import (
     ColumnProfileSnapshot,
-    Connector,
+    ColumnValueProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
     QueryEstimate,
@@ -14,25 +14,290 @@ from aida.connectors.base import (
 )
 from aida.connectors.discovery import (
     append_aggregated_constraint_rows,
+    append_grouped_index_rows,
+    append_partition_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
+    build_routines,
     build_table_map_from_column_rows,
 )
+from aida.connectors.sql_execution import SqlExecutor
 
 
 def _quote_identifier(identifier: str) -> str:
     return '"' + identifier.replace('"', '""') + '"'
 
 
-class PostgresConnector(Connector):
+# Envelope 1.1 (gap/02 N1). `pg_get_viewdef` returns the complete reconstructed
+# definition -- PostgreSQL never truncates it -- so `truncated` is left false
+# here rather than guessed. A view whose definition this principal may not read
+# yields NULL, which `apply_view_definitions` records as *unavailable* rather
+# than as an empty view.
+_VIEW_DEFINITION_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        pg_get_viewdef(c.oid, true) AS definition,
+        (c.relkind = 'm') AS is_materialized,
+        v.is_updatable AS is_updatable,
+        v.check_option AS check_option
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN information_schema.views v
+      ON v.table_schema = n.nspname
+     AND v.table_name = c.relname
+    WHERE c.relkind IN ('v', 'm')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname
+"""
+
+# `p.oid` is the overload discriminator: PostgreSQL allows two routines to share
+# a schema and a name, so the name alone is not an identity and the parameter
+# join has to be on the oid. Restricted to prokind 'f'/'p' because
+# `pg_get_functiondef` raises on aggregate and window functions.
+# CN-3. `information_schema.tables`/`.columns` never list materialized views
+# (relkind 'm') -- that is a documented Postgres limitation of the SQL-standard
+# information_schema, not a version difference -- so a materialized view was
+# never entering `tables` via the primary column query below, and
+# `apply_view_definitions` (`_lookup_table` returning None) was silently
+# dropping its columns *and* its view_definition even though `_VIEW_DEFINITION_SQL`
+# below reads it and DEFAULT_CAPABILITIES.views's own docstring claims coverage
+# of relkind 'v' *and* 'm'. Found by building a real live fixture with a
+# materialized view (tests/test_postgres_version_fixtures.py) -- every existing
+# unit test drives `build_table_map_from_column_rows` directly with hand-built
+# rows, so this gap was invisible to all of them. Reconstructed from
+# `pg_attribute`/`pg_attrdef` in the same row shape `build_table_map_from_column_rows`
+# expects, so the existing assembly pipeline needs no changes -- only this query
+# and the two lines in `discover()` that merge its rows in.
+_MATERIALIZED_VIEW_COLUMN_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        'MATERIALIZED VIEW' AS table_type,
+        a.attname AS column_name,
+        a.attnum AS ordinal_position,
+        format_type(a.atttypid, a.atttypmod) AS data_type,
+        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+        pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef ad
+      ON ad.adrelid = c.oid
+     AND ad.adnum = a.attnum
+    WHERE c.relkind = 'm'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+
+_ROUTINE_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.proname AS routine_name,
+        p.oid::text AS specific_name,
+        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS routine_type,
+        l.lanname AS language,
+        pg_get_functiondef(p.oid) AS body,
+        pg_get_function_result(p.oid) AS return_type,
+        (p.provolatile <> 'v') AS is_deterministic,
+        CASE WHEN p.prosecdef THEN 'DEFINER' ELSE 'INVOKER' END AS security_mode,
+        obj_description(p.oid, 'pg_proc') AS description
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.proname, p.oid
+"""
+
+_ROUTINE_PARAMETER_SQL = """
+    SELECT
+        n.nspname AS routine_schema,
+        p.oid::text AS specific_name,
+        p.proargnames[arg.ordinality] AS parameter_name,
+        arg.ordinality::int AS ordinal_position,
+        CASE COALESCE(p.proargmodes[arg.ordinality], 'i')
+            WHEN 'i' THEN 'IN'
+            WHEN 'o' THEN 'OUT'
+            WHEN 'b' THEN 'INOUT'
+            WHEN 'v' THEN 'VARIADIC'
+            WHEN 't' THEN 'TABLE'
+            ELSE 'IN'
+        END AS parameter_mode,
+        format_type(arg.type_oid, NULL) AS data_type
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+        WITH ORDINALITY AS arg(type_oid, ordinality) ON TRUE
+    WHERE p.prokind IN ('f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, p.oid, arg.ordinality
+"""
+
+_TABLE_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        obj_description(c.oid, 'pg_class') AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(c.oid, 'pg_class') IS NOT NULL
+    ORDER BY n.nspname, c.relname
+"""
+
+_COLUMN_COMMENT_SQL = """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        a.attname AS column_name,
+        col_description(c.oid, a.attnum) AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND col_description(c.oid, a.attnum) IS NOT NULL
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+
+_SCHEMA_COMMENT_SQL = """
+    SELECT
+        n.nspname AS schema_name,
+        obj_description(n.oid, 'pg_namespace') AS description
+    FROM pg_namespace n
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(n.oid, 'pg_namespace') IS NOT NULL
+    ORDER BY n.nspname
+"""
+
+_CATALOG_COMMENT_SQL = """
+    SELECT shobj_description(d.oid, 'pg_database')
+    FROM pg_database d
+    WHERE d.datname = current_database()
+"""
+
+# CT-3/CN-8. Not an envelope 1.1 axis (cost-estimation-only, see DiscoveredIndex),
+# grouped like the constraint query above via pg_index/pg_am. Expression indexes
+# (indkey entries of 0) have no matching pg_attribute row and are silently
+# dropped by the join rather than reported with a placeholder column name.
+_INDEX_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        ic.relname AS index_name,
+        am.amname AS index_type,
+        ix.indisunique AS is_unique,
+        ix.indisprimary AS is_primary,
+        att.attname AS column_name
+    FROM pg_index ix
+    JOIN pg_class rel ON rel.oid = ix.indrelid
+    JOIN pg_class ic ON ic.oid = ix.indexrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN pg_am am ON am.oid = ic.relam
+    JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = cols.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, ic.relname, cols.ordinality
+"""
+
+# Declarative partitioning: pg_partitioned_table carries the parent's
+# partitioning strategy and key; pg_inherits lists each partition's parent.
+_PARTITION_KEY_SQL = """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        key.ordinality AS ordinal_position
+    FROM pg_partitioned_table part
+    JOIN pg_class rel ON rel.oid = part.partrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN LATERAL unnest(part.partattrs) WITH ORDINALITY AS key(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = key.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY ns.nspname, rel.relname, key.ordinality
+"""
+
+_PARTITION_SQL = """
+    SELECT
+        parent_ns.nspname AS table_schema,
+        parent.relname AS table_name,
+        child.relname AS partition_name,
+        CASE part.partstrat
+            WHEN 'r' THEN 'RANGE'
+            WHEN 'l' THEN 'LIST'
+            WHEN 'h' THEN 'HASH'
+        END AS partition_type,
+        pg_get_expr(child.relpartbound, child.oid) AS high_value,
+        inh.inhseqno AS ordinal_position
+    FROM pg_inherits inh
+    JOIN pg_class parent ON parent.oid = inh.inhparent
+    JOIN pg_class child ON child.oid = inh.inhrelid
+    JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+    JOIN pg_partitioned_table part ON part.partrelid = parent.oid
+    WHERE parent_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY parent_ns.nspname, parent.relname, inh.inhseqno
+"""
+
+# `role_table_grants` is the privileges visible to the connecting role, which is
+# the honest scope: a metadata reader is not a superuser, and reporting only what
+# it can see is preferable to failing the whole discovery on a permission error.
+# PostgreSQL has one principal kind, so `grantee_type` is always ROLE.
+_GRANT_SQL = """
+    SELECT
+        g.table_schema AS schema_name,
+        g.grantee AS grantee,
+        'ROLE' AS grantee_type,
+        g.privilege_type AS privilege,
+        'TABLE' AS object_type,
+        g.table_name AS object_name,
+        g.is_grantable AS is_grantable
+    FROM information_schema.role_table_grants g
+    WHERE g.table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY g.table_schema, g.table_name, g.grantee, g.privilege_type
+"""
+
+
+class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
     DEFAULT_CAPABILITIES = ConnectorCapabilities(
         constraints=True,
-        indexes=False,
-        partitions=False,
+        # CT-3/CN-8: indexes -> pg_index/pg_am; partitions -> pg_partitioned_table
+        # + pg_inherits. See `_INDEX_SQL`/`_PARTITION_SQL` below.
+        indexes=True,
+        partitions=True,
         explain=True,
         delegated_identity=False,
         approximate_statistics=True,
+        # Envelope 1.1 (gap/02 N1). Each flag below is backed by a query in
+        # `discover()`, which is what INV-9 requires of a `True`:
+        #   views            -> pg_get_viewdef over pg_class relkind in ('v','m')
+        #   routines         -> pg_proc / pg_get_functiondef plus a parameter query
+        #   object_comments  -> shobj_description / obj_description / col_description
+        #   grants           -> information_schema.role_table_grants
+        views=True,
+        routines=True,
+        object_comments=True,
+        grants=True,
+        # PR-2: the only connector today with a real `profile_column_values`
+        # implementation below -- every other connector stays honestly
+        # unsupported (default False) rather than simulating this capability.
+        value_range_profiling=True,
     )
 
     def __init__(self, dsn: str, *, command_timeout: float = 30.0) -> None:
@@ -118,12 +383,70 @@ class PostgresConnector(Connector):
                 ORDER BY ns.nspname, rel.relname, con.conname
                 """
             )
+            materialized_view_column_rows = await connection.fetch(
+                _MATERIALIZED_VIEW_COLUMN_SQL
+            )
+            view_rows = await connection.fetch(_VIEW_DEFINITION_SQL)
+            routine_rows = await connection.fetch(_ROUTINE_SQL)
+            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
+            table_description_rows = await connection.fetch(_TABLE_COMMENT_SQL)
+            column_description_rows = await connection.fetch(_COLUMN_COMMENT_SQL)
+            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
+            grant_rows = await connection.fetch(_GRANT_SQL)
+            index_rows = await connection.fetch(_INDEX_SQL)
+            partition_key_rows = await connection.fetch(_PARTITION_KEY_SQL)
+            partition_rows = await connection.fetch(_PARTITION_SQL)
         finally:
             await connection.close()
 
-        tables = build_table_map_from_column_rows(rows)
+        # CN-3: materialized-view rows are appended, not merged separately -- they
+        # share the exact row shape `information_schema.columns` rows have, so one
+        # call to `build_table_map_from_column_rows` populates both. See
+        # `_MATERIALIZED_VIEW_COLUMN_SQL` above for why this is necessary at all.
+        tables = build_table_map_from_column_rows([*rows, *materialized_view_column_rows])
         append_aggregated_constraint_rows(tables, constraint_rows)
-        return assemble_catalog(str(catalog_name), tables)
+        apply_table_descriptions(tables, table_description_rows)
+        apply_column_descriptions(tables, column_description_rows)
+        apply_view_definitions(tables, view_rows)
+        append_grouped_index_rows(tables, index_rows)
+
+        # A partition key is a property of the parent table's partitioning
+        # scheme, not of the individual partition, so it is merged onto every
+        # partition row for that table before `append_partition_rows` groups them.
+        partition_key_map: dict[tuple[str, str], list[str]] = {}
+        for row in partition_key_rows:
+            key = (str(row["table_schema"]), str(row["table_name"]))
+            partition_key_map.setdefault(key, []).append(str(row["column_name"]))
+        merged_partition_rows = [
+            {
+                "table_schema": str(row["table_schema"]),
+                "table_name": str(row["table_name"]),
+                "partition_name": str(row["partition_name"]),
+                "partition_type": row["partition_type"],
+                "high_value": row["high_value"],
+                "ordinal_position": row["ordinal_position"],
+                "key_columns": partition_key_map.get(
+                    (str(row["table_schema"]), str(row["table_name"])), []
+                ),
+            }
+            for row in partition_rows
+        ]
+        append_partition_rows(tables, merged_partition_rows)
+
+        return assemble_catalog(
+            str(catalog_name),
+            tables,
+            routines=build_routines(routine_rows, routine_parameter_rows),
+            grants=build_grants(grant_rows),
+            schema_descriptions={
+                str(row["schema_name"]): str(row["description"])
+                for row in schema_description_rows
+            },
+            catalog_description=(
+                None if catalog_description is None else str(catalog_description)
+            ),
+        )
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
@@ -229,6 +552,76 @@ class PostgresConnector(Connector):
             sampled_row_count=sampled_row_count,
             columns=tuple(snapshots),
         )
+
+    async def profile_column_values(
+        self,
+        schema_name: str,
+        table_name: str,
+        column_names: tuple[str, ...],
+        *,
+        sample_rows: int,
+        top_n: int,
+        timeout_seconds: int,
+    ) -> tuple[ColumnValueProfileSnapshot, ...]:
+        """PR-2: the one connector with a real value-bearing implementation.
+
+        Callers (`profile_table_task`) are responsible for only invoking this
+        for columns whose classification has an APPROVED, unrevoked
+        `ProfilingExceptionPolicy` -- this method has no policy awareness of
+        its own and, per ADR-0014, is never on the path `profile_table` uses.
+        """
+        if not column_names:
+            return ()
+        if sample_rows < 1 or top_n < 1:
+            raise ValueError("profiling limits must be positive")
+        qualified_table = f"{_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
+        connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)
+        snapshots: list[ColumnValueProfileSnapshot] = []
+        try:
+            async with connection.transaction(readonly=True):
+                await connection.execute(f"SET LOCAL statement_timeout = {timeout_seconds * 1000}")
+                for name in column_names:
+                    quoted = _quote_identifier(name)
+                    bounded_sample = (
+                        f"SELECT {quoted} AS v FROM {qualified_table} "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                        f"LIMIT {int(sample_rows)}"
+                    )
+                    try:
+                        # A nested transaction here is a SAVEPOINT (asyncpg's
+                        # behaviour for a transaction opened inside another): a
+                        # column whose type has no total order (e.g. json) raises
+                        # below and is rolled back to the savepoint alone, rather
+                        # than aborting the outer read-only transaction and
+                        # poisoning every column queried after it.
+                        async with connection.transaction():
+                            range_row = await connection.fetchrow(
+                                f"SELECT MIN(v::text) AS min_v, MAX(v::text) AS max_v "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                                f"FROM ({bounded_sample}) AS bounded_sample"
+                            )
+                            top_rows = await connection.fetch(
+                                f"SELECT v::text AS value, COUNT(*) AS cnt "  # noqa: S608 -- identifiers are ANSI-quoted; limits are validated integers
+                                f"FROM ({bounded_sample}) AS bounded_sample "
+                                "WHERE v IS NOT NULL GROUP BY v "
+                                f"ORDER BY COUNT(*) DESC, v LIMIT {int(top_n)}"
+                            )
+                    except asyncpg.PostgresError:
+                        snapshots.append(
+                            ColumnValueProfileSnapshot(name=name, min_value=None, max_value=None)
+                        )
+                        continue
+                    snapshots.append(
+                        ColumnValueProfileSnapshot(
+                            name=name,
+                            min_value=None if range_row is None else range_row["min_v"],
+                            max_value=None if range_row is None else range_row["max_v"],
+                            top_values=tuple(
+                                (str(row["value"]), int(row["cnt"])) for row in top_rows
+                            ),
+                        )
+                    )
+        finally:
+            await connection.close()
+        return tuple(snapshots)
 
 
 def _extract_explain_estimate(raw_plan: dict[str, Any]) -> QueryEstimate:

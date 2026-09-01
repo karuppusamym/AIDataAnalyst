@@ -57,4 +57,4 @@ The bank supplies a legal-entity or entitlement model that this hierarchy cannot
 ## Enforcement
 
 - INV-5 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_cross_tenant_denial` over every endpoint and worker
+- Test: `test_cross_tenant_denial` over every endpoint and worker (`tests/test_inv5_tenant_isolation.py`, plus a second in `tests/test_tier0_invariants.py`)

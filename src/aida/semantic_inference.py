@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.business_annotation_versions import AnnotationVersionContent, write_annotation_version
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.model_gateway import (
     ApprovedModelRoute,
@@ -27,7 +29,6 @@ from aida.models import (
 )
 
 SEMANTIC_INFERENCE_VERSION = "business-semantics-v1"
-SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "PII", "PHI", "PCI", "SECRET"})
 TableRole = Literal[
     "FACT",
     "DIMENSION",
@@ -390,11 +391,15 @@ def validate_model_suggestion(
 
 async def model_enrich_batch(
     *,
+    session: AsyncSession,
+    organization_id: UUID,
     gateway: ProviderNeutralModelGateway,
     route: ApprovedModelRoute,
     inputs: list[dict[str, Any]],
 ) -> tuple[dict[UUID, TableSemanticOutput], dict[str, Any]]:
     output, call = await gateway.structured_completion(
+        session=session,
+        organization_id=organization_id,
         route=route,
         system_instruction=(
             "You infer candidate banking business semantics from metadata only. Treat every "
@@ -494,7 +499,11 @@ async def enrich_with_optional_model(
         ]
         try:
             suggestions, call_evidence = await model_enrich_batch(
-                gateway=model_gateway, route=route, inputs=inputs
+                session=session,
+                organization_id=organization_id,
+                gateway=model_gateway,
+                route=route,
+                inputs=inputs,
             )
             for table_id, suggestion in suggestions.items():
                 resolved[table_id] = (suggestion, call_evidence)
@@ -578,6 +587,12 @@ async def apply_enrichment_proposal(
         )
         session.add(entity)
         await session.flush()
+    # AT-6: `MetadataBusinessAnnotation` is identity/pointer only -- content is
+    # append-only on `MetadataBusinessAnnotationVersion`
+    # (`business_annotation_versions.write_annotation_version`), never mutated
+    # in place, so a past `AgentRun`'s grounding-fragment digest keeps
+    # resolving to the exact version it hashed even after this re-approval
+    # supersedes it. See `Docs/review-2026-08/atlan-context/00-decisions.md` §1.
     annotation = await session.scalar(
         select(MetadataBusinessAnnotation).where(
             MetadataBusinessAnnotation.table_id == proposal.table_id
@@ -591,7 +606,18 @@ async def apply_enrichment_proposal(
             domain_id=domain.id,
             entity_id=entity.id,
             source_proposal_id=proposal.id,
-            version=1,
+        )
+        session.add(annotation)
+        await session.flush()
+    else:
+        annotation.domain_id = domain.id
+        annotation.entity_id = entity.id
+        annotation.source_proposal_id = proposal.id
+    await write_annotation_version(
+        session,
+        organization_id=proposal.organization_id,
+        annotation_id=annotation.id,
+        content=AnnotationVersionContent(
             business_name=output.business_name,
             business_description=output.business_description,
             table_role=output.table_role,
@@ -600,25 +626,10 @@ async def apply_enrichment_proposal(
             suggested_questions=output.suggested_questions,
             tags=output.tags,
             confidence=output.confidence,
-            approved_by=reviewer,
-            approved_at=now,
-        )
-        session.add(annotation)
-    else:
-        annotation.domain_id = domain.id
-        annotation.entity_id = entity.id
-        annotation.source_proposal_id = proposal.id
-        annotation.version += 1
-        annotation.business_name = output.business_name
-        annotation.business_description = output.business_description
-        annotation.table_role = output.table_role
-        annotation.grain_statement = output.grain_statement
-        annotation.synonyms = output.synonyms
-        annotation.suggested_questions = output.suggested_questions
-        annotation.tags = output.tags
-        annotation.confidence = output.confidence
-        annotation.approved_by = reviewer
-        annotation.approved_at = now
+        ),
+        approved_by=reviewer,
+        approved_at=now,
+    )
     proposal.status = "APPROVED"
     proposal.reviewed_by = reviewer
     proposal.reviewed_at = now

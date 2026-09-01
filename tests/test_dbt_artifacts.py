@@ -8,6 +8,7 @@ from aida.dbt_artifacts import (
     ParsedDbtResource,
     parse_dbt_catalog,
     parse_dbt_manifest,
+    parse_dbt_run_results,
 )
 from aida.main import app
 from aida.schemas import DbtArtifactImportRead
@@ -181,6 +182,78 @@ def test_catalog_matching_prefers_exact_database_schema_relation() -> None:
         )
         == exact_table_id
     )
+
+
+def test_manifest_extracts_exposure_extra_metadata() -> None:
+    manifest = {
+        "metadata": {
+            "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+            "dbt_version": "1.10.0",
+        },
+        "exposures": {
+            "exposure.bank.executive_dashboard": {
+                "resource_type": "exposure",
+                "package_name": "bank",
+                "name": "executive_dashboard",
+                "type": "dashboard",
+                "maturity": "high",
+                "url": "https://bi.bank.internal/dashboards/exec",
+                "owner": {"name": "Risk & Finance Team", "email": "risk-finance@bank.com"},
+                "depends_on": {"nodes": ["model.bank.customer_summary"]},
+            }
+        },
+    }
+    parsed = parse_dbt_manifest(manifest, "postgres")
+    assert len(parsed.resources) == 1
+    exposure = parsed.resources[0]
+    assert exposure.resource_type == "EXPOSURE"
+    assert exposure.extra_metadata["exposure_type"] == "dashboard"
+    assert exposure.extra_metadata["maturity"] == "high"
+    assert exposure.extra_metadata["url"] == "https://bi.bank.internal/dashboards/exec"
+    assert exposure.extra_metadata["owner_name"] == "Risk & Finance Team"
+    assert exposure.extra_metadata["owner_email"] == "risk-finance@bank.com"
+
+
+def test_run_results_parser_extracts_test_outcomes() -> None:
+    payload = {
+        "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/run_results/v4.json"},
+        "results": [
+            {
+                "unique_id": "test.bank.customer_summary_not_null",
+                "status": "pass",
+                "failures": 0,
+                "execution_time": 0.35,
+                "message": None,
+            },
+            {
+                "unique_id": "test.bank.customer_balance_positive",
+                "status": "fail",
+                "failures": 14,
+                "execution_time": 0.82,
+                "message": "Got 14 results, configured to fail if != 0",
+            },
+        ],
+    }
+
+    results = parse_dbt_run_results(payload)
+    assert len(results) == 2
+    pass_test = results["test.bank.customer_summary_not_null"]
+    assert pass_test.status == "PASS"
+    assert pass_test.failures == 0
+    assert pass_test.execution_time == 0.35
+
+    fail_test = results["test.bank.customer_balance_positive"]
+    assert fail_test.status == "FAIL"
+    assert fail_test.failures == 14
+    assert fail_test.message == "Got 14 results, configured to fail if != 0"
+
+
+def test_run_results_parser_validates_input() -> None:
+    with pytest.raises(DbtArtifactError, match="valid JSON object"):
+        parse_dbt_run_results(["not-a-dict"])  # type: ignore[arg-type]
+
+    with pytest.raises(DbtArtifactError, match="'results' list"):
+        parse_dbt_run_results({"metadata": {}})
 
 
 def test_dbt_paths_are_published() -> None:

@@ -23,6 +23,7 @@ S1, S2 (conflicts), S3 (bulk ownership), S5 (coverage), R1, R3, and B2 (is this 
 - Six-dimensional coverage scoring at organization, source, domain, and line-of-business scope.
 - Durable coverage snapshots and history, plus a bounded unowned-table backlog.
 - One maker-checker bulk contract for ownership, linking, certification, and deprecation.
+- Deterministic, evidence-scored table description drafting, reviewed through the common governance queue.
 - A responsive Stewardship Control Center integrated with the Business Meaning and asset-intelligence workbenches.
 
 ## 4. Not responsibilities
@@ -46,6 +47,8 @@ ownership_rule -> bulk_stewardship_operation -> governance_review
 ownership_assignment
 asset_certification
 coverage_snapshot
+asset_description_draft -> governance_review
+asset_description_draft -> asset_documentation_version (on approval)
 ```
 
 Term synonyms are stored on immutable versions. An authoritative link records `MANUAL`, `BULK`, or `INFERRED`; inferred links retain the approved business annotation that supplied their evidence.
@@ -68,7 +71,7 @@ Future precedence learning may use resolution history, but the current implement
 
 | Operation | Implemented form |
 |---|---|
-| Assign ownership | Explicit tables or tables selected by a reusable schema/table glob rule; individual or group owner |
+| Assign ownership | Explicit tables or tables selected by a reusable rule (table name, schema, business domain, or annotation tag glob); individual or group owner |
 | Link terms | Explicit table selection linked to one approved active term |
 | Certify | Explicit table selection with shared rationale and expiry |
 | Deprecate | Explicit term selection with shared rationale |
@@ -98,12 +101,13 @@ The `/v1/organizations/{organization_id}` API includes:
 - `/glossary/conflicts`, conflict detection, and reviewed resolution.
 - `/glossary/link-proposals` for bounded exact-label inference and review.
 - `/stewardship/coverage`, snapshots, and snapshot history.
+- `/asset-description-drafts/generate`, the confidence-ordered `/asset-description-drafts` list, and `/asset-description-drafts/{id}/submit` for evidence-scored description drafting.
 
 The common `/v1/governance-reviews/{review_id}/decision` endpoint applies or rejects every governed change.
 
 ## 10. Events
 
-Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. They cover reviewed bulk requests and decisions, ownership assignment, bulk linking, term deprecation, certification, conflict creation/resolution, inferred-link decisions, and coverage snapshots.
+Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. They cover reviewed bulk requests and decisions, ownership assignment, bulk linking, term deprecation, certification, conflict creation/resolution, inferred-link decisions, coverage snapshots, and description-draft submission/approval/rejection.
 
 ## 11. Safety boundaries
 
@@ -113,6 +117,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 - Conflict auto-detection is bounded to 5,000 active terms and 100 conflicts per request.
 - Coverage and operation subjects are organization checked; cross-tenant IDs fail closed.
 - Makers cannot approve their own proposed changes.
+- Description drafting reads schema, lineage, dbt, annotation, and glossary-link metadata only — no source row values, and no external model or LLM call. A draft below the minimum evidence score can never be submitted for review, and every submitted draft (regardless of score) still requires an independent `decide_governance_review` approval before its text is published.
 
 ## 12. Current state and remaining work
 
@@ -120,10 +125,11 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 |---|---|---|
 | Term lifecycle | Implemented vertical slice | Category edit/archive; scheduled lifecycle policy |
 | Term-asset linkage | Manual, reviewed bulk, and reviewed exact inferred links | Fuzzy/model-assisted ranking and bank corpus calibration |
-| Ownership | Individual/group, manual/rule, reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
+| Ownership | Individual/group, manual/rule (name, schema, domain, tag), reviewed bulk | Inheritance and dedicated leaver/vacate workflow |
 | Conflicts | Manual and synonym detection with reviewed retained resolution | Definition-source precedence learning and richer impact preview |
 | Certification | Reviewed bulk table certification with expiry | Automatic expiry state/event worker; additional asset types |
 | Coverage | Six dimensions, four scopes, snapshots/history, unowned IDs | Scheduled trend computation, routing/escalation, bank-scale benchmarks |
+| Description drafting | Deterministic evidence-scored drafts, minimum-evidence submission gate, reviewed publish/reject with retained negative knowledge | Column/table-type-specific templates, batch scan trigger, bank corpus calibration of the scoring weights |
 | User experience | Responsive Stewardship Control Center and asset accountability actions | Interactive WCAG/usability certification and very-large-selection patterns |
 
 ## 13. Open work
@@ -138,3 +144,6 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | GL-6 | Unowned-asset backlog with routing | IN PROGRESS - bounded backlog exists; automated routing remains | P1 |
 | GL-7 | Dedicated leaver reassignment and ownership vacate workflow | TODO | P2 |
 | GL-8 | Review-confirmed term-link inference from approved annotations | DONE | P1 |
+| GL-9 | Evidence-scored table description drafting, routed through review | DONE | P1 |
+
+Atlan's "Context Agents" auto-draft table/column descriptions and auto-*apply* high-confidence output with no human review. GL-9 takes the underlying idea — draft from real evidence, score the draft — and rejects the no-review auto-apply, which is wrong for a governed/bank platform: `AssetDescriptionDraft` composes a description deterministically from evidence already in the catalog (column and constraint counts, `OpenLineageTableEdge` lineage, a matched `DbtResource` description, an approved `MetadataBusinessAnnotation`, and bound `AssetTermLink` glossary terms — no external model call), scores it on four explainable dimensions (accuracy, clarity, style, completeness), and routes it through the same `governance_review` queue as every other governed object type. The score sets review priority — `GET .../asset-description-drafts` sorts by `overall_score` descending — and gates whether a draft may even be submitted (`MINIMUM_EVIDENCE_FOR_REVIEW`); it never skips or substitutes for `decide_governance_review`, and self-approval is denied by that endpoint's shared maker-checker guard exactly as for every other object type. Approval publishes the drafted text as a new `AssetDocumentationVersion` (superseding the prior approved version); rejection retains the draft as `REJECTED` — negative knowledge, per §6 — so an identical low-value draft is not silently regenerated on the next run.

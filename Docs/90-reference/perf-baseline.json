@@ -1,0 +1,30 @@
+{
+  "benchmarks": {
+    "fusion_ranking_rrf_500_candidates": {
+      "description": "fuse_results() (hybrid retrieval's reciprocal-rank-fusion combiner) over a synthetic 500-candidate catalog with lexical/vector/graph signals -- 100 calls per measured iteration.",
+      "iterations": 20,
+      "median_ms": 201.2819,
+      "warmup": 3
+    },
+    "openapi_schema_generation": {
+      "description": "app.openapi() -- the same call TS-4's diff gate exercises -- with FastAPI's schema cache cleared each iteration so it is regenerated from the route table every time.",
+      "iterations": 8,
+      "median_ms": 4854.7877,
+      "warmup": 2
+    },
+    "policy_engine_evaluate_500_policies": {
+      "description": "policy_engine.evaluate() over 500 policies -- the engine actually wired into the query-execution path -- 50 calls per measured iteration.",
+      "iterations": 20,
+      "median_ms": 13.3104,
+      "warmup": 3
+    },
+    "sql_guard_validate_adversarial_corpus": {
+      "description": "SqlGuard.validate() over all 100 QG-1 adversarial-SQL-corpus cases across 5 certified dialects -- the exact deterministic guard pipeline every agent SQL statement passes through before execution.",
+      "iterations": 15,
+      "median_ms": 168.6648,
+      "warmup": 3
+    }
+  },
+  "generated_at": "2026-08-31T07:10:57.456342+00:00",
+  "threshold_pct": 20.0
+}

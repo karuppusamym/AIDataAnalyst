@@ -78,6 +78,7 @@ flowchart TD
 | Default | Conservative — when classification is uncertain, mask |
 | Evidence | The masking decision is recorded per execution |
 | Target | Source-native row/column policies and dynamic masking |
+| Sync (QG-2) | `policy_native_sync.py`/`policy_native_sync_api.py`: unconditional (subject-match-empty) `FILTER`/`MASK` obligations from the same governed ABAC policy set can be previewed and, maker-checker-gated, applied as native DDL — PostgreSQL RLS (row) and SQL Server DDM (column) today. Defense in depth, not a substitute: this table's masking keeps running unconditionally regardless of whether a sync exists or succeeded |
 
 Alias propagation is the subtle part. `SELECT ssn AS x FROM …` and `SELECT SUBSTR(ssn,1,3) FROM …` must both mask; a naive implementation catches neither.
 
@@ -117,7 +118,7 @@ Emits `execution.requested|denied|completed|cancelled`, `execution.cost_exceeded
 | AST validation | Implemented — SQLGlot, allowlists, deny rules | Adversarial corpus per certified dialect |
 | Cost gate | Implemented — EXPLAIN, cost ceiling | Per-LOB quotas, warehouse workload groups |
 | Bounded execution | Implemented — read-only, timeout, row/byte caps | Cancel propagation certification |
-| Masking | Implemented — conservative, alias/derived propagation | Source-native row/column policies, dynamic masking |
+| Masking | Implemented — conservative, alias/derived propagation; QG-6 tokenization for opted-in columns (`ColumnTokenizationPolicy`, local dev provider certified, Vault Transform adapter shape); QG-2 source-native sync for Postgres RLS (row) and SQL Server DDM (column), preview + maker-checker apply, apply verified only against a mocked connection | SQL Server native RLS, Postgres native column masking (documented future work); apply certified against a live source; Vault Transform certified against a live Vault |
 | Evidence | Implemented — HMAC, audit correlation, lineage | KMS-managed HMAC keys |
 | Concurrency control | Not implemented | Per-LOB quotas and a concurrency controller |
 
@@ -126,9 +127,9 @@ Emits `execution.requested|denied|completed|cancelled`, `execution.cost_exceeded
 | ID | Item | Priority |
 |---|---|---|
 | QG-1 | Adversarial SQL corpus per certified dialect | P0 |
-| QG-2 | Source-native row/column policy synchronization | P0 |
+| QG-2 | Source-native row/column policy synchronization | P0 — IN PROGRESS. Postgres RLS + SQL Server DDM shipped, preview + maker-checker apply; apply not yet certified against a live source; SQL Server RLS and Postgres column masking remain future work |
 | QG-3 | Per-LOB quotas and concurrency controller | P1 |
 | QG-4 | Cancel propagation certification | P1 |
 | QG-5 | KMS-managed HMAC keys | P0 |
-| QG-6 | Dynamic masking and tokenization integration | P1 |
-| QG-7 | Import-linter contract enforcing gateway exclusivity | P0 |
+| QG-6 | Dynamic masking and tokenization integration | P1 — delivered 2026-08-31, see tracker QG-6 (Vault Transform adapter untested against a live Vault) |
+| ~~QG-7~~ | ~~Import-linter contract enforcing gateway exclusivity~~ — **DONE 2026-08-30**. See ADR-0004 implementation status and INV-2 | — |

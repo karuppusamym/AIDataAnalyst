@@ -1,9 +1,15 @@
 import json
+from collections.abc import AsyncIterator
+from uuid import uuid4
 
 import httpx
 import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from aida.config import Settings
+from aida.db import Base
 from aida.model_gateway import (
     ApprovedModelRoute,
     DeterministicTestProvider,
@@ -15,6 +21,20 @@ from aida.model_gateway import (
     SqlGenerationOutput,
 )
 from aida.secrets import ResolvedSecret, SecretResolver, StaticTestSecretProvider
+
+
+@pytest_asyncio.fixture
+async def session() -> AsyncIterator[AsyncSession]:
+    """In-memory sqlite session, schema-complete (`kill_switch_state` included), for
+    the DB-backed kill-switch check every `structured_completion` call now performs
+    -- same real-engine pattern as `test_bulk_governance_decisions.py`."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as active:
+        yield active
+    await engine.dispose()
 
 
 def approved_route(provider_type: str = "OPENAI") -> ApprovedModelRoute:
@@ -49,10 +69,12 @@ def configured_gateway(response: dict[str, object]) -> ProviderNeutralModelGatew
 
 
 @pytest.mark.asyncio
-async def test_gateway_fails_closed_without_approved_route() -> None:
+async def test_gateway_fails_closed_without_approved_route(session: AsyncSession) -> None:
     gateway = ProviderNeutralModelGateway(Settings(_env_file=None))
     with pytest.raises(ModelRouteNotApproved):
         await gateway.structured_completion(
+            session=session,
+            organization_id=uuid4(),
             route=None,
             system_instruction="Generate read-only SQL",
             payload={"evidence": []},
@@ -61,7 +83,9 @@ async def test_gateway_fails_closed_without_approved_route() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_validates_structured_output_and_records_hashes() -> None:
+async def test_gateway_validates_structured_output_and_records_hashes(
+    session: AsyncSession,
+) -> None:
     gateway = configured_gateway(
         {
             "sql": "SELECT account_id FROM retail.account",
@@ -71,6 +95,8 @@ async def test_gateway_validates_structured_output_and_records_hashes() -> None:
         }
     )
     output, evidence = await gateway.structured_completion(
+        session=session,
+        organization_id=uuid4(),
         route=approved_route(),
         system_instruction="Generate read-only SQL",
         payload={"evidence_ids": ["table-1"]},
@@ -83,10 +109,12 @@ async def test_gateway_validates_structured_output_and_records_hashes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_rejects_invalid_provider_output() -> None:
+async def test_gateway_rejects_invalid_provider_output(session: AsyncSession) -> None:
     gateway = configured_gateway({"unexpected": "output"})
     with pytest.raises(ModelOutputInvalid):
         await gateway.structured_completion(
+            session=session,
+            organization_id=uuid4(),
             route=approved_route(),
             system_instruction="Generate read-only SQL",
             payload={"evidence_ids": []},

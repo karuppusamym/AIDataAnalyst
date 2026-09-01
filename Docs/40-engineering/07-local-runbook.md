@@ -147,6 +147,32 @@ flowchart TD
 | Query rejected with a policy denial | Working as designed | Check the denial reason code in the trace |
 | Cross-tenant 403 | Working as designed | Verify the organization header |
 
+## 9b. Connecting an MCP client locally
+
+Lifted 2026-08-30 from the retired MCP integration guide
+(`_superseded/26-mcp-server-integration-guide.md`) — this was the only operational content in it.
+
+The server is a plain HTTP JSON-RPC 2.0 endpoint at `POST /mcp`, authenticated with the same
+OIDC bearer token as the REST API. It is **not** a stdio server, so a client that only speaks
+stdio needs an HTTP proxy in front of it rather than a direct `command` entry:
+
+```json
+{
+  "mcpServers": {
+    "atlas": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://localhost:8000/mcp"],
+      "env": { "ATLAS_TOKEN": "<your-oidc-token>" }
+    }
+  }
+}
+```
+
+Whatever the client, the governance path is identical to the REST path and cannot be bypassed
+through MCP: prompt-risk screening before retrieval (ADR-0013), SQL AST validation and cost
+gating in the query gateway (INV-2), classification-based masking, an immutable `QueryExecution`
+and `AgentRun` record (INV-7), and a `query.execution.completed.v1` outbox event.
+
 ## 10. Production substitutions
 
 Before any deployment:

@@ -9,6 +9,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlglot import exp
 
+from aida.business_annotation_versions import current_version_alias
+from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -21,6 +23,7 @@ from aida.models import (
     DataSource,
     GovernanceReview,
     MetadataBusinessAnnotation,
+    MetadataBusinessAnnotationVersion,
     MetadataColumn,
     MetadataConstraint,
     MetadataEnrichmentProposal,
@@ -29,7 +32,6 @@ from aida.models import (
     Project,
     SemanticInferenceRun,
 )
-from aida.query_gateway import SENSITIVE_CLASSES
 from aida.schemas import (
     BusinessMapEdgeRead,
     BusinessMapNodeRead,
@@ -87,11 +89,16 @@ def _proposal_read(
 
 def _annotation_read(
     annotation: MetadataBusinessAnnotation,
+    version: MetadataBusinessAnnotationVersion,
     table: MetadataTable,
     schema: MetadataSchema,
     domain: BusinessDomain,
     entity: BusinessEntity,
 ) -> MetadataBusinessAnnotationRead:
+    """AT-6: content comes from `version`, the current (`APPROVED`)
+    `MetadataBusinessAnnotationVersion` -- `annotation` itself is identity
+    only. See `business_annotation_versions.py`.
+    """
     return MetadataBusinessAnnotationRead(
         id=annotation.id,
         organization_id=annotation.organization_id,
@@ -106,19 +113,19 @@ def _annotation_read(
         entity_key=entity.entity_key,
         entity_name=entity.display_name,
         source_proposal_id=annotation.source_proposal_id,
-        version=annotation.version,
-        business_name=annotation.business_name,
-        business_description=annotation.business_description,
-        table_role=annotation.table_role,
-        grain_statement=annotation.grain_statement,
-        synonyms=annotation.synonyms,
-        suggested_questions=annotation.suggested_questions,
-        tags=annotation.tags,
-        confidence=annotation.confidence,
-        approved_by=annotation.approved_by,
-        approved_at=annotation.approved_at,
+        version=version.version,
+        business_name=version.business_name,
+        business_description=version.business_description,
+        table_role=version.table_role,
+        grain_statement=version.grain_statement,
+        synonyms=version.synonyms,
+        suggested_questions=version.suggested_questions,
+        tags=version.tags,
+        confidence=version.confidence,
+        approved_by=version.approved_by,
+        approved_at=version.approved_at,
         created_at=annotation.created_at,
-        updated_at=annotation.updated_at,
+        updated_at=version.updated_at,
     )
 
 
@@ -428,19 +435,25 @@ async def list_business_annotations(
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
+    version_alias, version_ranked = current_version_alias()
     base = (
         select(
             MetadataBusinessAnnotation,
+            version_alias,
             MetadataTable,
             MetadataSchema,
             BusinessDomain,
             BusinessEntity,
         )
+        .join(version_alias, version_alias.annotation_id == MetadataBusinessAnnotation.id)
         .join(MetadataTable, MetadataTable.id == MetadataBusinessAnnotation.table_id)
         .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
         .join(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
         .join(BusinessEntity, BusinessEntity.id == MetadataBusinessAnnotation.entity_id)
-        .where(MetadataBusinessAnnotation.datasource_id == datasource.id)
+        .where(
+            MetadataBusinessAnnotation.datasource_id == datasource.id,
+            version_ranked.c.rn == 1,
+        )
     )
     total = await session.scalar(select(func.count()).select_from(base.subquery()))
     rows = (
@@ -479,27 +492,30 @@ async def get_table_business_annotation(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> MetadataBusinessAnnotationRead:
+    version_alias, version_ranked = current_version_alias()
     row = (
         await session.execute(
             select(
                 MetadataBusinessAnnotation,
+                version_alias,
                 MetadataTable,
                 MetadataSchema,
                 BusinessDomain,
                 BusinessEntity,
             )
+            .join(version_alias, version_alias.annotation_id == MetadataBusinessAnnotation.id)
             .join(MetadataTable, MetadataTable.id == MetadataBusinessAnnotation.table_id)
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
             .join(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
             .join(BusinessEntity, BusinessEntity.id == MetadataBusinessAnnotation.entity_id)
-            .where(MetadataBusinessAnnotation.table_id == table_id)
+            .where(MetadataBusinessAnnotation.table_id == table_id, version_ranked.c.rn == 1)
         )
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="approved business annotation not found")
-    annotation, table, schema, domain, entity = row
+    annotation, version, table, schema, domain, entity = row
     enforce_organization(context, annotation.organization_id)
-    return _annotation_read(annotation, table, schema, domain, entity)
+    return _annotation_read(annotation, version, table, schema, domain, entity)
 
 
 @router.get(
@@ -525,20 +541,26 @@ async def get_business_map(
     session: AsyncSession = Depends(get_session),
 ) -> BusinessMapRead:
     enforce_organization(context, organization_id)
+    version_alias, version_ranked = current_version_alias()
     rows = (
         await session.execute(
             select(
                 MetadataBusinessAnnotation,
+                version_alias,
                 MetadataTable,
                 MetadataSchema,
                 BusinessDomain,
                 BusinessEntity,
             )
+            .join(version_alias, version_alias.annotation_id == MetadataBusinessAnnotation.id)
             .join(MetadataTable, MetadataTable.id == MetadataBusinessAnnotation.table_id)
             .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
             .join(BusinessDomain, BusinessDomain.id == MetadataBusinessAnnotation.domain_id)
             .join(BusinessEntity, BusinessEntity.id == MetadataBusinessAnnotation.entity_id)
-            .where(MetadataBusinessAnnotation.organization_id == organization_id)
+            .where(
+                MetadataBusinessAnnotation.organization_id == organization_id,
+                version_ranked.c.rn == 1,
+            )
             .order_by(BusinessDomain.display_name, BusinessEntity.display_name)
             .limit(limit)
         )
@@ -546,7 +568,7 @@ async def get_business_map(
     nodes: dict[str, BusinessMapNodeRead] = {}
     edges: dict[str, BusinessMapEdgeRead] = {}
     annotations_by_table: dict[UUID, tuple[MetadataBusinessAnnotation, BusinessDomain]] = {}
-    for annotation, table, schema, domain, entity in rows:
+    for annotation, version, table, schema, domain, entity in rows:
         domain_node = f"domain:{domain.id}"
         entity_node = f"entity:{entity.id}"
         table_node = f"table:{table.id}"
@@ -571,8 +593,8 @@ async def get_business_map(
             parent_id=entity_node,
             metadata={
                 "datasource_id": str(annotation.datasource_id),
-                "table_role": annotation.table_role,
-                "grain": annotation.grain_statement,
+                "table_role": version.table_role,
+                "grain": version.grain_statement,
             },
         )
         edges[f"contains:{domain.id}:{entity.id}"] = BusinessMapEdgeRead(
@@ -587,7 +609,7 @@ async def get_business_map(
             edge_type="ENTITY_REPRESENTED_BY_TABLE",
             source_node_id=entity_node,
             target_node_id=table_node,
-            evidence={"annotation_version": annotation.version},
+            evidence={"annotation_version": version.version},
         )
         annotations_by_table[table.id] = (annotation, domain)
     if annotations_by_table:

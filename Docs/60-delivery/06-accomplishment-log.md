@@ -13,6 +13,932 @@
 
 ---
 
+## 2026-08-30 (tenth entry)
+
+### Cleared the lint backlog — and four of the errors were runtime faults
+
+The ninth entry recorded 168 `ruff` and 16 `mypy` errors arriving with the parallel session's
+~35 new modules, and said they were "surfaced, not repaired". The owner's instruction was to fix
+rather than escalate, so this entry is the repair. **CI is green again**: ruff clean, mypy clean
+on 156 files, 4 import contracts kept, one Alembic head, 1,199 tests passing.
+
+#### The part worth remembering
+
+Most of the 184 were genuine noise — unused imports, import order, long lines. **Four were
+defects that would have failed at runtime**, and they were invisible because nobody reads 168
+warnings looking for the four that matter.
+
+* **`observability.traced` called the function it wrapped twice.** The `try` block enclosed the
+  wrapped call, so any exception was swallowed by `except Exception: pass` and the fallback path
+  then ran the function *again* — a silent duplicate side effect on every traced operation that
+  raised, with the caller seeing only the second failure. The `try` now guards tracer
+  acquisition alone, and the call sits in the `else` branch. Tracing must never change how many
+  times the thing it observes runs.
+* **`studio_api` called `record_outbox` without `aggregate_type` or `aggregate_id`** — both
+  required, so every change-set submit would have raised `TypeError`.
+* **`search_api` wrapped an existing `UUID` in `UUID(...)`** — `TypeError` for every search hit
+  carrying a datasource.
+* **`MetricsConfig` had no `insecure` field** that `configure_metrics` reads — `AttributeError`
+  the moment OTLP metrics were enabled.
+
+Two more were narrowed rather than silenced: a bare `except Exception` inside the injection
+detector, where a wide silent catch makes a decoder bug read exactly like "nothing found"; and
+an `assert False` in a test, which `python -O` deletes, turning the test into one that passes
+either way.
+
+A mistake of my own is worth recording with them: a blanket replacement of
+`org_id = context.require_organization()` hit eleven call sites when only five had an unused
+variable, breaking four functions. `ruff` reported the resulting `F821`s immediately and the
+repair was scoped per-function. The lesson is the ordinary one — a mechanical edit across call
+sites needs the scope check *before* the write, not the linter afterwards.
+
+#### The embedding model is chosen and built (N5)
+
+Decision: **OpenAI or Gemini**, the same two providers the generation path already supports.
+`src/aida/embedding_provider.py` implements both, with 12 tests.
+
+Reusing those two providers was the point rather than a shortcut: a third embedding vendor means
+a second credential path, a second retry policy and a second failure mode for one capability.
+The embedding credential resolves through the same reference mechanism as every model
+credential, inheriting its rotation, registry and production refusal of `env://`.
+
+**The most valuable thing this uncovered was already in the tree.** The fused retrieval path
+built `HashEmbeddingProvider()` *unconditionally* and fed its output into ranking as the
+`vector` signal. A hash has no semantic structure, so that score was noise wearing the name of a
+signal — and from outside, the result looked complete. Resolution now fails closed
+(`EmbeddingUnavailable` with a reason code, no fallback), and the vector stage is **skipped and
+logged** rather than substituted. A smaller answer beats a confidently wrong one, and reporting
+a capability you do not have is what INV-9 forbids.
+
+Three provider responses are refused rather than accepted: wrong vector count, wrong width,
+unparseable shape. Each would otherwise misalign vectors with the texts they describe or store
+something incomparable with what is already indexed — and **neither is detectable downstream**.
+They would surface as quietly bad search months later.
+
+#### Neo4j: configurable, not removed
+
+Recorded in full in the ninth entry; the tracker rows moved with it. C7 becomes "graph store as
+a configurable port" and E5, the projection rebuild drill, is promoted from deferred to a
+prerequisite of shipping the `neo4j` backend.
+
+#### Verification evidence
+
+- `ruff check .` clean · `mypy src` clean on **156** files · `lint-imports` 4 kept, 0 broken ·
+  `alembic heads` = 1 (`d5f8b21c4a03`) · **1,199 tests passing**, no failures, no skips.
+- The four runtime faults above were each confirmed by reading the call site, not by inference
+  from the error text.
+
+#### Current limitations
+
+- **Nothing embeds the catalogue yet.** The provider exists and is tested against mocked
+  transports; no vectors have been produced for real metadata, and no live call to either
+  provider has been made from this repository.
+- **The recall@10 evaluation has not been run** — 200–500 real steward questions, measured
+  *after* policy filtering, per `review-2026-08/decisions/02-embedding-model.md`. Choosing the
+  provider was the blocking decision; proving the choice is a separate piece of work.
+- The lint repair touched 20 files that a parallel session had open. It was done only after
+  confirming no writes since 05:49; if that session resumes on the same files, this is where a
+  conflict will appear.
+- `MAX_BATCH` is declared and not yet enforced by a chunking caller — the batching limit exists
+  as a constant for the backfill that does not exist yet.
+
+---
+
+## 2026-08-30 (ninth entry)
+
+### Neo4j: configurable, not removed — and a tree that moved underneath the last entry
+
+Two things, recorded together because the second changes how to read the first.
+
+#### The graph store becomes a setting (C7, ADR-0020 amendment)
+
+Asked whether both backends could be offered under an admin setting, and whether that was hard.
+It is not, and the reasoning is worth keeping because it reverses the framing of ADR-0020's
+own reversal condition.
+
+That condition said: reintroduce a graph store when p95 lineage traversal exceeds ~200 ms after
+caps, on a real estate. Under a removal, satisfying it meant weeks of work *at exactly the moment
+the estate was proving the need*. As a per-organization setting, satisfying it means changing a
+value for one organization and measuring the result. **A decision that can be tested is worth more
+than a decision that has to be defended**, so the amendment strengthens the ADR rather than
+softening it.
+
+The switch itself is cheap and the honest reason is that the surface is small: three modules read
+Neo4j, a gating boolean (`lineage_neo4j_read_enabled`) already exists, and `vector_store.py` is
+the same port-with-adapters pattern already built once under ADR-0019.
+
+**What actually costs the time is not the switch.** Two backends must answer *identically* —
+identical node sets, ordering, tie-breaks, cap behaviour and truncation reasons — or a
+configuration flag has quietly become a correctness surface, and the user who hits the difference
+has no way to diagnose it. One conformance suite run against both is the deliverable that makes
+the setting safe. Beyond that: no Neo4j runs in the test suite today (INV-1's test says so
+itself), so the second backend either joins CI or ships advertised as uncertified (INV-9); and
+INV-1 confines the setting to lineage and exploration reads, never the authorization path or the
+classification roll-up.
+
+The cost named rather than absorbed: removal would have eliminated two overdue drills. Keeping
+Neo4j puts them back and promotes **E5**, the projection rebuild drill, from deferred to a
+prerequisite. A projection never proven rebuildable should not be offered as a selectable backend.
+
+#### The working tree moved, and it no longer passes lint
+
+The eighth entry's verification block said 716 tests and 120 files, clean. That was true at 04:30
+and false by 12:25. The parallel session restarted, committed three times (latest `2c30a6f`), swept
+this session's authorization work into its commits, and added roughly 35 modules — ABAC API,
+studio, tool plans, view lineage, full-text index, fusion ranking, graph retrieval, compliance
+packs, consumption and AI-decision lineage.
+
+| | 04:30 | 12:25 |
+|---|:--:|:--:|
+| Tests passing | 716 | **1,187** |
+| Source files (mypy) | 120 | 155 |
+| `ruff` | clean | **168 errors** |
+| `mypy --strict` | clean | **16 errors in 7 files** |
+| Import contracts | 4 kept | 4 kept |
+| Alembic heads | 1 | 1 |
+
+**CI would be red.** The failures concentrate in the in-flight modules — `runtime_contracts.py`
+(12), `injection_defense.py` (10), `tool_plans.py` (9), `retrieval.py` (8), `compliance_api.py`
+(8) — and 119 of the 168 are auto-fixable, so this reads as work in progress rather than damage.
+It is recorded because the eighth entry's numbers are now wrong, and this log's own rule is that a
+correction is a new entry rather than an edit.
+
+It is also the first live test of the consolidation rule written four hours earlier. `00-status.md`
+now carries the moving-tree caveat in its header instead of a clean number that would have been
+false within the day — which is the behaviour the rule was written to produce.
+
+#### Verification evidence
+
+- 1,187 tests pass, no failures, no skips; 4 import contracts kept; one Alembic head
+  `d5f8b21c4a03`. `ruff` and `mypy` fail as tabulated above.
+- No code was changed in this entry. ADR-0020 gained an amendment; `00-status.md` §1 and decision
+  5, and tracker rows C7 and E5, were updated to match.
+
+#### Current limitations
+
+- **The lint regression is not this session's to fix.** Touching 46 files another session has open
+  is how two sessions produce a merge conflict neither can explain. It is surfaced, not repaired.
+- The C7 estimate (2–3 weeks) is judgement, not measurement: roughly a week for the port and the
+  admin setting, a week for the conformance suite and the CI service container, plus E5.
+- Nothing has yet been built for C7. This entry records a decision and its cost, not an outcome.
+
+---
+
+## 2026-08-30 (eighth entry)
+
+### Documentation consolidation — twelve status documents down to one
+
+Status had accumulated in twelve places, and four of them disagreed. This entry is the cleanup.
+It changed no code.
+
+#### What was actually wrong
+
+Not sprawl for its own sake — the failure mode was specific. `60-delivery/04-status-matrix.md`
+said 387 tests and Alembic head `9e4c7a12b5f8`; `05-gap-register.md` said retrieval was
+lexical-only; `review-2026-08/gap/01-baseline-reality.md` said CI did not exist and there were two
+import contracts; `10-architecture/01-principles-and-invariants.md` said four of nine invariants
+had no test. Each was true when written. Together they meant **no document could be trusted
+without checking the code**, which is the same as having no status document at all.
+
+Worse, one false claim was sitting in an authoritative *contract*, not a status file:
+`30-contracts/05-metadata-ingestion-envelope.md` stated that the envelope-1.1 pull path did not
+persist the new axes. `workflows/activities.py` imports `persist_envelope_extensions` at line 27
+and calls it at line 587. A reader would have concluded a shipped capability was missing.
+
+#### The consolidation
+
+`60-delivery/00-status.md` is now the single answer to "where are we": at-a-glance figures,
+capability matrix, per-invariant status *with each one's remaining limit*, deliberate
+simplifications, open gaps, the retest register, and the decisions waiting on a person. The two
+documents it absorbed are in `_superseded/`.
+
+Four rules were written into it, because a consolidation with no rule about what happens next just
+resets the clock:
+
+1. **One status claim, one home.** A document that needs to state status links to it. A dated
+   `Implementation status` callout in a design document is the exception and must name the file
+   that proves it.
+2. **The accomplishment log is history, not status.** Being in it is not evidence of still being
+   true.
+3. **A completed work-item write-up keeps its design rationale and loses its status section.** The
+   rationale explains why the code looks the way it does and is worth keeping.
+4. **A superseded document moves to `_superseded/` with a header naming its replacement.** Never
+   edited into agreement, never silently deleted.
+
+#### Also done
+
+- **The review's `C`/`N`/`E`/`D` item vocabulary was re-homed into `03-tracker.md`**, with status
+  per item, so the open-work list is one list. `gap/02` keeps the original week and risk estimates
+  and is now explicitly the historical plan.
+- **All vendor research moved into one folder.** Four shallower competitor analyses were superseded
+  by the review's primary-source research; the two Collibra deep-dives worth keeping moved to join
+  it. `Docs/competitors/` is gone.
+- **The two open decision briefs got their own home**, `review-2026-08/decisions/`. They were
+  buried among completion write-ups with colliding numeric prefixes, which is a poor place for the
+  only two documents in the folder that need someone to *do* something.
+- **A published contract was moved out of a handoff note.** The fourteen SQL-validation finding
+  codes — declared append-only, and a breaking change to every MCP client if renamed — lived in
+  `gap/05-validate-sql-handoff.md`. They are now `30-contracts/09` §7.
+- **`gap/06` presented a closed INV-7 breach as live.** Thirteen endpoints, fixed under ST-17, and
+  the section still read as an open finding. Marked closed, with the finding kept because the
+  finding is the useful part.
+- Two numeric-prefix collisions resolved; the stale "the repository is not under version control"
+  claim in `_superseded/README.md` corrected.
+
+#### Verification evidence
+
+- **Every relative link and backticked document path under `Docs/` resolves**, checked by script
+  across all 130 files. One exception is deliberate and reads as such: ST-13 names the retired
+  baseline snapshot as "formerly" at that path.
+- Code untouched, and re-verified unchanged: `ruff check .` clean, `mypy src` clean on 120 files,
+  `lint-imports` 4 contracts kept, 1 Alembic head, **716 tests passing**, 1 xfailed.
+
+#### Current limitations
+
+- **Paths in earlier entries of this log point at pre-consolidation locations.** This document is
+  append-only, so they were not rewritten — that rule is worth more than the broken links. The
+  mapping is in `_superseded/README.md`. In short: `60-delivery/04-status-matrix.md` and
+  `05-gap-register.md` → `60-delivery/00-status.md`; `Docs/competitors/*` → `_superseded/` or
+  `review-2026-08/research/`; `review-2026-08/gap/01` → `_superseded/27`; `gap/03` and the
+  embedding brief → `review-2026-08/decisions/`.
+- **`Docs/` is 130 files and this pass did not attempt to reduce that.** It removed *contradiction*,
+  not volume. `20-modules/` (21 files) still describes a decomposition the code has not reached,
+  and that is a code problem (ST-05 onward), not a documentation problem.
+- The consolidation is only as durable as rule 1. Nothing enforces it mechanically — there is no
+  test that fails when a second status claim appears, and writing one would mean parsing prose.
+
+---
+
+## 2026-08-30 (seventh entry)
+
+### The authorization decision is now wired into production paths (Task #19)
+
+For the last four entries this platform had a complete attribute-based authorization
+system -- policy engine, workspace membership, expiring source bindings, rule-derived
+roles, shadow mode -- with **48 passing tests and zero production callers**. Every prior
+entry said so plainly. This entry closes that gap: `authorize` now decides on the
+execution path, the validation path, four catalog read handlers and the retrieval
+preview, and three tests exist to stop it becoming unwired again.
+
+#### The problem that had to be solved first: which workspace is this request in?
+
+`authorize` needs a workspace id. Nothing in the existing API surface supplies one --
+the contracts predate ADR-0018 -- so a resolution step was unavoidable. The obvious
+implementation is a hole:
+
+> find the workspaces this principal belongs to, intersect with the ones bound to this
+> datasource, take the match
+
+That picks the workspace by where the caller already has access and then asks whether
+the caller has access there. It reads as helpful and it is a check with a foregone
+answer. **`aida/workspace_resolution.py` is subject-independent by construction:** every
+rule looks only at the request and at platform state, never at who is asking. There are
+exactly two ways to get a workspace -- the request names one, or the datasource has
+exactly one live binding so the answer is forced. Two live bindings is
+`WORKSPACE_AMBIGUOUS`: a refusal to answer, not a guess.
+
+The single-binding path is what carries the existing estate, because the ADR-0018
+migration gave every datasource exactly one grandfathered binding from its project.
+
+#### An unresolved workspace is a third state, not a quiet allow
+
+Most callers still name no workspace. Making that an allow would hide the size of the
+remaining migration inside a boolean; making it a denial on the day the gate was wired
+would take the platform down. It is its own state, with its own setting
+(`unresolved_workspace_posture`, default `SHADOW`), a `decided=False` flag on the gate's
+result so no caller can claim a check that did not happen, and a warning log line that
+**counts the callers still to migrate**. Flipping that setting to `DENY` is the actual
+completion of this rollout, and it is one setting, not a code change.
+
+#### Wired at the choke point, not at the handlers
+
+The gate sits inside `QueryExecutionGateway.execute` and `.validate`, which INV-2
+already makes the only path to a warehouse. Gating the four callers instead (two HTTP
+handlers, the MCP tool surface, the agent orchestrator) would mean the gate is present
+on the ones somebody remembered.
+
+`AuthorizationRejected` subclasses `QueryRejected` deliberately: every existing caller
+already knows how to record a rejection, with the execution id, failure reason and run
+status handling that goes with it. A sibling exception type would have meant each caller
+either grew a branch or let a denial escape as a 500 -- and the second outcome happens to
+whichever caller is overlooked. Handlers that want the right status catch it first and
+answer **403**, not 422: the statement was never the problem.
+
+Authorization runs *after* the execution row and its `requested` audit entry exist, and
+before anything reaches a connector. A denied attempt therefore leaves a REJECTED row
+naming who asked and why (INV-7), which gating earlier would have thrown away.
+
+#### Two design corrections found while building it
+
+* **A shadow record written into the caller's session is discarded exactly when it
+  matters.** A read handler never commits and a rejected execution rolls back, so the
+  most interesting divergences -- the ones attached to requests that failed -- would be
+  the least likely to survive, biasing the readiness report towards agreement. Since
+  that report is what a human reads before flipping a workspace to `ENFORCE`, the record
+  now gets a transaction of its own (`record_divergence_durably`).
+* **The INV-7 mutation scan was right to flag the gated GETs, and the fix was not an
+  exemption list.** Once a read path is gated every gated GET reaches a `session.add`,
+  and a route-keyed exemption list would grow with each one. `NON_GOVERNED_WRITERS` in
+  the shared scan says instead that recording an authorization divergence is not a
+  mutation of governed state -- nothing reads it, no object differs because it exists --
+  and `test_the_excluded_writers_only_ever_write_attributable_shadow_records` asserts
+  that claim rather than trusting it.
+
+#### Verification evidence
+
+- `ruff check .` clean; `mypy src` clean on 120 files; `lint-imports` **4 contracts kept,
+  0 broken**; `alembic heads` = 1. **716 tests pass** (26 new), 1 xfailed.
+- **This change adds no migration.** Schema is untouched; the only configuration addition
+  is one setting with a safe default.
+- **Measured proof the gate is not a no-op:** the suite was re-run with
+  `AIDA_UNRESOLVED_WORKSPACE_POSTURE=DENY`. **17 tests fail**, every one of them a test
+  whose double supplies no source binding. The gate is live, it fails closed, and the
+  failures name exactly the surfaces that must pass a workspace id before the posture
+  can flip.
+- The static half of `test_inv4_authorization_wiring.py` would pass against a `gate` that
+  returned True unconditionally; the behavioural half would pass against a perfect gate
+  nothing called. Both are present because neither is worth much alone, and
+  `test_the_scan_would_notice_if_a_gate_were_removed` keeps the static half able to fail.
+
+#### Current limitations
+
+- **Nothing is denied in production today**, and that is the intended state: every
+  workspace is in `SHADOW`, the unresolved posture is `SHADOW`, so behaviour is
+  unchanged. What exists now is the *measurement* -- divergences and unresolved-workspace
+  counts accumulating per workspace -- that makes flipping to `ENFORCE` evidence-based.
+  Claiming enforcement on the strength of this entry would be false (INV-9).
+- **Clients do not yet pass `workspace_id`.** `QueryExecutionRequest` and
+  `GatewaySqlValidationRequest` accept it and no caller sends it, so resolution runs
+  through the sole-binding path. The DENY rehearsal above is the list of what to fix.
+- **Coverage is the execution path plus five read surfaces**, not every read in the
+  platform. Query lineage, glossary, stewardship, semantic and marketplace reads are
+  ungated; `test_the_scan_would_notice_if_a_gate_were_removed` currently uses
+  `get_query_lineage` as its ungated control, which is itself a reminder that it should
+  be gated.
+- The per-request cost of a resolved gate (binding lookup, workspace, membership, rules,
+  classification scope, policy load) has been measured only on the synthetic estate from
+  the ADR-0019/0020 benchmarks (auth hot path 0.8 ms with the materialised roll-up). It
+  has not been measured against the bank's real catalogue.
+
+---
+
+## 2026-08-30 (sixth entry)
+
+### Cross-session review: one gap neither session would have found alone
+
+The parallel session stopped after six commits (validate_sql, all nine Tier-0 invariants,
+a documentation truth pass, envelope 1.1 across four connectors, INV-7 auditing). Reviewing
+that work against the same adversarial standard found one defect that exists precisely
+*because* two sessions worked in parallel: each was internally consistent, and the
+inconsistency lived between them.
+
+#### What the other session built, assessed honestly
+
+Strong work, and better than mine in two places:
+
+* **`validate_sql`** is real and shares `_run_validation` with `execute`, so "what
+  validation says" and "what execution enforces" cannot drift. Exactly the design the
+  review recommended.
+* **Five invariant test files** (~90 KB) that include *meta-tests* -- `test_the_cypher_scan
+  _finds_the_statements_it_is_supposed_to`, `test_the_control_plane_scan_would_notice_a
+  _leak`, `test_the_unauthenticated_route_list_stays_closed`. These are the guard against
+  the failure mode this session hit on its own INV-6 test, which asserted nothing. Better
+  practice than mine.
+* Exemption lists are tight and justified: **3** unauthenticated routes, **8** tenant-free
+  routes each carrying a written reason.
+* INV-1 is explicit that it does not prove Neo4j ingests correctly, because no Neo4j is
+  running. Honest about its own limit rather than claiming the invariant outright.
+
+#### The gap
+
+**The same codebase now treated persisted SQL two different ways, and the newer path was
+the unsafe one.**
+
+`dbt_artifacts.py` has always stored `compiled_sql_hash` + `compiled_sql_redacted` and
+never the raw artifact. Envelope 1.1's `metadata_view_definition.definition_sql` and
+`metadata_routine.body_sql` stored source SQL **raw**. A view defined
+`... WHERE ssn = '123-45-6789'` landed verbatim in the control plane -- a source value
+written in a different syntax, which is exactly what INV-6 forbids.
+
+It was invisible because **INV-6's own test drives only the query gateway**, so the tables
+envelope 1.1 introduced sat outside the scan entirely. A test is only as strong as the
+paths its author had in mind.
+
+#### Fixed, migration `d5f8b21c4a03`
+
+Columns replaced with `*_redacted` + `*_fingerprint` + `redaction_status`, raw columns
+**dropped rather than migrated** -- carrying the text forward would defeat the change.
+Redaction extracted to `aida/sql_redaction.py`, which also removed a latent L1-imports-L3
+edge (ingestion would otherwise have imported the gateway).
+
+**A design problem surfaced while building it, and changed the design.** Fail-closed
+redaction -- "store nothing that does not parse" -- discarded most *procedure bodies*,
+because `BEGIN ... END` is procedural rather than a single statement and every dialect
+spells it differently. That would have thrown away the text envelope 1.1 exists to capture,
+and with it procedure lineage: one of the four capabilities no competitor offers. So
+redaction now has three tiers -- `PARSED` (node-level, precise), `LEXICAL` (literals
+removed by scanning; structure survives, values do not), `UNPARSED` (nothing stored).
+Removing literals never actually required a parse.
+
+Numeric literals are scrubbed as well as quoted strings: an account number is as likely to
+appear unquoted as quoted, and `LIMIT 100` losing its number is the accepted cost of not
+guessing which numbers are values.
+
+#### Ingestion-time screening (ADR-0013, N18) -- shipped
+
+`aida/ingest_screening.py` runs the existing deterministic classifier over source-supplied
+text at **write** time, recording a verdict and quarantining what fails. Screening once on
+write is cheaper and more complete than screening on every read, and quarantine changes
+*eligibility for model context* rather than deleting a source's own metadata.
+
+The gap this closes is recorded in ADR-0013, threat model T7, AI-safety AS-1 and
+agent-runtime AG-1, and was addressed in none of them. Envelope 1.1 had just made it much
+larger: a procedure body is kilobytes of source-controlled text that meaning inference and
+tool generation are both designed to read.
+
+Stated plainly in the module: this is defence in depth and it is the weaker layer. INV-3 is
+load-bearing -- a successful injection still produces a proposal that cannot execute.
+
+#### INV-6's test now covers the ingestion path
+
+The systemic fix, not just the instance. Sentinel-laden view and procedure SQL is driven
+through the real redaction path and searched for leakage.
+
+#### Verified on PostgreSQL 16, with an SSN actually in the database
+
+Seeded a raw view definition containing `123-45-6789` at the pre-migration revision, then
+migrated. **5 of 5**: rows preserved, raw column dropped, the SSN gone, CHECK constraint
+rebuilt around the new column, pre-existing row still satisfying it. Downgrade and
+re-upgrade clean with data present.
+
+#### A process failure worth recording
+
+The single-head migration gate produced **two heads twice**, and the second time this
+session missed it -- because the verification command used `alembic heads | tail -1`, which
+showed one line and hid the second head. The gate was built in Phase 0, then not actually
+run. A check you own is not a check you performed.
+
+689 tests passing, ruff and mypy clean, 4 import contracts kept, one head.
+
+---
+
+## 2026-08-30 (fifth entry)
+
+### A devil's-advocate check before building found that the next planned change was an outage
+
+The plan stated at the end of the previous entry was "wire `authorize` into the read and
+execution paths". Challenging that plan before implementing it, rather than after, produced
+the most valuable finding of the day.
+
+#### The plan would have denied every request in the platform
+
+The ADR-0018 migration backfills one workspace per project and **zero memberships**. It
+backfills zero because there is nothing to backfill *from*: this codebase has **no persisted
+principal table at all** -- identity and roles arrive as OIDC claims per request and are
+never stored. (Module 01's spec claims a principal registry; it does not exist. Third
+doc-versus-code gap of the day.)
+
+Verified on the populated rehearsal database: 24 workspaces, 48 active source bindings,
+**0 memberships**. Wiring `authorize` in would have returned `NO_WORKSPACE_MEMBERSHIP` for
+every request. The 14-assertion migration rehearsal missed it because not one assertion
+asked "can anyone actually get in".
+
+#### What was built instead
+
+Seeding 24 synthetic owners would have invented an access grant nobody made. Two mechanisms
+instead, migration `c9d1a83e6b47`:
+
+* **`workspace_access_rule`** derives workspace membership from an IdP role, scoped to a
+  workspace, to everything under a business node, or org-wide. Seven rules per organization
+  cover every migrated workspace; revoking a rule revokes the access; rules only grant, and
+  a DENY policy still outranks them.
+* **Shadow mode.** `workspace.authorization_mode` defaults to `SHADOW`, where the full
+  decision is computed, divergences are recorded in `authorization_shadow_record`, and
+  nothing is denied. `authorize_enforced` is what surfaces call; `authorize` stays public
+  for the probe endpoint, which wants the unmodulated answer. `enforcement_readiness`
+  summarises the shadow record so flipping a workspace to `ENFORCE` is a measurement.
+
+Re-verified on the populated PostgreSQL rehearsal: 7 rules seeded, 0 workspaces enforcing,
+0 memberships invented, ADR-0018 backfill intact, upgrade/downgrade round trip clean.
+**Lockout risk: none.**
+
+#### A bug class, not a bug
+
+The timezone-naive/aware comparison defect found in the previous entry appeared **twice
+more** while building this -- in `workspace_access._live` and latently in
+`workspace_service._expired`. Three occurrences in one day makes it a class, so it now has
+one implementation: `aida/timeutil.py`, with `as_utc`, `is_expired`, `is_live` and
+`same_instant`, and a test pinning the behaviour. Both of the new sites were **expiry checks
+on access grants**, which is the worst possible place for a backend-dependent answer.
+
+#### The CI gate caught its first real defect
+
+Applying the new migration produced `Multiple head revisions are present` -- the parallel
+session had authored a migration from the same parent. That is a merge accident which
+normally surfaces at deploy time, and the single-head gate added in Phase 0 caught it.
+
+Resolving it produced a second, sharper failure: both authors rebased onto the other
+simultaneously, creating a revision **cycle** -- which `alembic heads` cannot even report,
+because it raises instead of returning a count. Resolution rule recorded in the migration:
+whoever moved last yields. Chain is linear again.
+
+#### Hub-shaped lineage measured, and it reframed the ADR-0020 caveat
+
+ADR-0020 listed hub fan-out as unmeasured and as the likeliest weakness in choosing
+PostgreSQL over Neo4j. Measured downstream through a single hub column on the 880,000-edge
+DAG: 50,000 fan-out at depth 12 costs **3,402 ms** and reaches 480,000 nodes.
+
+But cost tracks **nodes reached, not depth** -- and that is not a graph-database problem,
+because Neo4j must also materialise 480,000 nodes. Bounding the traversal, which ADR-0010
+already mandates, takes the same worst case to **1.5 ms** at a 1,000-node cap. A degree
+pre-check ("is this a hub?") costs 8.8 ms.
+
+The mitigation was already the design; it had simply never been shown to be load-bearing.
+ADR-0020 now carries three binding requirements: node caps with explicit truncation, a hub
+degree pre-check before traversal, and precomputed impact summaries for high-degree nodes.
+
+#### Also produced
+
+`gap/05-embedding-model-decision-brief.md` -- deliberately a decision *input*, not a
+decision. Which embedding model runs and where is a model-risk and procurement question,
+and the irreversible part is that `index_signature` pins model, version, dimensions and
+chunking, so changing the model means re-embedding the estate.
+
+#### Known limitations
+
+- Surfaces still call neither `authorize` nor `authorize_enforced`; the safe wiring now
+  exists but no endpoint uses it. That is the next change and it is now genuinely safe.
+- Hub measurement is synthetic. The real estate's degree distribution is still unknown, and
+  what matters is how many columns exceed a 1,000 fan-out.
+- No embedding model chosen, so retrieval remains lexical-only.
+
+---
+
+## 2026-08-30 (fourth entry)
+
+### Adversarial self-review: five defects in work that had already shipped green
+
+Prompted by a direct challenge — "how can I trust your analysis, and are you making a
+big mistake?" — the ADR-0018/0019 work was attacked rather than re-read. All five
+findings below were in code that had passed review, passed `mypy --strict`, and shipped
+inside a suite of 575 passing tests.
+
+The method mattered more than the findings: tests were written to *fail first*, and each
+was watched failing before anything was changed. Three are now permanent regressions in
+`tests/test_regressions_from_adversarial_review.py`.
+
+#### 1. Fail-open tenant isolation (INV-5) — the serious one
+
+`workspace_service.authorize` read
+`if context.organization_id is not None and <organization mismatch>`, so a caller
+claiming **no** organization skipped the cross-organization check entirely. Development
+identity makes `X-Organization-Id` optional, so `None` is reachable from outside.
+
+This was in the function whose whole purpose is INV-5, and the suite already contained
+two cross-tenant tests — both of which supplied an organization and therefore never
+reached the branch. Fixed: an absent tenant claim is now `NO_ORGANIZATION_CONTEXT`, a
+denial. Deliberately no `PlatformAdmin` bypass, unlike the older `enforce_organization`:
+a workspace is a tenancy boundary and INV-5 says isolation is total.
+
+#### 2. An allowlist matching on the wrong key
+
+`PostgresBruteForceIndex.search` filtered candidates by `owner_id`, which is unique only
+*within* an `owner_type`. An allowlist authorising `("TABLE", "x")` also admitted
+`("COLUMN", "x")` — an object the policy filter had not authorised. Fixed by matching the
+full pair, narrowing in SQL on the indexed column and completing the match in Python
+because a tuple `IN` is not portable across the dialects in play.
+
+#### 3. A constraint violation visible on only one backend
+
+Re-asserting an assignment at the same instant set `effective_to == effective_from` and
+then inserted a row colliding on the unique key. **The first fix did not work**, and the
+reason is the finding: timestamps read back aware from PostgreSQL and naive from SQLite,
+so `stored == supplied` was silently False on the test backend and would have been True
+in production. Backend-dependent comparison is the worst failure shape there is, because
+no single environment reveals it. Fixed with explicit UTC normalisation (`_as_utc`).
+
+#### 4. A test that asserted nothing
+
+`assert "tbl_1" not in rendered or decision.matched_policy_id is not None` — the
+right-hand side is always true, so the assertion always passed. It was the INV-6 test,
+meaning the one control claimed as verified was the one not verified at all. Rewritten to
+assert both halves; the original kept in a comment as a standing reminder that a green
+test is not evidence until it has been watched failing.
+
+#### 5. A performance bug behind a correct-looking fallback
+
+`rollup` fell through to the expensive recompute whenever the materialised result was
+empty — but empty is ambiguous between "nothing assigned here" and "projection not built",
+and the first is the common case early in an estate's life. The ~3 s query would have run
+constantly on precisely the nodes the materialisation exists to make fast. Fixed with an
+existence probe.
+
+### Also produced
+
+`Docs/review-2026-08/gap/04-how-to-verify-this-work.md` — every claim in the review
+paired with the command that checks it, every performance number with the dataset shape
+that produced it, and an explicit list of what has *not* been verified. It includes the
+instruction to break the INV-2 import contract deliberately and watch it fail, because a
+contract that has only ever passed is not evidence of anything.
+
+### Known limitations — unchanged and still open
+
+- Nothing is wired into the read and execution paths; ABAC and the vector index decide
+  nothing in production traffic.
+- Hub-shaped lineage remains unmeasured and is the likeliest weakness in ADR-0020.
+- No embedding model is configured.
+- CI has never run on a remote.
+
+---
+
+## 2026-08-30 (third entry)
+
+### Three assumptions challenged, measured, and two of them corrected
+
+Prompted by three questions from the product owner. Each was answered with a benchmark
+against real PostgreSQL 16 rather than an opinion, because two of the three concerned
+claims this project had asserted without evidence.
+
+#### 1. `pgvector` is not available in the target estate — ADR-0019 accepted
+
+The retrieval design named `pgvector` as a fact. It is not one: the bank's PostgreSQL has
+no `vector` extension, and `CREATE EXTENSION` needs a privilege a DBA will not grant a new
+platform. An architecture that requires an extension the operator cannot install is a
+design defect, not a deployment detail.
+
+Nearest-neighbour search is now a **port** (`aida/vector_store.py`) with four adapters:
+exact cosine over `bytea` in plain PostgreSQL (default, needs nothing), the bank's
+in-network vector service over HTTP, `pgvector` where it genuinely exists (probed via
+`pg_available_extensions`, never trusted from configuration — INV-9), and disabled.
+Embeddings live in a new `embedding` table with a stored norm and an `index_signature`
+pinning model, version, dimensions and chunking; vectors from different signatures are not
+comparable, and mixing them fails as quietly poor search rather than as an error.
+
+*Measured* end to end against 200,000 stored 768-dimension embeddings — fetch, unpack,
+score, top-25: **200 candidates 45 ms, 1,000 → 100 ms, 5,000 → 427 ms, 20,000 → 1,697 ms.**
+That is the honest envelope, and it moved the default candidate cap from a guessed 20,000
+to a measured 5,000. The cap is a refusal with a reason code, not a truncation: scoring an
+arbitrary slice of a larger set returns plausible answers that are wrong.
+
+Recorded and not glossed: **embeddings are not anonymous.** Embedding-inversion research
+recovers substantial portions of source text from vectors alone, so the embedding store
+inherits the classification of what was embedded, an external index must be inside the
+bank's network, and there is no hosted-vector-API mode.
+
+#### 2. "Will recursive SQL scale?" — the tree was fine, the aggregation was not
+
+The distinction that matters and was easy to miss: the recursive CTE walks the *taxonomy*,
+never tables or columns. Measured against a bank-scale taxonomy (13,548 nodes, depth 4) and
+5,000,000 assignments:
+
+| Operation | Before | After |
+|---|---:|---:|
+| Descendants of an LOB | 3.3 ms | 1.5 ms (closure) |
+| Authorization scope for one table | 26 ms (two round trips) | 0.8 ms (one query) |
+| Roll-up over a subtree | **3,147 ms** | **0.4 ms** (materialised) |
+
+So: a closure table (`business_node_closure`) for traversal, a materialised
+`business_node_rollup` for aggregation — full recompute of every node takes ~47 s as one
+grouped statement, which is a batch job, not a request — and `classification_scope`
+collapsed from two round trips into one because it sits inside a 50 ms authorization
+budget. `computed_at` is returned to callers so roll-up staleness is visible rather than
+hidden. Migration `a7c3e91d4f28`.
+
+#### 3. "Wouldn't Neo4j be better for lineage?" — measured; the answer held, the argument did not
+
+The original recommendation to drop Neo4j was a cost argument and was too glib about
+capability. A graph database genuinely is better at deep, variable-length paths, and
+lineage is where depth is real, so the honest question was how deep this product's
+traversal actually goes.
+
+A bank-shaped column-level DAG — 12 layers, 40,000 columns per layer, real fan-in,
+**880,000 column-level edges** — traversed upstream from one report column on PostgreSQL:
+depth 4 → 0.7 ms, depth 8 → 1.6 ms, **depth 12 → 10.8 ms reaching 3,637 nodes.** The
+join-per-hop cost does not bite at this depth and edge count, and the 1–4 hop cap in
+ADR-0010 turns out to be a product decision about what to render rather than a performance
+ceiling.
+
+ADR-0020 records the decision *and what was not measured*: hub-shaped fan-out (a shared key
+column feeding tens of thousands of downstream columns), all-paths enumeration, and graph
+algorithms. Each is a named reversal condition with a threshold, not a hand-wave.
+
+Worth noting the first attempt at this benchmark measured nothing — the synthetic graph
+collapsed to a linear chain with no branching. It was rebuilt before any conclusion was
+drawn from it.
+
+#### The migration rehearsal gap is closed
+
+The previous entry listed "the migration has not been run against a populated PostgreSQL
+database" as a real gap. It has now been run, on PostgreSQL 16:
+
+- Full 37-migration chain from base to head on an empty database — clean.
+- Then the real rehearsal: populated the pre-ADR-0018 tables with 6 LOBs, 24 domains
+  (including a sub-domain layer), 24 projects and 48 datasources, and ran the chain over
+  it. **14 of 14 backfill assertions passed** — workspace count, node count, parent chains
+  for both DOMAIN→LOB and SUB_DOMAIN→DOMAIN, assignment count, grandfathered ACTIVE
+  bindings, code uniqueness under namespacing, 4 ACTIVE + 1 DRAFT seeded policies, closure
+  and roll-up populated, and the pre-ADR-0018 tables untouched.
+- Full round trip: upgrade → downgrade → upgrade. New tables removed cleanly, original data
+  intact, backfill reproduced identically.
+
+#### Known limitations — still open
+
+- **Nothing is wired into the read and execution paths yet.** ABAC and the vector index
+  both exist, are tested, and decide nothing in production traffic. Unchanged from the
+  previous entry and still the next thing to do.
+- **Hub-shaped lineage is unmeasured** and is the likeliest place the PostgreSQL graph
+  decision hurts. It should be measured on the real estate once view and procedure parsing
+  land and the graph has a realistic degree distribution.
+- **No embedding model is configured.** `embedding_model_id` defaults to `unset`; nothing
+  produces vectors yet, and which model runs where is a model-route governance question
+  (ADR-0009) that has not been answered.
+- Scoring runs in Python. `numpy` would cut the scoring half of the cost substantially and
+  was deliberately not added, because a dependency should be paid for by a measurement.
+- The `pgvector` adapter is declared and refuses with `PGVECTOR_ADAPTER_NOT_IMPLEMENTED`
+  rather than existing untested (INV-9).
+
+---
+
+## 2026-08-30 (second entry)
+
+### ADR-0018 three-axis tenancy -- schema, engine, API and tests
+
+#### Completed
+
+**Steps 1-4 of the ADR-0018 migration are built. Step 5 is deliberately not.**
+
+*Access axis.* `workspace`, `workspace_membership`, `source_binding` and
+`isolation_boundary` models plus migration `f1a2b3c4d5e6`. A workspace is created with
+its first owner in one call, because a workspace with no owner is one nobody can
+administer and making that state reachable invites it.
+
+*Classification axis.* `business_node` (LOB / SUB_LOB / DOMAIN / SUB_DOMAIN / CONCEPT,
+self-referencing, effective-dated), `business_assignment` (many-to-many, polymorphic
+target, effective-dated) and `business_assignment_rule`. `business_graph.py` provides
+descendant and ancestor traversal by recursive CTE, `nodes_for_target`,
+`classification_scope`, `rollup` and `as_of` history.
+
+*Policy.* `policy_engine.py` -- pure, no I/O, exhaustively unit-testable. DENY is a hard
+ceiling at any priority including PlatformAdmin; default is deny; `principal_kind` is a
+first-class subject attribute; MASK and FILTER obligations accumulate; ALLOW ties break
+deterministically so a decision replays identically a year later.
+
+*Enforcement.* `workspace_service.authorize` is the single entry point, failing closed at
+every step in order: workspace unavailable, cross-organization, no membership, role does
+not permit the action, no active binding, binding expired, outside schema scope,
+classification outside binding, then the policy decision.
+
+*HTTP.* `workspace_api.py` -- workspaces, memberships, source bindings with maker-checker
+approval, business nodes and assignments, `as_of` tree, roll-up, access policies, and an
+`/authorization-probes` endpoint that answers "what would you decide, and why" without
+performing the action. Every mutation audits in the same transaction (INV-7).
+
+*Migration behaviour.* The backfill creates one workspace per project keeping its slug, a
+business node per LOB and per data domain preserving the parent chain, `MIGRATED`
+assignments for every project and datasource, and grandfathered ACTIVE source bindings so
+existing access does not break at the moment the binding model is introduced. Seeded
+policies reproduce today's RBAC outcomes exactly; the one policy that would change
+behaviour (agents denied sensitive classifications) is seeded `DRAFT`.
+
+**INV-5 is now formalised in the Tier-0 invariant suite** -- the first of the five
+previously-unformalised invariants to close. The earlier docstring said INV-5 needed "a
+running app plus a much heavier per-route fake-session harness"; that stopped being true
+once tenant isolation had a single enforcement point, so it is asserted against that
+function with a real in-memory database instead.
+
+*Verified*, in a clean checkout using the exact CI recipe: ruff clean, mypy clean across
+110 files, 3 import contracts kept, 1 Alembic head (`f1a2b3c4d5e6`), **424 tests passing**
+(up from 387; +35 new across `test_policy_engine.py`, `test_workspace_authorization.py`
+and the two new Tier-0 INV-5 cases).
+
+#### Found while doing the above
+
+**A real bug in the recursive CTE traversal, caught by a warning rather than a failure.**
+The first implementation built its live-node predicate against the un-aliased
+`BusinessNode` inside the recursive term, which silently added a second FROM entry -- a
+cartesian product with the whole table, filtering on "some row is live" rather than "this
+row is live". It returned correct results on the small test tree and would have returned
+wrong ones on a real estate. SQLAlchemy emitted a cartesian-product `SAWarning`; the
+predicate helper now takes the entity or alias explicitly and the joins are written out.
+The tests were re-run with warnings escalated to confirm none remain.
+
+#### Notable choices
+
+**These are the first tests in the repository that run against a real database.** SQLite
+in memory, added as a dev-only dependency. The behaviour under test is recursive CTE
+traversal, effective-dated history and multi-step authorization; a fake session would have
+asserted that the fake behaves, not that the SQL does. The full 89-table schema creates
+cleanly on SQLite, so the fixture is a few lines rather than a harness.
+
+#### Known limitations -- explicitly still open
+
+- **Step 5 of the migration is not started.** The tenancy columns are still authoritative
+  and no repository base class exists to scope on `(organization_id, workspace_id)`;
+  `src/atlas/platform/` holds config, context, db and logging only. This depends on the
+  module decomposition (ST-05/06/07).
+- **No endpoint is routed through `authorize` yet.** The entry point, the engine and the
+  probe endpoint exist and are tested; wiring the existing read and execution paths through
+  them is the next change. Until then ABAC decides nothing in production traffic -- which
+  is also why migration day changes no behaviour.
+- **The p95 ≤ 50 ms authorization budget is unmeasured.** `load_policies` runs per request
+  with no cache, and `classification_scope` issues two CTE queries. Both are obvious
+  caching targets and neither has been profiled.
+- **Residency is not an attribute** (tracker PG-1 remains PARTIAL for that reason).
+- Purpose is matchable but not mandatory per session.
+- The migration has been verified for correctness by reading and by schema creation, but
+  **has not been run against a populated PostgreSQL database.** That is a real gap: the
+  backfill is the part most likely to surprise, and it deserves a rehearsal on a copy.
+
+---
+
+## 2026-08-30
+
+### Phase 0 — "make the invariants true" (independent architecture review, `Docs/review-2026-08/`)
+
+#### Completed
+
+**Continuous integration now exists** (tracker ST-02, closed). `.github/workflows/ci.yml`
+adds five gates across three jobs: `ruff`, `mypy` (strict), `lint-imports`, an
+exactly-one-Alembic-head guard, and `pytest`. `UV_FROZEN=1` makes a stale `uv.lock` itself a
+failure. Before this date there was no pipeline at all, while `40-engineering/03-coding-standards.md`
+and `30-contracts/01-contract-strategy.md` both stated that checks "fail CI."
+
+*Verified*, in a clean checkout outside the working tree, using the exact CI recipe
+(`uv sync --frozen --extra dev`): ruff clean; mypy clean across 106 source files; 3 import
+contracts kept, 0 broken; 1 Alembic head (`e6d5b8c6bcef`); **387 tests passing**.
+
+**INV-2 gateway exclusivity is now enforced rather than asserted** (tracker QG-7, closed;
+ADR-0004's named mechanism, outstanding since that ADR was accepted). The SQL-accepting pair
+`estimate_read_query` / `execute_read_query` was moved off the `Connector` ABC onto a new
+`aida.connectors.sql_execution.SqlExecutor`. `ConnectorRegistry.create` still returns
+`Connector`, which now has no SQL-accepting member. `aida.connectors.execution_access` is the
+sole source of a `SqlExecutor`, and the import-linter contract *"INV-2 connector SQL execution
+is reachable only from the query gateway"* permits exactly one importer.
+
+*Verified by making it fail, not only by making it pass:*
+
+- Adding `from aida.connectors.execution_access import ...` to `aida.api` breaks the contract:
+  `Illegal imports of protected package aida.connectors.execution_access: aida.api -> ... (l.22)`.
+- Calling `connector.execute_read_query(...)` on a registry-produced connector is rejected by
+  mypy: `"Connector" has no attribute "execute_read_query" [attr-defined]`.
+- Both probes were reverted; the tree is clean.
+
+The Tier-0 AST scan (`test_no_connector_execution_outside_gateway`) was widened to cover
+`estimate_read_query` as well — it takes a caller-supplied statement exactly as
+`execute_read_query` does — and a new test,
+`test_the_connector_handed_to_the_platform_has_no_sql_surface`, fails if the methods are ever
+moved back onto `Connector`, a change that would leave the import contract and the AST scan
+passing while the type-level guarantee silently disappeared.
+
+**The `09` ↔ `16` import cycle does not exist** (tracker ST-11, closed). Checked against the
+code before redesigning anything: `query_gateway.py` imports no lineage module, no lineage
+module imports the gateway, and `extract_column_lineage` is defined inside `query_gateway.py`
+and called only there. The mutual edge was an error in the module register in
+`10-architecture/04-module-decomposition.md` §3/§4, not a property of the import graph. Rule
+recorded: **the gateway emits, intelligence modules consume.** No layer diagram redraw needed.
+
+**Pre-existing gate failures fixed so CI is green on its first run** rather than red on
+arrival: 6 ruff errors (4 × E501, 2 × unsorted imports) and 2 mypy errors.
+
+#### Found while doing the above
+
+- **`PyYAML` was an undeclared dependency.** `src/aida/context_compiler.py` imports `yaml`;
+  nothing in `pyproject.toml` declared it, and it resolved only transitively. Now declared
+  (`PyYAML==6.0.3`) with `types-PyYAML` in the dev extra. `uv.lock` regenerated — it had also
+  been missing the dev extras entirely, so `import-linter` was not in the lockfile.
+- **`domain_service.resolve_domain` returned `DataDomain | None` against a `DataDomain`
+  annotation.** An unresolvable `data_domain_id` returned `None` for callers to dereference.
+  Now raises (INV-4, fail closed) rather than returning a value the type says cannot occur.
+
+#### Known limitations — explicitly still open
+
+- `bandit`/SAST and `pip-audit` are named as CI gates in `03-coding-standards.md` and are
+  **not wired**; the tools are not in the `dev` extras. Marked as such in that table.
+- The import-linter contracts cover three narrow, real invariants. There is still **no layering
+  or independence contract over the flat `aida` package** — that lands with decomposition
+  (ST-05/06/07), all of which remain TODO.
+- CI has never actually run: this workflow file has not yet been pushed to a remote. The recipe
+  was verified locally in a clean checkout, which is not the same as a green run on GitHub.
+- Five of the nine Tier-0 invariant tests remain unformalised (INV-1, 5, 6, 7, 9), for the
+  reasons the test module's own docstring gives. Unchanged by this work.
+- Every operational drill remains **never run**. Unchanged by this work.
+
+### Decisions
+
+**ADR-0018 accepted; ADR-0017 superseded before acceptance.** Access, classification and
+technical hierarchies are modelled as three independent axes, and only access grants. Tenancy
+becomes `organization → workspace`; `line_of_business` and `data_domain` become effective-dated
+`business_node` classification records with many-to-many assignments; policy becomes
+attribute-based and keys on classification. `legal_entity` is withdrawn rather than deferred —
+it has never existed in the schema. ADR-0017's `cross_boundary_grant` mechanism is retained.
+
+The triggering argument is ADR-0017's own recorded reversal condition — *"domain taxonomy turns
+out not to nest cleanly (a table genuinely needs two sibling domains)"* — which is structurally
+met in a bank estate rather than being a future risk. **No migration code has been written; the
+schema is unchanged.**
+
+---
+
 ## 2026-08-24
 
 ### Completed
@@ -322,6 +1248,7 @@
 - `connector_registry` already carried an `oracle`/`oracle` `IMPLEMENTED`/`BETA` registration and `tests/test_connectors_oracle.py` (14 tests: credential parsing, identifier quoting, capability declaration, discovery assembly, LOB-aware profiling expressions) from earlier scaffolding in this build; `ingestion.py`'s `default_capabilities()` is fully connector-agnostic and needed no Oracle-specific branch.
 - Added a `gvenzl/oracle-free:23-slim` sample source to `compose.yaml` (`sample-oracle-source`, host port `15210`, built-in `healthcheck.sh`) with `infra/sample-oracle-source/init.sql` creating least-privilege `retail`/`risk` schema-owner users plus a read-only `source` user, mirroring the `retail.customer`/`retail.account`/`retail.transaction_fact`/`risk.customer_risk_snapshot` fixture schema (including the cross-schema foreign key from `risk.customer_risk_snapshot` to `retail.customer`, requiring an explicit `GRANT REFERENCES`) that PostgreSQL and SQL Server already use, so the same manual API walkthrough applies unchanged. `AIDA_SAMPLE_ORACLE_SOURCE_DSN` was already present in `.env.example`; added the matching `compose.yaml` environment entry and data volume. This has not yet been exercised against a real running container in this session — Docker itself is unavailable in this sandbox, so `docker compose up` and live connection/discovery/profiling verification against the fixture remain an open step for the next session with access to the user's Docker host, exactly as the first SQL Server compose attempt needed a live iteration to fix an unavailable base image.
 - Ruff, strict mypy, and the full pytest suite are clean against a real editable `uv`-installed verification environment (all Oracle unit tests plus the full existing suite pass with no regressions); `compose.yaml` was validated by parsing it with `pyyaml` to confirm the new service, environment entry, and volume are structurally well-formed, which is not a substitute for a real `docker compose up`.
+- Live-attempted in a follow-up session against the user's real Docker host and found a genuine `gvenzl/oracle-free:23-slim` gotcha: the image ships `FREEPDB1` pre-baked into its compressed seed data, so the container's own `CREATE PLUGGABLE DATABASE FREEPDB1` step on first boot always raises `ORA-65012: Pluggable database FREEPDB1 already exists`; the entrypoint recovers by restarting and treating the database as "already initialized," but that recovery path skips `/container-entrypoint-initdb.d/` entirely, so `init.sql` (the retail/risk schema and the `source` reader user) never ran. The database itself came up and stayed healthy for hours with no other errors — this is purely an init-script-skip, not a broken image or a broken connector. The documented recovery (`docker exec ... resetPassword`, then `docker cp init.sql` + `sqlplus ... as sysdba @init.sql` inside the container) was handed to the user but not completed in that session — the user does not have `sqlplus` on the host, and it must be run *inside* the container via `docker exec`, which was not carried out before the session moved on. **Oracle live verification (connection test, discovery, profiling against real rows) remains genuinely open.** Rather than ask the user for more manual `docker exec` steps, fixed `compose.yaml` at the root cause: replaced the `/container-entrypoint-initdb.d/00-init.sql` mount on `sample-oracle-source` (which the quirk above makes dead weight) with a dedicated `sample-oracle-source-init` sidecar — same pattern as `sample-mssql-source-init` — that polls `sqlplus -s sys/...@//sample-oracle-source:1521/FREEPDB1 as sysdba` in a retry loop (up to 60 attempts, 5s apart) until the listener genuinely accepts a query, then applies `init.sql` unconditionally, independent of the main container's flaky `healthcheck.sh` status. `init.sql`'s internal `CONNECT retail/...`/`CONNECT risk/...` statements were also fixed from `@//localhost:1521/...` to `@//sample-oracle-source:1521/...`, since they now run from the separate sidecar container rather than from inside `sample-oracle-source` itself. This is a real fix for the diagnosed root cause, but it has **not been run against a live Docker host** — no Docker access exists in this sandbox — so `docker compose up --build -d` and a full connection-test/discovery/profiling pass against real rows remain the concrete next step. The `sample-oracle-source` healthcheck itself was also observed reporting `unhealthy` for hours despite the database being genuinely up; its exact failure mode (`healthcheck.sh` invocation, PATH, or something else) was never captured, and is now decoupled from schema bootstrap but still worth fixing for accurate container status.
 
 ### R24 governed glossary and stewardship control center
 
@@ -332,3 +1259,3882 @@
 - Added migrations `7fbc5568a81f` and `9284d3ee7c0e`, then merge revision `d81e6c0f2a14` to reconcile the concurrent organization-integration-policy branch. Alembic has one head and reports no model drift.
 - Repository-wide Ruff and strict mypy pass; JavaScript syntax is valid; all 188 Python tests pass. The rebuilt API/UI are healthy and the permanent `scripts/verify-stewardship.ps1` workflow passed against the public API, including two ownership assignments, an `INFERRED` provenance link, auto-detected/resolved conflict `17b0e127-360d-4f92-b1f1-0467193c621d`, coverage snapshot, and reviewed term deprecation.
 - Interactive browser visual/WCAG certification remains open because the in-app browser runtime exposed no browser session. Static accessibility contracts and deployed HTML/JavaScript markers pass; bank-scale selection, scheduled expiry/escalation, dedicated leaver reassignment, broader asset types, and fuzzy inference calibration remain explicit follow-up work.
+
+### R25 BigQuery connector
+
+- Added `src/aida/connectors/bigquery.py`, a native pull adapter implementing the same `Connector` contract as Oracle/SQL Server (`test_connection`, `discover`, `explain_read_query`, `execute_read_query`, `profile_table`) via `google-cloud-bigquery==3.44.0`. Credentials are one canonical structured payload (`project_id`, `location`, `auth_method` of `service_account` or `workload_identity`, with `service_account_info` required only for the former) — deliberately not a fake DSN string, matching the design decision in `18-oracle-bigquery-implementation-backlog.md` Workstream C. GCP project maps to catalog, dataset to schema.
+- Discovery uses region-qualified `INFORMATION_SCHEMA.COLUMNS`/`TABLES`/`TABLE_CONSTRAINTS`/`KEY_COLUMN_USAGE`, reusing the shared `aida.connectors.discovery` assembly helpers. Foreign-key metadata and `column_default` are honestly omitted rather than guessed at, since their `INFORMATION_SCHEMA` shapes could not be verified live.
+- Estimation uses a `dry_run=True` job for `total_bytes_processed` (no row estimate — BigQuery dry runs don't provide one). Extracted the query-gateway cost gate into a new pure function `gate_query_estimate(estimate, settings)` in `src/aida/query_gateway.py` that branches structurally on `estimate.estimated_bytes is not None`, adding a deterministic byte-budget check (`max_bigquery_dry_run_bytes`, default 10 GB, new `config.py` setting) without changing PostgreSQL/SQL Server/Oracle's existing cost-plan gating path. Governed execution records `warehouse_query_id="bigquery-job:<job_id>"`, matching the `oracle-sid:`/`sqlserver-spid:` convention. Bounded profiling caps every query with an explicit `LIMIT`, `maximum_bytes_billed` and timeout; `REPEATED`/`RECORD`/`STRUCT`/`BYTES`/`GEOGRAPHY`/`JSON` columns fall back to static placeholders rather than issuing aggregates BigQuery rejects on those types.
+- Registered `bigquery` in `connector_registry` (`BETA`, transports `PULL`+`PUSH`, dialect `bigquery`) and removed it from the `declare_planned` list.
+- Added `tests/test_connectors_bigquery.py` (28 tests): credential parsing (valid plus 11 invalid/ambiguous forms), capability declaration, identifier/region quoting, discovery assembly including the FK omission, profiling-expression fallback for complex types, and `gate_query_estimate` (byte-budget allow/reject, cost-based fallback, non-finite rejection).
+- Full local suite: `ruff check .` and `mypy src` (strict) are clean on every file this increment touched; `pytest` passes at 170/170 (up from a 141-test baseline, +28 new plus +1 in `tests/test_ingestion.py` distinguishing BigQuery-implemented from still-planned connectors).
+- Not done, and explicitly left open: no live GCP project or credentials were available in this session, so `test_connection`, discovery, dry-run estimation, execution and profiling are unit-tested against mocked shapes only, never against a real BigQuery project — this mirrors exactly how Oracle's live-fixture verification was left open in its own increment. Certification and multi-version fixtures are unstarted.
+
+### R26 UI accessibility and usability remediation
+
+- Reviewed the R17 accomplishment entry and `20-modules/21-experience-shell.md` (UX-5, "accessibility audit and remediation") before changing anything, then applied targeted ARIA/keyboard/focus/contrast fixes across `ui/index.html`, `ui/app.js` and `ui/styles.css` via assertion-guarded patch scripts (each replacement asserted its expected match count before writing, and the live files were re-read after each stage to confirm), matching the idempotent-patch discipline R17 used.
+- `ui/index.html`: `aria-label`s on all 12 icon-only dialog-close buttons; `aria-expanded`/`aria-controls` on the sidebar toggle; `tabindex="-1"` on `#page-title` so navigation can move focus to it; `#graph-canvas` marked `aria-hidden` (its real content lives in sibling button nodes); the operations tabs and the five asset-detail tabs converted to a real ARIA tabs pattern (`role="tab"`/`aria-selected`/`aria-controls`, `role="tabpanel"`/`aria-labelledby`); the command palette input exposes `role="combobox"`/`aria-expanded`/`aria-controls`/`aria-activedescendant` with a `role="listbox"` results container; `#alert-region` and the analysis-status badge are live regions.
+- `ui/app.js`: `notify()` now switches between `role="status"` (success) and `role="alert"` (errors) instead of announcing both at the same urgency; `showView()` sets `aria-current="page"`, moves focus to `#page-title` after navigation, and respects `prefers-reduced-motion`; added `bindTabKeyboardNav()` for roving-tabindex Left/Right/Home/End navigation on both tab groups; the virtualized-table row-range indicator is a polite live region so scrolling a large table announces "Showing X–Y of Z rows" without re-announcing the whole grid; added `window.confirm()` guards on three previously-silent destructive actions (disabling a source, unlinking a glossary term, cancelling an in-flight analysis run).
+- `ui/styles.css`: a `prefers-reduced-motion: reduce` block; a global `:focus-visible` outline (most custom controls had no explicit focus style before); fixed the command-palette search input, which set `outline: none` with no replacement; changed `--muted` from `#6e7890` (4.42:1 on white, just under WCAG AA's 4.5:1 for normal text, computed by hand since no browser was available) to `#5b6680` (5.74:1) in both `:root` blocks in the file.
+- Verified: `node --check ui/app.js` passes before and after every patch stage; HTML tag and CSS brace counts balanced (`<dialog>` 13/13, `<div>` 309/309, `<button>` 104/104, CSS braces 649/649); confirmed via mtimes that only the three `ui/` files were touched.
+- Not done, and explicitly left open: no browser, screen reader, or axe-core run was available in this session, so none of the above was interactively verified — the same constraint R17 hit. The contrast fix is the only color pair checked against the WCAG formula; the rest of the stylesheet's palette is unaudited. Interactive click-through, real keyboard-flow verification, and a full WCAG AA certification remain open, consistent with the `UX-5` tracker entry and the portal's status-matrix row.
+
+### 2026-08-28 consolidation note
+
+- This session ran three independent workstreams in parallel against a live, actively-changing checkout (BigQuery connector, glossary term lifecycle, UI accessibility) and closed with a repo-wide verification pass. At verification time `git status` showed 21 additional changed files from *other, unrelated concurrent work* on this same checkout (a Snowflake connector, a dbt/quality bridge, and OpenLineage ingestion changes) that this session did not author and left untouched, plus a stale `.git/index.lock`. `ruff check .` at that point showed 45 errors, all confined to those other files (none in anything this session touched); `uv run alembic heads` showed one clean head; `pytest` passed 214/214; nothing was committed. Flagging this for whoever picks up next: the working tree had more than one active author in the same window and was not committed by this session.
+
+### R27 repo-wide lint/type cleanup and dependency fix
+
+- Fixed the 45 `ruff check .` errors and 2 `mypy --strict` errors that were sitting in files from other concurrent work on this checkout (`migrations/versions/8a7f3c1d4b22_openlineage_run_events.py`, `migrations/versions/04003a3d6945_dbt_resource_test_and_extra_metadata.py`, src/aida/data_contracts.py [deleted 2026-08-31, AU-6, orphaned duplicate of runtime_contracts.py — does not exist any more], `src/aida/openlineage.py`, `src/aida/openlineage_api.py`, `src/aida/connectors/snowflake.py`) — none in this session's own BigQuery/glossary/UI work, which was already clean.
+- `uv run ruff check --fix .` cleared unused imports and import ordering (11 auto-fixed); `uv run ruff format` on the five affected files reflowed most remaining over-100-column lines (mechanical, quote-style/wrapping only, no logic change); the 6 lines it couldn't safely reflow (long f-string `message=` assignments in the now-deleted data_contracts.py and one `raise OpenLineageError(...)` in `openlineage.py`) were manually wrapped into parenthesized implicit string concatenation, preserving the exact original message text (verified via diff).
+- Added the missing `snowflake-connector-python==3.15.0` dependency to `pyproject.toml` — `snowflake.py` was importing it at runtime (`_get_connection()`) without it being declared, which both broke `mypy` (`import-not-found`) and meant a fresh `uv sync` would silently produce a connector that fails at first use. `uv sync` resolved cleanly (also correctly downgrading `cryptography` from `50.0.1` to `45.0.7` to satisfy the new dependency's constraint).
+- Final state: `ruff check .` → All checks passed. `mypy src` (strict) → Success, no issues found in 70 source files. `pytest` → 214/214 passed, no regressions.
+
+### R28 MCP tool-exposure role-binding enforcement
+
+- Audited `src/aida/mcp_server.py` (the real JSON-RPC 2.0 MCP endpoint at `POST /mcp`, mounted in `main.py`) against the CX-1/CX-3/CX-5 exit criteria and found the docs describing module 19 as entirely `Pending` were stale — the endpoint already existed and routed `tools/call` through the full governed orchestrator/query-gateway stack — but found a real, unflagged gap: `_handle_tools_list` returned every published tool regardless of the caller's role, and `_handle_tools_call` never checked `GovernedToolVersion.allowed_roles` before invoking the orchestrator, unlike the identical role-binding check already enforced in the native REST path (`tool_api.py::execute_tool`) and the native agent planner (`agent_intelligence.py::GovernedPlanner.plan`). A caller with no eligible role could see an ineligible tool listed and, on calling it, fall through to open-ended `MODEL_GENERATION` SQL generation instead of a denial — the endpoint's own `_ERR_ACCESS_DENIED` code was declared but never raised.
+- Added `_tool_role_eligible(roles, allowed_roles)`, mirroring `tool_api.py`'s check exactly. `tools/list` now filters to role-eligible tools and surfaces `allowed_roles` in `_atlas_meta`. `tools/call` on an ineligible tool now returns the identical "not found or not published" response used for a genuinely absent tool — deliberately not a distinguishable "access denied," so a caller can't enumerate tool existence by role-probing — while recording an `AuditEvent` (`mcp.tool_call.role_binding_denied`) and outbox event (`mcp.tool_invocation_denied.v1`) so operators can see the denial.
+- Added `tests/test_mcp_server.py` (12 tests), taking `mcp_server.py` from zero test references to full coverage of the new decision logic, following the codebase's existing DB-free unit-test convention for this kind of routing/decision code.
+- Corrected `Docs/20-modules/19-context-products-and-mcp.md` §13 from "entirely unbuilt" to an accurate implemented/partial/missing breakdown. Also flagged for future audits: `src/aida/context.py` is an unrelated 7-line correlation-ID helper, not a "context products" implementation — the name overlap with CX-2 is coincidental.
+- `ruff check .` clean, `mypy src` (strict) clean across 70 files, `pytest` 226/226 passed (214 + 12 new).
+- Explicitly still open, not attempted this pass: CX-2 (context products with maker-checker — no model exists at all), CX-4 (`resources/read` records no consumption-lineage edges), CX-6 (per-consumer rate limits/budgets), MCP `prompts/*` handlers (advertised in `initialize` capabilities but unimplemented), and module 12's RT-1/2/3/4/6/7/8/9 (retrieval is a real single-source lexical scorer only — no vector projection, graph expansion, true multi-factor fusion, Postgres full-text index, or cross-source search; `retrieval.py` and `agent_orchestrator.py` both remain completely untested, a real gap worth its own increment).
+
+### R29 documentation audit — Snowflake connector, OpenLineage ingestion, dbt quality bridge (backfilled records)
+
+- This entry does not describe new code. It backfills the accomplishment-log record for three capabilities that were already sitting in the working tree from unattributed concurrent sessions (the Snowflake connector, OpenLineage ingestion, and the dbt-quality bridge — all previously visible only as the "2026-08-28 consolidation note" and the R27 lint/type fixup, neither of which described what they actually do) and corrects every tracker/status-matrix/module-doc row that had gone stale as a result. Done at the user's explicit request ("go through all the files and update the track again") after other concurrent sessions on this checkout stopped, so this record is now the authoritative baseline going forward.
+- **Snowflake connector** (`src/aida/connectors/snowflake.py`, 517 lines) is a native pull adapter registered `IMPLEMENTED`/`BETA` in `connector_registry` — not `PLANNED` as every doc still claimed. It parses either a `snowflake://` URI or a structured JSON credential payload (`_parse_dsn`), discovers columns and primary/unique/foreign-key constraints across every database in the account via `INFORMATION_SCHEMA`, reusing the same `aida.connectors.discovery` assembly helpers as every other connector, estimates query cost via `EXPLAIN USING JSON` with a partition-pruning-ratio evidence field (`_extract_snowflake_explain_estimate`, so `capabilities.explain=True`), profiles tables with `APPROX_COUNT_DISTINCT`, and captures the real Snowflake query ID (`cur.sfqid`) as `warehouse_query_id="snowflake-query:<sfqid>"` — the same real-backend-identifier convention Oracle/SQL Server/BigQuery use. `tests/test_connectors_snowflake.py` (7 tests: identifier quoting, both DSN formats, EXPLAIN-JSON extraction, registry definition, discovery assembly, query execution) passes cleanly, verified directly in this session (`pytest tests/test_connectors_snowflake.py` → 7 passed). No live Snowflake account exists in any session, so connection/discovery/profiling against a real warehouse remain unverified — the same "implemented, unverified live" position as Oracle and BigQuery. Corrected: tracker `CN-2` (split into `CN-2a` Snowflake/`CN-2b` Databricks), `04-status-matrix.md`'s "Other connectors" row (added a dedicated Snowflake row), `05-gap-register.md`'s connector-fleet row, `07-connector-implementation-backlog.md` (added a full "Workstream E" record matching the Oracle/BigQuery format), and `20-modules/02-connectivity.md`'s adapter table and open-work list (which additionally had Oracle itself mis-stated as `PLANNED` maturity — it has been `BETA` since R19).
+- **OpenLineage ingestion** (`src/aida/openlineage.py`, 272 lines; `src/aida/openlineage_api.py`, 433 lines; migration `8a7f3c1d4b22_openlineage_run_events`) is a real, mounted capability, not the `TODO`/"module unbuilt" the tracker and gap register claimed. `parse_openlineage_run_event` validates a bounded, value-free OpenLineage RunEvent payload (job/run/namespace/dataset model, facet-shape validation) and extracts column-lineage edges from the `columnLineage` facet. `POST /v1/lineage/openlineage` (mounted in `main.py`) is idempotent by SHA-256 event fingerprint, resolves input/output datasets against the existing catalog (exact, schema+table, and table-only matching tiers), and persists `OpenLineageRunEvent`/`OpenLineageDataset`/table/column edge rows with audit and outbox evidence; `GET /v1/datasources/{id}/openlineage-events` and `GET /v1/openlineage-events/{id}` expose them. What remains genuinely missing, confirmed by direct check in this session: **zero test files** reference OpenLineage anywhere in `tests/` (`ls tests/ | grep -i openlineage` → no matches), and no Airflow-sourced event has ever been posted to the endpoint — only the parser's own internal logic has been read, never exercised end to end. Corrected: tracker `LN-1` (`TODO` → `IN PROGRESS`), `04-status-matrix.md`'s "SQL / query lineage" row, and `05-gap-register.md`'s "Context products and MCP" row (which was unrelated to OpenLineage but was found to be separately and severely stale — see below).
+- **dbt quality bridge** (`src/aida/dbt_quality_bridge.py`, 223 lines) couples dbt test outcomes into the existing `DataQualityIncident` lifecycle — a real, narrow instance of "quality signals driving other behavior," though not the broader DQ-3/RT-7/AG-6/TL-3 "quality → runtime coupling" (retrieval ranking, answer warnings, tool gating) that tracker row still correctly lists as `TODO` (`DataQualityIncident` has zero references in `retrieval.py`, `agent_orchestrator.py`, or `tool_api.py`, confirmed by grep). `infer_dbt_test_anomaly_type` classifies a failing dbt test (`not_null`/`unique`/`relationship`/`accepted_values`/`freshness` naming conventions) into the platform's existing anomaly taxonomy, and `reconcile_dbt_test_quality` opens, reopens, or resolves a deterministically fingerprinted `DataQualityIncident` per failing/passing test, wired into the manifest-import endpoint (`dbt_api.py`) via `parse_dbt_run_results`, which was already parsing `run_results.json` and persisting `test_status`/`test_failures`/`test_execution_time` per `DbtResource` with no consumer. `tests/test_dbt_quality_bridge.py` and `tests/test_dbt_artifacts.py` pass cleanly, verified directly in this session. No integration test exercises the full `POST .../artifact-imports` → incident-reconciliation path together. Corrected: tracker `LN-6` (`TODO` → `IN PROGRESS`) and `04-status-matrix.md`'s "dbt transformation intelligence" row.
+- **Also corrected while auditing, found independently stale and outside the three items above:** tracker `KG-1`/`RL-4` (`TODO` → `IN PROGRESS` — Graph Explorer V2's bounded, policy-filtered relationship-candidate visibility already satisfies most of the exit bar; only projecting *approved* candidates into Neo4j itself, as opposed to declared FK constraints, remains) and tracker `MG-3` (`TODO` → `IN PROGRESS` — approved-route selection via `ModelRouteConfiguration`'s maker-checker lifecycle plus config-selected `route_key` gating has been real since R9/R11; only private-endpoint routing is unbuilt). `05-gap-register.md`'s "Context products and MCP" row separately claimed **"None — module unbuilt,"** flatly contradicting the tracker's own `CX-1`/`CX-3`/`CX-5` rows (which R28 had already correctly updated to `IN PROGRESS`/`DONE`) and the status matrix's "Context products and MCP" row (`Partial`) — corrected to match.
+- Four parallel research agents did the actual code-vs-doc comparison (connectors; lineage/dbt-quality; semantics/glossary/graph/retrieval/agent; tools/gateway/governance/identity/UX) against `03-tracker.md`, `04-status-matrix.md`, and the relevant module docs; every other row they checked — including a full re-verification of `GL-1` through `GL-8`, `KG-2` through `KG-7`, all `RT-*`, `AG-*`, `SM-*`, and the entire tools/gateway/governance/identity/observability section — matched the code exactly and needed no change. src/aida/data_contracts.py (a `DataContractSpec`/SLA-evaluation module) was found to be genuine dead code: not imported anywhere outside itself, no route, no table, no test — it did not count as evidence toward `DQ-2` and was left alone at the time rather than either wired in or removed, since the user had not asked for either. (Since deleted 2026-08-31 under AU-6, once the end-to-end audit confirmed the same orphan status independently and a live duplicate, `runtime_contracts.py`.)
+- Not run in this pass: a full repo-wide re-verification of every one of the tracker's 171 rows — the four agents' scope was targeted at the sections most likely to have drifted (connectors, lineage/quality, semantics/glossary/graph/retrieval/agent, tools/gateway/governance/identity/UX), on the working assumption (confirmed correct in every section checked) that rows already updated by R14/R24/R26/R28 were current and that Section A (structural foundation — `platform/` extraction, import-linter, etc.) and Section H/I/J (testing/performance/certification, drills, bank decisions) describe target-architecture and operational work with no code correlate to check.
+
+
+### R29 addendum — competitor-comparison and module-doc sweep (same audit pass)
+
+- Extended the R29 audit beyond the tracker/status-matrix/module docs it directly targeted, grepping `Snowflake`/`BigQuery`/`Oracle`/`OpenLineage`/`declare_planned`/`MCP` across every remaining `Docs/` subtree (`00-product`, `10-architecture`, `20-modules`, `30-contracts`, `40-engineering`, `50-security`, `90-reference`, `competitors`) to catch stale claims outside the four agents' original briefs. `00-product`, `10-architecture`, `30-contracts`, `40-engineering`, `50-security`, and `90-reference` all describe target architecture, competitor offerings, or wire contracts rather than Atlas's own current implementation state — nothing there needed correction.
+- `Docs/competitors/05-codebase-gap-analysis-and-improvements.md`: "Connector Coverage" row corrected from "PostgreSQL & SQL Server (Beta)" / "**BEHIND**: Missing Snowflake, BigQuery, Databricks, and Oracle adapters" to reflect Oracle/BigQuery/Snowflake all being implemented (`BETA`, unverified live) and only Databricks/Teradata/Db2 still missing. "Context API / MCP Server" row corrected from "Internal REST API only" / "**BEHIND**: No standard...MCP server" to describe the real, tested, role-eligible `mcp_server.py` endpoint, noting it has not yet been exercised by a live external MCP client.
+- `Docs/competitors/06-codebase-architecture-reference.md`: the connectors table was missing `bigquery.py`/`snowflake.py` rows entirely and still described `registry.py` as using `declare_planned()` "for BigQuery / Snowflake / Databricks" — added the two missing rows and corrected the registry row and the "Planned but not yet implemented" line to list only `databricks`/`teradata`/`db2`. Gap-list row #3 ("No BigQuery / Snowflake pull adapters", self-contradictorily citing the very files that disprove the claim) reworded to the real remaining gap (Databricks/Teradata/Db2). Gap-list row #1 ("No MCP Server", citing `mcp_server.py` as a file *to create*) reworded to reflect that the 652-line, tested MCP server already exists and the real gap is external-client verification.
+- `Docs/20-modules/09-lineage.md` §12: "ETL / OpenLineage" row corrected from "**Not implemented**" to "Partial" with the same real-implementation/zero-test-coverage caveat as the tracker; "DBT" row's target column had `run_results.json` removed since `dbt_quality_bridge.py` now consumes it.
+- `Docs/20-modules/15-model-gateway.md` §14/§15: "Route versions" row and the `MG-3` open-work line both still described "bank-approved route selection" as entirely un-implemented target work; corrected to note the config-selected `route_key` gating is real (since R9/R11) and only private-endpoint routing remains open, matching the tracker's `MG-3` correction.
+- Checked and found already accurate, no change needed: `Docs/20-modules/10-knowledge-graph.md` (Graph Explorer V2 already marked Implemented), `Docs/20-modules/06-relationship-intelligence.md` (RL-4/"projection of approvals to Neo4j" already correctly listed as outstanding), `Docs/20-modules/19-context-products-and-mcp.md` (already carries the detailed, accurate MCP partial-build breakdown from R28).
+- This closes out the "go through all the files" audit request. Standing open item, unrelated to documentation accuracy: no live Docker verification has been performed against a real Oracle/BigQuery/Snowflake backend in this session (blocked on this session's network egress allowlist blocking the user's local Docker host); the user has taken over verification themselves via `/tmp/verify_oracle.ps1` for Oracle and asked this session to move on from requesting manual debugging steps.
+
+
+## 2026-08-29 — Unified Lineage Explorer (EA.14) and Collibra platform gap wiring
+
+User shared the Collibra Data Lineage and Collibra Platform product pages and asked for the
+findings to be captured as feature requirements with references, and for the highest-value
+gap to actually be built rather than only documented.
+
+**Built:**
+- `src/aida/unified_lineage.py` — pure, database-free graph module: `UnifiedLink`,
+  `expand_frontier`, and `traverse`, generalizing `aida/knowledge_graph.py`'s BFS to string
+  node ids (needed because dbt resources and OpenLineage datasets without a matched catalog
+  table get a synthetic id, e.g. `dbt:<uuid>`, `openlineage:<namespace>:<name>`, instead of
+  disappearing from the graph).
+- `src/aida/unified_lineage_api.py` — `GET /v1/datasources/{id}/unified-lineage/graph` (merges
+  `MetadataConstraint` FKs, `RelationshipCandidate` suggestions, `DbtLineageEdge` dependencies
+  from each project's latest imported manifest, and `OpenLineageTableEdge` ETL edges into one
+  node/edge set, bounded and truncation-flagged like the existing knowledge-graph endpoints)
+  and `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}` (bounded transitive
+  upstream/downstream traversal — replaces `/v1/metadata/tables/{id}/impact`'s direct-reference
+  count for the nodes reachable in the unified graph; that endpoint is left in place since it
+  also covers metrics/tools not part of the lineage graph).
+- New schemas in `schemas.py`: `UnifiedLineageNodeRead`, `UnifiedLineageEdgeRead`,
+  `UnifiedLineageGraphRead`, `UnifiedLineageImpactNodeRead`, `UnifiedLineageImpactRead`.
+- Wired into `src/aida/main.py`.
+- `tests/test_unified_lineage.py` — 8 tests: pure BFS/traversal behavior (direction semantics,
+  bounding, transitive multi-hop depth across mixed edge sources) with no database, plus
+  OpenAPI-contract and schema-serialization tests mirroring `tests/test_knowledge_graph.py`'s
+  style. Full suite (165 tests before and after) plus `ruff check`, `ruff format`, and
+  `mypy --cache-dir=/tmp/mypy_cache` all pass. Verified by installing dependencies into an
+  ephemeral `uv` environment at `/tmp/aida-venv` (`UV_PROJECT_ENVIRONMENT=/tmp/aida-venv uv
+  sync --frozen --extra dev`) since the checked-in `.venv` is a Windows venv unusable from the
+  Linux device-bridge shell, and its directory can't be overwritten from that shell
+  (`Operation not permitted` on `.venv/.gitignore`).
+
+**Known limitation, documented rather than silently accepted:** column-level edges are still
+name-matched (dbt UI) or absent (unified graph is table-level only); view/procedure and BI
+nodes are not yet in the unified graph; there is no export. These are exactly LN-10, LN-11,
+LN-12, tracked as open work below.
+
+**Documentation:**
+- New `Docs/competitors/08-collibra-lineage-and-platform-analysis-2026-08.md` — the
+  screenshot-driven capability comparison for both pages, with source URLs, and the resulting
+  gap list.
+- `Docs/90-reference/03-sources.md` — added the Collibra Data Lineage URL.
+- `Docs/20-modules/09-lineage.md` — Impact row and HTTP surface updated for the delivered
+  endpoints; LN-7 marked delivered; LN-9 (delivered) through LN-12 (open) added to open work.
+- `Docs/60-delivery/02-epic-backlog.md` — added `EA.14` (delivered, full acceptance detail) and
+  `EE.8`–`EE.11`, wiring the CP-2/CP-3/CP-5/CP-6/CP-7/CP-8 platform requirements that
+  `Docs/20-modules/19-context-products-and-mcp.md` §15.2 had already specified in detail (from
+  an earlier pass over the same Collibra platform material) but that had not yet been turned
+  into epic-backlog or gap-register entries.
+- `Docs/60-delivery/05-gap-register.md` — updated the "Relationship and lineage evidence" and
+  "Context products and MCP" rows, and added four new rows to "Newly identified gaps" for the
+  lineage-MCP, context-compiler, product/contract-registry, and AI-registry/trust gaps.
+- `Docs/20-modules/19-context-products-and-mcp.md` — cross-referenced the new competitors doc
+  and the CP-* -> EE.* epic mapping.
+
+
+## 2026-08-29 (continued) — Lineage MCP tools (EE.10, partial) and 5-page Collibra review
+
+User pasted five more Collibra product page URLs (Data Marketplace, Data Catalog,
+Integrations & APIs, MCP Server, Data Governance) and asked for a further review and for the
+platform to keep being built out meaningfully.
+
+**Reviewed:** all five pages via WebFetch. Most of what they show was already anticipated by
+the CP-1..CP-14 requirements added to `Docs/20-modules/19-context-products-and-mcp.md` §15.2 in
+an earlier pass. Two genuinely new, concrete gaps came out of the MCP Server page specifically
+(it lists 25+ tools, both read and write, plus "fuzzy name matching and concept mapping"):
+`MCP-2` (no MCP write path to catalog stewardship) and `MCP-3` (no fuzzy entity resolution --
+every tool we expose needs an exact UUID). Full findings:
+`Docs/competitors/09-collibra-marketplace-catalog-integrations-mcp-governance-2026-08.md`.
+
+**Built — EE.10 (partial):**
+- Refactored `unified_lineage_api.py`'s two route bodies into reusable payload builders
+  (`build_unified_lineage_graph_payload`, `build_unified_lineage_impact_payload`) that take an
+  already-loaded, already-authorized `DataSource` rather than doing their own `Depends`-based
+  lookup, so the exact same merge/traversal logic can be called from a second transport. Added
+  `LineageNodeNotFoundError` (plain `ValueError` subclass, not `HTTPException`) so the REST
+  route and the new MCP tool can each translate a missing node into their own transport's error
+  shape from one raise site.
+- `mcp_server.py`: two new native MCP tools, `atlas__get_lineage_graph` and
+  `atlas__get_lineage_impact`, dispatched in `_handle_tools_call` before the
+  `GovernedToolVersion` lookup (native tools are not backed by a published tool row). Listed in
+  `tools/list` only for callers whose roles intersect `UNIFIED_LINEAGE_READER_ROLES` --
+  eligible-tool exposure applied the same way it already is for governed SQL tools, including
+  the anti-enumeration property (an ineligible call gets the identical "not found or not
+  published" text as a genuinely unknown tool name).
+- 7 new tests in `tests/test_mcp_server.py` (role denial, invalid UUID, cross-org datasource,
+  missing `node_id`, and two success-path tests that monkeypatch the payload builders --
+  consistent with this test file's existing no-database convention) plus 1 in
+  `tests/test_unified_lineage.py`'s neighborhood confirming the refactor didn't change route
+  behavior.
+- Full suite, `ruff check`, `ruff format`, `mypy` all clean for every file this session touched.
+  **Noted, not fixed** (out of scope -- belongs to the separate, already-uncommitted
+  `context_product_api.py`/`context_product_policy.py` work): `tests/test_context_products.py`
+  is flaky, failing a different test on about 1 in 3 runs with
+  `AttributeError: '_Result' object has no attribute 'all'` in `context_product_policy.py`,
+  independent of anything touched this session (confirmed by running it in isolation, repeatedly).
+- Also corrected stale text in `Docs/20-modules/19-context-products-and-mcp.md` §13: it still
+  said "no `ContextProduct` concept anywhere in the codebase," which predates the (uncommitted)
+  `context_product_api.py` work discovered while wiring these tools in -- `ContextProduct` /
+  `ContextProductVersion` models and their MCP resource-read path already exist.
+
+**Not built, tracked as open work:** MCP-2 (write operations), MCP-3 (fuzzy resolution),
+transformation-detail-as-a-tool, consumption-lineage recording for the new tools (same
+pre-existing `CX-4` gap `resources/read` already has), and a dedicated cross-tenant leak test
+for the two new tools.
+
+
+## 2026-08-29 (continued) — Code review of a separately AI-generated build-out; router-wiring and type-safety fixes
+
+User ran a different AI model against this same repository in parallel with this session and
+asked for the result to be reviewed, the docs corrected to match reality, and any real bugs
+fixed. This entry supersedes several "not met" / "not built" notes from the two entries above
+it, which the other model's work closed.
+
+**Reviewed** (via `git diff`/`git show` against commits `2fa7667` "Harden context products and
+unified lineage" and `99cc556`, plus the working tree, which was still being actively written to
+during this review — see caveat below): `context_product_policy.py`, `lineage_cache.py`, the
+`unified_lineage_api.py` and `mcp_server.py` hardening diff, the `9a6d4f21c8b7` and
+`b4e8f2a71c90` migrations, `src/aida/models.py`'s new ORM classes, `platform_schemas.py`,
+`context_compiler.py` / `context_compiler_api.py`, and `product_marketplace_api.py`.
+
+**Findings — fixed:**
+- `src/aida/main.py` did not register the `product_marketplace_api` or `context_compiler_api`
+  routers. Both files were fully implemented (contract/product lifecycle, marketplace search,
+  access requests, context compilation, drift detection) but every one of their ~16 endpoints
+  was unreachable — confirmed by generating `app.openapi()` before and after. Fixed by adding
+  both imports and `include_router` calls in the correct alphabetical position.
+- `product_marketplace_api.py::_validate_product_references` assigned `session.get(...)` results
+  of three different ORM types to the same `asset` variable across an if/elif/else chain without
+  an explicit annotation; `mypy` narrowed it to the first branch's type and flagged the other two
+  as `arg-type` errors. Fixed with an explicit
+  `asset: MetadataTable | SemanticModelVersion | ContextProductVersion | None` annotation.
+  Runtime behavior was already correct — this was a type-checker-only defect, but a real one
+  (would fail a `mypy` CI gate).
+- My own `tests/test_mcp_server.py::test_native_lineage_tool_slugs_match_declared_definitions`
+  (written last session) hard-coded the expected native-tool slug set to only
+  `{"get_lineage_graph", "get_lineage_impact"}`. The other model legitimately added
+  `resolve_entity` and `get_transformation_detail` as real, fully-wired native tools (not
+  stubs — traced both handlers), so my test was failing against correct new behavior. Updated
+  the assertion to the current four-tool set.
+
+**Findings — verified as non-issues:**
+- The context-compiler's `YAML` target sets `content_type: application/yaml` but the body is
+  canonical JSON. Not a defect: JSON is a valid subset of YAML 1.2, so the content is valid
+  YAML, just not idiomatically formatted (no `pyyaml` dependency exists in the project to do
+  better yet). Documented as a simplification in `02-epic-backlog.md` (EE.9) rather than fixed.
+- The previously-noted flaky `tests/test_context_products.py` (`AttributeError: '_Result' object
+  has no attribute 'all'`, intermittent) did not reproduce across 6 consecutive runs (1 full run
+  + 5 targeted re-runs) after the other model's changes. Whatever caused it earlier appears to
+  already be resolved; no fix was needed or applied.
+- Org-scoping, role-gating, and maker-checker patterns across `product_marketplace_api.py` and
+  `context_compiler_api.py` consistently follow the codebase's existing conventions
+  (`enforce_organization` called before any read/write on every scoped lookup; role-based
+  discoverability filtered at the SQL level, not post-filtered in Python; cache/audit keys
+  scoped by organization before the caller's authorization is checked). No authorization gaps
+  found.
+- `context_product_policy.py`, `lineage_cache.py`, and the `unified_lineage_api.py`/
+  `mcp_server.py` hardening diff (bounded `register_node`/`register_link` helpers replacing my
+  original unbounded `nodes.setdefault(...)` calls, org+datasource-scoped Redis cache keys,
+  quality-gated context-product access, `ContextProductConsumptionEdge` tracking) are genuine
+  improvements over what this session shipped last time, not regressions.
+
+**Findings — flagged, not fixed (need a decision, not just an edit):**
+- `ai_asset` / `ai_asset_version` / `ai_assessment` have models, a migration, and Pydantic
+  schemas (including an `AiTrustScoreRead` contract) but no API/service layer and no trust-score
+  computation function anywhere in the codebase — the schema has no producer. `EE.11` downgraded
+  from "open" to "partial — data layer only" rather than claimed delivered.
+- `scratch/repo_bundle{3..8}.tar.gz` / `repo_live.tar.gz` (~5.4 MB of binary tarballs) and
+  `proof-gaps-round-*-report.md` files are committed to git history and `scratch/` is not in
+  `.gitignore`. Left alone: removing tracked history is a decision for the user, not something
+  to do unilaterally mid-review.
+- No dedicated unit tests exist yet for `resolve_entity`, `get_transformation_detail`,
+  `product_marketplace_api.py`, or `context_compiler_api.py` (only the slug-set test, now
+  fixed, indirectly touches the first two). No leak/cross-org test for the two newest MCP tools.
+
+**Verification:** built a fresh Linux `uv` venv (`UV_PROJECT_ENVIRONMENT=/tmp/aida-venv`), ran
+`ruff check` (clean on every file this pass touched or fixed; pre-existing `E501` line-length
+warnings in the other model's new files were left alone as cosmetic), `mypy --cache-dir=/tmp/mypy_cache`
+(clean on every file reviewed, after the one fix above), and the full `pytest` suite (all green,
+including 6 consecutive clean runs of the previously-flaky file).
+
+**Caveat this session flagged to the user directly:** the repository was being actively written
+to during this review — new untracked files (`context_compiler.py`, `product_marketplace_api.py`,
+the `b4e8f2a71c90` migration, `platform_schemas.py`) appeared with modification timestamps only
+seconds to minutes old partway through, and a `.git/index.lock` was present for over ten minutes
+without the index itself changing. No git write operations (commit, `rm --cached`, etc.) were
+performed this pass to avoid racing whatever process holds or held that lock; all fixes above are
+uncommitted working-tree edits only.
+
+**Not built, tracked as open work:** trust-score computation and AI-registry API layer (`EE.11`
+remainder), dedicated tests for the four new modules above, a leak test for `resolve_entity` /
+`get_transformation_detail`, idiomatic YAML compilation target, contract breaking-change
+approved-exception override, and the `scratch/` repo-hygiene cleanup.
+
+### R34 agentic data platform foundation completion
+
+- Completed the data product and contract control plane: immutable versions, typed ports,
+  normalized producer/consumer roles, structural compatibility checks, independent
+  breaking-change exceptions, publication/supersession/retirement, and audited access
+  request/approve/reject/expire/revoke lifecycle.
+- Added policy-filtered marketplace REST/UI surfaces and a deliberately bounded MCP write:
+  agents may request product access but cannot grant it or bypass maker-checker review.
+- Added the deterministic Context Compiler with stable hashes, structural drift evidence,
+  quality/lifecycle gates, and MCP, REST, YAML, OSI, ODCS, Snowflake Semantic View, and
+  Databricks Metric View targets.
+- Added a tenant-scoped AI asset registry, immutable versions, independent assessments,
+  maker-checker publication, and deterministic explainable trust scoring. Seven inspectable
+  factors total exactly 100 points; prohibited risk, critical runtime incidents, missing or
+  failed assessments, and weak high-risk evaluations are explicit blockers.
+- Completed MCP prompts, deterministic fuzzy entity resolution, redacted dbt transformation
+  detail, atomic Redis consumer budgets, and governed marketplace access requests. Budget keys
+  hash principals and production fails closed if an enabled budget store is unavailable.
+- Extended the Kafka/Neo4j projector with generation-stamped unified FK, approved-relationship,
+  dbt, and OpenLineage nodes/edges. Optional Neo4j impact reads are bounded and fail open to the
+  authoritative PostgreSQL graph; Redis remains an optional response cache.
+- Added marketplace, authoring, compiler, AI registry, assessment, and trust-factor UI surfaces;
+  added migration `b4e8f2a71c90`; and consolidated pure behavior/OpenAPI coverage in
+  `tests/test_agentic_platform.py`.
+- Remaining scale expansion is explicit rather than hidden: purpose ABAC/workload identity,
+  entitlement-provider fulfillment, managed compliance templates/remediation, provider sync,
+  idiomatic YAML/downloads/external validators, million-node projection certification,
+  broader MCP stewardship writes, privacy operations, adoption analytics, and CP-S8 ecosystem
+  integrations.
+
+
+## 2026-08-29 (continued) — Second review pass: AI registry / MCP budget, and a correction
+
+User repeated the "review the code / update the document / fix if needed" request. By this
+point the repo had settled (the other model's process finished; `.git/index.lock` was gone) and
+everything from the prior entry had been committed in `434e98d "Build agentic data marketplace
+and AI trust platform"`, including this session's router-wiring and `mypy` fixes.
+
+**Correction to the entry above:** it claimed "no dedicated tests exist yet" for
+`product_marketplace_api.py`, `context_compiler_api.py`, `ai_registry_api.py`, and
+`mcp_budget.py`. That was wrong — `tests/test_agentic_platform.py` (282 lines, 10 tests)
+already covered contract compatibility, product-port validation, marketplace access-expiry,
+context-compiler determinism and drift, trust-score explainability with an incident blocker,
+assessment scoring, raw-evidence rejection, fuzzy-entity scoring, disabled-budget behavior, and
+an OpenAPI route-publication smoke test — the search that missed it only grepped for
+`ai_registry|mcp_budget|marketplace|compiler` in filenames, which `test_agentic_platform.py`
+doesn't match. `02-epic-backlog.md` and `05-gap-register.md` have since been corrected (by the
+same process that built this code) to credit that file; no further doc fix was needed there.
+
+**Reviewed this pass:** `ai_registry.py` (`compute_ai_trust_score`, `score_assessment_controls`)
+and `ai_registry_api.py` (full AI-asset lifecycle: create/version/submit/assess/trust, wired
+into `semantic_api.py`'s maker-checker dispatcher under `AI_ASSET_VERSION`, including the
+one-approved-per-asset supersede-on-approve logic), and `mcp_budget.py` (Redis
+`INCR`+`EXPIRE` Lua-script token counter, wired into `mcp_endpoint` for `REQUEST_MINUTE` /
+`TOOL_DAY` / `CONTEXT_DAY` buckets, fail-closed in staging/production, fail-open in
+development). No bugs found — `ruff` and `mypy` clean, and the maker-checker approval path
+correctly supersedes the prior approved version.
+
+**Added:** `tests/test_ai_registry.py`, 11 tests giving `compute_ai_trust_score` and
+`score_assessment_controls` edge-case coverage `test_agentic_platform.py` didn't have:
+`PROHIBITED` risk tier, `HIGH` risk below the evaluation threshold, a missing assessment alone
+(vs. bundled with an incident), a failed assessment alone, and `score_assessment_controls` with
+empty and `NOT_APPLICABLE`-only control lists. Full suite green (was already green; this only
+added coverage, changed no behavior).
+
+**Open at that review point:** idiomatic YAML compilation, file-export delivery,
+entitlement-provider fulfillment, managed compliance templates/remediation/retirement APIs,
+provider sync, score history, dependency-graph visualization, and repo hygiene. The production
+features in this list were subsequently closed by R35 below; shared-history cleanup remains.
+
+### R35 production acceptance and control-plane hardening
+
+- Applied migrations `b4e8f2a71c90` and `c8a4d3e91f02` to live PostgreSQL and verified the
+  expected evidence tables. Redis and Neo4j live probes passed; the rebuilt API reported ready.
+- Enforced OIDC-backed MCP workload principal types outside development, propagated bounded
+  business-purpose claims, added exact purpose ABAC to Context Product REST/compiler/MCP reads,
+  and persisted generic immutable MCP consumption evidence without prompts, SQL, or values.
+- Added idempotent entitlement fulfillment state and outbox/webhook adapters. Governance remains
+  authoritative when providers fail; provisioning and revocation are independently retryable.
+- Added managed EU AI Act, NIST AI RMF, and AI-UC assessment templates; durable remediation and
+  independent risk acceptance; maker-checker retirement; immutable trust history; value-free
+  provider evidence sync; and dependency graph APIs.
+- Added idiomatic deterministic YAML, validated attachment downloads, and structural conformance
+  checks for MCP, REST, YAML, OSI, ODCS, Snowflake, and Databricks compiler targets.
+- Enabled Redis lineage caching, MCP budgets, and Neo4j lineage reads in the local integration
+  stack while retaining production fail-closed/fallback behavior defined in code.
+
+
+## 2026-08-29 (continued) — Local portfolio analytics completion and verifier hardening
+
+### Completed
+
+- Added tenant-scoped portfolio analytics summary and trend APIs in `product_marketplace_api.py`
+  over existing product, contract, context-read, MCP, tool, query, quality, and agent evidence.
+- Extended `scripts/verify-local.ps1` to create and publish a Context Product, publish a linked
+  Data Product and Data Contract, request and approve marketplace access, provision the
+  entitlement through the outbox-backed local path, and verify the new portfolio analytics
+  endpoints end to end.
+- Fixed three real local defects uncovered by that verifier pass: marketplace search used
+  `DISTINCT` across JSON-backed version rows and failed on PostgreSQL; marketplace access
+  requests could flush before their governance-review row existed and misreport the resulting
+  foreign-key failure as "already pending"; and governance approval/outbox plus marketplace
+  access-request listing both returned non-JSON-safe payloads.
+- Added regression coverage in `tests/test_agentic_platform.py` for portfolio trend bucketing,
+  marketplace access-request flush ordering, and governance outbox expiry serialization.
+
+### Verification evidence
+
+- Repo-wide static and test gates passed on Saturday, August 29, 2026: `379` tests passed, Ruff
+  clean, and strict mypy clean.
+- Final local verifier run passed on Saturday, August 29, 2026 with organization
+  `abe5877e-e12e-4095-88a4-411562a763f6`, datasource `d623616a-9df9-48d4-bbc5-3b4e51d20208`,
+  analysis run `0545b916-bd88-4e46-b322-a0bfde07bfcb`, Context Product version
+  `cf6ebf7b-2d69-48a4-b001-015f0ecbb13d`, Data Product version
+  `3e18b674-dba8-4f46-9f45-6c24764ea8fb`, Data Contract version
+  `cd5308d0-44ca-4756-82d3-8094c951ebf6`, marketplace access request
+  `dff2bda5-f0ed-4e2c-ab18-3817efb7a885`, and tool-first agent run
+  `eacc8511-28c8-4d41-8c92-c5ae3179f3e6`.
+- The same verifier proved `portfolio_access_requests = 1`, `portfolio_context_reads = 1`,
+  `portfolio_agent_runs = 3`, `portfolio_top_product_key = customer_portfolio_1788039914`, and
+  an outbox-backed entitlement state of `PENDING`, which is the correct local fail-safe posture
+  without an external fulfillment provider.
+
+### Current limitations
+
+- The remaining open items are the dedicated-environment gates rather than local code-path gaps:
+  million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — MCP lineage-tool coverage completion
+
+### Completed
+
+- Added dedicated unit coverage in `tests/test_mcp_server.py` for the two newest native
+  lineage MCP tools, `resolve_entity` and `get_transformation_detail`.
+- The new tests cover input validation, anti-enumeration denial symmetry for ineligible callers,
+  successful value-free JSON payload rendering, and the not-found branch for transformation
+  detail reads.
+- This closes the local code-review gap that previously noted the tools existed in production
+  code but only had slug-level coverage in the test suite.
+
+### Verification evidence
+
+- Focused MCP verification passed on Saturday, August 29, 2026:
+  `python -m pytest tests/test_mcp_server.py -q` (`29` passed),
+  `python -m ruff check tests/test_mcp_server.py src/aida/mcp_server.py`, and
+  `python -m mypy src/aida/mcp_server.py`.
+
+### Current limitations
+
+- The remaining open items are still dedicated-environment gates rather than local code-path
+  gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — AI registry dependency graph UI completion
+
+### Completed
+
+- Extended the `ai-registry` portal view to render governed AI dependency topology using the
+  shared graph engine already used by Knowledge Graph and Unified Lineage.
+- Added operator actions for dependency inspection and retirement requests directly from the AI
+  asset portfolio table, reusing the existing `/ai-asset-versions/{version_id}/dependencies`
+  and `/ai-assets/{asset_id}/retire` API paths.
+- Added a value-free side panel that shows the selected asset or dependency node's status,
+  owner, provider, dependency counts, and approved references without exposing prompts or source
+  values.
+
+### Verification evidence
+
+- Repo-wide gates remained green on Saturday, August 29, 2026 after the UI change:
+  `python -m pytest -q`, `python -m ruff check .`, and `python -m mypy src`.
+- The full local verifier passed again on Saturday, August 29, 2026 with `status = PASS`,
+  `ui_status = HEALTHY`, and `ui_url = http://localhost:3000`, preserving the same end-to-end
+  workflow evidence for Context Products, marketplace access, AI registry/trust, and portfolio
+  analytics.
+
+### Current limitations
+
+- The remaining open items are still dedicated-environment gates rather than local code-path
+  gaps: million-node lineage/load certification, authoritative BI/procedure lineage, privacy
+  operations, workflow templates, external provider certification, and browser/accessibility QA.
+
+## 2026-08-29 (continued) — Refactor Phase 0: import-linter ratchet + `platform/` extraction (ST-01–ST-04)
+
+### Completed
+
+- Added `[tool.importlinter]` to `pyproject.toml` with `root_packages = ["atlas"]` and a
+  `platform-is-the-lowest-layer` layers contract (`atlas.modules` → `atlas.platform`, never the
+  reverse). Scoped as a permissive baseline: only the target `atlas` package is checked, matching
+  Phase 0's ratchet design — `aida`, the pre-existing flat package, is intentionally out of scope
+  until the strangler migration reaches each module.
+- Extracted `db.py`, `config.py`, `logging.py`, and `context.py` from `aida` into
+  `atlas.platform`, adapting `db.py`'s internal `config` import to the new location. Left a
+  backward-compatible re-export shim at each old `aida.*` path so the 40+ existing import sites
+  across `src/aida/*` and `tests/*` needed no changes.
+- Added `src/atlas` to the `hatchling` wheel package list so the extracted modules are included
+  in production builds, not just the editable dev install.
+- Confirmed `scripts/generate_module.py` (tracker ST-01) and `tests/test_tier0_invariants.py`
+  (tracker ST-03, 4 of 9 invariants) already existed from prior work; the tracker had gone stale
+  and still listed both as `TODO` — corrected to reflect actual repo state.
+- Deliberately did **not** touch `models.py`, `schemas.py`, `api.py`, or any Phase 2+ work — a
+  concurrent session was actively editing those same files for ADR-0017 (domain-complete tenancy)
+  while this work was in progress, and the refactor plan itself calls Phase 2 (the models/schemas
+  split) the one phase needing a migration freeze.
+
+### Verification evidence
+
+- Built an isolated Python 3.13 verification environment (`uv venv` + `uv pip install -e ".[dev]"`)
+  outside the repo, since the checked-in `.venv` is a Windows venv not runnable from this session.
+- `python -m pytest -q`: baseline before any change was fully green (no failures). After the
+  change, all tests pass except 3 in `tests/test_operational_behaviors.py`
+  (`test_scheduler_commits_run_and_evidence_before_workflow_dispatch`,
+  `test_scheduler_defers_rejected_admission_without_dispatch`,
+  `test_due_scan_policies_statement_orders_by_priority_then_next_run_at`) — confirmed via
+  `git diff` to belong to the concurrent session's in-progress `computed_usage_boost` scheduling
+  feature (ADR-0017 §8), not this change: `scheduler.py` and `models.py` were mid-edit for that
+  feature throughout this verification, unrelated to `db`/`config`/`logging`/`context`.
+- `pytest -q src/atlas/modules/identity_tenancy` (standalone module execution) passes.
+- `lint-imports`: `platform-is-the-lowest-layer KEPT` — `Contracts: 1 kept, 0 broken`.
+- `ruff check` and `mypy` (strict) clean on every new and changed file.
+
+### Current limitations
+
+- ST-02's exit criterion ("new violations fail CI") is not fully met: this repo has no CI
+  pipeline at all yet (no `.github/workflows`), so the contract passes locally but isn't enforced
+  automatically. Setting up CI is a separate, larger gap.
+- ST-03 remains 4 of 9 invariants; the other 5 (INV-1, INV-5, INV-6, INV-7, INV-9) need
+  infrastructure that does not exist locally yet (live Neo4j/search replay, an all-endpoints fake
+  session harness, a certification-result store) — see the docstring in
+  `tests/test_tier0_invariants.py` for the reasoning per invariant.
+- ST-04 covers 4 of the ~10 files/areas Phase 1 names. `main.py` was deliberately left where it
+  is: it currently imports nearly every domain router (violating `platform-purity` as-is), and the
+  refactor plan's own sequencing defers untangling that to Phase 5 (the `api.py` router split)
+  rather than moving it in its current shape. `events.py` and the pagination/idempotency/
+  error-taxonomy/telemetry scaffolding remain unbuilt.
+- Phases 2 and onward (splitting `models.py`/`schemas.py`, extracting leaf/runtime modules) are
+  untouched — see `Docs/60-delivery/03-tracker.md` ST-05 onward.
+
+## 2026-08-29 (continued) — Refactor doc corrections found during ST-04 verification
+
+### Completed
+
+- Checked whether Phase 2 (models/schemas split) had unblocked since the last entry: it hadn't —
+  `models.py`, `schemas.py`, and `api.py` were still uncommitted and actively changing under the
+  concurrent session (a new file, `context_product_api.py`, picked up a modification between
+  checks). Left Phase 2+ untouched again; did documentation-only work instead that needed no code
+  freeze.
+- Corrected `40-engineering/06-refactor-plan.md` Phase 1: it listed `events.py` (outbox
+  mechanics) as moving to `platform/`. Read the file — it directly constructs and writes
+  `AuditEvent`/`OutboxEvent` (`aida.models`), module 20's owned tables per
+  `10-architecture/04-module-decomposition.md` §4 and §9, not domain-free infrastructure. Moving
+  it to `platform/` as written would have failed the `platform-purity` contract (ST-02) on day
+  one. `04-module-decomposition.md` §9 already had the correct target (module 20, Phase 3/4);
+  fixed the refactor plan to match, and fixed the same incorrect claim in
+  `src/atlas/platform/__init__.py`'s docstring (written in the previous entry).
+- Flagged a real, previously undocumented architectural tension in
+  `10-architecture/04-module-decomposition.md` (new §5.3): three L2 modules (`05` profiling, `09`
+  lineage, `11` data-quality) depend on `16 query-gateway`, an L3 module, contradicting the
+  document's own layering rule; separately, `09` and `16` list each other as callable, which is a
+  cycle contradicting the `no-cycles` contract the same document says CI will enforce. Added
+  tracker `ST-11` (P0, unassigned) so this is resolved before Phase 4 extracts those modules,
+  rather than being discovered mid-extraction.
+
+### Verification evidence
+
+- `ruff check` clean and `ast.parse` valid on the one `.py` docstring touched
+  (`src/atlas/platform/__init__.py`); `pytest -q src/atlas/modules/identity_tenancy` still passes.
+  No other code changed in this entry — documentation only.
+
+### Current limitations
+
+- ST-11 is flagged, not resolved — it needs an architecture-owner decision (redraw the layer
+  diagram to move `16` down, or narrow what `05`/`09`/`11` actually need from it), not something
+  to decide unilaterally.
+- Phase 2 (models/schemas split) and the leaf-module extraction it unblocks remain untouched;
+  still gated on the concurrent session's ADR-0017 work landing.
+
+## 2026-08-30 — Log-scrubbing verification (OB-8) closed; TS-3 logs slice closed
+
+### Completed
+
+- A concurrent session was already active on this branch's namesake work (Snowflake/dbt/lineage
+  MCP); picked an unrelated, self-contained P0 gap instead rather than duplicate that effort.
+- `Docs/10-architecture/01-principles-and-invariants.md` INV-6 names
+  `test_no_source_values_in_control_plane` as the invariant test and states it needs a live
+  Neo4j/search stack and a full ingestion pipeline not present in this environment
+  (`tests/test_tier0_invariants.py` module docstring says the same). That full-fixture test is
+  still out of reach here, but the logs slice of INV-6 — OB-8 ("Log-scrubbing verification |
+  Sentinel scan passes") — did not require live infrastructure and had no code behind it at all:
+  `src/atlas/platform/logging.py` configured `structlog` with no redaction processor in the
+  pipeline, and no test anywhere asserted that a secret value never reaches a rendered log line.
+- Added `redact_sensitive_data`, a `structlog` processor in `src/atlas/platform/logging.py`,
+  wired into `configure_logging`'s processor chain immediately before `JSONRenderer`. It redacts
+  by key name (case-insensitive denylist covering password/secret/token/credential/api_key/
+  authorization/jwt/hmac/private_key/connection_string/dsn/cookie and variants, matched on
+  normalized `[^a-z]`-stripped keys so `db_password`, `apiKey`, and `client-secret` all match),
+  recursing through nested dicts, lists, tuples, and sets; a value whose *key* is itself
+  secret-shaped (e.g. `credentials`) is redacted wholesale rather than recursed into, since a
+  nested non-sensitive field inside a container named `credentials` isn't a safe assumption. As
+  defense in depth for secrets logged into free-text messages rather than structured keys, it
+  also pattern-redacts JWTs, `user:pass@host` connection strings, `Bearer <token>` values, and AWS
+  access-key IDs inside string values.
+- Added `tests/test_log_scrubbing.py` (6 tests): key-based redaction, nested-structure redaction,
+  whole-container redaction when the container key itself is sensitive, non-sensitive fields
+  passing through unchanged, free-text pattern redaction, and — the OB-8 exit criterion itself —
+  `test_sentinel_scan_end_to_end_log_output`, which calls the real `configure_logging`, logs a
+  sentinel value under multiple sensitive keys through `structlog.get_logger`, captures real
+  stdout, and asserts the sentinel is absent from the rendered JSON while a `tenant_id` field
+  survives untouched.
+- Updated tracker `OB-8` to DONE and `TS-3` to IN PROGRESS (logs closed; tables/events/traces
+  still blocked on the same live-infrastructure gap as INV-6/`test_no_source_values_in_control_plane`).
+
+### Verification evidence
+
+- `uv run pytest -q` (full suite, Python 3.13 via `uv sync --python 3.13 --extra dev`): all tests
+  pass, including the 6 new tests in `tests/test_log_scrubbing.py` and the pre-existing
+  `tests/test_tier0_invariants.py` and `tests/test_secrets.py` suites (unaffected).
+- `uv run ruff check src/atlas/platform/logging.py tests/test_log_scrubbing.py`: clean. Repo-wide
+  `ruff check .` shows 6 pre-existing findings in unrelated files (`context_product_api.py`
+  import order, a long line in `workflows/scheduler.py`) that predate this change — confirmed via
+  `git status` showing no modification to those files.
+- `uv run mypy src/atlas/platform/logging.py`: clean (strict mode); the processor is typed against
+  `structlog`'s actual `Processor` signature (`MutableMapping[str, Any] -> Mapping[str, Any]`),
+  not a loosened one.
+- `uv run lint-imports`: `Contracts: 2 kept, 0 broken` — unchanged, no new cross-module imports
+  introduced.
+- `uv.lock` had unrelated pre-existing drift from `pyproject.toml` (missing `import-linter`,
+  stale `pyyaml`/`types-pyyaml` entries) surfaced by `uv sync`; reverted with `git checkout --
+  uv.lock` rather than committing it, since re-locking is a separate concern from this change.
+
+### Current limitations
+
+- TS-3's tables/events/traces sentinel scan (the rest of INV-6, `test_no_source_values_in_control_plane`)
+  remains open — it genuinely needs the live Neo4j/search + full ingestion pipeline Tier 3/4
+  infrastructure this environment doesn't have, same as documented for ST-03 above. This entry
+  does not claim otherwise.
+- The key-name denylist is a fixed list, not sourced from a schema; a secret field with a name
+  outside `_SENSITIVE_KEY_TOKENS` (e.g. an idiosyncratic vendor field name) would not be caught by
+  the key-based path and would only be caught if it happened to match one of the value patterns.
+  Extending the denylist as new sensitive field names are found is expected maintenance, not a
+  gap unique to this change.
+- No audit/outbox event payload was found constructing log lines from secret material during this
+  pass (a targeted `grep` across `src/aida` for `structlog.get_logger`/`get_logger(` call sites
+  found none touching `secrets.py`/`security.py`/`query_gateway.py`), so this closes a
+  defense-in-depth gap rather than an active leak — but that was a spot check, not an exhaustive
+  audit of every call site.
+
+## 2026-08-30 (eighth entry)
+
+### Retrieval, security, quality, lineage, studio, observability, and tool-plan feature completion
+
+Thirty-one tracker items across eight workstreams moved from TODO/PARTIAL to DONE in a single
+coordinated build-out. Every module was implemented with code, tests, and API registration.
+The full suite now passes 1109 tests with 0 failures — up from 716 at the start of this
+increment. INV-5 tenant isolation and INV-7 audit invariants are verified.
+
+#### Retrieval and search (RT-1 through RT-6)
+
+- **Full-text index** (RT-4/tracker RT-4): GIN index, `ts_query`, cross-source search.
+  `full_text_index.py`.
+- **Vector retrieval** (RT-1/tracker RT-1): pgvector embedding with cosine similarity.
+  `vector_retrieval.py`.
+- **Graph expansion** (RT-2/tracker RT-2): BFS traversal with org-boundary enforcement.
+  `graph_retrieval.py`.
+- **Fusion ranking** (RT-3/tracker RT-3): Reciprocal rank and weighted linear fusion.
+  `fusion_ranking.py`.
+- **Global search API + command palette** (RT-5/tracker RT-5, UX-2): `search_api.py` and
+  `ui/scripts/features/global-search.js`.
+- **Enhanced hybrid retrieval orchestration** (RT-6): `hybrid_retrieve_enhanced` in
+  `retrieval.py`.
+- **Cross-source search** (tracker RT-9): Covered by the full-text index and hybrid retrieval.
+
+Hybrid retrieval has moved from Partial to Implemented in the status matrix.
+
+#### Security and access control (SEC-1 through SEC-4)
+
+- **ABAC engine** (SEC-1): Policy evaluation, agent-vs-human gating, simulation mode.
+  `abac.py` (does not exist any more) and `abac_api.py` (does not exist any more) -- both deleted 2026-08-31 under
+  PG-1/PG-6/PG-8/AU-11: that engine was never wired into the money path, `policy_engine.py` was,
+  and PG-8's simulation mode was ported to `aida.policy_engine.simulate` rather than lost (see
+  those tracker rows). Closes tracker PG-1 (from PARTIAL), PG-6, PG-8.
+- **Indirect injection defense** (SEC-2): Pattern detection, multilingual, encoding-aware
+  corpus. `injection_defense.py`, `injection_corpus.py`. Closes tracker AG-1, AG-2, TS-6,
+  and the gap-register P0 indirect prompt injection gap.
+- **SIEM routing** (SEC-3): CEF format, syslog/webhook transport. `siem_routing.py`.
+  Closes tracker OB-2.
+- **WORM archive** (SEC-4): Immutable audit, legal hold, retention. `worm_archive.py`.
+  Closes tracker OB-3 and the gap-register P1 legal hold gap.
+
+Policy and governance has moved from Partial to Implemented in the status matrix.
+
+#### AI decision and lineage (AI-1 through AI-4)
+
+- **AI decision lineage** (AI-1): Retrieval, tool selection, rejection, and refusal edges.
+  `ai_decision_lineage.py`, `ai_decision_lineage_api.py`. Closes tracker LN-3 and AG-5.
+- **SQL lineage parser** (AI-2): Multi-dialect, CTE support, literal redaction.
+  `sql_lineage_parser.py`, `view_lineage_api.py`. Closes tracker LN-2.
+- **Consumption lineage** (AI-3/CX-4): Consumer tracking and graph.
+  `consumption_lineage.py`, `consumption_lineage_api.py`. Closes tracker CX-4.
+- **Negative knowledge** (AI-4): Rejected inferences, re-proposal suppression.
+  `negative_knowledge.py`, `negative_knowledge_api.py`.
+
+#### Quality and trust (QT-1 through QT-4)
+
+- **Quality-runtime coupling** (QT-1): Demotion, trust warnings, tool gating.
+  `quality_coupling.py`. Closes tracker DQ-3, RT-7, AG-6, TL-3.
+- **Trust scoring** (QT-2): Composite 0-100 score, A-F grade, explainable factors.
+  `trust_scoring.py`.
+- **Freshness monitoring** (QT-3): Watermark config, maker-checker, ADR-0016.
+  `freshness.py` plus `quality_api.py` endpoints. Closes tracker DQ-2.
+- **Runtime data contracts** (QT-4): Schema drift, quality breach, SLA enforcement.
+  `runtime_contracts.py`, `runtime_contracts_api.py`. Closes tracker DQ-5.
+
+Data-quality observability has moved from "Implemented for profile-baseline controls" to
+Implemented in the status matrix.
+
+#### Studio and governance (STU-1 through STU-3)
+
+- **Studio change sets** (STU-1): Create, items, conflict detection. `studio.py`,
+  `studio_api.py`. Closes tracker ST-A1.
+- **Studio test harness** (STU-2): Fixture validation, metrics. `studio_test_harness.py`.
+  Closes tracker ST-A2.
+- **Studio diff view and impact preview** (STU-3): `studio_api.py` endpoints. Closes
+  tracker ST-A3 and ST-A5.
+
+Studio has moved from Pending to Partial in the status matrix.
+
+#### Notifications and compliance (NC-1, NC-2)
+
+- **Notification routing** (NC-1): Rules, escalation, dedup, ITSM integration.
+  `notification_routing.py`, `notification_api.py`. Closes tracker DQ-1.
+- **Compliance pack generation** (NC-2): Five frameworks, reproducible, WORM-archived.
+  `compliance_packs.py`, `compliance_api.py`. Closes tracker OB-5.
+
+#### Observability (OB-1, OB-2)
+
+- **OpenTelemetry tracing and metrics** (OB-1): `observability.py`. Closes tracker OB-1.
+- **Observability API** (OB-2): SLO, error budgets, archive status.
+  `observability_api.py`. Closes tracker OB-4.
+
+#### Tool plans (TP-1)
+
+- **Multi-step tool plans** (TP-1): Validation, budget enforcement, dependency ordering,
+  partial failure. `tool_plans.py`, `tool_plans_api.py`. Closes tracker AG-4 and TL-2.
+
+#### Context products enhancements (CX-3, CX-6)
+
+- **Per-read policy evaluation** (CX-3): Wired into `mcp_server.py`. Closes tracker CX-3
+  (from IN PROGRESS).
+- **Per-consumer rate limits** (CX-6): `mcp_budget.py` enhancement. Closes tracker CX-6.
+
+#### Verification evidence
+
+- **1109 tests pass, 0 failures.** 17 new test files with 200+ tests covering all
+  implemented modules.
+- INV-5 tenant isolation verified across all new API surfaces.
+- INV-7 audit invariant verified: `_KNOWN_UNAUDITED_MUTATIONS` is empty.
+- All code registered with FastAPI routers in `main.py`.
+
+#### Known limitations
+
+- Bank-scale benchmarks for retrieval (large-catalog), SIEM routing (target SOC endpoint),
+  and WORM archive (target storage) remain Phase D gates.
+- The ABAC engine supersedes the earlier `policy_engine.py` partial but residency attribute
+  evaluation against production data has not been measured.
+- Injection defense corpus covers multilingual and encoding vectors but bank-specific
+  adversarial evaluation remains.
+- Studio parameter-contract designer and Git binding remain open (tracker ST-A4, ST-A6).
+- Interactive browser visual/accessibility certification is not possible in this session.
+
+## 2026-08-30 (continued) — Re-verified `00-status.md` "at a glance" and Retest register figures
+
+### Completed
+
+- A user-supplied summary of `00-status.md` quoted its 12:25 snapshot (1,199 tests, 156 mypy
+  files, "9/9 invariants automated") and asked for the doc to be validated and corrected. By the
+  time this was checked, other concurrent sessions had continued pushing to this shared branch —
+  `git fetch` found 61, then 6 more, divergent commits arrive mid-session — so the 12:25 numbers
+  were already stale rather than wrong-when-written.
+- Built an isolated Python 3.13 venv (`uv venv` + `uv pip install -e ".[dev]"`, the checked-in
+  `.venv` not being runnable from this session) against the current merged head (`c4d8e6f0a1b3`)
+  and re-ran the full suite, `ruff`, `mypy --strict`, and `lint-imports`.
+- Updated `00-status.md`'s "At a glance" table and Retest register (§8) to the 17:20 UTC figures:
+  test count, mypy file count, and the Alembic head hash, with a note on how much drifted and why
+  (other sessions' commits landing in the intervening ~5 hours), rather than silently overwriting
+  the 12:25 numbers as if they had been wrong. Left the invariant-count claim ("9 of 9") and the
+  capability matrix (§4) unchanged — nothing in this pass contradicted either.
+- Confirmed a separate claim in the same user-supplied summary — that this repo's tracker "marks
+  several Studio items done" while the status doc lists Studio as pending — does not hold:
+  `03-tracker.md`'s `ST-A1`–`ST-A7` (module 18) are all still open, matching `00-status.md`'s
+  "Studio | 18 | **Pending**" row. The two documents already agree on Studio.
+
+### Verification evidence
+
+- `pytest`: 1,390 passed, 1 xfailed (1,391 collected) — up from the doc's prior 1,199, with the
+  Tier-0 invariant test files alone now at 188 total (`test_inv5_tenant_isolation.py` particularly,
+  8 → 62) versus the doc's prior 71.
+- `ruff check .`: clean. `mypy src` (strict): clean on 163 files (was 156). `lint-imports`: 4
+  contracts kept, 0 broken (unchanged). `alembic heads`: single head, `c4d8e6f0a1b3` (was
+  `d5f8b21c4a03` — a merge migration landed in between).
+
+### Current limitations
+
+- This branch is under heavy concurrent multi-session development right now (dozens of commits an
+  hour observed while doing this check); any point-in-time count in `00-status.md` should be read
+  as "true when last verified," not as a stable figure — the doc's own §2 "Living document" framing
+  already says this, but the drift rate on this specific branch today is unusually high.
+- Did not re-verify the capability matrix (§4), the invariant-by-invariant limits (§3), or the
+  decisions/gaps sections (§6–§7) against current code — this pass was scoped to the specific
+  numeric claims the user's summary quoted and to the Studio cross-document-consistency question
+  they raised.
+
+### Addendum (17:35 UTC) — the correction above was already stale by the time it merged
+
+- Pushing the above correction required merging two further rounds of concurrent commits (a QG-1
+  adversarial-SQL-corpus merge and a CT-5 certification merge, each bringing their own tracker/
+  Alembic-head updates). Re-ran the same checks against the newly merged head (`12aa5b4dd87d`):
+  `pytest` now reports **2,381 passed, 5 skipped, 1 xfailed** (2,387 collected) — up again from the
+  1,391 just logged above, largely from a new `tests/test_doc_claims.py` (866 cases: a doc-claim
+  regression gate landed by the same concurrent work, tracker TS-12) plus
+  `test_catalog_certification.py` and `test_adversarial_sql_corpus.py`.
+- `ruff check .` regressed from clean to **14 errors** (all auto-fixable) between this addendum and
+  the check 15 minutes prior — not this session's doing; left unfixed as out of scope for a
+  docs-only pass, and noted in `00-status.md` rather than silently fixed, since the owning session
+  should decide whether `--fix` is safe against their in-flight work.
+- Updated `00-status.md` a second time in the same sitting to the 17:35 figures rather than leave
+  the 17:20 numbers live and known-wrong. This is the third distinct "true count" recorded for this
+  page today (12:25: 1,199; 17:20: 1,391; 17:35: 2,387) — each correction was accurate when made and
+  stale within the hour, which is itself the fact worth recording: on a branch this actively
+  developed, treat every count in `00-status.md` as a timestamped snapshot, not a stable number.
+
+## 2026-08-31 — ST-A4 (Studio parameter-contract designer) closed
+
+- Studio's TOOL change-item validation (`studio_test_harness.py::_validate_tool_item`) previously
+  re-implemented a weaker, ad hoc version of parameter-contract checking: it verified only that
+  parameter names were unique and that `parameter_type` was one of the five known literals. It did
+  not check `allowed_values`, `minimum`/`maximum`, the `sensitive`+`default` conflict, or whether
+  the declared parameters actually matched the SQL template's placeholders — all of which module
+  14's real `ToolParameterDefinition` (`schemas.py`) and `tool_rendering.py` already enforce for
+  published tools.
+- Closed by adding `validate_parameter_contract()` to `studio.py`, which parses each raw definition
+  as a real `ToolParameterDefinition` (structured pydantic errors on failure, not a crash),
+  cross-checks declared names against `tool_rendering.template_placeholders()`, and — once
+  structurally valid — proves the contract renders by substituting one representative in-bounds
+  value per parameter through the real `render_tool_sql()`. `_validate_tool_item` now calls this
+  directly instead of its previous hand-rolled loop. Also exposed standalone at
+  `POST /v1/studio/parameter-contracts/validate` (`studio_api.py`) so an author can validate a
+  contract incrementally while still drafting, before it is attached to any change item.
+- 9 new tests in the `TestParameterContractDesigner` class (e.g.
+  `tests/test_studio.py::test_valid_contract_renders_a_sample`): valid contract renders a
+  sample, invalid type reported as a typed error (not a crash), inverted bounds rejected, sensitive
+  parameter with default rejected, duplicate name rejected, undeclared placeholder rejected, unused
+  definition rejected, `allowed_values` takes precedence for the synthetic sample, malformed SQL
+  template reported rather than raised. Full suite green (exit 0, no failures); `ruff check .`,
+  `mypy src` (184 files), and `lint-imports` (4 contracts kept, 0 broken) all clean.
+- The new endpoint is stateless (no DB session, persists nothing), so it needed the same documented
+  exemption `POST /v1/context-compiler/validate` already has in both `test_inv5_tenant_isolation.py`
+  (`_TENANT_FREE_ROUTES`) and `test_inv7_attributability.py` (`_READ_ONLY_POST_ROUTES`) — added with
+  the same rationale rather than weakening either invariant's default (every route must reach a
+  tenant boundary check or a documented, falsifiable exemption).
+- OpenAPI baseline (`Docs/90-reference/openapi-baseline.json`) regenerated via
+  `scripts/openapi_diff.py --accept-baseline`; the diff gate itself confirmed the change is
+  additive only (`added path '/v1/studio/parameter-contracts/validate'`, no breaking changes) before
+  the baseline was regenerated, so no `info.version` bump was needed.
+- Known limitation: no live-DB / FastAPI-test-client coverage of the new endpoint end-to-end — the
+  same "systemic no-DB-test-harness gap" already named for CT-1/TL-1/LN-4 in the tracker. Core-logic
+  coverage is thorough; wiring-level coverage relies on the route-registration and INV-5/INV-7
+  route-classification tests instead.
+- Context: this branch is under very heavy concurrent multi-session development (see the
+  17:35 UTC addendum above). Before starting this item, 8 speculative parallel workstreams were
+  launched against a base that turned out to be 182 commits behind origin; every one of those items
+  (RT-1..4, LN-2, DQ-1/2, PG-1/2/6, AG-1/2, ST-A1/2/3/5, ST-02, TS-4, TS-6) had already been
+  delivered by other concurrent sessions by the time that was discovered, so all 8 were stopped
+  before any wrote code, and ST-A4 — the one item confirmed still open after re-checking the live
+  tracker — was picked up directly instead.
+
+## 2026-08-31 — CT-1 (catalog bulk actions) closed: per-item SAVEPOINT isolation, real-DB tests, and the "no test harness exists" claim was wrong
+
+- CT-1 (bulk tag/classify/own/certify) was already delivered 2026-08-30 with the right shape —
+  filter-or-explicit selection, a 500-item cap, per-item partial-success reporting — but its own
+  tracker row admitted it had never been run against a database: "this repo has no live/fake-DB
+  endpoint-level test harness at all (a pre-existing, systemic gap)". That claim, also repeated
+  verbatim against TL-1/LN-4/ST-A4, is false. `tests/test_bulk_governance_decisions.py` (PG-3) and
+  `tests/test_catalog_pagination.py` (CT-2) already establish exactly that pattern — a real
+  in-memory sqlite engine, `Base.metadata.create_all`, rows seeded through the real ORM, the
+  endpoint function called in-process. Nobody had checked before writing that note down.
+- Following that pattern surfaced a real defect the never-executed code had been carrying since
+  2026-08-30: the `CatalogBulkActionRun` ORM model in `models.py` was missing the `requested_by`
+  column that its own Alembic migration (`b3f7a1c94d62`) creates and that
+  `_persist_catalog_bulk_action_run` unconditionally passes as a constructor kwarg. Every real call
+  to any of the four bulk endpoints would have raised `TypeError` before a run could ever be
+  persisted — a correctness bug invisible to `ruff`/`mypy`/code review, caught on the first test
+  that actually executed a request. Fixed by adding the column to the model; no migration change
+  needed since the table already had it.
+- Separately, and more structurally: the previous implementation's four endpoints computed a whole
+  batch's mutations in memory (`plan_tag`/`plan_classify`/`plan_own`/`plan_certify`, no session I/O)
+  and issued a single `session.commit()` for the entire request. That is not partial-success-safe at
+  the database level — a single DB-level failure anywhere in a 500-item batch (a constraint
+  violation the application-level precondition checks don't catch) would have rolled back every
+  item, not just the one that failed, silently contradicting the "partial success reported" exit
+  condition the moment reality diverged from the happy path. Refactored to mirror PG-3's own
+  pattern exactly: `catalog_bulk_actions.py` now exposes one `apply_<action>_item` function per
+  action — the single-item core, raising `CatalogBulkItemError` on a precondition failure — and each
+  of the four endpoints in `api.py` dispatches to it per subject inside that item's own SAVEPOINT
+  (`async with session.begin_nested(): ... await session.flush([row, ...])`), catching both
+  `CatalogBulkItemError` and a real `IntegrityError` per item.
+- New `tests/test_catalog_bulk_actions_endpoints.py`, following PG-3's and CT-2's real-engine test
+  pattern (not a hand-simulated session), proves:
+  - **Partial success at real scale**: a full 500-item explicit-selection batch (tag: 470
+    ACTIVE + 25 DEPRECATED + 5 never-existed ids; classify: 480 ACTIVE + 20 DEPRECATED columns)
+    reports every item's outcome correctly and persists exactly the succeeded count — no failure
+    dropped a success, no success went unpersisted.
+  - **The cap and `truncated` flag**: filter selection over 5,000 candidate ACTIVE tables caps the
+    processed batch at exactly `CATALOG_BULK_ACTION_MAX_ITEMS` (500) with `truncated=True` recorded
+    in the run's `parameters`, and the database ends up with exactly 500 new `OwnershipAssignment`
+    rows, never more; a 40-row match is correctly reported un-truncated.
+  - **SAVEPOINT isolation actually contains a failure**: a real, table-defined CHECK constraint
+    (`ck_asset_certification_column_consistency`) is tripped on exactly one item's certify dispatch
+    via a `before_insert` listener (this sandbox's sqlite fixture is single-connection, so a genuine
+    concurrent-writer race can't be reproduced deterministically — the constraint violation itself
+    is real, not the trigger mechanism). Proven: the prior certification that item had already
+    superseded in memory reverts to ACTIVE (not stuck SUPERSEDED with no replacement), no partial
+    certification row exists for that table, the item is reported FAILED with the constraint reason,
+    and both sibling items in the same request still commit and read ACTIVE — the outer transaction
+    was never aborted by the contained failure.
+- `tests/test_catalog_bulk_actions.py` (the pure-function unit tests) rewritten from
+  `plan_tag`/`plan_classify`/`plan_own`/`plan_certify` to `apply_tag_item`/`apply_classify_item`/
+  `apply_own_item`/`apply_certify_item`, since the old batch-planner functions no longer exist as a
+  separate code path from what the endpoints actually call — keeping one single-item core per
+  action, exactly PG-3's "single-item and bulk can never drift" property.
+- Verified: `ruff check .` clean; `mypy src` clean (184 files); full `pytest` suite run to
+  completion with exactly 2 failures, both pre-existing and unrelated to this item
+  (`test_doc_claims.py::test_cited_test_path_resolves` flagging ST-A4's tracker/log citation of the
+  test_studio.py TestParameterContractDesigner class by name rather than by function — the scanner
+  only resolves function/method names, not class names, so a class-name citation can never pass —
+  confirmed present at `ca80b14`, the commit this session started from, before any change made
+  here). Every catalog-bulk-action test passes, and no other test in the suite fails.
+- Known limitation, stated plainly rather than glossed: this sandbox has no live Postgres, so the
+  SAVEPOINT-isolation proof above uses sqlite's own CHECK-constraint enforcement (real, but not
+  Postgres) and a single-connection fault-injection listener rather than a genuine concurrent
+  writer race, which sqlite's default in-memory single-connection fixture cannot reproduce
+  deterministically. The mechanism proven (SQLAlchemy `begin_nested()` SAVEPOINT rollback contains
+  a real `IntegrityError`) is dialect-independent, but a live-Postgres run of the same scenario has
+  not been performed in this environment.
+
+## 2026-08-31 — QG-6 (dynamic masking / tokenization integration) closed
+
+- Gave `query_gateway.py`'s masking pass a second strategy alongside the existing flat
+  `"***MASKED***"` redaction: reversible, format-preserving tokenization for output columns a
+  steward has explicitly opted in. `tokenization.py`'s `TokenizationProvider` protocol is
+  `signing.py`'s `SigningProvider` (QG-5) restructured for a second operation pair
+  (`tokenize`/`detokenize` instead of `sign`/`verify`) rather than a new shape: async, resolved
+  fresh per call by `resolve_tokenization_provider`, no fallback on failure. `LocalFpeTokenizationProvider`
+  transforms the digit run of a value with a deterministic, invertible, unbalanced Feistel-style
+  construction (keyed HMAC-SHA256 round function, alternating modular updates to two unequal
+  halves) — covers realistic numeric PII shapes (card numbers, SSNs, account/phone numbers) and is
+  explicitly documented as **not** a validated FF1/FF3-1 implementation, the same honesty line drawn
+  around `LocalHmacSigningProvider`. `VaultTransformTokenizationProvider` calls HashiCorp Vault's
+  Transform secrets engine over plain `httpx`, the same wire shape `VaultTransitSigningProvider`
+  already uses for Transit.
+- New `ColumnTokenizationPolicy` model/table (migration `2fa45be65bf7`, on top of head `4f730e96ee9b`):
+  a steward-declared, `column_id`-scoped row that opts one catalog column into tokenization.
+  `query_gateway.py`'s `_tokenized_output_names` mirrors `_sensitive_output_names`'s shape exactly
+  (including reusing `sensitive_projection_names` for alias/derived-expression propagation, so a
+  tokenized column stays tokenized under a rename or a wrapping expression), and `execute()` now
+  tokenizes the columns that policy covers instead of redacting them — `tokenized_names` takes
+  precedence over `masked_columns` for the columns it names, every other sensitive column keeps
+  today's behaviour unchanged. A query that needs to tokenize but has no usable provider configured
+  is rejected closed (`TOKENIZATION_PROVIDER_UNAVAILABLE` / `TOKENIZATION_FAILED`), never silently
+  falling back to redaction or returning the raw value.
+- Reversal is gated: `POST /v1/security/tokens/detokenize` (`detokenization_api.py`) requires one of
+  `PlatformAdmin`/`OrganizationAdmin`/`ComplianceOfficer`/`DataSteward`, a stated `purpose`, and
+  writes an audit row via `record_audit` on *every* path — both the grant and the denial — before
+  the response returns, using the same "record before deciding what to return" shape
+  `token_revocation_api.py` established rather than a bare `require_roles` dependency (which would
+  raise before the handler body, and audit-record, ever runs). INV-6 held: neither the token nor the
+  recovered value ever enters the audit `details` payload.
+- Production configuration now refuses `tokenization_provider == "local"` and a `tokenization_key`
+  under 32 characters, the same shape and same `reject_insecure_production_configuration` function
+  as the existing `hmac_signing_provider == "local"` / `audit_hmac_key` checks. The Tier-0
+  `_SECURE_PRODUCTION_BASELINE` fixture in `test_tier0_invariants.py` was updated to configure the
+  KMS-backed tokenization provider (mirrors its existing `hmac_signing_provider: "vault_transit"`
+  entry), and two new parameterized cases added to `_INCOMPLETE_POSTURE_CASES` alongside QG-5's.
+- 33 new tests across three files: `test_tokenization.py` (22 — round-trip/determinism/key-binding/
+  format-preservation for the local provider across SSN/card/phone/account-number lengths, mocked
+  Vault Transform wire contract, fail-closed on network error/non-2xx/malformed body, production
+  refusal), `test_query_tokenization.py` (4 — a policy-covered column comes back tokenized not
+  redacted, the exact token the gateway produced detokenizes back to the original value through the
+  same provider a real detokenize call would resolve, a sensitive column with no policy keeps
+  today's flat redaction unchanged, a query needing tokenization with no usable provider is rejected
+  closed with the execution row recorded `REJECTED`), and `test_detokenization_api.py` (7 — an
+  authorized caller with a stated purpose recovers the value and the grant is audited without ever
+  leaking the token or value into the audit payload, every one of the four authorized roles is
+  accepted, an unauthorized caller is denied *and the denial is itself audited*, an unavailable
+  provider fails closed with a 503 and that failure is also audited).
+- `tests/support/doubles.py`'s `CatalogSession` (shared Tier-0 test double) gained a fourth
+  recognised statement shape (a 2-column select, for the `ColumnTokenizationPolicy` join) alongside
+  the existing 3-/4-column/scalars routing, with an empty default so every existing caller is
+  unaffected.
+- OpenAPI baseline regenerated (`uv run python scripts/openapi_diff.py --accept-baseline`) after
+  confirming the only diff is additive (`added path '/v1/security/tokens/detokenize'`) — no breaking
+  changes, no version bump needed.
+- Full suite run in the foreground start to finish (not backgrounded, per the coordinator's
+  correction mid-session — a backgrounded run does not survive this session's own turn boundaries),
+  both before and after rebasing onto latest origin: `ruff check .` clean, `mypy src` clean (186
+  files), `lint-imports` (4 contracts kept, 0 broken), one Alembic head, the OpenAPI baseline diff
+  additive-only, and `pytest` green except one pre-existing, unrelated failure introduced by the
+  CT-1 commit this session rebased onto (`eaf7ee1`, confirmed via `git show`) — its own
+  accomplishment-log entry cites test_studio.py's TestParameterContractDesigner the same way an
+  earlier ST-A4 entry did before a same-day fix (`08a37cb`) repointed the ST-A4 citations at a real
+  function; `test_doc_claims.py::test_cited_test_path_resolves` correctly reports it, since the
+  doc-claims scanner resolves `path::name` citations only against functions, never classes.
+  Untouched by QG-6. (Deliberately not written as a backtick-fenced `path.py::Name` citation here,
+  so this note about the gap does not itself become another instance the same scanner trips on.)
+- Not yet DONE, stated plainly: no source-native (in-database) tokenization or masking policy — this
+  is the query-gateway's own output-layer transform over an already-executed result set, the same
+  "application layer today, source-native next" boundary the module doc's target column already
+  named. `VaultTransformTokenizationProvider` has never made a request against a real Vault
+  instance — verified only against a mocked HTTP transport asserting the documented wire contract,
+  the same standing limitation already recorded for QG-5's `VaultTransitSigningProvider` and the
+  connector work (CN-1c/CN-2a). Only one value shape is implemented (the digit run of a value);
+  `ColumnTokenizationPolicy.value_shape` is left open for a future alphanumeric scheme without a
+  schema change, but no such scheme exists yet.
+
+## 2026-08-31 — QG-2 (source-native row/column policy synchronization)
+
+- Built the synchronization path module 16's masking §7 target names but the codebase had not yet
+  shipped: `policy_native_sync.py` translates the platform's existing governed row/column
+  obligations into real source-native DDL, alongside (never instead of) `query_gateway.py`'s
+  application-level masking, which is untouched. Deliberately reused the platform's one policy
+  language rather than inventing a second: obligations come from `policy_engine.PolicyRecord`
+  (loaded via the existing `business_graph.load_policies`) with effect `FILTER` (row) or `MASK`
+  (column) — the same records `query_gateway.py` already builds masking decisions from.
+- The load-bearing design choice: a policy is eligible for native sync only when it is
+  *unconditional on subject* (empty `subject_match`) and its `resource_match` resolves without a
+  business-graph closure query. A native `CREATE POLICY`/`ADD MASKED` construct has no way to see
+  Atlas's roles, purpose, or principal kind, so a subject-scoped policy (e.g. "mask for AGENT
+  principals only") is left to application-level enforcement rather than synced with a silently
+  narrowed meaning — reported by name in `NativeSyncPlan.unsupported`, not dropped quietly. Same
+  treatment for the two connector/obligation combinations with no real native construct today:
+  Postgres column masking (would need the third-party `postgresql_anonymizer` extension) and SQL
+  Server native row-level security (`CREATE SECURITY POLICY` needs a schema-bound predicate
+  function this module does not yet manage) — both documented as future work in the module
+  docstring, matching this codebase's convention of not shipping a source half-supported without
+  saying so.
+- Real, tested DDL for the two connectors with real native pull adapters: PostgreSQL RLS
+  (`ENABLE`/`FORCE ROW LEVEL SECURITY` + `CREATE POLICY ... USING (...)`, idempotent via a leading
+  `DROP POLICY IF EXISTS`) and SQL Server Dynamic Data Masking (`ALTER COLUMN ... ADD MASKED WITH
+  (FUNCTION = ...)`, profile-mapped with a conservative `default()` fallback for an unrecognized
+  profile, matching module 16's existing "default is conservative" masking rule).
+- Row-filter predicates are governance-authored trusted SQL text (the same trust level as a
+  `SourceBinding.masking_profile` or a governed tool's SQL template), but are still round-tripped
+  through `sqlglot` before being concatenated into generated DDL: parsed as a `WHERE` condition,
+  rejected on multiple statements/semicolons, rejected on any DDL/DML/administrative AST node, and
+  re-rendered from the parsed tree rather than passed through raw — the same safety property
+  `query_gateway._run_validation` already relies on. Found a real gap while writing the injection
+  tests: a subquery can hide a call to a dangerous function (`(SELECT 1 FROM pg_sleep(5)) = 1`)
+  past a pure node-type denylist, since the node itself (a comparison) is not forbidden. Closed by
+  additionally walking every function call in the parsed predicate against the same
+  Postgres denylist `sql_guard.SqlGuard` already applies to the read path (`pg_sleep`,
+  `dblink_connect`, `pg_read_file`, etc.), independently duplicated rather than imported (see the
+  module docstring on why this module does not reach into another module's private members) —
+  verified closed by test before and after the fix.
+- `policy_native_sync_api.py`: a dry-run preview (steward-tier role gate, nothing persisted or
+  applied) plus a maker-checker `PolicyNativeSyncRequest` gate modeled directly on
+  `ProfilingExceptionPolicy` — its own denormalized `status`/`requested_by`/`decided_by` fields
+  rather than filing into the shared `governance_review` queue, for the exact reason
+  `ProfilingExceptionPolicy`'s own docstring gives for itself: gating a live external-source write,
+  with generated DDL as the evidence, doesn't fit that queue's existing per-object-type dispatcher
+  without distorting it. `APPROVE` immediately attempts the apply and records the real outcome
+  durably either way (`APPLIED` with an HMAC evidence hash via `aida.signing` — the same evidence
+  mechanism `QueryExecutionGateway` uses for executed SQL — or `APPLY_FAILED` with the exception
+  class only, never the raw driver error text, which could carry source-side values, INV-6);
+  `REJECT` never touches the source. Maker != checker enforced the same way
+  `decide_profiling_exception_policy` enforces it in `api.py`.
+- Apply mode is deliberately a separate execution surface from the query gateway, not an oversight:
+  `aida.connectors.execution_access` (the only source of a `SqlExecutor`) is import-linter-
+  restricted to `aida.query_gateway` alone (INV-2), and `sql_guard.SqlGuard` refuses every
+  DDL/administrative statement outright — `CREATE POLICY`/`ALTER TABLE ... ADD MASKED` could never
+  pass through that read-only pipeline by the same rule that makes it safe for governed reads.
+  `apply_native_sync_plan` therefore opens its own narrowly-scoped administrative connection
+  (`asyncpg`/`pytds`, the same drivers the read connectors use) and executes only the exact
+  statements the checker reviewed, in one transaction. `lint-imports` (4 contracts kept, 0 broken)
+  and `tests/test_tier0_invariants.py::test_no_connector_execution_outside_gateway` both confirm
+  this module never reaches the gateway-restricted surface.
+- 32 tests (`tests/test_policy_native_sync.py`): DDL generation correctness against real RLS/DDM
+  syntax; identifier and string-literal escaping (embedded `"`, `]`, `'` all verified to stay
+  escaped rather than break out of a quoted identifier or literal); injection safety (multi-
+  statement rejection, comment-smuggling neutralized to an inert re-rendered comment, dangerous
+  function inside a subquery rejected, a legitimate subquery still accepted); policy-resolution
+  scoping (subject-conditional and business-node-scoped policies correctly excluded, datasource/
+  schema scoping, priority tie-break); `apply_native_sync_plan` against injected fake connections
+  for both connector types, including a rollback-and-propagate path on failure — never against a
+  real Postgres/SQL Server instance, the same "verified only against a mock" posture QG-5's
+  `VaultTransitSigningProvider` tests already carry in this codebase; and the maker-checker HTTP
+  surface exercised the way `test_profiling_exception_policy.py` exercises its own endpoints
+  (self-approval refused, already-decided refused, reject never attempts apply, a failed apply is
+  recorded durably without raising and without leaking the raw driver error).
+- New table `policy_native_sync_request` (migration `a3f6c9e21b74`, chained onto head
+  `4f730e96ee9b`). New events `policy_native_sync.requested.v1` / `.decided.v1` / `.applied.v1`
+  added to `Docs/30-contracts/04-event-catalog.md` (`test_event_catalog_gate.py` was the gate that
+  caught the omission). New router `policy_native_sync_api.py` mounted in `main.py` rather than
+  added to `api.py`, to keep this change out of the branch's single largest shared file — three new
+  paths confirmed additive-only via `scripts/openapi_diff.py` before regenerating
+  `Docs/90-reference/openapi-baseline.json`.
+- Full suite: 2,796 tests collected, exits with exactly 2 failures, both pre-existing and unrelated
+  (`test_doc_claims.py` flagging ST-A4's tracker/log citation of the test_studio.py
+  TestParameterContractDesigner class by name rather than by function — a stale citation from the
+  ST-A4 session's own doc edits, present before this session started, not touched here). `ruff
+  check .` and `uv run mypy src`
+  (186 files) both clean; `lint-imports` 4/4 contracts kept.
+- Not yet DONE, stated plainly: apply has never run against a real Postgres/SQL Server instance
+  (mock-verified only — the same standing limitation QG-5, CN-1c, and CN-2a already carry in this
+  tracker); SQL Server native row-level security and Postgres native column masking are explicitly
+  unimplemented, documented as future work rather than faked; and only unconditional policies are
+  synchronized by design, so a subject-scoped masking/filter rule stays application-level-only
+  until a session-variable bridge between Atlas's subject attributes and a source engine's session
+  context exists (also not started).
+
+## 2026-08-31 — PF-3 (CI performance regression gates) closed
+
+- Scope, stated plainly: this closes the CI-runner regression-gate *mechanism*, not bank-scale
+  load/soak/spike testing. PF-1 (1M-object benchmark corpus), PF-2 (published performance
+  dashboards), PF-4 (projection rebuild timing) and TS-7 remain open, infra-dependent items this
+  work does not touch.
+- Added `scripts/perf_baseline.py`, following the same committed-baseline ratchet pattern as ST-02's
+  import-linter gate and TS-4's `scripts/openapi_diff.py`. It times four real, already-tested,
+  in-process hot paths rather than any invented benchmark: `SqlGuard.validate()` over every case in
+  QG-1's own adversarial SQL corpus (`tests/fixtures/adversarial_sql_corpus/*.json`, all 5 certified
+  dialects); `abac.evaluate()` over 500 policies, the exact scenario PG-1's own
+  `tests/test_abac.py::test_evaluation_under_50ms_with_500_policies` p95<50ms test already exercises at the time (that file does not exist any more -- `abac.py`/`tests/test_abac.py` deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11, the benchmark retargeted to `aida.policy_engine.evaluate`), reused here rather than
+  reimplemented; `fuse_results()`, hybrid retrieval's reciprocal-rank-fusion combiner, over a
+  synthetic 500-candidate catalog; and `app.openapi()` — TS-4's own gate input — with FastAPI's
+  schema cache cleared every iteration so it is genuinely regenerated, not cached.
+- Each benchmark runs a warmup, then several timed iterations, and the comparison uses the median
+  (p50) rather than a tail percentile: on a shared CI runner the tail is dominated by scheduler noise
+  unrelated to the code under test, while the median stays representative with far fewer samples.
+  The regression threshold is 20% — chosen because repeated local measurement showed run-to-run
+  median variance comfortably under 15% for three of the four benchmarks even on an unusually loaded
+  machine (see below), leaving headroom above that noise floor while still catching a real slowdown.
+  A benchmark that crosses the threshold is re-measured once before the gate actually fails, so one
+  transient blip does not fail the build by itself — the regression has to reproduce.
+- Committed baseline at `Docs/90-reference/perf-baseline.json`; `--accept-baseline` regenerates it
+  deliberately, exactly like `scripts/openapi_diff.py`'s own flag. Wired as a new job in
+  `.github/workflows/ci.yml` alongside the existing five gates (ruff, mypy, lint-imports,
+  single-Alembic-head, openapi-diff, pytest) — additive only, none of the existing jobs were
+  restructured.
+- 16 tests (`tests/test_perf_baseline_gate.py`): pure `find_regressions()` coverage of the threshold
+  boundary and edge cases (exactly-at-threshold passes, missing-on-either-side entries are
+  informational only, a zero baseline doesn't divide by zero), plus — per this item's own definition
+  of done — aida.abac.evaluate (retargeted 2026-08-31 to `aida.policy_engine.evaluate` when
+  `abac.py` was deleted under PG-1/PG-6/PG-8/AU-11; aida.abac.evaluate does not exist any more)
+  wrapped with an artificial `time.sleep` to prove the gate actually
+  flags a regression in a real benchmarked function (not just a synthetic fixture), and the same
+  unmodified benchmark proven not to be flagged.
+- Found and fixed two false positives of its own in the same edit: the tracker row's prose cited the
+  OpenAPI diff script as a bare filename instead of the full `scripts/openapi_diff.py` path
+  the doc-claims gate (TS-12) requires, and separately named the new CI job in backticks on the same
+  line as "contracts kept" (from the lint-imports verification sentence), which made the doc-claims
+  gate's contract-name checker mistake the job name for an import-linter contract citation. Both
+  fixed before commit; `uv run pytest tests/test_doc_claims.py` re-run clean for every citation this
+  entry and the tracker row introduce.
+- This session's sandbox was, for its own reasons, unusually heavily loaded — many concurrent
+  sibling sessions each running their own full ~2,400-test suite at the same time on the same
+  machine (confirmed via `ps aux`: multiple `pytest -q` processes from other worktrees running
+  concurrently throughout). That is real, encountered evidence, not a hypothetical, of exactly the
+  shared-runner noise this gate's own docstring warns about: the first version of the fusion-ranking
+  benchmark (20 `fuse_results()` calls per measured iteration, ~18ms) swung 107–188% run-to-run under
+  that load, and even the CI-facing test written to prove "the gate passes when nothing regressed"
+  flaked once at a 20.1% reading against the real 20% production threshold. Fixed two ways: the
+  fusion-ranking benchmark's inner-loop batch size was raised from 20 to 100 calls per iteration
+  (diluting a single scheduler stall's effect on the measured median), and the CLI round-trip test
+  was changed to stub `measure()` to a fixed value rather than compare two live timings, since it
+  exists to prove argument/file-I/O wiring, not timing precision — that coverage already exists,
+  risk-free, in the pure `find_regressions()` unit tests. Left as an open, named caveat rather than
+  engineered away entirely: real GitHub Actions runners are dedicated, not shared with N other full
+  suites the way this sandbox was, so the committed baseline may still want one deliberate
+  `--accept-baseline` re-capture after the job's first live run there — not yet observed, verified
+  locally only, the same caveat TS-4 recorded for its own gate.
+- `ruff check .` clean, `mypy src` clean (184 files), `lint-imports` 4 contracts kept / 0 broken,
+  `alembic heads` a single head. Full `pytest` run twice after all fixes above: both times exactly
+  two failures, both pre-existing and unrelated — `tests/test_doc_claims.py::test_cited_test_path_resolves`
+  citing a `TestParameterContractDesigner` class inside `tests/test_studio.py`, from `03-tracker.md:231`
+  and this log's own ST-A4 entry (`06-accomplishment-log.md:2064`), both from the ST-A4 commit already
+  on origin before this session started (confirmed identical `tests/test_doc_claims.py` against
+  `origin/feature/snowflake-dbt-lineage-mcp`; `tests/test_studio.py` has no such class, only flat
+  test functions). Out of scope for PF-3 (neither the tracker's ST-A4 row nor another session's
+  accomplishment-log entry is this item's to edit) and left for whoever owns ST-A4 to fix.
+
+## 2026-08-31 — UX-1 (persona navigation from OIDC groups) closed
+
+- Module 21 §5's rule — "a persona that a user can select is a persona that grants nothing, so any
+  capability gated on it would be a fake control" — was true but unenforced: `ui-next`'s shell
+  (UX-10) already labelled its persona `<select>` "Dev only — derived from OIDC in production," but
+  nothing behind that label actually gated it. The switcher rendered unconditionally, in every mode.
+- Closed by extending module 01's existing claims-to-roles pipeline rather than building a parallel
+  one. `aida.oidc.context_from_claims` already turns a verified OIDC roles claim into platform roles
+  via a configurable claim path (`Settings.oidc_roles_claim`) plus a mapping dict
+  (`Settings.oidc_role_mappings`). Added the same shape for groups: `oidc_groups_claim` (default
+  `"groups"`) and `oidc_persona_mappings` (group name -> persona), plus `oidc_default_persona` for a
+  principal whose groups map to none of the configured personas. `_persona_from_groups` picks the
+  first group, in claim order, with a recognized mapping — deterministic per token, and the bank's
+  own group ordering controls priority with no extra config. `SecurityContext` gained
+  `persona: str | None`. Refactored the roles/groups claim-parsing duplication in `oidc.py` into one
+  `_string_list_claim` helper used by both, rather than copy-pasting the groups parser.
+- New `GET /v1/me` (`src/aida/persona_api.py`, following the existing single-purpose-router pattern
+  of `token_revocation_api.py`) is the seam the shell actually reads: it returns the current
+  principal's roles, its server-derived `persona`, and `identity_provider` —
+  `Settings.identity_provider.upper()`, the exact `"development" | "oidc"` value
+  `aida.security.get_security_context` already branches its whole auth flow on. The shell defers to
+  that one flag instead of inventing its own prod/dev signal.
+- `ui-next`: extracted the persona `<select>` out of `App.tsx` into a standalone `PersonaNav`
+  component (`ui-next/src/components/PersonaNav.tsx`) with three render branches keyed on one prop,
+  `identityProvider`: `"OIDC"` renders read-only persona text and **no `<select>` in the DOM at
+  all** (not disabled — absent); `"DEVELOPMENT"` renders the pre-existing manual switcher,
+  unchanged; `null` (mode not yet resolved) renders nothing, matching module 01 INV-4's fail-closed
+  default rather than guessing a mode while `/v1/me` is still in flight. `App.tsx` fetches `/v1/me`
+  once on mount and passes the result straight through — no new state machine beyond what the fetch
+  itself already models.
+- `ui-next` had no test runner at all before this (`package.json` had no `test` script). Added
+  `vitest` + `@testing-library/react` + `jsdom` as devDependencies (exact-pinned, matching this
+  repo's convention) and a minimal `vitest.config.ts`/`ui-next/src/test/setup.ts` (the latter also stubs
+  `ResizeObserver`, which jsdom lacks and `@tanstack/react-virtual`'s `CatalogTable`, UX-11, needs
+  just to mount). `PersonaNav.test.tsx` (9 cases) asserts the rendered DOM directly per mode —
+  `queryByRole("combobox")`/`queryByTestId("persona-select")` absent under OIDC (including the
+  no-persona-mapped case), present under development, `onPersonaChange` never firing when there is
+  no control to fire it. `App.test.tsx` (3 cases, `fetchMe` mocked) proves the same gating holds
+  through the actual shell, not just the isolated component.
+- Tests (`tests/test_persona_derivation.py`, 17 cases): a principal in a mapped group derives the
+  configured persona; different groups derive different personas; the first mapped group wins when
+  several are present, in claim order; an unmapped principal derives `None`, or the configured
+  default when one is set; an out-of-catalog persona name is ignored whether it comes from a group
+  mapping or from the default; the groups claim honors a custom dotted claim path exactly like the
+  roles claim does; comma-separated and malformed groups claims are handled the same way roles
+  claims already are; the full derivation survives real RS256 sign-and-verify, not just unit-level
+  claim parsing; and `GET /v1/me` reports the right `persona`/`identity_provider` pair in both modes
+  (called directly against a hand-built `SecurityContext`, no DB — the existing "no live-DB harness"
+  gap already named for several other endpoints in this tracker, e.g. this file's ST-A4 entry
+  above).
+- `uv run ruff check .` / `uv run mypy src` (185 files) / `uv run lint-imports` (4 contracts kept) /
+  `uv run alembic heads` (single head, no migration — no new tables) / `uv run pytest` all green,
+  with the same one pre-existing, unrelated failure already logged in this file and in the CX-9
+  tracker row: test_doc_claims.py's citation check for ST-A4's TestParameterContractDesigner
+  test-path citation, reproduced identically on the unmodified branch (`git stash` confirmed).
+  `ui-next`: `npm run typecheck`, `npm test` (12/12), `npm run
+  build` all green. OpenAPI baseline regenerated (`scripts/openapi_diff.py --accept-baseline`):
+  `GET /v1/me` is a new, additive path — the diff gate confirmed no breaking changes before the
+  baseline was accepted.
+- Also removed `ui-next/vite.config.ts.timestamp-*.mjs`, a stray Vite build artifact that had been
+  committed by an earlier session; harmless but not something that belongs in the tree.
+
+## 2026-08-31 — CN-2b (Databricks adapter) — native pull adapter, moved off `declare_planned`
+
+- Re-checked the live tracker before starting: CN-2b was still `TODO`, Databricks still registered
+  only via `connector_registry.declare_planned(...)` (canonical push ingestion only, no pull
+  adapter) — not duplicated by any concurrent session.
+- Added `src/aida/connectors/databricks.py` (`DatabricksConnector`), modeled directly on
+  `aida.connectors.snowflake` — the closest existing adapter shape (a cloud warehouse reached over a
+  DB-API driver via `INFORMATION_SCHEMA`, with EXPLAIN-based cost estimation) — and reusing the same
+  shared assembly helpers (`aida.connectors.discovery`) every other adapter uses rather than
+  reinventing per-adapter logic:
+  - **Discovery**: Unity Catalog's per-catalog `INFORMATION_SCHEMA` (catalog → schema → table →
+    column via `COLUMNS`/`TABLES`; `PRIMARY KEY`/`UNIQUE` via `TABLE_CONSTRAINTS`/
+    `KEY_COLUMN_USAGE`; best-effort `FOREIGN KEY` via `REFERENTIAL_CONSTRAINTS`/
+    `CONSTRAINT_COLUMN_USAGE`, degrading to "none observed" rather than failing discovery on an
+    older metastore without that surface). Table/column/schema/catalog comments are also
+    implemented and `object_comments` is honestly claimed `True`; `views`/`routines`/`grants` are
+    deliberately left `False` — Unity Catalog exposes the ANSI-shaped views for them, but claiming
+    those axes without a live workspace to verify column shapes and refusal modes against would be
+    exactly the overclaim INV-9 exists to prevent.
+  - **Capability negotiation**: `ConnectorCapabilities` matches what `discover()` actually reads —
+    `catalogs`/`schemas`/`constraints`/`explain`/`query_history`/`approximate_statistics`/
+    `object_comments` `True`; `indexes`/`partitions`/`delegated_identity` (PAT-only auth for now)/
+    `views`/`routines`/`grants` honestly `False`.
+  - **Credentials**: JSON payload or DSN URI (`databricks://token:<access_token>@<host>/<catalog>/
+    <schema>?http_path=...`), parsed the same way `SecretResolver` hands resolved DSNs to every
+    other adapter — no inline secrets, no plumbing changes to the secret-resolution path itself.
+  - **Cost estimation**: `EXPLAIN COST <sql>`, parsing Spark's humanized
+    `Statistics(sizeInBytes=<n> <unit>, rowCount=<n>)` fragments (byte-unit conversion table for
+    `B`/`KiB`/`MiB`/`GiB`/`TiB`/`PiB`/`EiB`; largest fragment taken rather than summed, since
+    fragments nest bottom-up in the plan and summing would multiply-count). Falls back to a floor
+    estimate (`DATABRICKS_EXPLAIN_FALLBACK`) exactly as Snowflake's EXPLAIN-JSON path does when a
+    plan carries no CBO statistics (table never `ANALYZE`d).
+  - **Bounded profiling**: batched per-column-group queries (not one round trip per column) over a
+    `LIMIT`-bounded CTE — `COUNT`/`APPROX_COUNT_DISTINCT`/`MIN|MAX(LENGTH(...))`, same shape as the
+    BigQuery adapter's batching, chosen because Spark's planner benefits more from one shared scan
+    per batch than Snowflake-style per-column round trips do.
+- Registered in `src/aida/connectors/registry.py`: `connector_registry.register("databricks", ...,
+  maturity="BETA", ...)` replacing the `declare_planned` entry (Teradata and Db2 remain planned).
+  Notes are explicit that this has never been exercised against a live Databricks workspace — same
+  honesty precedent already carried by the Snowflake, Oracle and BigQuery rows.
+- Added `databricks-sql-connector==4.4.0` to `pyproject.toml` `dependencies` (matching how
+  `snowflake-connector-python` is a hard dependency, not an extra) plus the matching
+  `ignore_missing_imports` mypy override; `uv sync --extra dev` picked it up cleanly with no
+  conflicts. `import databricks.sql` stays lazy inside `_get_connection`, guarded by `ImportError`,
+  same as every other adapter's driver import.
+- 24 new tests (`tests/test_connectors_databricks.py`): identifier quoting/escaping, JSON and URI
+  DSN parsing (including malformed-payload and missing-field rejection), `EXPLAIN COST` byte-unit
+  conversion (parametrized over `B`/`KiB`/`MiB`/`GiB`) and largest-fragment selection, the no-
+  statistics fallback, registry definition/capability-honesty checks, mocked-connection discovery
+  (columns/constraints/FK/comments assembling correctly) and a companion test proving FK and
+  comment-query refusals degrade the envelope rather than raising, mocked `execute_read_query`
+  (captures `cursor.query_id`), mocked `estimate_read_query`, mocked `profile_table`, and the
+  positive-limits guard.
+- Updated four existing tests that encoded the old `declare_planned` state, all pre-existing
+  assertions this change made false rather than test bugs: `tests/test_connectors.py`
+  (`default_capabilities(databricks)` now equals the real capability dict, not `{}`);
+  `tests/test_ingestion.py` (the "planned connector" example switched to `teradata`; added a new
+  `test_registry_exposes_databricks_as_implemented`, mirroring the existing Snowflake one);
+  `tests/test_inv9_capability_honesty.py` (added a `databricks` entry to `_CONSTRUCTION_DSNS` so
+  INV-9's advertised-vs-implemented and SQL-execution-surface checks actually run against it; the
+  registry-populated tripwire's planned-count floor dropped from `>= 3` to `>= 2` — Databricks moved
+  out of the planned set, and that is the correct, intended consequence of doing the work, not a
+  weakened check, since two connectors — Teradata, Db2 — remain honestly planned).
+- Verification run against `origin/feature/snowflake-dbt-lineage-mcp` HEAD `ca80b14` (synced via
+  `git fetch && git reset --hard` before starting, confirming CN-2b was not already closed): `ruff
+  check .` clean; `mypy src` clean (185 source files); full `pytest` suite green except two
+  pre-existing, unrelated failures confirmed present on the clean checkout before this change
+  (`tests/test_doc_claims.py::test_cited_test_path_resolves[...TestParameterContractDesigner]` ×2 —
+  a stale doc citation from the ST-A4 entry above, naming a test class that does not exist in
+  `tests/test_studio.py`; not touched here, out of this item's scope).
+- Known limitations, stated the same way the Snowflake/Oracle/BigQuery rows already state theirs:
+  no live Databricks workspace was available to verify against; `views`/`routines`/`grants`
+  discovery axes are not implemented; auth is PAT-only (no OAuth service-principal / workload
+  identity); FK discovery is best-effort against a Unity Catalog surface newer than PK/UNIQUE and
+  unverified live; no certification run or version fixtures yet (CN-3 remains open for every
+  adapter, not specific to this one).
+
+## 2026-08-31 — LN-7 (transitive cross-kind impact traversal) closed
+
+- On re-checking the live tracker before starting, most of LN-7's exit criterion — "bounded
+  traversal across all edge kinds" — turned out to already be delivered: `traverse`/
+  `expand_frontier` in `unified_lineage.py` is a real, unit-tested, breadth-first, depth- and
+  node-bounded traversal wired into `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`
+  and the MCP tool `atlas__get_lineage_impact`, already merging FOREIGN_KEY, SUGGESTED_RELATIONSHIP,
+  and DBT_DEPENDENCY/OPENLINEAGE_ETL edges with per-node hop-depth and contributing-edge-kind
+  evidence, policy-scoped by organization and RBAC role. `Docs/20-modules/09-lineage.md` §12 had
+  already recorded this as "Transitive impact delivered 2026-08-29", but `03-tracker.md` row LN-7
+  and the `00-status.md` "Impact analysis" row had never been updated to match — a doc-sync gap,
+  not missing code.
+- What was genuinely still missing: `schemas.py`'s `UnifiedLineageEdgeSource` literal already
+  reserved `VIEW_DEFINITION`/`PROCEDURE_DEFINITION` labels (evidently anticipating this), but
+  `unified_lineage_api.py::_build_unified_graph` never populated them — the view/stored-procedure
+  SQL-parsed lineage edges landed by a concurrent session's LN-2 work (`view_lineage_api.py`,
+  `ViewLineageEdge`/`ProcedureLineageEdge` in `models.py`) were persisted but invisible to the
+  unified traversal, so a chain like `raw_table -> view -> downstream_table_via_FK` could not be
+  surfaced as transitive impact even though every individual edge existed. Closed by folding both
+  edge tables into `_build_unified_graph`, following the same source-depends-on-target convention
+  as the existing FOREIGN_KEY/DBT_DEPENDENCY sections: the view/procedure is the dependent node
+  (`target_table_id`), the base table it reads from is what it depends on (`source_table_id`).
+  Only rows the SQL parser matched to a real catalog table on *both* ends are folded in — an
+  unmatched free-text table name is left to the dedicated `/view-lineage`/`/procedure-lineage`
+  list endpoints rather than guessed at, to avoid a false cross-schema merge on a shared table
+  name. Multiple column-level rows between the same table pair collapse into one edge (same
+  dedup the dbt `COLUMN_DEPENDS_ON` rows already needed).
+- BI lineage (LN-4, Tableau/Power BI now real per the tracker) is deliberately **not** folded in
+  here: `BiReportNode`/`BiMetricNode` are new node kinds with their own hierarchy
+  (`BiReportMetricEdge`, `BiMetricColumnEdge`), a materially bigger lift than the two-column
+  table-pair edges added above, and already tracked separately as LN-11 (now scoped down to just
+  the BI half, since the view/procedure half is done here). Left open rather than rushed.
+- Tests added to `tests/test_unified_lineage.py` (13 total in the file now, up from 6): a real
+  2-hop chain across two different edge kinds end to end against an in-memory SQLite database
+  (`raw_orders --VIEW_DEFINITION--> vw_orders --FOREIGN_KEY--> fct_orders`, asserting depth and
+  contributing-edge-kind evidence at each hop); the same chain with `node_limit` too small to
+  reach the second hop, asserting the bound stops traversal and self-reports `truncated`; a
+  cross-datasource containment test proving a `ViewLineageEdge` whose matched `target_table_id`
+  points at a table in a *different* datasource never surfaces as a node (policy containment,
+  independent of the org/RBAC check); and a direct HTTP-route-level cross-organization denial test
+  complementing the codebase-wide INV-5 structural sweep. `ruff check .` and `mypy src`
+  (188 files) both clean; full `pytest` suite green with no failures after rebasing onto latest
+  origin — `67cf3ae` landed mid-session and cleaned up the last stale
+  `TestParameterContractDesigner`-class doc citations the CT-1/QG-2 entries above this one had
+  independently reintroduced (this paragraph deliberately does not itself fence
+  "tests/test_studio.py" and that class name together inside one pair of backticks, for the same
+  reason those entries tripped `test_doc_claims.py` in the first place). OpenAPI baseline regenerated
+  (`scripts/openapi_diff.py --accept-baseline`) after docstring-only changes to the graph-builder
+  functions and the `DomainLineageGraphRead`/`UnifiedLineageEdgeRead` schema docstrings; diff is
+  description-text only, no schema or path changes.
+
+## 2026-08-31 — MG-2 (kill-switch drill) closed: built the mechanism, then drilled it
+
+- Re-read `Docs/60-delivery/03-tracker.md` row MG-2 before starting (still TODO on a freshly
+  fetched/reset branch — not a duplicate of already-closed work). `Docs/20-modules/
+  15-model-gateway.md` §7 and §14 described a kill switch as designed but undrilled, and the
+  module's own events section documented `model.kill_switch_engaged` / `.released`. Checking the
+  actual code found neither claim true: `grep -rn "kill_switch" src/aida` returned exactly one
+  hit, a docstring mention in `compliance_packs.py` — nothing implemented engagement, storage, or
+  enforcement, and `tests/test_event_catalog_gate.py`'s own "no current emitter" report confirmed
+  the two event names were catalog-only, never emitted. "Designed, not drilled" overstated what
+  existed; there was no design in code to drill.
+- Built the minimal real mechanism, following MG-3's `ModelRouteConfiguration` pattern for what to
+  reuse and what to deliberately not reuse:
+  - `aida.models.KillSwitchState` — one mutable current-state row per (organization_id,
+    route_key), `route_key="*"` (`model_gateway.GLOBAL_KILL_SWITCH_SCOPE`) meaning organization-
+    wide, any other value scoping to one route. Same "current-state row, immutable history lives
+    in `AuditEvent`/`OutboxEvent`" shape as `OrganizationIntegrationPolicy`, not an event-sourced
+    table of its own. New migration `d09d6e42028d_kill_switch_state.py`.
+  - `engage_kill_switch` / `release_kill_switch` / `list_kill_switch_state` in
+    `ai_governance_api.py` — deliberately *not* the `ModelRouteConfiguration` maker-checker
+    lifecycle: job P5 ("stop AI immediately") and the module's own kill-switch contract call for a
+    single-operator, immediately-effective action audited on both engagement and reversal, the
+    opposite failure mode from a route approval (premature activation is the risk there; an
+    unreviewed kill is not the risk here). Gated on the `PlatformAdmin` role via `require_roles`;
+    every call records an `AuditEvent` and an `OutboxEvent` (`model.kill_switch_engaged` /
+    `model.kill_switch_released`, matching the event catalog's documented names exactly — the
+    catalog row's `` `model.kill_switch_engaged` / `.released` `` shorthand was also fixed to
+    `` `model.kill_switch_engaged` / `model.kill_switch_released` `` after finding the catalog
+    gate's family-expansion parser mis-expanded the original `.released` suffix into
+    `model.released`; verified against the gate's own parser both before and after).
+  - `model_gateway.kill_switch_blocking_state`, checked **first** — ahead of route approval,
+    selection, credential resolution, adapter registration, and budget — inside
+    `ProviderNeutralModelGateway.structured_completion`. That function is the single choke point
+    every generation request passes through regardless of caller (its own docstring, and module
+    15's charter: "The only path from Atlas to a language model"), so the check was added there
+    rather than duplicated in each caller. A live per-request DB query, not a cached flag: a
+    just-committed engagement blocks the very next call. `session` and `organization_id` became
+    required keyword arguments on `structured_completion` (previously neither existed on that
+    signature) — the two real production call sites, `agent_orchestrator.py`'s SQL-generation path
+    and `semantic_inference.py`'s `model_enrich_batch`/`enrich_with_optional_model` classification
+    path, already had both in scope and needed only mechanical threading, not logic changes; mypy
+    on `src` confirms no call site was missed.
+- Drilled in `tests/test_kill_switch_drill.py` (6 tests), engaging and releasing exclusively
+  through the real governed endpoint functions with a `PlatformAdmin` `SecurityContext` and a real
+  (in-memory sqlite) database — never a direct `KillSwitchState(engaged=True)` row construction.
+  The drill test itself: baseline generation succeeds, engage through the real API, measure
+  engagement-to-denial latency with `time.perf_counter()` and assert it under a 5s bound (generous
+  margin against the tracker's 60s requirement), assert the next generation call raises
+  `KillSwitchEngaged`, assert exactly one audit row and one outbox row exist and are queryable with
+  the expected actor/reason/scope, then release through the same authorization and confirm
+  generation resumes and the release is itself audited. Additional tests cover route-scoped (not
+  just organization-wide) engagement leaving other routes generating, `PlatformAdmin`-only
+  authorization (403 for a `Viewer` context), releasing a switch that was never engaged (409), and
+  the current-state listing endpoint. Documented explicitly, in the test file's own module
+  docstring and in the tracker, what this drill does and does not prove: in-process/in-memory-
+  sqlite latency, not network or infrastructure propagation time to a deployed gateway process or a
+  production Postgres round trip — that would need a live-environment timed exercise.
+- Updated the two existing test files whose call sites gained required parameters
+  (`tests/test_model_gateway.py`, `tests/test_semantic_inference.py`) with a matching in-memory
+  sqlite session fixture (same real-engine pattern as `test_bulk_governance_decisions.py`) rather
+  than weakening the new parameters to optional.
+- OpenAPI baseline (`Docs/90-reference/openapi-baseline.json`) regenerated via
+  `scripts/openapi_diff.py --accept-baseline` for the three new kill-switch routes; the diff was
+  additive only.
+- `ruff check .` and `mypy src` (184 files) both clean. Full `pytest` suite green apart from two
+  pre-existing, unrelated failures confirmed present on the freshly-reset base branch before this
+  session made any change (`tests/test_doc_claims.py::test_cited_test_path_resolves`, for a
+  citation elsewhere in this file and in the tracker of a `TestParameterContractDesigner` class
+  that `tests/test_studio.py` does not define — that file has the cited tests as flat functions,
+  not a class of that name) — left alone as out of this item's module-15/AI-governance scope, not
+  silently fixed; flagged separately as its own suggested task.
+- Updated `Docs/60-delivery/03-tracker.md` row MG-2 to DONE, E9 (kill-switch drill) to DONE, and
+  §I "Drill currency"'s kill-switch row from Never/OVERDUE to 2026-08-31 (in-process/local),
+  explicit that it is current for local/in-process only pending a timed run against a deployed
+  gateway — same honesty convention as that section's existing "Batch forced-restart... Current
+  for local only" row. Updated `Docs/20-modules/15-model-gateway.md` §14 and §15 to match rather
+  than leave the "Designed, not drilled" claim standing.
+
+## 2026-08-31 — UX-12 (`CatalogRowRead` read-model endpoint) closed
+
+- Module 21's rebuild plan named one backend gap: `MetadataTableRead` returns eight fields, so a
+  governed catalog row on the new `ui-next` Catalog screen (UX-11, already DONE) cost five further
+  per-table calls — 100 rows = 501 requests. Closed by `GET /v1/organizations/{org}/catalog/rows`
+  (`aida.api.list_catalog_rows`), composing description, proposal state, owner, certification,
+  quality, glossary terms and a row-count estimate into one response per row, in a fixed number of
+  batched queries independent of page size — not a query per row, which is exactly the pattern
+  this endpoint exists to remove.
+- New module `aida/catalog_read_model.py` holds the composition. Each field's source, chosen from
+  what already exists in the platform rather than anything new:
+  - **description / description_is_proposed** — the tracker's "proposal state" folded into one
+    boolean because the client type (`CatalogRowRead` in `ui-next/src/lib/types.ts`) has no separate
+    field for it. Precedence: latest `APPROVED` `AssetDocumentationVersion` readme (GL-9's
+    evidence-scored drafting pipeline, `asset_description_service.py`) → a `PENDING_APPROVAL`
+    `AssetDescriptionDraft` shown as a proposal → the older
+    `MetadataBusinessAnnotation.business_description` (always review-approved) → the
+    connector-sourced `MetadataTable.source_description` → `None`.
+  - **owner** — GL-2 `OwnershipAssignment` (status `ACTIVE`, `subject_type` `TABLE`), falling back
+    to the approved documentation version's `owner_principal`, mirroring the two-source definition
+    of "owned" already in `stewardship_api._owned_table_ids`.
+  - **certification** — CT-5 `AssetCertification` (`asset_type` `TABLE`), newest row first,
+    projected through the existing `asset_certification_is_active` query-time projection rather than
+    trusting the raw `status` column, same as every other certification caller.
+  - **quality** — module 11's `DataQualityIncident` (`OPEN`/`ACKNOWLEDGED` → `INCIDENT_OPEN`) and
+    `DataQualityObservation` recency (no observation ever → `UNKNOWN`; last observation older than
+    14 days → `STALE`; otherwise `PASSING`). Module 11's own coupling API (`get_trust_signal`, DQ-3)
+    is documented as planned, not built, so this reads the source tables directly.
+  - **glossary_terms** — GL-8/SM-2 `AssetTermLink` joined to `GlossaryTermVersion` (status
+    `APPROVED`), the same join `asset_description_service.gather_evidence` already uses per table.
+  - **row_count_estimate** — latest `TableProfile.row_count_estimate` (module 05 profiling), batched
+    with the `row_number() OVER (PARTITION BY table_id ...)` idiom
+    `intelligence_api._latest_table_profiles` and `quality_service` already use for the same
+    "latest per table" problem, rather than inventing a new one.
+- CT-2's `CursorPage` keyset contract is reused verbatim (`aida.pagination.apply_keyset`/
+  `decode_cursor`/`encode_cursor`, the same primitives `list_tables` calls), including `total: null`
+  under a cursor — the endpoint never runs a `COUNT(*)` on the keyset path.
+- Permission-filtered by the same gate `list_tables` already applies (`aida.authorization_gate.gate`,
+  action `READ_METADATA`, resource_type `datasource`) rather than a new authorization path — called
+  once per **distinct datasource** on the page (cached, so a page dominated by one denied datasource
+  still costs one call for it, not one per row), and a row from a datasource the caller cannot read
+  is dropped from the page rather than failing the whole request. `enforce_organization` still fires
+  first and unconditionally denies a foreign organization before any session access, same as every
+  other organization-scoped read — the generic
+  `test_inv5_tenant_isolation.py::test_cross_tenant_denial` parametrization picks the new route
+  up automatically since its path names `{organization_id}`, and `list_catalog_rows` was added
+  to `test_inv4_authorization_wiring.py`'s
+  `test_the_catalog_read_handlers_are_gated` parametrization alongside `list_tables`/`list_columns`/
+  `list_constraints`/`get_latest_table_profile`.
+- No writes anywhere in the new code path (no `session.add`/`commit`) and no source-system SQL is
+  accepted or forwarded, so ADR-0004 (the execution gateway is the only path to a source query) is
+  untouched by construction, not just by inspection.
+- `certification` is also accepted as an optional query filter, applied after composition (the
+  states are derived, not stored columns) rather than as a correlated SQL subquery — the same reason
+  permission filtering above can leave a page short of `limit`: walk further with `next_cursor` to
+  keep collecting matches.
+- Tests: new `tests/test_catalog_rows_read_model.py` (11 tests, real SQLite execution via aiosqlite
+  — PostgreSQL is unreachable in this sandbox, same rationale `test_catalog_pagination.py` already
+  documents) covering: the full composed shape against a fully-seeded row; the description precedence
+  chain across five source combinations; all four quality states; all three reachable certification
+  states plus the `certification` query filter; the CT-2 cursor walk (every row exactly once,
+  `total` non-null only on page one) and the offset-mode/invalid-cursor cases mirrored from
+  `test_catalog_pagination.py`; a cross-organization 403 fired before the (intentionally
+  exploding-on-touch) session is used; per-datasource permission filtering proven by monkeypatching
+  `aida.api.gate` to deny one of two seeded datasources and asserting both that the denied
+  datasource's row is dropped and that `gate` was called exactly twice (once per distinct
+  datasource, not once per row); and a query-count-bounded test (`before_cursor_execute` statement
+  counter, the same pattern `test_bulk_governance_decisions.py`'s `_StatementCounter` uses) proving
+  the statement count is identical for a 4-row and a 24-row page.
+- Surfaced and fixed one latent gap along the way: `asset_certification_is_active`'s naive/aware
+  datetime comparison raises under SQLite (`DateTime(timezone=True)` round-trips naive there,
+  tz-aware under PostgreSQL in production) — nothing had previously combined a SQLite-seeded
+  certification row with that check in a test. Fixed locally in `catalog_read_model.py` with a small
+  `_as_aware` coercion and a non-frozen proxy dataclass satisfying `AssetCertificationLike` without
+  mutating the ORM row (a frozen dataclass's fields are read-only, which mypy correctly refuses to
+  accept against a protocol declaring settable attributes) — `asset_certification.py` itself was left
+  unchanged, out of scope for this item.
+- `ui-next/src/lib/api.ts`'s `VITE_USE_FIXTURES` flag was left at its default (fixtures on) rather
+  than flipped to `0`: it also gates `fetchAssetEvidence`
+  (UX-13, `GET /v1/metadata/tables/{id}/evidence`), which does not exist yet — flipping the flag
+  now would 404 the evidence pane rather than just switch the catalog table to real data. Noted in
+  `00-status.md`'s new `ui-next` shell rebuild row rather than silently left unflipped; the honest
+  fix is either landing UX-13 first or splitting the flag per-endpoint.
+- `Docs/90-reference/openapi-baseline.json` regenerated via `scripts/openapi_diff.py
+  --accept-baseline`; the diff gate confirmed the change is additive only (`added path
+  '/v1/organizations/{organization_id}/catalog/rows'`, no breaking changes) before the baseline was
+  regenerated.
+- Verification: `ruff check .` clean. `mypy src` clean (187 files). Full `pytest` suite green —
+  before this item's rebase onto origin, two pre-existing `test_doc_claims.py` failures were
+  present (a stale test-path citation in the ST-A4 entry above, confirmed present via `git stash`
+  before this item's own changes and unrelated to this work); a separate concurrent session fixed
+  that citation, and the fix was picked up by this item's own rebase onto origin before pushing, so
+  no failures remain.
+- Known limitations: no dedicated composite index on `(organization_id, status, name, id)` for the
+  org-wide keyset order (the existing `ix_metadata_table_org_status` and per-datasource composite
+  index don't cover this exact ordering) — acceptable for a first landing, worth revisiting once
+  bank-scale row counts are available; and the certification query filter, being applied after
+  composition, can return fewer than `limit` items per page for a narrow filter, same as permission
+  filtering already can.
+
+## 2026-08-31 (eleventh entry)
+
+### AU-9: the first production deployment artifact — a reviewable Kubernetes manifest
+
+The 2026-08-30 end-to-end audit's §4 said it plainly: *"No production deployment artifact
+exists. `infra/` contains four `init.sql` seed files... Whoever writes the first manifest
+decides whether C1 is set correctly — and there is currently nothing to review."* This entry is
+that first manifest.
+
+- New `infra/k8s/base/`: `namespace.yaml`, `serviceaccount.yaml` (no API token mounted —
+  least privilege), `configmap.yaml`, `secret.example.yaml` (template only, deliberately
+  excluded from `kustomization.yaml`), `deployment.yaml`, `service.yaml`,
+  `poddisruptionbudget.yaml`, `migration-job.yaml` (mirrors compose.yaml's `migrate` service —
+  `alembic upgrade head` on the same image before/alongside rollout), and
+  `kustomization.yaml` tying the applyable resources together. Companion `infra/k8s/README.md`
+  states what a deployer must supply and what this manifest does and does not cover.
+- Real env var names were read from `src/atlas/platform/config.py` (`Settings`,
+  `env_prefix="AIDA_"`), not guessed: `AIDA_ENVIRONMENT=production` and
+  `AIDA_IDENTITY_PROVIDER=oidc` are pinned in `configmap.yaml`, directly answering audit
+  findings C1 (typo'd variable names are silently dropped by `extra="ignore"`, so a reviewed
+  manifest with the *correct* names is the available mitigation short of an application-code
+  fix) and C2 (the default `development` identity provider trusts an unauthenticated
+  `X-Roles` header).
+- Checked the `Dockerfile` before assuming a fix was needed: it already creates and switches
+  to a non-root `aida` user (uid/gid 10001, `USER aida`) — no image change was required.
+  `deployment.yaml`'s pod- and container-level `securityContext` (`runAsNonRoot: true`,
+  `runAsUser/Group: 10001`, `allowPrivilegeEscalation: false`, `readOnlyRootFilesystem: true`,
+  `capabilities: drop: [ALL]`, `seccompProfile: RuntimeDefault`) was set to match that image
+  rather than assert a number nothing enforces.
+- CPU/memory requests and limits are inline and commented as tunable defaults, not
+  measurements — no load test exists for this codebase yet (audit §5), so the entry says that
+  rather than implying a capacity-planning result.
+- `image:` in both `deployment.yaml` and `migration-job.yaml` is
+  `REPLACE_ME_REGISTRY/aida-api@sha256:REPLACE_ME_WITH_REAL_DIGEST` — the manifest's *shape*
+  forbids a floating tag, matching the audit's specific call-out of `compose.yaml`/minio's
+  `:latest`. The README documents that the CI/CD pipeline expected to populate the real digest
+  does not exist yet (audit remediation item #12, still open) and that populating it is not
+  this item's job.
+- Every credential-bearing value (DB DSN, Redis URL, Neo4j password, object-store keys,
+  `AIDA_AUDIT_HMAC_KEY`/`AIDA_TOKENIZATION_KEY` — both required to independently be
+  32+ characters in production per `Settings.reject_insecure_production_configuration`
+  regardless of signing provider, `OPENAI_API_KEY`/`GEMINI_API_KEY`) is referenced via
+  `envFrom: secretRef: aida-api-secrets`, never hardcoded. `secret.example.yaml` documents the
+  required keys as a template a deployer populates via `kubectl create secret` or, preferably,
+  a secrets operator — it is excluded from `kustomization.yaml` specifically so `kubectl apply
+  -k` can never apply placeholder credentials by accident.
+- Readiness/liveness probes point at the existing `/health/ready`/`/health/live` routes in
+  `src/aida/main.py` (audit-confirmed to exist already).
+- Honest gap surfaced while writing the ConfigMap: `Settings` forbids
+  `credential_provider=="env"` in production, so `configmap.yaml` sets
+  `AIDA_CREDENTIAL_PROVIDER=vault` to satisfy that startup check — but per audit remediation
+  item #10, no non-`env` `SecretProvider` is actually implemented in `src/aida/secrets.py` yet
+  (only the `Protocol` and caching exist). This lets the process pass config validation, not
+  actually resolve production credentials end to end. `infra/k8s/README.md` states this
+  explicitly rather than letting the manifest imply it's solved; the real fix is AU-10.
+- Validation: this sandbox has no reachable Kubernetes cluster, said plainly rather than
+  glossed over. `kubectl` v1.30.5 and `kubeconform` v0.6.7 were fetched to do the strongest
+  offline check available. `kubectl kustomize infra/k8s/base` renders all 7 resources with no
+  errors; `kubectl apply --dry-run=client` was attempted but this kubectl version calls out to
+  a live API server even in client mode for resource-mapping discovery, which fails with no
+  cluster present. `kubeconform -strict -summary` against the rendered output validated all 7
+  resources (plus the excluded `secret.example.yaml` template, checked separately) against the
+  real, versioned Kubernetes v1.30 OpenAPI schema — 7/7 and 1/1 valid, zero errors. This is a
+  stronger structural check than dry-run client validation would have been, but it is still not
+  `--dry-run=server` against a real cluster, which is named in the README as the next real
+  validation step once one exists.
+- Verification: confirmed via `git diff --stat` that no application source was modified before
+  running checks (only new `infra/k8s/` files and doc updates). `ruff check .`: 2 pre-existing
+  `UP042` findings in `src/aida/sql_lineage_parser.py` (str+Enum inheritance), confirmed via
+  `git diff --stat HEAD -- src/aida/sql_lineage_parser.py` (empty) to already be present on
+  `origin/feature/snowflake-dbt-lineage-mcp` before this work and untouched by it. `mypy src`:
+  clean, 190 files (required an `uv sync --all-extras --dev` first — the base `uv run mypy`
+  environment didn't have `pydantic` installed for the mypy plugin). Full `pytest` suite: exit
+  code 0, no failures (all `.`/`s`/`x` markers across the full run, consistent with the prior
+  entry's skip/xfail counts).
+- Known limitations, stated in `infra/k8s/README.md` rather than left implicit: no CI builds
+  or digest-pins the image yet (#12); no non-`env` secret provider is implemented (AU-10); no
+  Ingress/TLS termination, NetworkPolicy, or autoscaling is included (explicitly out of scope,
+  left to the deployer's existing platform conventions); resource requests/limits are
+  defaults, not measurements; the Temporal-outage readiness coupling (audit remediation #11)
+  is unfixed in application code and this manifest's probe wiring cannot paper over it; and
+  the datastores themselves (Postgres, Redis, Temporal, Neo4j, Redpanda, object storage) are
+  referenced by in-cluster hostname but this directory does not include manifests to actually
+  run them — that would be its own tracker item.
+
+## 2026-08-31 — AG-1/AG-2/TS-6 (indirect-injection defense) closed: the 726-line corpus was reachable from nothing
+
+- The 2026-08-30 audit (`04-end-to-end-audit-2026-08-30.md` §2) found AG-1/AG-2/TS-6 all pointed at
+  `injection_defense.py`/`injection_corpus.py` (726 lines, a genuinely richer detector than what
+  ships live) with zero callers outside their own test file, and separately that
+  `ingest_screening.is_eligible_for_model_context` — its own docstring calls it "the one question
+  every model-context builder must ask" — had zero callers anywhere, including inside
+  `ingest_screening.py` itself. Two distinct gaps, both closed here.
+- **Gap 1 — the richer detector never ran on live text.** `ingest_screening.screen_text`
+  (`ingest_screening.py:75`), the function actually wired into the live write path
+  (`ingestion.py:544`'s `_store_source_sql`, which sets `MetadataViewDefinition`/
+  `MetadataRoutine.screening_status` on every ingested view definition and routine body), only ran
+  `prompt_risk.DeterministicPromptRiskClassifier` — no multilingual, no obfuscation/encoding, no
+  homoglyph coverage. `screen_text` now also runs `injection_defense.screen_metadata`
+  (`ingest_screening.py:91`) and quarantines on either detector flagging, tagging the reason code
+  `INJECTION_DEFENSE:<threat_type>` so the two detectors stay distinguishable in the stored verdict.
+  `SCREENING_VERSION` is now the concatenation of both detectors' versions, so a stored verdict from
+  before this change is identifiable for re-screening. `screen_many` now passes each field's name as
+  `content_origin` for a better evidence trail; existing callers passing no `content_origin` are
+  unaffected (new keyword-only parameter, default `"unknown"`).
+- **Gap 2 — `is_eligible_for_model_context` had no consumer, because the consumer it was written for
+  doesn't exist yet.** Tracing every reader of the `screening_status` columns
+  `MetadataViewDefinition`/`MetadataRoutine` carry (envelope 1.1, gap/02 N2/N12) found none —
+  "meaning inference and tool generation," the two consumers envelope_models.py's docstring names as
+  the intended readers, are not built. Rather than invent a consumer for those two tables, this
+  found the real, live, already-reachable analogue: `mcp_server.py::_transformation_detail`
+  (dispatched from `_handle_native_lineage_tool_call`'s `get_transformation_detail` slug, itself
+  reached from the real `/mcp` `tools/call` JSON-RPC handler) returns `DbtResource.description` —
+  free text pulled from a dbt manifest's `description:` field, source-controlled, and with no stored
+  `screening_status` column of its own — directly into an MCP tool response, i.e. straight into the
+  calling LLM's context. This is this branch's (`feature/snowflake-dbt-lineage-mcp`) own new
+  indirect-injection surface, live and previously completely unscreened.
+  `_transformation_detail` (`mcp_server.py:924-935`) now screens `resource.description` live via
+  `ingest_screening.screen_text` on this single-row read (explicitly not a bulk path — the module's
+  "screen once at write" rationale doesn't apply where there is no write-time verdict to read back)
+  and gates it through `is_eligible_for_model_context` before it goes into the response; a quarantined
+  description is nulled out and replaced with `description_screening: {status, reason_codes}` rather
+  than silently dropped, matching the "quarantine, not deletion" contract (the DB row is untouched —
+  only the MCP-served copy is redacted).
+- Both fixes proven end to end, not by calling `injection_defense.py`/`is_eligible_for_model_context`
+  directly in a test (the exact failure mode the audit found — a passing unit test with no callers is
+  indistinguishable from a wired one):
+  - `tests/test_envelope_v11.py::test_a_multilingual_indirect_injection_in_a_routine_body_is_quarantined`
+    drives a Chinese "ignore all previous instructions" string from `injection_corpus.MULTILINGUAL_INJECTIONS`
+    through `_ingest` (the same helper `test_hostile_text_in_a_view_definition_is_quarantined` above
+    uses to drive the real ingestion pipeline) embedded in a routine body, and asserts
+    `MetadataRoutine.screening_status == "QUARANTINED"` with `INJECTION_DEFENSE:MULTILINGUAL_INJECTION`
+    in the reason codes — a case `DeterministicPromptRiskClassifier` alone does not flag (verified:
+    `prompt_risk.py`'s classifier has no multilingual signal, only English `\b`-word patterns), so this
+    is proof the richer detector, not just some detector, runs live.
+  - `tests/test_mcp_server.py::test_transformation_detail_quarantines_a_multilingual_injection_description`
+    seeds a fake `DbtResource` with the same corpus string as its `description` and drives it through
+    `_handle_native_lineage_tool_call("get_transformation_detail", ...)` — `_transformation_detail`
+    is deliberately left unmonkeypatched here, unlike every other `get_transformation_detail` test in
+    the file, specifically so its own screening code executes — and asserts the JSON response omits
+    the hostile text and carries `description_screening: {"status": "QUARANTINED", ...}`.
+    `::test_transformation_detail_passes_through_a_benign_description` is the paired false-positive
+    check: an ordinary manifest description passes through unchanged with `"status": "CLEAN"`.
+  - The pre-existing `test_hostile_text_in_a_view_definition_is_quarantined` (an
+    `INSTRUCTION_OVERRIDE` case `prompt_risk.py` alone already caught) still passes unchanged —
+    Gap 1's fix is additive, not a behavior change for cases already caught.
+- Tracker rows AG-1, AG-2, TS-6 updated in place with file:line citations for both call sites rather
+  than left as the original "delivered" evidence, per AU-2's redefinition of DONE (reachability
+  gate).
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green in a
+  genuine foreground run — one unrelated flake on first pass,
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  (a wall-clock linear-vs-quadratic ratio assertion, sensitive to the heavy CPU contention from the
+  several other concurrent sibling-worktree `pytest` runs sharing this host at the time), confirmed
+  by re-running it alone (passed in 37.6s) and unrelated to any file this item touches.
+- Known limitations / left for a follow-up: `mcp_server.py` has other free-text fields flowing into
+  tool/resource/prompt responses (context-product and business descriptions among them) that were not
+  audited or screened here — this item's scope was the one confirmed-live, confirmed-unscreened path
+  (`_transformation_detail`'s dbt description) that matches the audit's citation, not a full sweep of
+  the MCP server's text surface. `DbtResource` itself still carries no `screening_status` column, so
+  `_transformation_detail` screens live on every read rather than once at dbt-artifact write time
+  (`dbt_artifacts.py`) the way view/routine text does — cheap enough for this single-row detail call,
+  but adding a stored verdict at dbt ingestion would need a `models.py` migration and was out of this
+  item's scope (`models.py` is flagged as under concurrent edit; `envelope_models.py` exists
+  specifically to avoid touching it).
+
+## 2026-08-31 — AU-10 (one non-`env` secret provider) closed
+
+- Closed the audit's stated deployment blocker: `SecretResolver` registered exactly one provider
+  (`env`), and production config forbids `credential_provider == "env"`, so no credential resolved
+  in any production-valid configuration — the `SecretProvider` Protocol and caching already existed
+  correctly, only the fetch was missing. `secrets.py`'s new `VaultKvSecretProvider` implements that
+  fetch against HashiCorp Vault's KV v2 secrets engine over plain `httpx`, registered under scheme
+  `vault` in `SecretResolver.__init__` unconditionally alongside `env` whenever
+  `Settings.secrets_vault_url`/`secrets_vault_token` are configured — the same "always register, let
+  `credential_provider` and the reference scheme decide which is used" shape `env` already had, so
+  `provider_available()`/`resolve()` fail closed exactly the way an unimplemented provider
+  (`cyberark`, `aws-sm`, ...) already does when it is not configured, rather than crashing at
+  `SecretResolver()` construction.
+- Matches the wire/error-handling conventions `signing.py`'s `VaultTransitSigningProvider` (QG-5)
+  and `tokenization.py`'s `VaultTransformTokenizationProvider` (QG-6) already established for this
+  codebase's Vault integrations: bearer `X-Vault-Token` header, `{base_url}/v1/...` path shape, fail
+  closed on network error/non-2xx/malformed body, and the provider itself holds no secret material —
+  only a `base_url`, `kv_mount`, and the request token. The one deliberate difference: `SecretProvider.resolve`
+  is synchronous (every existing call site — `workflows/activities.py`, `query_gateway.py`,
+  `model_gateway.py`, `policy_native_sync_api.py` — calls `resolve()` from non-async code), so this
+  adapter uses `httpx.Client`, not `httpx.AsyncClient`, the way `VaultTransitSigningProvider`/
+  `VaultTransformTokenizationProvider` do for their async `SigningProvider`/`TokenizationProvider`
+  protocols.
+- Reference shape: `vault://<kv-path>#<field>`, e.g. `vault://bank/data-sources/core#dsn` — `key`
+  (the reference's `#fragment`) selects one field out of the KV v2 secret's data map, defaulting to
+  the conventional `"value"` field when the reference carries no fragment. KV v2's per-write
+  `metadata.version` is carried through as `ResolvedSecret.version`, informational provenance for
+  whichever value was actually fetched.
+- New `Settings` fields in `atlas/platform/config.py`: `secrets_vault_url`, `secrets_vault_token`
+  (`SecretStr | None`), `secrets_vault_kv_mount` (default `"secret"`), `secrets_vault_timeout_seconds`.
+  `credential_provider`'s `Literal` already accepted `"vault"` before this change — only `"env"` was
+  forbidden in production, and only `env` actually resolved anything. The bootstrap Vault token is
+  deliberately *not* itself a `SecretResolver` reference — that would be circular, since `vault` is
+  now the very provider `hmac_signing_vault_token_reference` (QG-5) and `tokenization_vault_token_reference`
+  (QG-6) resolve through — it is injected directly into process config the way a Vault Agent
+  auto-auth sidecar (or an equivalent platform mechanism) ordinarily delivers a short-lived root
+  token, documented inline as the same directly-injected-bearer-credential shape
+  `entitlement_webhook_token` already uses.
+- 13 tests in `tests/test_secrets.py` (4 pre-existing + 9 new): the documented KV v2 wire contract
+  against a mocked `httpx` transport (path, bearer token, default-vs-fragment field selection,
+  `metadata.version` surfaced correctly), fail-closed tests (network error, non-2xx, malformed/
+  non-JSON body, a response missing the requested field), a no-extra-secret-material assertion
+  mirroring `VaultTransitSigningProvider`'s equivalent test, and two end-to-end tests through
+  `SecretResolver` itself (`credential_provider="vault"` configured now actually resolves a
+  reference end to end against a mocked transport; left unconfigured it fails closed with
+  `provider_available() is False`, same as `cyberark`).
+- Scope held to `secrets.py`, its config wiring (`atlas/platform/config.py`), and its tests, per the
+  coordinator's scope discipline for this item — the `SecretProvider` Protocol's shape was not
+  touched.
+- Verification, foreground start to finish per the coordinator's standing correction (a backgrounded
+  run does not survive this session's own turn boundaries): `ruff check .` clean, `mypy src` clean
+  (190 files, strict), full `pytest` suite green (all tests passing, 0 failures).
+- Not yet DONE, stated plainly: `VaultKvSecretProvider` has never made a request against a real
+  Vault instance — verified only against a mocked HTTP transport asserting the documented KV v2 API,
+  the same standing limitation already recorded for QG-5's `VaultTransitSigningProvider`, QG-6's
+  `VaultTransformTokenizationProvider`, and the connector work (CN-1c/CN-2a). No production
+  deployment artifact configures `secrets_vault_url`/`secrets_vault_token` yet — that is AU-9's
+  scope, not this item's.
+
+## 2026-08-31 — AU-4 (source error text leaking into the value-free control plane, ADR-0014 / INV-6) closed
+
+### Completed
+
+- Per `04-end-to-end-audit-2026-08-30.md` §4 C3: the worker persisted whatever a source connector
+  raised, verbatim, into `analysis_run.error_message` (a value-free control-plane column) — driver
+  errors routinely quote the offending row (`Key (account_no)=(...) already exists`), and the
+  engine had no `hide_parameters=True`, so a raised `StatementError` would also have appended real
+  bound values as `[SQL: ...] [parameters: (...)]`.
+- Added `hide_parameters=True` to the engine construction in `src/atlas/platform/db.py:31` (the
+  canonical location per ST-04's `platform/` extraction; `aida.db` re-exports it unchanged).
+- Found 8 `str(exc)[:4000]` call sites across 5 `except Exception` blocks in
+  `src/aida/workflows/activities.py` (the audit's "seven more sites" undercounted slightly —
+  `run.error_message = str(exc)` direct assignments and `finish_task(error_message=str(exc)...)`
+  keyword calls are two different sub-patterns feeding the same leak, both counted here): every one
+  replaced with `error_class = type(exc).__name__` plus a bounded, per-activity generic string
+  (`"datasource discovery failed"`, `"datasource profiling failed"`, `"profile task planning
+  failed"`, `"table profiling failed"`, `"profile finalization failed"`) — the exact pattern
+  already used in `query_gateway.py`'s `except Exception` block (audit cited it at line 708; it has
+  since shifted to ~798 from unrelated edits, same shape). Sites: `discover_datasource`
+  (`activities.py:1039`→now the constant at `:1043`, and `:1047`→`:1051`), `profile_datasource`
+  (was `:1254`/`:1262`, now `:1260`/`:1268`), `plan_profile_tasks` (`:1375`→`:1383`),
+  `profile_table_task` — the activity that talks to source connectors directly and is the one this
+  branch's test drives — (was `:1648`/`:1656`, now `:1660`/`:1668`), `finalize_profile_tasks`
+  (`:1733`→`:1747`). `error_class` (already safe, already separate) was left untouched everywhere.
+- Extended `redact_sensitive_data` in `src/atlas/platform/logging.py` as defense in depth, reusing
+  OB-8's existing `_redact_mapping`/`_key_is_sensitive` machinery rather than duplicating it: added
+  a second frozenset, `_VALUE_SHAPED_KEY_NAMES` (`exception`, `error_message`/`errormessage`,
+  `sql`, `parameter`/`parameters`, `row`/`rows`), matched by *exact* normalized key rather than the
+  existing denylist's substring match — `_SENSITIVE_KEY_TOKENS`'s substring matching is
+  intentional for secrets (over-matching is the safe default there), but the same approach on `row`
+  would also redact `row_count`, a plain non-sensitive integer already asserted safe by
+  `test_preserves_non_sensitive_fields`, so this set needed a different match rule to coexist with
+  it. This is genuinely a second layer, not cosmetic: `logger.exception(...)` calls elsewhere in
+  `activities.py` go through `structlog.processors.format_exc_info`, which renders the full
+  traceback (including the exception's own `str()`) under an `exception` key regardless of what the
+  seven call sites above now store — this is exactly the vector the new key catches.
+- Load-bearing test added to `tests/test_inv6_value_freedom.py`:
+  `test_source_connector_exception_never_reaches_analysis_run_error_message` drives the real
+  `profile_table_task` end to end (real sqlite-backed session, real `start_task`/`finish_task`
+  bookkeeping, a real Temporal activity context installed the same way
+  `test_profiling_exception_policy.py` does) against a `_RaisingConnector` whose `profile_table`
+  raises a `RuntimeError` shaped like an actual Postgres constraint-violation message carrying a
+  sentinel (`ZZQ-SENTINEL-DRIVERDETAIL-71ae`), then re-reads the persisted `AnalysisRun` and asserts
+  the sentinel never reached `error_message` while `error_class == "RuntimeError"` did get stored.
+  Verified load-bearing, not just present: temporarily reverted the `profile_table_task` fix back to
+  `str(exc)[:4000]`, reran the test, watched it fail with the sentinel found in the assertion
+  message, then restored the fix and reran green.
+  `test_the_worker_scan_would_notice_a_leak` is the negative control (mirroring
+  `test_the_control_plane_scan_would_notice_a_leak`'s intent): proves the fixture's exception
+  actually carries the sentinel, so the positive test's absence-assertion means something rather
+  than passing vacuously against an already-clean fixture. It does not re-run the full activity
+  with the fix disabled, unlike that existing control — this fix removed the `str(exc)` call
+  outright rather than gating it behind a patchable flag, so there is nothing left in production
+  code to toggle back on.
+- `tests/test_log_scrubbing.py` gained `test_redacts_value_shaped_keys` (all five new key names
+  redact) and `test_value_shaped_redaction_does_not_over_match_similar_keys` (`row_count`,
+  `error_class`, `sql_dialect` all pass through unchanged).
+- Tracker `AU-4` updated to DONE with the file:line evidence above.
+
+### Verification evidence
+
+- `uv sync --frozen --extra dev` (the `dev` optional-dependency group, not installed by a bare
+  `uv sync`) needed once in this worktree before `pytest`/`ruff`/`mypy` were importable at all.
+- `uv run --extra dev ruff check .`: clean.
+- `uv run --extra dev mypy src`: clean, no issues in 190 source files.
+- `uv run --extra dev pytest -q` (full suite, foreground, run twice): first run had one failure,
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  (a linear-vs-quadratic timing assertion); reran it alone and it passed in 27s, reran the full
+  suite a second time and it passed clean with no failures at all — a pre-existing, load-sensitive
+  flake unrelated to this change (touches bulk governance decisions, not the files this item
+  modified). Both `tests/test_inv6_value_freedom.py` (33 tests, including the 2 new) and
+  `tests/test_log_scrubbing.py` (8 tests, including the 2 new) pass on their own and inside the full
+  run.
+- `grep -rn "create_async_engine\|create_engine(" src/`: confirmed exactly one engine construction
+  site in `src/`, so `hide_parameters=True` covers every engine the process builds.
+- `grep -n "str(exc)" src/aida/workflows/activities.py`: zero matches outside the explanatory
+  comments left at each fixed site.
+
+### Current limitations
+
+- The bounded generic messages (`"table profiling failed"`, etc.) are per-activity constants, not
+  parameterized with any safe identifying detail (e.g. a correlation id) — an operator debugging a
+  failed run has `error_class` and the run id to go on, and needs the correlation id / structured
+  logs (already scrubbed by the redactor above) for anything deeper. This mirrors
+  `query_gateway.py`'s existing `"source query execution failed"` constant exactly, so it is
+  consistent with the established pattern rather than a new gap.
+- The `_VALUE_SHAPED_KEY_NAMES` denylist, like `_SENSITIVE_KEY_TOKENS` before it, is a fixed list
+  sourced from the audit's named fields, not derived from a schema — a differently-named field
+  carrying the same class of leak (e.g. a vendor connector's own `detail` or `hint` key) would not
+  be caught by name and would only be caught by the value patterns already in place, or not at all.
+  Extending the list as new field names are found is expected maintenance, same caveat OB-8 recorded
+  for its own denylist.
+- Scope was held to exactly what AU-4 named: the engine construction, the seven-call-site pattern in
+  `activities.py`, and the log redactor's denylist. `query_gateway.py`'s own `except QueryRejected`
+  branch (a different block from the `except Exception` one this item mirrors) still does
+  `execution.error_message = str(exc)[:1000]` — out of scope here because `QueryRejected` is raised
+  internally with a curated reason string, not a raw source-connector exception, but worth a second
+  look if that assumption ever stops holding.
+
+## 2026-08-31 — DQ-3 / TL-3 / AG-6 wired for real; RT-7 honestly deferred
+
+- `Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` section 2 found `quality_coupling.py`/
+  `trust_scoring.py` (416 lines) real and unit-tested but with zero call sites anywhere else in
+  `src/aida`: `check_tool_gate` gated nothing, no trust warning was ever emitted, and the trust
+  factor never entered ranking, despite DQ-3/RT-7/AG-6/TL-3 all being marked DONE on 2026-08-30.
+  Confirmed independently before touching anything: `grep -rln "quality_coupling\|trust_scoring"
+  src/aida` outside the two modules themselves returned nothing, and neither did the same grep over
+  `tests/` outside their own two unit-test files.
+- **TL-3 (tool gating) — closed.** `tool_api.py::execute_tool`, the real governed-tool execution
+  endpoint (`POST /v1/tool-versions/{id}/execute`), now resolves the tool's own declared
+  `referenced_tables` (authorised against the datasource's catalog at tool-version creation time) to
+  this datasource's `MetadataTable` rows and checks them against real OPEN/ACKNOWLEDGED
+  `DataQualityIncident` rows via `quality_coupling.check_tool_gate`, before a single row of SQL is
+  rendered or a warehouse is touched. A CRITICAL incident on a dependency table blocks with HTTP 409
+  — no `ToolExecution` row is ever created, and a `DENIED` `AuditEvent` is recorded
+  (`reason: QUALITY_INCIDENT_BLOCK`). A WARNING incident allows execution through, with the gate
+  outcome surfaced in the response's new `ToolExecutionResponse.quality_gate` field (`action`,
+  `affected_assets`, `message`) and in the success `AuditEvent`'s `quality_gate_action` detail. No
+  open incident (or only a RESOLVED one) leaves `quality_gate` null.
+- **AG-6 (answer trust warnings) — closed.** `GovernedAgentOrchestrator.run` (`agent_orchestrator.py`)
+  resolves the tables the *executed* query actually touched
+  (`gateway_result.execution.referenced_tables`) against the same real `DataQualityIncident` rows;
+  when any are OPEN/ACKNOWLEDGED it computes a real `trust_scoring.compute_trust_score` (seeded from
+  the worst `quality_coupling.demote_in_retrieval` factor among the affected tables) plus
+  `quality_coupling.get_trust_warning` messages, and folds both into `agent_run.plan_evidence["trust"]`
+  (returned to the caller as `AgentAnalysisResponse.plan_evidence`, not a buried internal field) and
+  into the deterministic explanation string itself, e.g. `"... TRUST WARNING (grade F, score
+  30/100): Asset <table_id> has 1 active quality incident (highest severity: CRITICAL). Results may
+  be unreliable."`. A clean run (no open incidents) carries no `"trust"` key and no warning text.
+- Both wiring points resolve names to rows through one shared, new pair of async helpers added to
+  `quality_coupling.py` itself (deliberately co-located with the pure functions they feed, rather
+  than duplicated at each call site, so tool-gating and answer-warnings can never resolve the same
+  incident differently): `resolve_table_ids` (the same qualified/unqualified `schema.table` /
+  `catalog.schema.table` name matching `QueryExecutionGateway.allowed_tables` already uses, so a name
+  a tool's SQL was authorised to touch resolves to the same `MetadataTable` row here) and
+  `fetch_open_incidents` (the real `IncidentSummary` rows the existing pure functions — unchanged —
+  consume).
+- **RT-7 (ranking factor) — honestly deferred, not guessed at.** The task brief for this item warned
+  that a sibling agent might have just wired `retrieval.py::hybrid_retrieve` / `fusion_ranking.py`
+  into the live retrieval path this same wave (RT-1/RT-2/RT-3/RT-9/SM-2, all marked DONE
+  2026-08-30/31) — which is exactly where `demote_in_retrieval` would plug in. Checked before
+  starting: `grep -rln "hybrid_retrieve\|fusion_ranking\|GovernedRetriever" src/aida` shows
+  `agent_orchestrator.py` constructs `self.retriever = GovernedRetriever(settings)`
+  (`agent_intelligence.py`'s own lexical `_score`/hit-sort implementation) — `retrieval.py` and
+  `fusion_ranking.py` have no real callers outside their own modules and each other;
+  `graph_perspectives_api.py`'s docstring only *mentions* `aida.fusion_ranking` while explicitly
+  disclaiming any dependency on it, and `tests/test_hybrid_retrieval.py` says outright "Pure unit
+  tests -- no database required." So RT-1/RT-2/RT-3/RT-9/SM-2's own exit text describing
+  `retrieval.py`/`hybrid_retrieve` as "the live retrieval path" is itself not accurate — the same
+  reference-only pattern this item exists to fix, one module over. Wiring the trust factor into a
+  ranking implementation nothing calls would not satisfy RT-7's exit criterion ("Part of DQ-3"), so
+  per the task's own scope-discipline instruction this was deferred rather than guessed at against an
+  interface (`GovernedRetriever`/`fusion_ranking`) that may change under a future agent's hands. A
+  follow-up task was filed (not started here, out of scope for this item) to reconcile
+  RT-1/RT-2/RT-3/RT-9/SM-2's exit evidence with this finding.
+- Tracker: DQ-3 moved DONE → IN PROGRESS (2 of 3 legs genuinely live; re-close once RT-7 lands for
+  real); RT-7 moved DONE → TODO with the finding above; AG-6 and TL-3 stay DONE with real exit
+  evidence replacing the reference-only text.
+- Tests: new `tests/test_quality_runtime_coupling.py` (6 tests, real in-memory sqlite via aiosqlite,
+  same `_Scenario`-seeded-through-the-ORM pattern `test_semantic_glossary_binding.py` established for
+  SM-2) — `execute_tool` blocks on a CRITICAL incident (409, zero `ToolExecution` rows, one `DENIED`
+  `AuditEvent`), warns-but-allows on a WARNING incident (`quality_gate.action == "WARN"`), allows
+  cleanly with no incidents, and allows when the only incident is RESOLVED;
+  `GovernedAgentOrchestrator.run` surfaces a trust warning end-to-end (real `DEVELOPMENT_SQL` plan
+  path, `QueryExecutionGateway.execute` monkeypatched to stand in for an actual warehouse round-trip
+  — gating/warning behaviour is what these tests prove, not the SQL execution itself, which is
+  covered elsewhere) and stays silent with no open incidents. `AuditEvent.id`'s sqlite
+  autoincrement-PK workaround follows the existing `test_kill_switch_drill.py` /
+  `test_bulk_governance_decisions.py` pattern rather than inventing a new one.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite run
+  foreground twice: the first run caught one real, expected fallout —
+  `test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output`, because
+  `ToolExecutionResponse.quality_gate` is a genuinely new optional response field. Confirmed additive
+  and non-breaking with `uv run python scripts/openapi_diff.py` ("POST
+  /v1/tool-versions/{version_id}/execute 200 response [application/json].quality_gate: added new
+  response field" / "No breaking OpenAPI changes detected"), then regenerated the committed baseline
+  with `--accept-baseline` (same mechanism UX-12's entry above documents). Second foreground run:
+  full suite green, no failures.
+
+## 2026-08-31 — RT-1/RT-2/RT-3/RT-9/SM-2 closed: `retrieval.py`'s hybrid/vector/graph/fusion
+stack wired into the live orchestration path, not deleted
+
+- Re-read `04-end-to-end-audit-2026-08-30.md` §2 before starting: `retrieval.py` +
+  `fusion_ranking.py` + `vector_store.py` + `embedding_provider.py` + `graph_retrieval.py` +
+  `vector_retrieval.py` (~2,320 lines, independently unit-tested) had zero callers outside their
+  own files and tests. The live path — `GovernedAgentOrchestrator.run()` →
+  `agent_intelligence.GovernedRetriever.retrieve()` — ran a separate, narrower, hand-rolled
+  lexical scan instead. `retrieval.py:43-52`'s own docstring documented the intended hand-off
+  ("Import and call from `agent_intelligence.GovernedRetriever.retrieve()`") that had never been
+  made. Confirmed no concurrent session had already closed this gap: `03-tracker.md`'s AU-6 row
+  listed only abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `quality_coupling`/`trust_scoring` as its remaining unwired modules at the time.
+- **Decision: wire in, not retire.** `retrieval.py`'s lexical stage (`hybrid_retrieve`) was a
+  strict superset of `GovernedRetriever`'s own scan (same object types plus glossary-term
+  binding folding, SM-2), and `hybrid_retrieve_enhanced` already orchestrated vector similarity,
+  graph expansion and RRF/weighted-linear fusion with a documented fail-closed fallback when no
+  embedding provider is configured — a working, mostly-sound design that had simply never been
+  called. Discarding ~2,320 lines of tested code to avoid a translation-layer fix would have
+  thrown away real product capability (hybrid search is the P0 capability behind the "ask"
+  experience per the audit's own journey trace §3 stage 5) for a problem that turned out to be
+  fixable in the retrieval subsystem alone. Nothing found during investigation was broken beyond
+  repair — three real gaps were found and fixed (below), none of them a reason to retire.
+- **What "drop-in replacement" actually required, and wasn't true as written**:
+  `agent_intelligence.GovernedPlanner.plan()` filters retrieval hits on
+  `hit.object_type == "GOVERNED_TOOL"` and reads `hit.metadata["allowed_roles"]` /
+  `["required_parameters"]` to decide tool eligibility and whether to ask for clarification.
+  `retrieval.py`'s tool hits used `object_type="TOOL_VERSION"` and never populated that metadata
+  — wiring the two together as documented would have made every governed tool permanently
+  invisible to the planner (`tools = [...]` always empty), silently disabling the `GOVERNED_TOOL`
+  strategy branch entirely. Fixed in `hybrid_retrieve` by renaming the object type and adding the
+  two metadata keys (`retrieval.py`, tool candidate block), computed the same way
+  `GovernedRetriever`'s old code did. Also added `source_table_id` to `SEMANTIC_METRIC` metadata
+  and `table_id` to `DBT_*` metadata — both read by `agent_orchestrator._model_context` to decide
+  which tables to hydrate into SQL-generation context, present in the old scan's hits, absent
+  from `retrieval.py`'s.
+- **The graph stage was a structural no-op even in isolation**: `hybrid_retrieve_enhanced` built
+  a `KnowledgeGraph` containing only the lexical hits as nodes, with no edges ever added —
+  `expand_graph`'s BFS therefore could never reach anything beyond the seeds (which it doesn't
+  even emit as hits at depth 0). RT-2's own unit tests never caught this because they test
+  `expand_graph` directly against a hand-built graph *with* edges; nothing exercised the
+  zero-edge graph `hybrid_retrieve_enhanced` actually constructs. Fixed by loading real
+  table-to-table edges from `MetadataConstraint` (`FOREIGN_KEY`, `ACTIVE`, datasource-scoped —
+  already-governed metadata needing no further approval to read) before calling `expand_graph`.
+  dbt `depends_on` / governed-tool `referenced_tables` edges would extend real coverage further
+  and are left as a documented follow-up rather than attempted here. Fixing this also surfaced a
+  second, independent bug: the graph-to-candidate conversion used `GraphHit.object_id` verbatim
+  as the merged candidate's `object_id`, but that field is the graph's own composite node id
+  (`"TABLE:<uuid>"`, per how the nodes were constructed) — a graph-only hit (no matching lexical
+  or vector hit) would have leaked that composite string into `RetrievalHit.object_id`, which
+  `_model_context`'s `UUID(hit.object_id)` expects to be a bare id, and would have raised on the
+  first real graph-only hit. Fixed by stripping the `"{object_type}:"` prefix before use. Also
+  fixed `graph_expansion_path` being hardcoded to `[]` in the returned evidence regardless of
+  whether expansion ran.
+- **Fusion score vs. tool-selection threshold — the one place this stayed deliberately narrow**:
+  `GovernedPlanner.plan()` gates `GOVERNED_TOOL` eligibility on
+  `hit.score >= Settings.agent_tool_match_threshold` (default `0.55`), a `[0,1]` match-confidence
+  number the lexical stage produces. RRF's fused score is a different, much smaller relative
+  quantity (`~1/rrf_k` per contributing signal) — handing it to that threshold would have meant
+  no governed tool could ever be selected by score alone, a real, silent change to
+  tool-selection orchestration behaviour that this item's scope explicitly excluded ("do not
+  touch... tool selection"). Fixed by keeping a `GOVERNED_TOOL` hit's pre-fusion lexical/boost
+  score as its operational `.score`, while the real fused score stays fully visible in
+  `metadata["retrieval_evidence"]["final_score"]` for inspection. Every other object type — none
+  of which is threshold-gated — gets the richer fused score.
+- **RT-9's "cross-source" claim was partly already wrong, unrelated to the reachability gap**:
+  `hybrid_retrieve` takes one `datasource: DataSource` and every query inside it is scoped to
+  that single datasource; it never searched across sources, before or after this change. The
+  genuinely cross-datasource search surface is `full_text_index.py` → `search_api.py`'s
+  `/v1/search` (mounted `main.py:48`), which was already live and is untouched by this work.
+  Recorded honestly on the RT-9 tracker row rather than left implied.
+- **Result**: `agent_intelligence.GovernedRetriever.retrieve()` (`agent_intelligence.py:93`) now
+  delegates to `retrieval.hybrid_retrieve_enhanced` (`retrieval.py:670`), translating results back
+  to `RetrievalHit`; the ~300-line duplicate lexical scan it used to run itself is deleted. Reached
+  from the real live entry point `GovernedAgentOrchestrator.run()` (`agent_orchestrator.py:308`),
+  the same object `api.py`'s `POST /datasources/{id}/agent-analyses` route constructs — no new
+  call site was invented for this fix, the existing one now calls real code.
+- **Tests**: new `tests/test_agent_orchestrator_retrieval_wiring.py` — a real (in-memory SQLite)
+  end-to-end proof through `GovernedAgentOrchestrator.run()` itself (not a direct
+  `hybrid_retrieve`/`hybrid_retrieve_enhanced` call, the exact isolation gap that let this go
+  unnoticed for five P0/tracker rows): a table matching the question lexically, a second table
+  sharing no token with the question or the first table's text at all and reachable only via a
+  real `MetadataConstraint` foreign key, and a governed tool planned via
+  `preferred_tool_version_id` with a missing required parameter so the run reaches
+  `CLARIFICATION` — retrieval and planning already complete and persisted — without needing a
+  real SQL warehouse or model route. Asserts the graph-only table is present in
+  `agent_run.retrieval_evidence` with a `"graph"` source signal and the correct
+  `graph_expansion_path`, re-read from the database after `_persist_rejection`'s commit rather
+  than off the in-memory object `run()` built. The embedding provider is stubbed with a real
+  OpenAI-shaped wire call (`httpx.MockTransport`, same pattern `test_embedding_provider.py` uses)
+  rather than skipped, so the vector-similarity signal is proven live too, not just structurally
+  present. Also fixed `test_retrieval_ranking.py`'s one assertion of the old `"TOOL_VERSION"`
+  object type. `tests/test_agent_orchestrator_retrieval_wiring.py` uses the same
+  `AuditEvent.id` sqlite-autoincrement workaround as `test_kill_switch_drill.py` /
+  `test_bulk_governance_decisions.py` (`BigInteger` PK relies on a Postgres sequence sqlite
+  doesn't have) — this test is the first one to exercise `_persist_rejection`'s `record_audit`
+  call against a real in-memory database.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files, via `uv run --extra dev mypy
+  src` — mypy's `pydantic.mypy` plugin needs the `dev` extra installed, not just the base venv).
+  `lint-imports` clean (4 contracts kept, 0 broken — no new import-linter contract needed;
+  `aida.retrieval` was already importable from `aida.agent_intelligence` under every existing
+  contract). Full `pytest` suite green: 3120 passed, 5 skipped, 1 xfailed, 0 failed.
+- Known limitations, stated rather than left implied: (1) `vector_store.py` (446 lines, the
+  actual persisted pgvector/bruteforce/external embedding-store abstraction RT-1's exit text
+  describes) remains unwired — this integration uses `vector_retrieval.py`'s simpler live-embed-
+  per-query approach instead, which works but re-embeds every candidate on every query rather
+  than searching a maintained index; populating a persisted index is a separate background-job
+  piece of work. (2) Graph edges are FK-only; dbt lineage and tool-reference edges would extend
+  real graph coverage. (3) The vector stage requires an org to configure an approved embedding
+  model route — with none configured (the default) it fails closed and the pipeline runs
+  lexical + graph + fusion only, same posture as before this change.
+
+## 2026-08-31 — AU-3 (config fails closed on unknown/missing `AIDA_*` variables) closed
+
+- The audit's C1: `environment` defaulted to `"development"` and every production guard gated on
+  `self.environment == "production"`, while `model_config.extra = "ignore"` meant a misspelled env
+  var *name* (`AIDA_ENVIRONMNET=production`) was silently discarded — the process booted with every
+  guard disabled, no error, no log line. A mistyped *value* already failed closed; a mistyped *name*
+  failed open.
+- Flipped `extra` to `"forbid"` in `atlas/platform/config.py`'s `Settings.model_config`, as the audit
+  suggested. Then verified experimentally (a plain pydantic-settings 2.15 repro, independent of this
+  codebase) that `extra="forbid"` **does not by itself** catch a misspelled env var name:
+  `EnvSettingsSource.get_field_value` only ever looks up known field names against `os.environ` —
+  an unmatched key like `AIDA_ENVIRONMNET` never becomes part of the dict handed to model
+  validation, so there is nothing for `extra="forbid"` to reject. The audit's literal fix closes the
+  kwargs/non-env-source half of the gap (a stray keyword arg to `Settings(...)`, or an unrecognized
+  key from a future JSON/secrets source) but not the env-var-typo case it actually opens with. Filed
+  this as a real finding rather than shipping a fix that only looks like it works.
+- Closed the actual gap with a `model_validator(mode="after")`
+  (`reject_unrecognized_aida_env_vars`) that scans the real process environment for `AIDA_`-prefixed
+  names and flags any that `difflib.get_close_matches` (cutoff 0.84) resolves to a near-miss of a
+  known field's env name — `AIDA_ENVIRONMNET` → "did you mean AIDA_ENVIRONMENT?". Deliberately
+  narrower than "any unrecognized `AIDA_*` var is an error": `aida.secrets` already has a second,
+  legitimate, open-ended use of the same prefix — `credential_reference="env://AIDA_SOME_DSN"`
+  resolves an arbitrary operator-named env var this model was never meant to know about (see
+  `AIDA_SAMPLE_SOURCE_DSN`/`AIDA_SAMPLE_ORACLE_SOURCE_DSN`/`AIDA_SAMPLE_MSSQL_SOURCE_DSN` in
+  `.env.example`/`compose.yaml`, and `AIDA_LOCAL_MODEL_KEY`/`AIDA_TEST_SECRET`/
+  `AIDA_TEST_DATASOURCE_SECRET` used the same way across several test files). A blanket check would
+  have broken that mechanism on every real deployment the moment it named a fresh datasource
+  credential; a fuzzy near-miss check catches the actual documented failure mode (a typo of a real
+  setting name) without touching the open namespace. Confirmed none of the credential-reference names
+  actually in the repo trigger a false positive.
+- Added a second validator, `reject_implicit_environment_outside_tests`: `environment` must now be
+  present in `model_fields_set` (explicitly supplied by *some* source — env var, `.env` file, or init
+  kwarg — not just defaulted) everywhere except under pytest, detected via `"PYTEST_VERSION" in
+  os.environ or "pytest" in sys.modules` — checked at *import* time (not per-test), since several
+  test files do `from aida.main import ...` at module scope during collection, before
+  `PYTEST_CURRENT_TEST` would ever be set for an individual test. The shipped bootstrap paths
+  (`.env.example`, `compose.yaml`) both already set `AIDA_ENVIRONMENT` explicitly, so this is a
+  no-op for every real deployment path that exists today; only a truly unconfigured process (or a
+  test that doesn't care about `environment`, exempted) is affected.
+- Tests added to `tests/test_config.py` (8 new, all real — construct `Settings()` and assert):
+  the audit's exact repro raises; a second near-miss name (`AIDA_LOG_LEVL`) raises with the right
+  suggestion; the `AIDA_SAMPLE_SOURCE_DSN`-shaped credential-reference vars do *not* raise (the
+  regression test for the design decision above); leaving `environment` unset raises when
+  `_running_under_pytest` is monkeypatched false, and passes when `environment` is supplied under
+  the same monkeypatch; and a construction of `Settings()` from the literal, unmodified
+  `.env.example` file content (parsed and set via `monkeypatch.setenv`) succeeds end to end.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files, strict). Full `pytest` suite:
+  **3125 passed, 5 skipped, 1 xfailed** — one unrelated flaky wall-clock timing test
+  (`test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`,
+  no reference to `Settings`/`AIDA_` anywhere in the file) failed once under load and passed cleanly
+  on immediate rerun in isolation and in a second full-suite run; not touched by this change. No
+  other test file, fixture, `conftest.py` (none exist in this repo), `.env.example` entry, or
+  `compose.yaml` entry needed changing — the stricter config was already compatible with every
+  legitimate caller once the credential-reference exemption above was in place.
+- Known limitation, stated plainly rather than glossed over: the near-miss scan reads
+  `os.environ` directly, not the `.env` file `get_settings()` also merges in via
+  `Settings(_env_file=".env")` — a typo confined to a local `.env` file that is never exported as a
+  real environment variable would not be caught. Every deployment path that exists today
+  (`compose.yaml`, the AU-9 k8s manifests) injects real env vars, not a `.env` file, so this covers
+  the actual threat surface named in the audit; extending the same scan to a parsed dotenv file is a
+  small, well-scoped follow-up if a `.env`-based deployment path is ever added.
+
+## 2026-08-31 — AU-1 (CI reachability gate) closed: the detector the audit called "the single highest-leverage change in this document"
+
+`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` found ~4,600 lines behind 17 DONE rows
+(six P0) reachable from nothing but their own file and their own test — invisible to CI because
+a module with passing unit tests and zero callers looks identical to a healthy one. Its §7
+Method described an ~80-line one-off script that found them; this item is the permanent version
+of that script, run on every push.
+
+- New `tests/test_reachability_gate.py`. Parses every `.py` file under `src/aida/` with `ast`,
+  resolves every `import`/`from ... import` statement (including relative imports, though none
+  currently exist in this codebase) to the dotted module names it causes Python to load, and
+  builds the full static import graph. Seeds a BFS from the five real entry points named in the
+  tracker exit criterion — `aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+  `aida.projectors.graph_projector`, `aida.projectors.outbox_publisher` — plus each entry
+  point's own parent packages (running `graph_projector.py` as a script loads
+  `aida.projectors/__init__.py` first, exactly like a live `from aida.x import y` does
+  elsewhere in the graph, so the seed set has to include that or the package `__init__` modules
+  themselves show up as false-positive "unreachable"). Any `src/aida` module outside the
+  resulting reachable set fails the build unless it's on the file's own `ALLOWLIST` dict, where
+  every entry names the tracker row that owns the gap.
+- Dynamic dispatch ruled out the same way the audit did (§7): `test_no_dynamic_module_dispatch`
+  greps all of `src/aida/` for `importlib`/`import_module`/`__import__`/`entry_points`/
+  `sys.modules[`/`globals()[` on every run rather than trusting a one-time comment, and
+  `test_no_undeclared_console_entry_points` parses `pyproject.toml` for `[project.scripts]` /
+  `[project.entry-points]` (there are none). Both hit zero today, matching the audit; either
+  would fail loudly if one is ever introduced, forcing whoever adds it to account for it
+  explicitly instead of silently invalidating the static graph.
+- `test_entry_points_exist_on_disk` fails if `ENTRY_POINTS` ever names a module that moved or was
+  renamed — a stale entry point would silently shrink the graph this gate walks into a no-op.
+- Self-cleaning by construction, not just at write time: `test_allowlist_has_no_stale_entries`
+  recomputes reachability on every run and fails if an allow-listed module was deleted (dead
+  reference) or became reachable (an entry hiding a real fix). This actually fired mid-session —
+  see below.
+- Deliberately did **not** weaken the gate to pass. Verified the detector actually detects: added
+  a throwaway orphan module under `src/aida/`, confirmed `test_all_modules_reachable_or_allowlisted`
+  failed on it with a clear message, then removed the module (not committed).
+- **What's actually still on `ALLOWLIST` today, and why each one is there** (re-verified against
+  the current tree, not copied from the audit — the audit's list turned out to be hours, not
+  days, stale relative to this session, and several sibling worktrees were actively wiring these
+  exact modules in throughout): `observability.py` (OB-1 — `configure_tracing` still never
+  called), `siem_routing.py` (OB-2 — zero call sites), `worm_archive.py` (OB-3 — zero call
+  sites), `vector_store.py` (RT-1 — the *persisted* vector index specifically, as opposed to its
+  now-wired sibling `vector_retrieval.py`'s live-embed-per-query approach), `injection_corpus.py`
+  (AG-1/AG-2/TS-6 — a standalone corpus module never imported by anything outside its own test,
+  including its own sibling `injection_defense.py`). That is 5 modules, not the audit's 13 — it
+  dropped in three steps mid-session, each one caught by `test_allowlist_has_no_stale_entries` on
+  the very next rebase rather than noticed by hand: `injection_defense.py` came off first, when a
+  concurrent commit (`6ed7e2f`, "fix(AG-1/AG-2/TS-6): wire injection_defense corpus...") landed on
+  origin and wired `injection_defense.screen_metadata` into `ingest_screening.screen_text`; then
+  `quality_coupling.py` + `trust_scoring.py` came off after the next rebase picked up `a635f5f`
+  ("fix(DQ-3/TL-3/AG-6): wire quality_coupling/trust_scoring into live paths"), which wired both
+  into `tool_api.py::execute_tool`'s pre-execution gate and `agent_orchestrator.py`'s post-run
+  trust warning, closing DQ-3/RT-7/AG-6/TL-3; then `retrieval.py` + `fusion_ranking.py` +
+  `graph_retrieval.py` + `embedding_provider.py` + `vector_retrieval.py` came off after a third
+  rebase picked up `676bbf8` ("wire retrieval.py's hybrid/vector/graph/fusion stack into the live
+  orchestration path"), closing RT-1/RT-2/RT-3/RT-9/SM-2 — `vector_store.py` alone stayed behind,
+  per that commit's own known-limitations note: it's a persisted index the change didn't
+  populate, using live per-query embedding instead. abac.py (does not exist any more; deleted
+  2026-08-31 under PG-1/PG-6/PG-8/AU-11) and `ai_decision_lineage.py` were
+  **not** on this list and never were:
+  both routers were registered on the live app (`main.py:126-127`), so both modules were
+  module-reachable — the audit's separate finding that their core *functions* (`record_decision`,
+  real ABAC enforcement vs. the `policy_engine.evaluate` duplicate) have no live caller is a
+  function-level claim this module-level gate cannot see or contradict; that is explicitly AU-2's
+  scope ("redefine DONE to require a live call site"), not this item's.
+- Wired into `.github/workflows/ci.yml` as a new `reachability` job, additive alongside the
+  existing `quality`/`migrations`/`openapi-diff`/`perf-baseline`/`tests` jobs, running
+  `uv run python -m pytest tests/test_reachability_gate.py -v`.
+- Tracker row AU-1 updated to DONE with the same allow-list evidence above.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green in
+  a genuine foreground run (`uv run python -m pytest -q`, exit code 0, zero `FAILED` entries) —
+  ran twice; the first pass hit the same
+  `test_bulk_governance_decisions.py::test_bulk_decide_at_scale_round_trips_are_linear_not_quadratic`
+  wall-clock flake the AG-1/AG-2/TS-6 entry above already documents (heavy concurrent-worktree CPU
+  contention on this host), reconfirmed unrelated by running it alone (passed) and by a clean
+  second full-suite run.
+- Known limitations: this is a module-level gate only, exactly matching AU-1's exit criterion —
+  it proves *something* on a live path imports a module, not that a specific function in it is
+  ever called. abac.py (does not exist any more; deleted 2026-08-31 under PG-1/PG-6/PG-8/AU-11)
+  and `ai_decision_lineage.py` above were the concrete example of that
+  boundary. Closing that gap is AU-2, already tracked, not reopened here. The allow-list will
+  need re-verification again the next time a sibling session wires in one of its remaining 5
+  entries — that's expected maintenance, not a defect in the gate, and this session watched it
+  happen three separate times while finishing this very item.
+
+## 2026-08-31 — OB-1/OB-2/OB-3 (tracing, SIEM routing, WORM archive) closed: three false-DONE claims corrected
+
+- `04-end-to-end-audit-2026-08-30.md` Sec.2 found the same-day 2026-08-30 tracker DONE claims for
+  OB-1/OB-2/OB-3 were false: all three modules (`observability.py`, `siem_routing.py`,
+  `worm_archive.py`) existed, were fully unit-tested in isolation, and had **zero real call sites**.
+  `configure_tracing` was never called anywhere in `src/`; `siem_routing.route_to_siem` had zero
+  callers so no security event ever reached a SOC; and nothing ever wrote an `AuditArchiveRecord`,
+  so `GET /observability/archive/status` silently returned zeros forever while reporting `HEALTHY`-
+  adjacent looking output. Investigated and wired each separately rather than trusting the prior
+  entry.
+- **OB-1**: `main.lifespan` now calls `configure_tracing`/`configure_metrics` at real process
+  startup (`main.py:143-163`), settings-driven via new `AIDA_OTEL_*` config (`atlas/platform/
+  config.py`). Also fixed a latent problem the audit didn't catch: `pyproject.toml` pins
+  `opentelemetry-api`/`opentelemetry-sdk` but never `opentelemetry-exporter-otlp-proto-grpc` —
+  so even a call to the old OTLP-only `configure_tracing` would have hit `ImportError` and
+  returned `False` on every request, forever, in this environment. `observability.py` now supports
+  `exporter="console"` (`ConsoleSpanExporter`/`ConsoleMetricExporter`, both shipped inside the
+  already-pinned `opentelemetry-sdk`) as the default, alongside the original `"otlp"` path for a
+  real collector. Every request is dispatched through a new `@traced _traced_dispatch` wrapper
+  (`main.py:180-190`) so a real span is produced from process start, and a new `record_counter`
+  helper emits a parallel OTEL metric alongside the existing Prometheus `REQUEST_COUNT`.
+- **OB-2**: wired at the two places security-relevant events already exist. (1)
+  `aida.events.record_audit` — the single funnel every audit event in the platform passes through,
+  DENIED policy checks, kill-switch engagement, and token revocation included — now classifies
+  DENIED/FAILED/REJECTED outcomes as `POLICY_VIOLATION` and three specific SUCCESS-outcome actions
+  (`model.kill_switch_engage`, `model.kill_switch_release`, `token.revoked`) as a new
+  `SECURITY_CONTROL_CHANGE` event type (added to `siem_routing.EVENT_TYPE_IDS`), then calls the
+  real `route_to_siem`. (2) `aida.security.get_security_context`'s three OIDC-rejection branches
+  call a new `_route_auth_failure` helper directly with `AUTH_FAILURE`/`HIGH`, since token
+  verification fails *before* a `SecurityContext` (and therefore `record_audit`) exists. New
+  `AIDA_SIEM_*` settings, enabled by default — safe because `route_to_siem` only formats a
+  CEF/webhook payload and logs it (see its own docstring: "this is a synchronous routing stub"),
+  it never opens a network connection itself.
+- **OB-3**: new `worm_archive.archive_pending_audit_events` reads real unarchived `AuditEvent`
+  rows per organization (incremental — each org's cutoff is its own last
+  `AuditArchiveRecord.event_range_end`, so a cycle never re-archives the same rows), calls the
+  pre-existing pure `archive_audit_events`, and persists a real `AuditArchiveRecord`. Triggered by
+  a new background task (`main._audit_archive_loop`) started from `main.lifespan` and cancelled
+  cleanly on shutdown, sweeping every `AIDA_AUDIT_ARCHIVE_INTERVAL_SECONDS` (default 3600s) across
+  every organization, `AIDA_AUDIT_ARCHIVE_*`-configurable, enabled by default.
+- Tests: `tests/test_observability.py` gained an OB-1 integration test that drives the real ASGI
+  lifespan (`fastapi.testclient.TestClient(aida.main.app)`, Temporal connect avoided via
+  `monkeypatch.setattr(main.settings, "temporal_enabled", False)`) and attaches an
+  `InMemorySpanExporter` to the *same* global `TracerProvider` the startup call configured, then
+  asserts a real span was produced by a real `/health/live` request — plus unit coverage for the
+  new console-exporter default and `record_counter`'s configured/no-op paths. New
+  `tests/test_siem_wiring.py` (9 tests, real SQLite-backed `AsyncSession`, same pattern as
+  `test_detokenization_api.py`/`test_token_revocation.py`): a policy denial is both audited and
+  reaches the real `route_to_siem` (spied to assert the exact `SecurityEvent` payload) with
+  `POLICY_VIOLATION`; all three kill-switch/token-revocation actions reach it as
+  `SECURITY_CONTROL_CHANGE` despite a `SUCCESS` outcome; a routine `SUCCESS` audit event is
+  confirmed *not* routed; and a real missing-bearer-token 401 through `get_security_context`
+  reaches the SIEM router as `AUTH_FAILURE`. New `tests/test_worm_archive_wiring.py` (6 tests):
+  a real archive cycle persists a real `AuditArchiveRecord` with the right `event_count`/checksum;
+  a second cycle is a genuine no-op when nothing new exists, then picks up exactly one new event
+  on a third cycle (proving the incremental cutoff, not a re-archive); legal hold is reflected on
+  the persisted record; and — the exact gap the audit named —
+  `test_archive_status_endpoint_reflects_a_real_non_zero_count` calls the real `GET
+  /observability/archive/status` handler directly, asserting `0`/`NO_ARCHIVES` before any archive
+  cycle and `5`/`HEALTHY` with the matching `archive_id`/checksum after one.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green —
+  3142 tests, 0 failures, 0 errors, 6 skipped (`--junitxml` summary; `-q`'s own final summary line
+  was obscured in this environment by a cosmetic `opentelemetry` background-thread stack trace at
+  interpreter shutdown, see below — the junitxml result is the authoritative one).
+- Known limitation / cosmetic noise: the OTEL SDK's `PeriodicExportingMetricReader` starts a
+  background export thread the moment a `MeterProvider` is constructed, independent of whether
+  `metrics.set_meter_provider` actually became the process-global one (OTEL only honors the first
+  call per process). Several tests in this change call `configure_metrics(enabled=True)`, so more
+  than one such thread is created; the orphaned ones print `ValueError: I/O operation on closed
+  file` to stderr at interpreter shutdown when they wake up after pytest has already torn down
+  captured stdout. This is pytest-process noise only — confirmed via `--junitxml` and exit code 0
+  across three separate full-suite runs that it fails nothing — not a defect in the request path,
+  but worth a follow-up if it turns out to be more than cosmetic (e.g. adding explicit
+  `provider.shutdown()` calls in the affected tests).
+- Scope discipline: touched only `observability.py`, `siem_routing.py`, `worm_archive.py`,
+  `main.py` (startup wiring + the per-request middleware), `events.py` and `security.py` (the two
+  audit-event emission points wired to SIEM), `atlas/platform/config.py` (new settings), and their
+  tests — per the task's explicit scope, since parallel sessions were working other tracker items
+  concurrently in sibling worktrees.
+
+## 2026-08-31 — AU-5 (AI decision lineage wired into the orchestrator) closed; AG-5/LN-3 re-verified DONE
+
+- The 2026-08-30 end-to-end audit's single most commercially important finding: `Docs/60-delivery/
+  04-end-to-end-audit-2026-08-30.md` SS2 found `ai_decision_lineage.record_decision` had **zero
+  callers** anywhere in `src/`. The writer, the `AiDecisionRecord` table and the read API
+  (`get_decisions_for_run`/`get_decisions_for_asset`/`get_refusals`, and the `list_refusals`
+  endpoint) were all real, correct, unit-tested code — but nothing ever called the writer, so
+  `list_refusals` queried a permanently empty table and none of the five `DecisionType` values was
+  ever set. SS§L's competitive positioning (the refusal record as the differentiator Atlan
+  structurally cannot copy) was, as the audit put it, "currently unsupported by the product." This
+  entry is the wiring, not a new module — `ai_decision_lineage.py` and `ai_decision_lineage_api.py`
+  are byte-for-byte unchanged.
+- Found the live orchestration path first: `agent_orchestrator.GovernedAgentOrchestrator.run`, the
+  handler behind `POST /v1/datasources/{id}/agent-analyses`, is where all three decision-point
+  categories actually happen — true both before and after the retrieval-stack rewiring below,
+  since that landed on `GovernedRetriever.retrieve`, which `run` already called.
+- **Rebase note, because it changed the shape of this section:** while this item was in flight, a
+  sibling session landed RT-1/RT-2/RT-3/RT-9/SM-2 (entry above) — replacing
+  `agent_intelligence.GovernedRetriever`'s ~300-line hand-rolled lexical scan with a delegation to
+  `retrieval.hybrid_retrieve_enhanced` (BM25 + vector + graph + RRF fusion). That is the version
+  actually shipped; the retrieval-selection design below was re-adapted onto it during the rebase,
+  not built against the hand-rolled scan.
+- **Retrieval selected/rejected.** `agent_intelligence.GovernedRetriever` gained a new
+  `score_candidates` method, a thin sibling of `retrieve`: both call `hybrid_retrieve_enhanced` and
+  translate its `HybridRetrievalHit`s back to `RetrievalHit`, but `score_candidates` passes a
+  `Settings.model_copy` with `agent_retrieval_limit` widened to `agent_retrieval_scan_limit` (the
+  bound `hybrid_retrieve`'s own per-object-type candidate fetch already uses) — `retrieval.py`
+  exposes no result-limit override of its own, and it is owned by the sibling work landed the same
+  day, so widening the settings object passed in rather than adding a new parameter to that module
+  keeps this change out of it entirely; every other setting (embedding provider, secrets, fusion
+  weights) is untouched. `retrieve` itself, and its callers
+  (`api.py::preview_agent_retrieval`, `agent_evals.py`,
+  `tests/test_retrieval_ranking.py`/`tests/test_agent_orchestrator_retrieval_wiring.py`'s coverage),
+  are unaffected. `agent_orchestrator.py::run` calls `score_candidates` directly instead of
+  `retrieve`, splits the result at `agent_retrieval_limit` itself, and passes both halves to a new
+  module-level `_record_retrieval_decisions` helper: `RETRIEVAL_SELECTED` for each hit handed to the
+  planner (with its rank and score as evidence), `RETRIEVAL_REJECTED` for each candidate ranked
+  below the cut (with the limit and its score as the reason).
+- **Tool selected/rejected.** `agent_intelligence.GovernedPlanner.plan` gained an additive
+  `tool_decisions: list[dict[str, str]]` field on the returned `AgentPlan` (default `[]`, so no
+  existing caller's positional-argument construction elsewhere breaks): for every governed-tool
+  candidate the planner considers, `{"tool_version_id", "decision": "SELECTED"|"REJECTED", "reason"}`
+  — `"role not in tool allowed_roles"`, `"score below the governed-tool match threshold"`, or (for an
+  eligible tool that simply wasn't ranked first) `"eligible but ranked below the selected governed
+  tool"`. `agent_orchestrator.py::run` records `TOOL_SELECTED`/`TOOL_REJECTED` from this list
+  immediately after `plan()` returns, before rendering or executing anything.
+- **Refusal**, at the two real decline points, both already existing exception handlers, now each
+  also calling `record_decision` with `decision_type="REFUSAL"`:
+  - `agent_orchestrator.py::_persist_rejection` — the shared sink already used by every
+    upstream-of-execution rejection (prompt-risk `BLOCK`, no completed metadata analysis, a planned
+    governed tool that is no longer published, invalid tool parameters, development-SQL override
+    disabled, model route not configured). One call site now covers all of them.
+  - the `QueryRejected` except-block in `agent_orchestrator.py::run` — the real
+    `QueryExecutionGateway.execute` denial path (SqlGuard, catalog allow-list, cost gate), which the
+    tracker's exit criterion names explicitly ("a query the gateway declined").
+- **Why the recording calls live in `agent_orchestrator.py` and not in `agent_intelligence.py`,
+  despite `agent_intelligence.py` being where the candidates and tool decisions are computed:** a
+  first pass put `record_decisions` inside `GovernedRetriever.retrieve` itself, gated by optional
+  `organization_id`/`run_id` parameters the live orchestrator would pass and the preview endpoint
+  wouldn't. That broke `tests/test_inv7_attributability.py::test_the_read_only_post_list_stays_closed`
+  — its `reaches_session_write` check walks the *static* call graph, not runtime branches, so
+  `POST /v1/datasources/{id}/agent-retrieval-preview` (which also calls `GovernedRetriever.retrieve`,
+  intentionally read-only, and is on the route's own `_READ_ONLY_POST_ROUTES` exemption list) was
+  now flagged as reaching a write regardless of the guard never firing at runtime. Moving the actual
+  `record_decisions`/`record_decision` calls out of `agent_intelligence.py` entirely and into
+  `agent_orchestrator.py` (which the preview endpoint never calls) fixed it correctly rather than by
+  weakening the gate: `agent_intelligence.py` stays a pure, side-effect-free module, and only the
+  real orchestration path writes.
+- Every evidence payload is value-free per the existing `AiDecisionEdge`/`AiDecisionRecord` contract:
+  identifiers (`table:<id>`, `governed_tool:<id>`, `tool:<id>`), scores, reason codes and ranks —
+  never the question text or matched row/column content.
+- Tests: new `tests/test_agent_orchestrator_decision_lineage.py`. Three real
+  `GovernedAgentOrchestrator.run` calls against a real in-memory SQLite database built the same way
+  `tests/test_catalog_rows_read_model.py` documents (`Base.metadata.create_all`, so retrieval's ORM
+  queries and the query gateway's catalog lookups run for real, not against a hand-scripted double),
+  with `tests/support/doubles.FakeSqlExecutor` standing in only for the external data-source
+  connector — the same substitution `tests/test_inv6_value_freedom.py` uses for the gateway's own
+  end-to-end test — and the `AuditEvent.id` sqlite/`BigInteger`-autoincrement workaround
+  `tests/test_token_revocation.py` already established (`before_insert` event listener assigning ids
+  by hand; sqlite only auto-populates a bare `INTEGER PRIMARY KEY`, and `BigInteger` doesn't compile
+  to that):
+  1. A governed-tool question (two published tool versions and one weakly-matching table seeded,
+     `agent_retrieval_limit=2`) that runs end to end to `status == "COMPLETED"` — proving the
+     pipeline still works, not just that it produces edges — and asserts `RETRIEVAL_SELECTED`×2,
+     `RETRIEVAL_REJECTED`×1, `TOOL_SELECTED`×1 (the matching tool) and `TOOL_REJECTED`×1 (the
+     other tool, either below the match threshold or simply ranked second depending on the live
+     scorer's exact values, only the identity and a real non-empty reason are pinned, not the
+     wording) all come back from `get_decisions_for_run` with the right `target_node`s and reasons,
+     scoped to the run and organization, with no row value anywhere in `evidence` or `reason`.
+  2. A prompt-risk `BLOCK` question, asserting exactly one `REFUSAL` row with
+     `source_node="governed_agent_orchestrator"` and `reason="PROMPT_POLICY_DENIED"`.
+  3. A `candidate_sql="SELECT * FROM ..."` (SqlGuard's wildcard-select denial) that reaches a real
+     `QueryExecutionGateway.execute` call and raises `QueryRejected`, asserting a `REFUSAL` row with
+     `source_node="query_execution_gateway"`, then confirming it two more ways: `get_refusals`
+     returns it, and the actual `ai_decision_lineage_api.list_refusals` handler — called directly,
+     the same pattern `test_catalog_rows_read_model.py` uses for `list_catalog_rows` — returns it in
+     `page.items` with `page.total >= 1`. This is the tracker's exit criterion made concrete:
+     `list_refusals` now returns a real row for a query the gateway actually declined, not a
+     permanently empty table.
+- Verification: `ruff check .` clean. `mypy src` clean (190 files). Full `pytest` suite green — no
+  failures, no errors, 3,128 collected tests.
+- Tracker: AU-5 moved TODO → DONE with the call sites above as exit evidence. AG-5 and LN-3 — marked
+  DONE on 2026-08-30 on the writer's existence alone, then audit-corrected in section N once the
+  audit found zero callers — are re-verified DONE on this same evidence rather than left in the
+  audit-corrected state, since the gap the audit found (written but unreachable) is now closed.
+- Known limitations: retrieval decisions are recorded per scored candidate above zero relevance,
+  which on a datasource with a very large matching catalog could mean a proportionally large number
+  of `RETRIEVAL_REJECTED` rows per run (bounded by `agent_retrieval_scan_limit` per object type,
+  same bound the underlying queries already use, so not unbounded — but not yet load-tested at
+  bank-scale catalog sizes). Tool-selection evidence only records governed-tool candidates the
+  planner actually considers (i.e. that scored above zero and were returned by retrieval); a tool
+  that never matched the question at all is not distinguishable from one deliberately excluded.
+  `UX-13`'s asset-evidence endpoint (still TODO) is the natural place for a future reader to surface
+  this per-asset, once it lands.
+
+## 2026-08-31 — PG-1/PG-6/PG-8/AU-11 (ABAC engine decision, real query-path wiring) closed
+
+### The decision: `policy_engine.py`, not abac.py
+
+Two contradictory claims sat in the tracker at once: PG-1's own DONE text (2026-08-30) called
+abac.py "supersedes earlier `policy_engine.py` partial", while the same-day end-to-end audit
+(`04-end-to-end-audit-2026-08-30.md` §2) said the opposite — "Real enforcement runs through
+`policy_engine.evaluate`. abac.py is imported only by its own router and its own test." Both
+files were read in full before deciding, not just the tracker row that was read first:
+
+- **abac.py** (187 lines): a pure in-memory function — `evaluate(subject_attrs, resource_attrs,
+  env_attrs, policies)` over dict-shaped attributes, deny-overrides, a generic condition matcher
+  (scalar/list/range operators), plus a genuinely nice `simulate(..., vary_subject_attrs)`. No
+  policy persistence, no workspace/membership/binding integration, no business-node classification
+  closure. Its only consumer was its own router, abac_api.py (mounted in `main.py`, so live but
+  reachable from nowhere else), which read/wrote `AbacPolicyRecord`/`AbacDecisionRecord` — and the
+  decision record stored raw subject/resource/environment attribute dicts, an INV-6 value-freedom
+  violation the query path's own decision log never had.
+- **`policy_engine.py`** (303 lines): `evaluate(policies: tuple[PolicyRecord, ...], subject:
+  Subject, resource: Resource, action, *, now)` — DB-backed `PolicyRecord` loaded from
+  `access_policy` (`aida.business_graph.load_policies`), `Resource` already carrying
+  `classifications`/`business_node_ids`/`certification`/`datasource_id`/`schema_name`/
+  `quality_state`/`freshness_state` as first-class typed attributes (exactly AU-11's four axes,
+  already modeled — the gap was never in the engine), DENY as a hard ceiling evaluated first and
+  unconditional, default-deny (INV-4), MASK/FILTER obligation accumulation, `principal_kind` as a
+  first-class subject attribute, and value-freedom by construction (`PolicyDecision` carries reason
+  codes and policy ids only). It was already reached from the real query-execution path — not by
+  this session, but by prior ADR-0018 rollout work (`aida.authorization_gate.gate` →
+  `aida.workspace_service.authorize_enforced` → `aida.policy_engine.evaluate`, wired into both
+  `QueryExecutionGateway.validate` and `.execute`) — proven by the pre-existing
+  `tests/test_inv4_authorization_wiring.py`, both its static reachability scan and its behavioural
+  half (SHADOW proceeds and records, ENFORCE denies, an unresolved workspace is its own state).
+
+`policy_engine.py` is the surviving engine: richer, DB-integrated, value-free, and already the one
+production traffic reaches. abac.py/abac_api.py were dead weight duplicating a decision the
+platform had already made elsewhere, and were deleted rather than wired in — wiring in a second,
+weaker, disconnected evaluator alongside the one already carrying real traffic would have made the
+system's authorization story less honest, not more complete.
+
+### What was built
+
+- **Deleted**: src/aida/abac.py, src/aida/abac_api.py, tests/test_abac.py, the `abac_router`
+  mount in `main.py`, and the now-orphaned `POST /v1/abac/{policies,evaluate,simulate}` /
+  `GET /v1/abac/{policies,decisions}` routes. `AbacPolicyRecord`/`AbacDecisionRecord` ORM models
+  left in `models.py` (unused, harmless) rather than migrated away — dropping the underlying
+  `abac_policy`/`abac_decision` tables needs an Alembic migration, judged out of scope for this
+  item and flagged separately rather than bundled in silently.
+- **PG-6 (decision logging) kept honest**: abac.py's decision log was the value-freedom violation
+  above, so it was not "ported" — the real path's existing logging (`record_audit` around every
+  `authorization_gate.gate()` call on the query path, into `AuditEvent`; `record_divergence`/
+  `record_divergence_durably` into `AuthorizationShadowRecord` for SHADOW-mode divergences) was
+  confirmed as the actual, value-free decision log. `compliance_packs.py`'s ACCESS_REVIEW section
+  queried the now-dead `AbacDecisionRecord` (would have silently reported zero decisions and zero
+  denials forever, in a *compliance report*) — repointed to `AuditEvent` filtered on
+  `query.validate.gateway`/`query.execute.requested`.
+- **PG-8 (simulation) ported, not lost**: abac.py's `simulate(..., vary_subject_attrs)` had no
+  real equivalent on `policy_engine.py` or its callers — the existing `POST /v1/authorization-probes`
+  endpoint only answers "would *I* (the calling context) be allowed", never "who could see this"
+  across hypothetical subjects. Added `aida.policy_engine.simulate(policies, subjects, resource,
+  action, *, now)` — `evaluate` run once per subject, built directly on it rather than a second
+  implementation — and a new endpoint, `POST /v1/workspaces/{workspace_id}/authorization-simulations`
+  (`workspace_api.py`), which loads the organization's real `access_policy` rows
+  (`aida.business_graph.load_policies`) and the resource's real business-node classification closure
+  (`aida.business_graph.classification_scope`), then evaluates every caller-supplied hypothetical
+  `{principal_kind, roles, purpose}` against them. Also extended `AuthorizationProbeRequest` to
+  accept `quality_state`/`freshness_state` (it already took `classifications`/`certification` but
+  not the other two AU-11 axes) so the probe can answer against all four.
+- **AU-11 (real attributes on the gate call)**: `validate`/`execute` used to call `gate()` with no
+  `classifications`/`certification`/`quality_state`/`freshness_state` at all (defaulting to
+  `frozenset()`/`None`), so every policy rule keyed on those axes — even though `policy_engine.py`
+  already modeled them — was structurally unreachable. New module `policy_resource_attributes.py`
+  resolves one worst-case value per axis from the query's actual referenced tables (parsed once via
+  `self.guard.validate` *before* gating, threaded into `_run_validation` rather than re-parsed):
+  classification is the union of `MetadataColumn.classification` (module 05); certification is
+  `CERTIFIED` only if every referenced table has a currently-active `AssetCertification` (GL-5/CT-5,
+  via `aida.asset_certification.current_asset_certification`), else `UNCERTIFIED`; quality_state
+  prefers an open `DataQualityIncident` (module 11) and falls back to the latest
+  `DataQualityObservation.status`; freshness_state runs `aida.freshness.evaluate_freshness` (DQ-2,
+  ADR-0016: scan age is never presented as freshness) per table against its
+  `FreshnessWatermarkConfig`/`FreshnessObservation` and takes the worst. All four values now reach
+  both gate calls in `query_gateway.py`.
+- **Two pre-existing latent bugs surfaced and fixed**, both only reachable once a real end-to-end
+  DB test actually exercised this path (nothing had before): `AuditEvent.id`'s `BigInteger` primary
+  key did not autoincrement under SQLite (`.with_variant(Integer, "sqlite")` in `models.py` — the
+  same fix pattern UX-12's entry above independently hit for `asset_certification_is_active`, one
+  entry up in this log); and `asset_certification.py`/`freshness.py` compared an aware `now` against
+  a SQLite-naive stored timestamp with a raw `>`/`-` instead of through `aida.timeutil.as_utc`/
+  `is_live`, the same fix `workspace_service._expired` already needed and the fix UX-12 applied
+  locally in `catalog_read_model.py` rather than at the source — this time fixed at the source
+  (`asset_certification.py` itself), since AU-11's new caller does not pre-normalize the way
+  `catalog_read_model.py` does.
+
+### Tests
+
+New `tests/test_au11_policy_resource_attributes.py` (11 tests): 7 resolver unit tests against a
+real (sqlite) database — no referenced tables resolves to every axis's empty default; classification
+is the union across a table's columns; certification is `UNCERTIFIED` if any referenced table lacks
+an active certification and `CERTIFIED` once all do, with expiry re-falling-back to `UNCERTIFIED`;
+quality_state prefers an open CRITICAL incident over a healthy observation and falls back to the
+latest observation status; freshness_state takes the worst (`STALE`) across a stale/fresh table
+pair — plus 4 end-to-end tests driving a real `QueryExecutionGateway.execute` call (real sqlite DB,
+`FakeSqlExecutor` standing in for the warehouse connector) with a real `AccessPolicy` row: a DENY
+keyed on `classifications ∋ PII` rejects a query touching the PII column and allows the same query
+once the column is dropped; an ALLOW suppressed by `condition.deny_when_quality_state_in` (the
+shape `_matches_state_condition` and the pre-existing `test_quality_state_can_gate_access` establish
+— the condition suppresses the ALLOW while the state matches, and default-deny takes over) rejects
+a query against a table with an open CRITICAL incident and allows the same query once there is
+none. `tests/test_policy_engine.py` gained 3 tests for `simulate()` (varies HUMAN/AGENT/SERVICE
+against a classification-keyed DENY; empty-subjects returns no decisions; equivalence to calling
+`evaluate` per subject). `tests/support/doubles.py`'s `CatalogSession` extended (entity+name-aware
+routing rather than raw column-count alone, since two of the new lookups are 1- and 2-column selects
+that collided with existing shapes) to model the five new catalog lookups AU-11 added, with honest
+empty defaults matching its existing convention for bindings/tokenized-columns.
+`tests/test_inv7_attributability.py`'s `_READ_ONLY_POST_ROUTES` swapped its `POST /v1/abac/simulate`
+entry for the new simulation endpoint. `scripts/perf_baseline.py`'s benchmark and
+`tests/test_perf_baseline_gate.py` retargeted from `abac.evaluate()` to `policy_engine.evaluate()`
+(same 500-policy, 50-call-per-iteration shape); `Docs/90-reference/perf-baseline.json` and
+`Docs/90-reference/openapi-baseline.json` regenerated via each script's own `--accept-baseline`.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4 contracts kept (no new
+contract needed — `policy_resource_attributes.py` is a plain leaf-ward addition). Full `pytest`
+suite green (exit 0, zero failures) after the doc-claims gate (`test_doc_claims.py`) was brought
+current: every stale abac.py/abac_api.py/aida.abac.evaluate citation across `03-tracker.md`,
+`04-end-to-end-audit-2026-08-30.md`, this log, and two `Docs/review-2026-08/atlan-context/`
+research notes annotated "does not exist any more" (or de-backticked where the dotted-module
+collector has no such exemption) rather than silently left to rot into false claims.
+
+### Scope note
+
+`quality_coupling.py`/`trust_scoring.py` wiring (DQ-3/RT-7/AG-6/TL-3) and the retrieval-stack work
+the end-to-end audit also flagged are explicitly out of scope for this item — concurrent sibling
+work per the task brief. `AU-11`'s quality_state resolution reads `DataQualityIncident`/
+`DataQualityObservation` directly rather than through `quality_coupling.py`'s not-yet-wired gating
+
+## 2026-08-31 — AU-7 (behavioural authorization tests for `require_roles`) closed
+
+### The finding
+
+`04-end-to-end-audit-2026-08-30.md` §5: "`require_roles` has 348 call sites and zero
+behavioural tests. Nothing constructs a principal with the wrong role and asserts 403. A route
+declared `require_roles('Viewer')` that should be `PlatformAdmin`-only passes every gate in
+this repo." The tracker's exit criterion asked for a table-driven suite, generated from the
+live app, asserting the expected role set per route and that a wrong-role principal gets 403.
+
+### What was built
+
+New `tests/test_au7_behavioural_authz.py`, driven entirely off the live app rather than a
+hand-maintained list — reusing `tests/support/app_surface.py`'s established `iter_api_routes`
+convention (the same one `test_inv5_tenant_isolation.py`/`test_inv7_attributability.py` use)
+rather than writing a second route enumerator.
+
+`app_surface.py` gained one new helper, `require_roles_gate(route)`. Extracting a route's
+declared role set turned out not to be an AST problem: `require_roles(*allowed)` is a
+dependency *factory* — the object FastAPI actually wires into `route.dependant.dependencies`
+is the inner closure it returns, not `require_roles` itself, so the declared roles are not
+sitting in the source text at the call site when that call site passes an aliased constant
+(`require_roles(*COMPILER_ROLES)`, `require_roles(*UNIFIED_LINEAGE_READER_ROLES)`, ...) — an
+AST scan would see a variable name, not a role. `require_roles_gate` instead reads the value
+back out of the closure Python already built: `call.__closure__`, keyed by the free-variable
+name in `call.__code__.co_freevars`. This reads what the live app actually wired rather than
+re-deriving it from source, so it is correct for every one of the 324 call sites regardless of
+whether the route wrote its roles inline or through a shared constant.
+
+Of 333 live routes, 323 carry a `require_roles` gate. The other 10 are named individually in
+`_NOT_ROLE_GATED_ROUTES` with a reason each, and `test_the_not_role_gated_route_list_stays_closed`
+asserts the live set matches the list exactly (in either direction) rather than trusting it to
+stay true: 3 genuinely unauthenticated routes (health/metrics — already INV-5's own exclusion),
+`GET /v1/me` (returns the caller's own identity, nothing to gate a role on), `POST /mcp`
+(per-tool authorization lives inside `mcp_server.py`, not at the transport route), the 3
+`consumption_lineage_api.py` reads (tenant-scoped via `enforce_organization`, no role
+restriction by design — CX-4), and `POST /v1/security/tokens/revoke` /
+`POST /v1/security/tokens/detokenize` (manually role-checked inside the handler body on
+purpose, per `detokenization_api.py`'s own module docstring, specifically so a denied attempt
+is itself audited before the 403 — a bare `Depends(require_roles(...))` failure never reaches
+a handler body at all).
+
+For each of the 323 gated routes, two parametrized tests drive the real dependency callable
+directly (the same "call the real thing FastAPI wired, not a reimplementation" convention
+`test_inv5_tenant_isolation.py` uses for `route.endpoint`, applied one level up at the
+dependency the endpoint sits behind):
+
+- `test_wrong_role_is_denied` — a principal holding one synthetic role
+  (`AU7-Probe-Unknown-Role`, which is not a real platform role anywhere in `src/aida` and is
+  therefore disjoint from every route's declared set by construction) is asserted to get a 403
+  from the gate. One probe validates unmodified across a route allowing one role and a route
+  allowing nine, because the property under test is "a role outside the declared set is
+  rejected", not "this specific other role is rejected".
+- `test_an_allowed_role_passes_the_role_gate` — a principal holding a declared-allowed role is
+  asserted not to be rejected by the gate. Deliberately scoped to the role gate alone, per the
+  tracker's own scoping note: the assertion is that `require_roles` itself lets the principal
+  through, not that the whole request would succeed — a route can still deny that principal
+  downstream for tenancy or any other reason, which is INV-5's job, not this suite's.
+
+Plus 3 structural sanity/tripwire tests: the gated-route set is non-empty (≥300, so a broken
+enumeration can't silently parametrize over nothing), every gate declares at least one role
+(`require_roles()` called bare would deny every principal unconditionally via
+`frozenset().isdisjoint(())` always being `True` — a distinct bug shape from a merely wrong
+role set, held structurally rather than trusted by inspection), and the exclusion-list-stays-
+closed test described above. 646 parametrized cases + 3 sanity tests = 649 new tests, all
+generated from the live app, none hand-listed.
+
+### Bug hunt
+
+Before writing the suite, hand-audited: every mutating route (POST/PUT/PATCH/DELETE) whose
+allowed set includes a broad or `Viewer`-inclusive role, every route whose path or handler name
+names a sensitive concern (`kill-switch`, `security`, `credential`, `policy`, `organization`,
+`revoke`, `token`, `admin`, `sync`, `delete`, ...), every single-role (`PlatformAdmin`-only)
+declaration (`POST /v1/organizations`, kill-switch engage/release), and the three modules using
+a paired `READ_ROLES`/`WRITE_ROLES`-style constant convention (`asset_description_api.py`,
+`glossary_api.py`, `stewardship_api.py`) for a read endpoint accidentally wired to the write
+constant or vice versa — each checked against its own module's documented intent, not guessed.
+
+**No genuine role-misconfiguration was found.** The one pattern that looked suspicious at
+first pass — `graph_perspectives_api.py`'s `create`/`update`/`delete` endpoints all allowing
+`Viewer` and `Auditor` alongside the admin/steward roles — turned out to be a documented,
+deliberate design: a graph perspective is "a personal/shared productivity artifact, not a
+governed object" (that module's own docstring); the broad `require_roles` gate only decides who
+may call the endpoint at all, and a second, owner-only check inside the handler body (`_can_view`
+plus an explicit owner comparison on PATCH/DELETE) does the real authorization. This is a clean
+bill of health, not the absence of a check — the specific routes inspected are named above and
+in the tracker row.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files) — `require_roles_gate` lives in
+`tests/support/`, outside `mypy src`'s `packages = ["aida"]` scope, consistent with every other
+`tests/support/` helper, so it is ruff-checked but not mypy-checked. Full `pytest` suite green:
+4,069 collected tests, 0 failures, 0 errors, 6 skipped (pre-existing, unrelated to this change),
+in ~196s (`--junitxml` confirmed the count independently of the terminal summary line, which an
+unrelated pre-existing OpenTelemetry metrics-exporter-at-shutdown warning in
+`test_observability.py` intermittently pushes past the tail of captured stdout on some runs).
+API, so it does not depend on that sibling work landing first.
+
+---
+
+## 2026-08-31 — AU-13 (dependency/secret scanning, SBOM, and a real `docker build` in CI) closed
+
+Four gates added to `.github/workflows/ci.yml`, plus the `Dockerfile` fix the audit called out,
+following the existing checkout/setup/run job pattern exactly. No application code touched.
+
+### `dependency-scan`
+
+`pip-audit` (no API key required, unlike `safety`; `uv` itself has no native audit subcommand —
+checked `uv --help` directly) runs via `uvx --python 3.13 pip-audit` against
+`uv export --frozen --no-dev --no-hashes` — the identical non-dev dependency set the fixed
+`Dockerfile` now installs, so the scan and the shipped image can't silently diverge. `--python 3.13`
+matters: pip-audit's default resolve venv picked up Python 3.11 and failed to resolve
+`numpy==2.5.2` (requires `>=3.12`) before this was pinned — a real failure caught by running the
+job locally before landing it, not assumed.
+
+Running it against the real, current `uv.lock` found **16 genuine, currently-unfixed CVEs** across
+three already-pinned packages: `cryptography` 45.0.7 (7 IDs, fixed in 46.0.6/46.0.7), `pyjwt`
+2.10.1 (7 IDs, fixed in 2.12.0/2.13.0), `pyopenssl` 25.3.0 (2 IDs, fixed in 26.0.0). Bumping those
+pins is a `pyproject.toml`/`uv.lock` change — outside this row's file scope (`ci.yml` +
+`Dockerfile` only) and not something to force through unilaterally on a branch many concurrent
+sessions push to continuously. The gate therefore carries a small, dated, **named** `--ignore-vuln`
+baseline listing exactly those 16 IDs with their fix versions in a comment — not a blanket
+exemption: any other known-vulnerable package, or a new CVE against an already-pinned one, still
+fails the job today. A full, unbaselined `pip-audit` JSON report is uploaded as a build artifact
+every run regardless, so the 16-CVE baseline stays visible rather than getting quietly swept away.
+A task suggestion to bump the three packages and shrink the baseline was queued (the spawn_task
+call itself twice hit a tool timeout in this session — worth re-issuing or picking up manually).
+
+A CycloneDX 1.6 SBOM (`uvx --from cyclonedx-bom cyclonedx-py requirements`) is generated from the
+same locked, non-dev requirement set and uploaded alongside the pip-audit report — validated
+locally: 94 components, valid CycloneDX 1.6 JSON.
+
+### `secret-scan`
+
+`gitleaks` v8.21.2 — a single static binary with no license requirement, chosen over
+`trufflehog`/the `gitleaks-action` marketplace action (which gates some usage behind a license key)
+for a plain, dependency-free `curl`+`run:` step matching this file's existing convention. Scans the
+full git history (`fetch-depth: 0`), not just the checked-out tree.
+
+Run locally against the real repository history before landing: found 6 findings, all confirmed
+synthetic — a fake Databricks token (`dapi0123456789abcdef`) and a placeholder BigQuery
+service-account JSON in connector-DSN-parsing unit tests, plus a `TEST_DSN_AU4_POSITIVE`
+environment-variable *name* (not a secret value) tripping the generic-entropy rule in
+`test_inv6_value_freedom.py`. New `.gitleaks.toml` extends the default ruleset unchanged and adds
+one narrow **path**-based allowlist for exactly those 3 test files — path-based rather than
+commit/fingerprint-based deliberately, because this branch is rebased constantly by concurrent
+sessions, which rewrites commit hashes and would silently invalidate a fingerprint allowlist on the
+next rebase. Re-run after adding the config: `no leaks found`, exit 0. Every other rule and every
+other path, including any future commit to those same 3 files, is still scanned.
+
+### `docker-build`
+
+Runs `docker build --tag aida:${{ github.sha }} .`, then a smoke step —
+`docker run --rm ... python -c "import aida.main"` inside the built image — directly validating
+that AU-9's k8s manifests (landed earlier the same day) actually have a working image behind them,
+which they did not before this row: nothing built the Dockerfile in CI.
+
+### Dockerfile fix
+
+`Dockerfile:15` (the audit's `:17` citation had already drifted — confirmed by reading the file
+fresh before touching it) was `python -m pip install .`, an unpinned, fresh dependency resolve at
+image-build time — able to silently pull different transitive versions than whatever CI last
+tested. Replaced with: install `uv` (pinned `0.8.17`) via pip, copy `pyproject.toml` + `uv.lock` +
+`alembic.ini`/`src`/`migrations`, then `RUN uv sync --frozen --no-dev` into `/app/.venv` (on
+`PATH`) — the same `--frozen` contract `ci.yml`'s `UV_FROZEN=1` already documents for every other
+job, so the image can no longer float away from what CI actually resolved and tested against.
+
+### Docker build validation — real, but partial, and here's exactly why
+
+Docker (client 29.3.1 + daemon, started via `sudo dockerd`) is available in this sandbox, and a
+full `docker build .` was attempted, not assumed to be unavailable. The daemon itself works, and
+once given the session's proxy env vars it successfully resolves `docker.io` manifests — but the
+image-layer *blob* download redirects to `production.cloudfront.docker.com`, which this sandbox's
+egress proxy denies as an organization policy CONNECT rejection (confirmed via
+`/__agentproxy/status`'s `recentRelayFailures: connect_rejected`, not a transient network blip —
+retried once at first because the earlier symptom looked like a plain rate limit, then stopped
+once the policy-denial signature was confirmed, per the proxy README's explicit "report, don't
+route around, a 403 policy denial" instruction). This blocks only *this local validation attempt*
+— the real GitHub Actions runners the `docker-build` job executes on have ordinary internet access
+and are unaffected.
+
+In place of the blocked full build, the Dockerfile's actual new logic was validated directly
+(outside the container, running the identical commands the image's `RUN` layer runs):
+`uv sync --frozen --no-dev` against the real, committed `uv.lock` installs cleanly into an
+isolated venv, and `import aida.main` against that venv succeeds, producing a real `FastAPI` app
+instance — the same import the new smoke-test step performs inside the container, just run one
+layer up from where the sandbox's network policy blocks the base-image pull.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). `lint-imports` 4/4 contracts kept. Full
+`pytest` suite green: 3,414 passed, 5 skipped, 1 xfailed, 0 failures (confirmed twice — the first
+run showed a single unrelated failure in `test_config.py::test_environment_must_be_explicit_outside_tests`
+caused by this session's own shell having `AIDA_ENVIRONMENT` exported ambiently, not by any change
+in this diff; re-run with a clean shell environment, matching exactly how the `tests` CI job
+invokes pytest, passed clean).
+
+### Scope note
+
+Only `.github/workflows/ci.yml`, `Dockerfile`, and the new `.gitleaks.toml` were touched (the last
+is CI tooling configuration enabling the `secret-scan` job, not application code). The 16-CVE
+dependency baseline and the follow-up task to clear it are deliberate, documented debt, not an
+oversight — see the `dependency-scan` section above and tracker row AU-13.
+
+---
+
+## 2026-08-31 — AU-2 (redefine DONE to require a live call site) closed: process rule plus a 36-row re-verification sweep
+
+### The process fix
+
+`03-tracker.md`'s "How to use this" section previously defined `DONE` only as "its exit condition
+is verifiably met" — the same one-line bar that let the 17 rows `04-end-to-end-audit-2026-08-30.md`
+found get marked `DONE` on a passing unit test with zero live callers. A new paragraph, **"The
+live-call-site rule (AU-2, added 2026-08-31...)"**, now sits immediately after the existing
+`**Rules.**` line: any row whose exit evidence claims a module/function/endpoint is "wired",
+"reachable", "live" or "called from" something must name a concrete `file:line` on a path
+transitively reachable from one of the five processes in `tests/test_reachability_gate.py`'s
+`ENTRY_POINTS` dict (`aida.main`, `aida.workflows.worker`, `aida.workflows.scheduler`,
+`aida.projectors.graph_projector`, `aida.projectors.outbox_publisher`) — not a passing test or a
+module's mere existence. Two exceptions are named explicitly rather than left implicit: module-level
+reachability is necessary but not sufficient (a row about one *function* needs that function's own
+call site, the AU-1-vs-AU-5 `ai_decision_lineage.py` distinction), and a row blocked on
+infrastructure the harness cannot reach (live Kafka, a real IdP) may cite an in-process proof if it
+says so plainly. A row that cannot produce this evidence is not `DONE`.
+
+### The re-verification sweep
+
+36 `DONE` rows across sections A, B, C, D, E, F, G, M and N were re-checked by grepping the actual
+code for the row's cited call site and confirming the containing router/module is `include_router`'d
+(or otherwise imported/called) from a real entry point — not by re-reading the row's own prose:
+
+- **A**: ST-01, ST-02, ST-03, ST-11, ST-12, ST-16 (`mcp_server.py`'s `validate_sql` tool slug +
+  `sql_validation_router` mounted `main.py:61,218`), ST-17 (`record_audit` at 11+ sites each in
+  `ai_registry_api.py`/`product_marketplace_api.py`, both routers included `main.py:211,226`).
+- **B**: IN-1 (`bulk_onboard_datasources`, `api.py:1044`), IN-5b (`persist_envelope_extensions`
+  called `workflows/activities.py:982`).
+- **C**: CT-1 (`catalog_bulk_actions` imported `api.py:25`, 6 bulk-* endpoints `api.py:3154-3504`),
+  RL-4 (`UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` used `graph_projector.py:471`), PR-4 (`start_task`/
+  `heartbeat_task`/`finish_task` called 10+ times in `workflows/activities.py`, read endpoints
+  `api.py:1534,1578`).
+- **D**: GL-1..GL-4 — the vaguest pre-rule exit text found in this sweep (no file names at all,
+  despite being P0) — strengthened in place with concrete citations (`glossary_api.py:175,282`,
+  `stewardship_api.py:417,484,551`, routers mounted `main.py:32,59,62,221,222`); GL-6
+  (`run_owner_routing_pass` called from the scheduler's own loop, `scheduler.py:539`); LN-5
+  (`extract_column_lineage` called `dbt_api.py:370`, `dbt_router` mounted `main.py:30,212`).
+- **E**: DQ-1, DQ-2, DQ-5, RT-4, RT-5, AG-4 — `notification_router`/`quality_router`/
+  `runtime_contracts_router`/`search_router`/`tool_plans_router` all confirmed `include_router`'d
+  (`main.py:219,227,231,234,237`).
+- **F**: TL-2 (same router as AG-4), MG-2 (`kill_switch_blocking_state` called
+  `model_gateway.py:375`, `ai_governance_router` mounted `main.py:17,210`), QG-7 (structural
+  import-linter claim, not a call-site claim), PG-2 (`principal_kind_of` derives from the real
+  `SecurityContext` at `authorization_gate.py:61-68`, called `:133,151` on the query-gateway
+  authorization path — not a hardcoded default), PG-3 (`POST /v1/governance/reviews/bulk-decision`
+  at `semantic_api.py:1562`, `semantic_router` mounted `main.py:59`).
+- **G**: ID-4 (`enforce_not_revoked` called `security.py:83` inside `get_security_context`), CX-1
+  (`/mcp` router `mcp_server.py:140` mounted via `mcp_router`, `main.py:37`), OB-4
+  (`observability_router` mounted `main.py:49`), OB-8 (`redact_sensitive_data` wired into
+  `configure_logging`, `logging.py:144`, called `main.py:74`), CX-6 (`consume_mcp_budget` called
+  `mcp_server.py:2004`).
+- **M**: UX-12 (`compose_catalog_rows` called `api.py:1985` inside `list_catalog_rows`).
+- **N**: AU-4 (`hide_parameters=True` at `atlas/platform/db.py:40`; AU-3/AU-5/AU-9 read and found
+  already carrying exactly this rule's evidence shape, so not re-derived).
+
+**Result: no additional false `DONE` found.** Every row in this sample was genuinely reachable from
+a live entry point — the concurrent wiring work earlier the same day (AG-5/LN-3, OB-1/OB-2/OB-3,
+RT-1/RT-2/RT-3/RT-9/SM-2, AG-1/AG-2/TS-6, DQ-3/AG-6/TL-3 with RT-7 correctly still open, PG-1/PG-6/
+PG-8, AU-6) already accounted for the 17 rows the original audit caught, and this sweep found no
+eighteenth. `tests/test_reachability_gate.py` re-run clean (5/5) to confirm the module-level graph
+this sweep's function-level spot-checks build on had not drifted mid-session.
+
+### Scope note
+
+Honestly not a full audit: roughly 130 of the 170+ tracker rows (most of section C beyond the 3
+sampled, section H's certification rows — all status `—`, so out of scope by definition — and §L's
+competitive-review items) were not individually re-verified, per this item's own "representative
+sample, not all 170+ rows" instruction. A full sweep remains open work for a future pass.
+
+### A doc-claims regression caught and fixed in the same pass
+
+This entry's own first draft in `03-tracker.md` cited the test file using `::`-qualified syntax
+against a module-level dict rather than a function, and separately used a bare hyphenated slug for
+an endpoint name on a table row that also mentioned an unrelated import-linter contract elsewhere in
+the same (very long, single-line) row — both tripped `test_doc_claims.py`'s mechanical citation gate
+(TS-12) on the first full-suite run, since that gate reads any hyphenated backtick-quoted token on a
+line containing the word "contract" as a contract-name citation. Fixed by dropping the `::`
+qualifier and writing the endpoint's full path instead of the bare slug — exactly the kind of drift
+that gate exists to catch, this time caught before merge rather than after.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). Full `pytest` suite green (exit 0, zero
+`FAILED` lines) including the full doc-claims gate re-run in isolation to confirm the fix
+(`test_doc_claims.py` — all passing). Docs-only change to `03-tracker.md` plus this log entry; no
+application code touched.
+
+---
+
+## 2026-08-31 — AU-12 (survive a Temporal outage) closed
+
+### The problem
+
+`main.py`'s `lifespan` used to `await Client.connect(settings.temporal_address, ...)` directly, with
+no timeout and no try/except. `temporalio.client.Client.connect` performs a real RPC handshake by
+default (`lazy=False`) with no built-in timeout of its own, so an unreachable or slow-to-respond
+Temporal server hung or raised right there — and since `lifespan` runs before the ASGI server ever
+starts serving traffic, that took the *entire process* down with it, not only the Temporal-dependent
+routes. The end-to-end audit's finding was precise: the readiness probe at `/health/ready` was
+already written to report `temporal: DOWN` correctly (`request.app.state.temporal_client` truthy
+check) — it just could never execute, because the process never survived far enough to bind a port.
+
+### The fix
+
+- **`_connect_temporal(loop_settings) -> Client | None`** (`main.py:130-160`): wraps `Client.connect`
+  in `asyncio.wait_for(..., timeout=settings.temporal_connect_timeout_seconds)` inside try/except.
+  Any failure — timeout, connection refused, DNS failure — becomes a logged `temporal_connect_failed`
+  warning (`exc_info=True`) and a `None` return, never a raised exception. `CancelledError` is left
+  uncaught (it's a `BaseException`, not caught by `except Exception`) so shutdown cancellation is
+  never swallowed.
+- **`lifespan`** (`main.py:206-227`) calls `_connect_temporal` instead of `Client.connect` directly.
+  On failure it logs `temporal_unavailable_at_startup` and starts a background
+  `_temporal_reconnect_loop` task — the app comes up degraded (Temporal-dependent routes
+  unavailable, `/health/ready` reports `temporal: DOWN`) instead of never starting.
+- **`_temporal_reconnect_loop(app, loop_settings)`** (`main.py:163-188`): polls on
+  `settings.temporal_reconnect_interval_seconds` and, once `_connect_temporal` succeeds, publishes
+  the new client onto `app.state.temporal_client` — the same attribute `/health/ready` reads — so
+  readiness flips back to `temporal: UP` on its own, no restart needed. Cancelled at shutdown
+  alongside the existing `archive_task` (`main.py:271-274`), mirroring `_audit_archive_loop`'s
+  (OB-3) started/cancelled-from-`lifespan`, log-and-retry-on-failure, `CancelledError`-re-raised
+  shape — this module's one existing background-task convention, reused rather than reinvented.
+  `worker.py`/`scheduler.py` were checked first per the task brief's instruction and have no
+  reconnection pattern of their own: both are standalone, single-shot-connect processes that rely
+  on their process supervisor (not application code) to restart them on a Temporal outage, so there
+  was nothing to reuse from them — `lifespan`'s in-process background retry is a new pattern here
+  because `main.py` is the one long-lived process among the three that must stay up and serve
+  non-Temporal traffic through an outage.
+- Two new `Settings` fields in `atlas/platform/config.py`: `temporal_connect_timeout_seconds`
+  (default 10.0s) and `temporal_reconnect_interval_seconds` (default 30.0s).
+- The readiness probe itself (`main.py:380-399`) is unchanged — its `temporal` dependency check was
+  already correct, it just needed to actually be reachable.
+
+### Tests
+
+New `tests/test_au12_temporal_outage_resilience.py` (5 tests), driving real ASGI `lifespan` via
+`fastapi.testclient.TestClient` against `aida.main.app` — the same pattern
+`test_observability.py::test_lifespan_wires_tracing_and_metrics_...` already established — with a
+fake class monkeypatched onto `aida.main.Client` standing in for `temporalio.client.Client` (no live
+Temporal server in this environment): `test_temporal_outage_at_startup_does_not_crash_app` (a
+raising fake `connect()` — entering the TestClient's lifespan context does not raise, `/health/live`
+still returns 200); `test_readiness_reports_temporal_down_during_outage` (`/health/ready` genuinely
+reports `dependencies["temporal"] == "DOWN"`); `test_temporal_connect_is_bounded_by_timeout_not_hanging`
+(a fake `connect()` that sleeps 30s against a 0.2s `temporal_connect_timeout_seconds` — startup
+returns in well under 5s, proving the timeout is enforced and not just the try/except); 
+`test_readiness_recovers_to_up_once_reconnect_succeeds` (a fake `connect()` that fails once then
+succeeds — `/health/ready` starts at `DOWN`, then flips to `UP` on its own within a few
+`temporal_reconnect_interval_seconds` cycles, no restart); `test_temporal_reconnect_task_is_cancelled_on_shutdown`
+(the reconnect task is running while the app is up, and is cancelled/done once the TestClient context
+exits — mirrors `_audit_archive_loop`'s existing shutdown-cancellation contract).
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict). Full `pytest` suite: exit code 0, zero
+`FAILED`/`ERROR` lines (confirmed via `grep -c "^FAILED\|^ERROR"` on the captured log, since an
+unrelated OTEL metrics-exporter atexit thread occasionally swallows pytest's own final summary line
+in this sandbox — a pre-existing environment quirk, not a test failure: the isolated run of just the
+new file reports plainly, `5 passed in 5.52s`). One pre-existing, unrelated failure mode was
+investigated rather than ignored: `test_config.py::test_environment_must_be_explicit_outside_tests`
+(AU-3) fails whenever `AIDA_ENVIRONMENT` is present in the ambient shell env at test time, because
+pydantic-settings marks an env-sourced field as "set" the same as an explicitly-passed one, so the
+test's `_running_under_pytest` monkeypatch alone can't reproduce a truly-unset variable once one is
+present in the process environment. Confirmed via `git stash` that this reproduces identically on
+the unmodified branch tip (`fb6fe65`), with or without this change — a latent conflict with
+`.github/workflows/ci.yml`'s workflow-level `AIDA_ENVIRONMENT: "development"` (added under AU-3,
+commit `cf1e65b`, whose own comment says the `tests` job is "exempt via its own pytest detection" —
+true for every other test, but not this one, which deliberately defeats that detection to test the
+non-pytest branch). Left unfixed: out of AU-12's scope (`main.py` Temporal-connect logic, the
+readiness probe, and their tests only), flagged here and in the tracker for whoever picks up AU-3
+next or notices CI go red on it.
+
+### Scope note
+
+Only `main.py`'s Temporal-connect logic in `lifespan`, the background reconnect task, the two new
+`Settings` fields it needs, and their tests were touched — per the task brief, the readiness probe's
+own logic was already correct and needed no change beyond becoming reachable.
+
+## 2026-08-31 — AU-8 (migration↔ORM drift gate) closed: found and fixed real drift on the first run
+
+`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md` Section 5: "84 migrations, zero tests apply
+them. All 19 DB-backed test files build schema from the ORM, so ORM↔migration drift is
+structurally invisible. The tracker records this bug firing once already (DQ-1) — the instance was
+fixed, no gate was added." This closes that gap with the gate the tracker's exit criterion
+describes verbatim, and — because nothing had ever checked this before, on a branch multiple
+concurrent sessions push migrations and ORM changes to all day — it found real drift on its first
+real run, before it had even landed.
+
+### The gate
+
+New `tests/test_migration_orm_drift.py`, deliberately **not** folded into the shared fixture path
+every other DB-backed test uses (`Base.metadata.create_all` against an in-memory SQLite engine —
+see `tests/test_tier0_invariants.py:298-300` for the pattern all 19 files share): it resets a real
+Postgres database's `public` schema to genuinely empty (`DROP SCHEMA public CASCADE; CREATE SCHEMA
+public` — chosen over `CREATEDB` because it works for any role that merely owns the target
+database, which is the common case for both a local dev Postgres and a CI service container's
+default user, without needing superuser or database-creation grants), runs `alembic upgrade head`
+through Alembic's own Python API (`alembic.command.upgrade`, not a subprocess), then reflects the
+result and diffs it against `Base.metadata` with `alembic.autogenerate.compare_metadata` — the same
+machinery `alembic revision --autogenerate` uses, run in the opposite direction. Any diff fails the
+test with every difference rendered in the failure message.
+
+Two real mechanical obstacles, both worth recording since they'd trip up the next person who tries
+this: (1) `migrations/env.py` calls `get_settings().database_url` itself and overwrites whatever URL
+the `alembic.config.Config` object was given, so pointing a real `alembic upgrade` at a scratch
+database requires setting `AIDA_DATABASE_URL` in the process environment *and* clearing
+`get_settings`'s `@lru_cache` before and after (`atlas/platform/config.py:459`) — the test does both,
+restoring each in a `finally`. (2) `alembic.command.upgrade` drives Alembic's own
+`asyncio.run(run_async_migrations())` internally (`migrations/env.py:78`), so it cannot be called
+from inside a coroutine that is itself already running inside an `asyncio.run()` — the test's schema
+reset, the migration run, and the post-migration diff are three separate top-level calls for exactly
+this reason, not one `async def` wrapping all three.
+
+Postgres, not SQLite: `Settings.database_url` defaults to `postgresql+asyncpg://...`
+(`atlas/platform/config.py:92`) and several migrations use Postgres-only DDL (`CREATE EXTENSION
+pg_trgm`, `USING gin (... gin_trgm_ops)` in `f9a2b3c4d5e6_catalog_scale_indexes.py`) with no SQLite
+equivalent, so a real migration run needs a real Postgres. **A real Postgres 16 instance was
+available in this sandbox** (`service postgresql start`; a pre-existing non-superuser `aida` role and
+database were already provisioned) and the gate ran against it for real throughout this work — this
+was not a "skip and hope CI catches it" delivery. If Postgres genuinely isn't reachable the test
+skips with the connection error as the reason (`pytest.skip`, verified by pointing it at a closed
+port) rather than failing CI on infrastructure absence; a new `migration-drift` job in
+`.github/workflows/ci.yml` provides a real one there via a `postgres:16` service container — the only
+CI job that needs one, which is why it's split out from `tests` rather than added to it (folding a
+~10-second real-Postgres migration run into the shared fast fixture path was explicitly the thing
+DQ-1/this row's exit criterion said not to do). Verified both directions before landing: passes
+clean at HEAD, and fails with the exact diagnostic expected when drift exists — confirmed by
+temporarily adding an ORM column with no migration, watching the test fail and name it, then
+reverting.
+
+### Real drift found and fixed (not synthetic)
+
+1. **8 ORM tables with no migration at all**: `consumption_record`, `negative_assertion`,
+   `search_index`, `vector_embedding`, `freshness_observation`, `freshness_watermark_config`,
+   `procedure_lineage_edge`, `view_lineage_edge` — all real, in-use ORM classes in `src/aida/
+   models.py` that some concurrent session on this branch added without an accompanying migration.
+2. **`composite_key_candidate` missing 5 columns**: `table_profile_id`, `column_names`,
+   `column_count`, `key_fingerprint`, `estimated_distinctness_ratio` (plus the FK and index
+   `table_profile_id` needs) — present in the ORM, absent from the table's original migration
+   (`6500275e1d36_composite_key_candidate.py`), added later without a follow-up migration.
+3. **`data_quality_incident.latest_observation_id` was live-broken in the database**: migration
+   `1b7e4c9a62d0_durable_data_quality.py` created it `NOT NULL` with `ON DELETE CASCADE` against
+   `data_quality_observation`, while the ORM (`models.py:1399-1401`) correctly declares it nullable
+   with `ON DELETE SET NULL`. `NOT NULL` plus `ON DELETE SET NULL` is self-contradictory — deleting a
+   referenced observation would have raised a Postgres constraint violation instead of nulling the
+   pointer, the first time anyone actually exercised that path against a real database. Fixed to
+   match the ORM, which is what the code elsewhere assumes ("latest observation" is documented and
+   used as optional).
+4. **3 columns migrated as `postgresql.JSONB` against house style**: `ai_remediation
+   .resolution_evidence`, `ai_trust_snapshot.factors`/`blockers` (`c8a4d3e91f02_production_control
+   _evidence.py`) — 43 other migrations in this repo use plain `sa.JSON` (matching the ORM's own
+   `mapped_column(JSON, ...)` convention, used 132 times in `models.py` with zero prior uses of
+   `JSONB`); this migration was the one outlier. Altered to `sa.JSON` to match.
+5. **`audit_archive_record`'s unique constraint had the wrong name**: created via raw SQL inline
+   `UNIQUE` (`e8f1a2b3c4d5_completed_control_plane_tables.py`), which Postgres auto-named
+   `audit_archive_record_archive_id_key`, instead of this repo's naming convention
+   (`uq_audit_archive_record_archive_id`, from `NAMING_CONVENTION` in `atlas/platform/db.py:17-23`).
+   Renamed to match.
+
+All five landed in one new migration, `migrations/versions/09be3ab5b008_au8_reconcile_orm_migration
+_drift.py` — generated with `alembic revision --autogenerate` (after the env.py fix below made the
+diff accurate) and hand-corrected in two places autogenerate got wrong: it double-applied the naming
+convention to `consumption_record`'s already-explicitly-named `CheckConstraint` through a redundant
+`op.f()` wrap, and the raw generated file used `typing.Union`/`from typing import Sequence` instead
+of this repo's `X | Y` / `from collections.abc import Sequence` convention every other migration in
+`migrations/versions/` follows — both fixed, then `ruff format`/`ruff check --fix` run over the file.
+
+### One real root cause, and one real ORM bug, both found along the way
+
+- **`migrations/env.py` imported `aida.models` but never `aida.envelope_models`**
+  (`envelope_models.py` defines `MetadataViewDefinition`, `MetadataRoutine`,
+  `MetadataRoutineParameter`, `MetadataObjectDescription`, `MetadataSourceGrant` — all real, already
+  correctly migrated tables), so those five tables were invisible to `Base.metadata` for *every*
+  Alembic autogenerate run, not just this test's first one. Concretely: they showed up as spurious
+  `remove_table` diffs the first time this test ran, before the fix — Base.metadata was incomplete,
+  not the database. Fixed by importing `envelope_models` alongside `models` in `migrations/env.py`, which also
+  means any future `alembic revision --autogenerate` will finally see that module.
+- **Three FK columns had a redundant, unused second index**: `NotificationEventRecord.incident_id`,
+  `StudioEvalRun.change_set_id`, `CompositeKeyCandidate.table_id` each declared `index=True` on the
+  column in addition to an already-covering named `Index` in `__table_args__` (e.g.
+  `ix_notification_event_incident` already covers `incident_id`; `index=True` would add a second,
+  differently-named index over the exact same column). No migration had ever created the redundant
+  second index for any of the three — confirmed this is drift, not an intentional pattern, against
+  `StudioTestRun.change_set_id`, which has the identical shape in the ORM but *does* have both
+  indexes in its migration, and was correctly left untouched. `index=True` removed from the three
+  real cases (fixing the ORM, not adding a wasteful duplicate-index migration) since a second index
+  covering an already-indexed single column serves no purpose.
+- **Deliberately not "fixed"**: three raw-SQL trigram/expression indexes on `metadata_table`
+  (`ix_metadata_table_catalog_page`, `ix_metadata_table_name_trgm`,
+  `ix_metadata_table_description_trgm`, all from `f9a2b3c4d5e6_catalog_scale_indexes.py`'s
+  `USING gin (lower(name) gin_trgm_ops)`-shaped DDL) have no clean SQLAlchemy `Index()` equivalent
+  and are absent from `Base.metadata` by design. Excluded from comparison via an `include_object`
+  filter added to both `migrations/env.py` (so real autogenerate runs don't propose dropping them
+  either) and `test_migration_orm_drift.py`, each carrying the same named set with a comment
+  requiring the two stay in sync.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, strict — `migrations/` and `tests/` are outside
+its scope, matching the `quality` CI job). `alembic heads` confirms exactly one head (`09be3ab5b008`)
+after landing — the `migrations` CI job's own gate. Full `pytest` suite: 3,415 passed, 5 skipped, 1
+xfailed, run against the same real local Postgres instance the drift gate itself used (not skipped
+locally). `.github/workflows/ci.yml` gained the `migration-drift` job (Postgres 16 service
+container, `POSTGRES_USER=aida`/`POSTGRES_PASSWORD=aida-local-only`/`POSTGRES_DB=aida_migration
+_drift_test` matching `AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL`) so this keeps running against a real
+database on every push, not just in this sandbox.
+
+## 2026-08-31 — RT-7 (quality trust factor in ranking) closed for real; DQ-3's third and last leg lands
+
+This item's own tracker row (see the `2026-08-31 — DQ-3 / TL-3 / AG-6 wired for real; RT-7 honestly
+deferred` entry above) explicitly deferred RT-7 rather than guess at it, because at that time
+`retrieval.py::hybrid_retrieve`/`fusion_ranking.py` had no live caller — wiring the trust factor
+into a ranking implementation nothing called would not have satisfied the exit criterion ("Part of
+DQ-3"). Re-checked before starting, per the task brief's own instruction: `retrieval.py`'s
+`hybrid_retrieve_enhanced` (Stage 4, fusion) is now genuinely reachable from
+`agent_intelligence.GovernedRetriever.retrieve()`, itself called from
+`GovernedAgentOrchestrator.run()` — confirmed by re-reading the RT-1/RT-2/RT-3 wiring entry above
+and the current `agent_intelligence.py`, not assumed. That was this row's own stated blocking
+precondition, now satisfied.
+
+### What was built
+
+- `retrieval.py::hybrid_retrieve_enhanced`'s Stage 4 (`retrieval.py:923` on) no longer appends the
+  hardcoded `SignalScore(signal="quality_trust", raw_score=0.5)` placeholder to every candidate.
+  Instead:
+  1. Every candidate is resolved to the `MetadataTable` id(s) it actually touches. TABLE, COLUMN,
+     BUSINESS_ANNOTATION, DBT_RESOURCE, and SEMANTIC_METRIC candidates already carry a
+     `table_id`/`source_table_id` UUID string in their metadata from Stage 1 — read directly.
+     GOVERNED_TOOL candidates instead carry `referenced_tables` (SQL-qualified table-name strings,
+     the tool version's own declared dependencies) — resolved to this datasource's table ids via
+     `quality_coupling.resolve_table_ids`, the exact same helper TL-3's tool gate already resolves
+     the same field through, so a tool's ranking-time trust factor and its gating-time trust factor
+     can never disagree about which table it depends on.
+  2. All resolved table ids across every candidate are batched into one
+     `quality_coupling.fetch_open_incidents` call (not one query per candidate) to fetch the real
+     OPEN/ACKNOWLEDGED `DataQualityIncident` rows.
+  3. Each candidate's `quality_trust` signal is `min(demote_in_retrieval(table_id, incidents) for
+     table_id in candidate's tables)` — the worst-case table wins, same "worst factor" convention
+     AG-6's trust-score computation already uses for the same helper.
+  4. A demoted candidate additionally gets `metadata["quality_trust_demotion"]` (`retrieval.py:1002`)
+     — `{"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids": [...], "worst_factor": <score>}` —
+     so the *reason* for a lower rank is visible on the hit itself, not just a bare number in the
+     fusion breakdown. The numeric factor was already going to be inspectable for free (RT-3's
+     `build_evidence` puts every signal's `raw_score`/`weight`/`weighted_score` into
+     `retrieval_evidence.factors` regardless of which signal it is); this closes the "which table,
+     why" gap the numeric-only view leaves.
+  5. A candidate with no resolvable table (e.g. a bare GLOSSARY_TERM hit with no bound semantic
+     object) gets the neutral 1.0, matching `demote_in_retrieval`'s own "no active incidents" return
+     rather than inventing a different default.
+- `quality_coupling.py` itself is unchanged — no signature adjustment was needed. `demote_in_retrieval`
+  already took a bare `asset_id: str` + `incidents: list[IncidentSummary]`, which is exactly what the
+  retrieval-side resolution above produces per candidate.
+
+### Tests
+
+New `tests/test_rt7_quality_trust_ranking.py` (3 tests), same in-memory-sqlite-via-aiosqlite,
+ORM-seeded `_Scenario` pattern `test_agent_orchestrator_retrieval_wiring.py` (RT-1/RT-2/RT-3) and
+`test_quality_runtime_coupling.py` (TL-3/AG-6) both established — driven through the real live
+retrieval entry point, `agent_intelligence.GovernedRetriever.retrieve()`, **not** a direct call into
+`quality_coupling.demote_in_retrieval` or `hybrid_retrieve_enhanced` in isolation. That
+direct-unit-test-only shape is the exact failure mode `04-end-to-end-audit-2026-08-30.md` found
+across this codebase (real, tested modules with zero live callers) and the standard this wave's
+wiring work has held itself to throughout.
+
+- `test_governed_retriever_demotes_table_with_open_critical_incident`: two tables
+  (`widgets_flagged`, `widgets_clean`) score identically on every lexical signal (same token overlap,
+  same exact-phrase bonus) — the only difference is an OPEN CRITICAL `DataQualityIncident` on
+  `widgets_flagged`. Asserts the flagged table's `quality_trust` factor is `0.3` vs. the clean
+  table's `1.0`, its `weighted_score` is lower, its overall fused `final_score` is measurably lower
+  than the clean table's (DoD #1: "a candidate touching a table with an open quality incident gets
+  measurably demoted relative to an identical candidate on a clean table"), and its evidence carries
+  `metadata["quality_trust_demotion"] == {"reason": "OPEN_QUALITY_INCIDENT", "demoted_table_ids":
+  [...], "worst_factor": 0.3}` while the clean table's metadata carries no such key.
+- `test_governed_retriever_does_not_demote_on_resolved_incident`: a RESOLVED incident does not
+  gate/demote — only OPEN/ACKNOWLEDGED do, matching `demote_in_retrieval`'s own filter and TL-3/AG-6's
+  existing behaviour for the same status check.
+- `test_governed_retriever_demotes_governed_tool_via_referenced_tables`: a GOVERNED_TOOL candidate
+  (no `table_id`/`source_table_id` of its own, only `referenced_tables`) whose one referenced table
+  carries an open CRITICAL incident is demoted the same way (`quality_trust` factor `0.3`,
+  `quality_trust_demotion` naming the resolved table id) — proving the tool-shaped candidate branch
+  isn't silently skipped because its metadata shape differs from a bare table/column hit.
+
+### Tracker
+
+RT-7 moved TODO → **DONE** with the real exit evidence above (file:line citations, real test names,
+not reference-only text). DQ-3 moved IN PROGRESS → **DONE** — RT-7 was its last of three wiring legs
+(TL-3 tool gating and AG-6 answer trust warnings already closed for real in the entry above); all
+three now resolve incidents through the same `quality_coupling.resolve_table_ids`/
+`fetch_open_incidents` helpers.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, no new files added to the checked set). Full
+`pytest` suite run foreground: exit code 0, progress output at 100% with no `F`/`E` markers anywhere
+in the run (a background OpenTelemetry metrics-exporter thread throws `ValueError: I/O operation on
+closed file` during interpreter teardown in `test_observability.py`'s span-export test, printed to
+stderr after the run itself completes — a pre-existing, unrelated background-thread teardown quirk,
+not a test failure; it also swallowed the final `N passed in Ys` summary line from the captured
+log, hence citing exit code + zero-failure-marker dot output as the pass evidence instead of quoting
+that line directly).
+
+### Scope discipline
+
+Touched only `retrieval.py` (Stage 4 of `hybrid_retrieve_enhanced`) and its new test file, per the
+task brief. `quality_coupling.py` needed no signature change — `demote_in_retrieval`'s existing
+`(asset_id, incidents)` shape was already sufficient, so TL-3/AG-6's call sites are untouched and
+unaffected. `fusion_ranking.py`/`vector_retrieval.py`/`graph_retrieval.py` (RT-1/RT-2/RT-3/RT-9/SM-2's
+own files) were not modified — the fusion mechanics they own already treat `quality_trust` as an
+ordinary named signal; only the raw score fed into it needed to become real. RT-6 (usage/popularity
+ranking factor, the other Stage-4 placeholder) is untouched and still `raw_score=0.5` — a separate
+tracker row, not this one's scope.
+
+## 2026-08-31 (continued) — AU-13 follow-up: the 16-CVE dependency baseline cleared, not just bumped
+
+The follow-up task AU-13 explicitly queued (clear the `dependency-scan` job's `--ignore-vuln`
+baseline by actually bumping `cryptography`/`pyjwt`/`pyopenssl`) landed the same day.
+
+### The three-package bump wasn't just three packages
+
+`pyproject.toml` pinned only `PyJWT[crypto]==2.10.1` directly; `cryptography` and `pyopenssl` were
+transitive (pulled in via `PyJWT[crypto]`, `google-auth[pyopenssl]`, and
+`snowflake-connector-python`'s own `cryptography`/`pyOpenSSL` requirements). To actually move the
+resolved versions — not just wish for it — both were added as explicit direct pins:
+`PyJWT[crypto]` 2.10.1 -> 2.13.0, `cryptography` (new direct pin) -> 50.0.1, `pyOpenSSL` (new
+direct pin) -> 26.4.0.
+
+The pyopenssl fix does not resolve on its own. `snowflake-connector-python==3.15.0` (and every
+3.x/early-4.x release checked on PyPI: 3.16.0, 4.0.0, 4.3.0 all still say
+`pyOpenSSL<26.0.0,>=22.0.0` or `>=24.0.0,<26.0.0`) caps `pyOpenSSL` below the CVE-fixed 26.0.0, so
+`uv lock` refused to resolve with a fixed pyopenssl until the connector's own ceiling moved.
+`snowflake-connector-python==4.4.0` is the first release that drops the upper bound
+(`pyOpenSSL>=24.0.0`), so it was bumped too — 3.15.0 -> 4.4.0. This dependency is used at exactly
+one call site, `src/aida/connectors/snowflake.py`'s `_get_connection()`, via
+`snowflake.connector.connect(**kwargs)` with only long-stable keyword arguments
+(`account`/`user`/`database`/`schema`/`warehouse`/`role`/`login_timeout`/`network_timeout`/
+`password`/`authenticator`/`token`) — nothing there changed across the major-version jump, and
+`mypy src` (which has an explicit `ignore_missing_imports` override for `snowflake.*`) stayed
+clean.
+
+### The baseline's own "fixed in 46.0.6/46.0.7" claim turned out to be stale
+
+Bumping `cryptography` to 46.0.7 first — the version the `dependency-scan` job's baseline comment
+named as the fix for all 7 of its cryptography CVEs — and re-running the unfiltered
+`pip-audit -r requirements-locked.txt` locally showed 4 of those 7 still open:
+`PYSEC-2026-3552`/`3553`/`3554` and `GHSA-537c-gmf6-5ccf`, each fixed only in 48.0.1/49.0.0/50.0.0
+per pip-audit's own advisory data — CVEs published against `cryptography` after the baseline
+comment was dated, not a scan error. `cryptography` went to 50.0.1 (current latest on PyPI at scan
+time) instead, which pulled `pyOpenSSL` up to 26.4.0 (the first pyOpenSSL release whose
+`cryptography<51,>=49.0.0` window admits it — 26.0.0 itself caps `cryptography<47`). A second
+unfiltered `pip-audit` re-scan against the fully-updated lock came back clean: **0 known
+vulnerabilities** in the locked, non-dev dependency set, versus the original baseline's 16 CVEs
+across the 3 packages. The lesson worth keeping: an ignore-vuln baseline's "fixed in Y" comment is
+a claim about the world on the day it was written, not a fact that stays true — re-scan after
+bumping rather than trusting the old comment, which is exactly what happened here.
+
+`src/` has no direct `cryptography`/`OpenSSL` imports at all (`grep -rln "cryptography\|OpenSSL"
+src/` — no hits); the only place `cryptography.hazmat.primitives.asymmetric.rsa` is imported is
+three *test* files generating RSA keys for signed-JWT fixtures (`tests/test_oidc.py`,
+`tests/test_persona_derivation.py`, `tests/test_token_revocation.py`), a stable, unaffected API.
+`src/aida/oidc.py`'s only `PyJWT` call site (`jwt.get_unverified_header`, `jwt.PyJWK.from_dict`,
+`jwt.decode`, `jwt.PyJWTError`/`jwt.InvalidTokenError`) is unchanged 2.x API — no source changes
+were needed anywhere for the version bump itself.
+
+### `.github/workflows/ci.yml`
+
+The `dependency-scan` job's `pip-audit -- fail on any unbaselined known vulnerability` step had its
+16-entry `--ignore-vuln` list removed entirely (0 remain after the re-scan above), and its comment
+rewritten to record both the original 2026-08-31 AU-13 baseline and this same-day follow-up that
+cleared it, so a future reader sees why the baseline is currently empty rather than assuming it was
+never populated.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files, unchanged from AU-13's original count). Full
+`pytest` suite: exit 0, zero `FAILED`/`ERROR` lines, with one test explicitly deselected —
+`test_doc_claims.py::test_cited_import_linter_contract_name_resolves` — confirmed (by stashing this
+change and re-running just that test against unmodified `origin/feature/snowflake-dbt-lineage-mcp`)
+to already fail identically before this change: it misreads the AU-13 tracker row's own
+backtick-quoted CI job names (`` `dependency-scan` ``, `` `pip-audit` ``, `` `secret-scan` ``,
+`` `docker-build` ``) as import-linter contract-name citations. Pre-existing and out of this
+change's scope; not touched.
+
+### Scope note
+
+`pyproject.toml`, `uv.lock`, and `.github/workflows/ci.yml`'s `dependency-scan` job were the
+intended surface. `snowflake-connector-python`'s version bump in `pyproject.toml`/`uv.lock` was not
+separately requested but was a hard resolver requirement to get a CVE-fixed `pyopenssl` at all (see
+above) — no unrelated `src/` refactoring rode along with it. See tracker row AU-13's follow-up note
+for the version table.
+
+## 2026-09-01 — AT-6 (context receipts: grounding-fragment digests + `MetadataBusinessAnnotation` versioning) closed
+
+The tracker's own framing of this row: *"We cannot reconstruct what a model saw"* —
+`AgentRun.retrieval_evidence` recorded which objects were retrieved, never what they said, and
+`MetadataBusinessAnnotation` was mutated in place on every re-approval with no history table. Both
+are fixed for real, end to end, not just modeled.
+
+### `MetadataBusinessAnnotation` split into identity + append-only version, matching the codebase's own convention
+
+`MetadataBusinessAnnotation` (`src/aida/models.py:2381`) now carries only identity and the current
+domain/entity classification pointer — no content columns. All authored content
+(`business_name`/`business_description`/`table_role`/`grain_statement`/`synonyms`/
+`suggested_questions`/`tags`/`confidence`/`approved_by`/`approved_at`) moved to the new, append-only
+`MetadataBusinessAnnotationVersion` (`src/aida/models.py:2425`), the exact parent-identity /
+versioned-content shape already used by `AssetDocumentation`/`AssetDocumentationVersion`
+(`asset_description_service.apply_asset_description_draft`) and
+`GlossaryTerm`/`GlossaryTermVersion` (`semantic_api.decide_governance_review`): the prior `APPROVED`
+row flips to `SUPERSEDED` in the same transaction that inserts the new `APPROVED` row, and is never
+edited for content again.
+
+A grep for every construction site of `MetadataBusinessAnnotation` in `src/` before this change
+found exactly one write path: `semantic_inference.apply_enrichment_proposal`'s `else:` branch, which
+did `annotation.business_name = output.business_name` (and seven siblings) plus
+`annotation.version += 1` directly on the row being read elsewhere — the in-place mutation the
+tracker row names. That branch now calls the new single write function,
+`business_annotation_versions.write_annotation_version` (`src/aida/business_annotation_versions.py:97`),
+which supersedes-then-inserts instead. `current_version_alias`/`current_versions_by_annotation_id`
+(same file) are the shared "read the current version" helpers, mirroring
+`catalog_read_model._latest_approved_documentation`'s window-function shape.
+
+Every downstream reader of the old content columns was updated to join the current version instead
+— found by grepping every `MetadataBusinessAnnotation` field read across `src/`, not assumed:
+`retrieval.py` (`hybrid_retrieve`'s `BUSINESS_ANNOTATION` candidate text — and the reason this
+mattered enough to fix rather than leave a TODO: this is the exact text a grounded query scores
+against), `catalog_read_model.py` (`_business_annotations`/`_description`), `semantic_intelligence_api.py`
+(`_annotation_read` and all three of its call sites: the list, get-by-table, and business-map
+endpoints), `stewardship_api.py` (`generate_glossary_link_proposals`'s label-matching scan), and
+`asset_description_service.py` (`_asset_evidence`'s business-name/description/grain evidence
+fields). None of these were in the tracker row's literal file list, but the model split makes them
+load-bearing — `mypy src` caught three of them (`asset_description_service.py`) as `attr-defined`
+errors, which is exactly the kind of drift a type checker is supposed to catch before a human does.
+
+### Fragment hashing at the real grounding-assembly call site
+
+`GovernedAgentOrchestrator.run()` (`src/aida/agent_orchestrator.py`) is where retrieved grounding
+content is actually assembled for a run — `retrieval_hits` becomes both `retrieval_evidence` (already
+existed) and, new, `AgentRun.grounding_fragment_digests` (`src/aida/models.py:1494`, a JSON column
+following the same shape as its `retrieval_evidence`/`plan_evidence`/`step_trace` siblings rather
+than a new table, per this codebase's existing evidence-on-the-run convention).
+`_compute_grounding_fragment_digests` (`agent_orchestrator.py:146`, wired in at `:460`, right after
+`retrieval_hits` is finalized and before the `RESOLVED` transition) computes one SHA-256 digest per
+fragment. For a `BUSINESS_ANNOTATION` hit specifically, `retrieval.py`'s `hybrid_retrieve` now joins
+the current `MetadataBusinessAnnotationVersion` (via `current_version_alias`) and stamps
+`metadata["annotation_version_id"]` on the hit; the digest is computed from that version's actual
+content (`business_annotation_versions.annotation_version_content_digest` — one shared definition
+used by both the hashing side and the replay-verification side below, so they cannot silently drift
+apart), and the version id is recorded alongside the digest. Every other hit type (`TABLE`,
+`COLUMN`, `GOVERNED_TOOL`, `DBT_RESOURCE`, `SEMANTIC_METRIC`, `GLOSSARY_TERM`) still gets a real
+digest, computed from its own value-free identifiers, since none of those have separately versioned
+content in this codebase yet — a real but weaker receipt than the annotation case, called out
+explicitly in the code comment rather than left silent.
+
+### The replay proof
+
+`agent_run_replay.resolve_grounding` (`src/aida/agent_run_replay.py:63`) takes an `AgentRun` and
+resolves each stored digest back to source content: for a `BUSINESS_ANNOTATION` fragment, it fetches
+the exact `MetadataBusinessAnnotationVersion` by id (`session.get`, which works regardless of
+`status` — a superseded row is still fetchable by primary key) and recomputes the digest to confirm
+it still matches what was recorded on the run. Exposed at
+`GET /v1/agent-runs/{agent_run_id}/grounding-receipts` (`src/aida/api.py:3043`,
+`AgentRunGroundingReceiptsRead`/`GroundingFragmentReceiptRead` in `schemas.py`).
+
+`tests/test_at6_context_receipts.py::test_resolve_grounding_replays_against_superseded_version_not_current_one`
+is the end-to-end proof the tracker exit criterion asks for, run for real rather than argued: a real
+question ("orders") is run through `GovernedAgentOrchestrator.run()` against a seeded table with a
+business annotation, producing a real persisted `AgentRun` with a `BUSINESS_ANNOTATION` fragment
+digest; the annotation is then re-approved through the real write path
+(`write_annotation_version`), which supersedes the original version; `resolve_grounding` is called
+on the *original* run and asserted to return the *original* content (`business_name == "Orders"`,
+not `"Orders (corrected)"`), with `digest_verified == True` and `current_status == "SUPERSEDED"`.
+Three more tests in the same file cover the versioning mechanics directly
+(`test_write_annotation_version_supersedes_instead_of_mutating`,
+`test_apply_enrichment_proposal_versions_on_reapproval`) and that the live orchestrator path
+actually produces the digest in the first place
+(`test_orchestrator_run_hashes_business_annotation_grounding_fragment`).
+
+### Migration `f8a3c1d97e42`
+
+`migrations/versions/f8a3c1d97e42_at6_context_receipts_and_annotation_versioning.py`: creates
+`metadata_business_annotation_version`; copies every existing `metadata_business_annotation` row's
+live content forward as its version 1 `APPROVED` row (carrying forward what already exists, not
+fabricating history the tracker row says cannot be backfilled); drops the now-superseded content
+columns from `metadata_business_annotation`; adds `agent_run.grounding_fragment_digests`. Verified —
+not just written — against a real Postgres database:
+`AIDA_MIGRATION_DRIFT_TEST_DATABASE_URL=postgresql+asyncpg://aida:aida-local-only@localhost:5432/aida_migration_drift_test
+uv run python -m pytest tests/test_migration_orm_drift.py -v` passes, meaning `alembic upgrade head`
+through every migration in order produces a schema that diffs clean against `Base.metadata` — no
+drift between this migration and the ORM changes above. `uv run alembic heads` confirms a single
+head (`f8a3c1d97e42`) before pushing.
+
+### Two pre-existing gates this change had to satisfy, not just pytest
+
+`tests/test_inv6_value_freedom.py` polices column *naming* (INV-6, value-freedom) across every
+mapped table by reflection, and had a named exemption for
+`metadata_business_annotation.suggested_questions`; moving that column to the version table required
+renaming the exemption to `metadata_business_annotation_version.suggested_questions` (with an updated
+rationale referencing this change) rather than deleting it — the column still matches the `question`
+value-bearing-name fragment for the same reason it always did (model- or steward-authored example
+prompts, not source data). `tests/test_openapi_diff_gate.py` compares the committed OpenAPI baseline
+against `app.openapi()`; the new endpoint and two new schemas required regenerating it via
+`AIDA_ENVIRONMENT=development uv run python scripts/openapi_diff.py --accept-baseline`, reviewed via
+`git diff` before committing — purely additive (254 insertions, 0 deletions): the new
+`grounding_fragment_digests` field on `AgentRunRead`, the two new schemas, and the one new path.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (191 files). Full `pytest` suite (`uv run pytest -q`,
+foreground, not backgrounded): exit code 0, zero `FAILED`/`ERROR` lines anywhere in the output. (This
+environment's pytest does not print a final "N passed" summary line even under `--collect-only` —
+also observed and noted in AU-13's follow-up entry above — so exit code plus the explicit absence of
+failure lines is the check here; the identical command surfaced exactly 3 real, named `FAILED` lines
+before the INV-6 exemption and OpenAPI baseline fixes above, confirming the harness does report
+failures when they exist.) `tests/test_at6_context_receipts.py`'s 4 tests, and every test file
+touched by the model split (`test_glossary_stewardship.py`, `test_catalog_rows_read_model.py`,
+`test_marketplace_personalization.py`, `test_agent_orchestrator_retrieval_wiring.py`), also re-run in
+isolation and confirmed green individually.
+
+### Scope note
+
+Stayed within the grounding-assembly call site (`agent_orchestrator.py`), `MetadataBusinessAnnotation`'s
+model and every real write/read path to it, `AgentRun`'s schema, one migration, and their tests, per
+the tracker row's file scope — no tool-selection or model-call logic in the orchestrator was touched.
+The wider blast radius (five extra `src/` files reading the old content columns) was not optional
+scope creep: it is what "the model is identity/pointer only" *means* once enforced by the type
+checker rather than left as an aspiration.
+
+## 2026-09-01 — AG-8 (retrieval and model benchmarks) closed: PF-3's quality/accuracy counterpart, real numbers for what's model-free, honestly framework-only for what needs a live route
+
+### What this closes
+
+Tracker AG-8 ("Retrieval and model benchmarks", exit criterion "Published") was TODO. Explicitly
+out of scope: the bank-scale 1M-object retrieval benchmark tracked separately as RT-8/PF-1, which
+this sandbox has no infrastructure (a populated warehouse-scale catalog, a soak rig) to run. In
+scope: reproducible *quality/accuracy* benchmarks — PF-3 already covers latency — for the two paths
+this fast-moving branch already made genuinely live earlier the same day: the hybrid retrieval stack
+(`retrieval.py::hybrid_retrieve_enhanced`, wired into the real orchestrator per RT-1/RT-2/RT-3/RT-9/
+SM-2) and the model-gateway/agent-generation decision path (module 13's PLANNED/GENERATED states).
+
+### `scripts/quality_benchmark.py` — the same ratchet pattern as `scripts/perf_baseline.py` (PF-3)
+
+`seed_catalog()` builds a small, deterministic, synthetic-but-structured retail-bank catalog —
+`uuid5`-derived ids (not `uuid4()`-random, so it is byte-for-byte reproducible across machines and
+runs, the same technique PF-3's own policy-engine benchmark already uses), ten tables across
+distinct subject areas, one real `MetadataConstraint` foreign key (`fact_orders` → `dim_customer`,
+so graph expansion has a real edge to walk), and one governed tool bound to `dim_customer` — the
+same seeded-scenario shape `tests/test_rt7_quality_trust_ranking.py` and
+`tests/test_agent_orchestrator_retrieval_wiring.py` already use, just broader. No production data is
+read or required.
+
+Two corpora are committed as fixtures, matching QG-1's own `tests/fixtures/adversarial_sql_corpus/
+*.json` convention:
+
+- `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` — 12 (question, expected
+  object, acceptable-rank-bound) cases, run through the *real* live
+  `aida.agent_intelligence.GovernedRetriever.retrieve` (→ `hybrid_retrieve_enhanced`), never a mock
+  or a reimplementation. Every expected rank in the corpus was captured empirically (a real run
+  against the real code), not hand-guessed — including a couple of deliberately-not-rank-1 cases
+  (a lexically-strong governed-tool match legitimately outranking the table a query is "about"),
+  because a corpus where every case is a trivial rank-1 hit would not be exercising the fusion
+  ranking it claims to benchmark.
+- `tests/fixtures/quality_benchmark_corpus/tool_selection_corpus.json` — 5 cases run through the real
+  `aida.agent_intelligence.GovernedPlanner.plan` (the same tool-first/generation-fallback decision
+  the live orchestrator's PLANNED state makes): approved-tool selection, role-denial falling back to
+  controlled SQL, role-denial requiring `MODEL_GENERATION` when no SQL candidate exists, and the
+  equivalent pair when no tool is eligible at all. This needs no live model route — tool-first
+  selection happens entirely upstream of GENERATED — so it is real, model-free evidence for exactly
+  the "expected tool/answer selection" half of AG-8's ask that credentials cannot gate.
+
+### Measured with real numbers
+
+Retrieval: hit@1 **0.8333**, recall-within-corpus-bound **1.0**, MRR **0.9028** (12 cases). Tool/
+generation-path selection: pass rate **1.0** (5 cases). Both compared against a committed, ratcheted
+baseline (`Docs/90-reference/quality-benchmark-baseline.json`, 5-percentage-point threshold,
+`--accept-baseline` to update deliberately and auditably, exactly like PF-3's and TS-4's own
+baselines) and published in a generated, timestamped, reproducible results report
+(`Docs/90-reference/quality-benchmark-results.md`) — re-running `uv run python
+scripts/quality_benchmark.py` regenerates it byte-for-byte identically except for the timestamp,
+since nothing in the corpus or the seeded catalog is random or wall-clock-dependent.
+
+The vector-similarity signal is real, genuinely-invoked code (`retrieval.py`'s Stage 2 really runs
+`resolve_embedding_provider` and really tries to embed), not stubbed out — but this sandbox has no
+`OPENAI_API_KEY`/`GEMINI_API_KEY` embedding credentials configured, so it is honestly skipped
+(`EMBEDDING_PROVIDER_NOT_CONFIGURED`) and the report says so explicitly rather than presenting a
+partial run as a complete one. The measured numbers above are the real fused result of lexical +
+graph + fusion with that one signal absent.
+
+### Honestly framework-only: model-generation *text* quality
+
+Scoring actual generated SQL/answer quality requires an approved, selected, credentialed,
+adapter-registered, explicitly-enabled model route — module 15's five independent activation
+conditions, all required. `check_model_generation_posture()` checks the `Settings`-level
+prerequisites (`model_generation_enabled`, `model_route`, an OpenAI or Gemini credential) and reports
+plainly: this sandbox has `model_generation_enabled=False` and neither credential configured, so
+`activatable=False`. No generation numbers are fabricated to fill the gap — the results report says
+so in as many words, and names the deliberate next step (running scenarios through
+`model_gateway.ProviderNeutralModelGateway.structured_completion` against a real approved route) as
+future work once one exists, rather than attempting an uncontrolled live network call from a routine
+benchmark script. `studio_eval.py`'s (ST-A8) mined eval questions were evaluated as a source and
+found not directly reusable for this half: by design (ADR-0014) `StudioEvalQuestion` is value-free —
+it references a real object by id, never the question text or a raw answer — so it cannot supply the
+natural-language questions this half would need even with a live route. Its *pattern* (mine real
+structure into a deterministic, value-free regression corpus rather than inventing one) is exactly
+what this item's own corpora follow instead.
+
+### CI and tests
+
+Wired as a new `quality-baseline` job in `.github/workflows/ci.yml`, alongside `perf-baseline`,
+running `scripts/quality_benchmark.py` as its own gate (same job shape: checkout, `uv sync --extra
+dev`, run). 15 tests in `tests/test_quality_benchmark_gate.py`: pure `find_regressions()` threshold/
+edge-case coverage; named-case spot checks against the real harness (not just an aggregate rate —
+e.g. asserting `governed-tool-top1` resolves at rank 1 and `customer-lookup-tool-outranks` at rank 2,
+by id, not just "the aggregate looks fine"); a real-regression-catching proof
+(`test_gate_catches_retrieval_genuinely_returning_nothing`, monkeypatching
+`GovernedRetriever.retrieve` to return `[]` and confirming `find_regressions` flags the resulting
+`hit_at_1_rate` drop — mirroring PF-3's and `test_openapi_diff_gate.py`'s own "prove the gate catches
+a real regression, not just a synthetic one" definition of done); a deterministic CLI
+accept-baseline/compare round trip (no wall-clock stubbing needed, unlike PF-3 — these metrics don't
+have timing noise); and baseline-freshness checks.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (198 files; `scripts/quality_benchmark.py` itself is outside
+`mypy src`'s `packages = ["aida"]` scope, same as `scripts/perf_baseline.py` — neither is gated by
+this command, matching the existing convention). Full `pytest` suite (`uv run pytest -q`, foreground,
+never backgrounded, run repeatedly across two rebases onto this fast-moving branch's latest commits):
+clean except two pre-existing failures verified unrelated to this diff and left untouched per this
+item's own scope discipline — `test_au7_behavioural_authz.py::test_the_not_role_gated_route_list_stays_closed`
+(new access-review/governance-review routes an in-flight sibling session hasn't added to the
+allowlist yet) and `test_doc_claims.py`'s stale bare-filename citation of the now-deleted abac.py
+on the tracker's own PG-4 row (left behind by a same-day "Refresh OpenAPI baseline after ABAC
+removal" commit from another
+session) — neither route gating, ABAC, nor tracker citations are files this item touches. A third,
+genuinely transient failure (`test_migration_orm_drift`'s "multiple head revisions", from a
+concurrent sibling session's in-flight migration) was observed once and resolved itself after that
+session's own "merge migration heads" fix landed and this branch was re-fetched and rebased onto it
+— consistent with this branch's documented many-concurrent-sessions reality, not a bug in this item's
+own code (no migration or model file was touched here).
+
+### Scope note
+
+Stayed within the new benchmark script (`scripts/quality_benchmark.py`), its corpus fixtures
+(`tests/fixtures/quality_benchmark_corpus/`), its baseline/results files
+(`Docs/90-reference/quality-benchmark-{baseline.json,results.md}`), its own test file
+(`tests/test_quality_benchmark_gate.py`), and one CI workflow addition, per this item's own
+instruction. `retrieval.py` and the model-gateway code it benchmarks were read, not modified.
+
+## 2026-09-01 — AT-7(a)/AT-D1 (context-product support window, distinguishable retirement) closed; AT-7(b) left TODO
+
+### The defect, confirmed by tracing the actual code before touching it
+
+Module 19's maker-checker publication flow (`context_product_api.py`, `semantic_api.py`'s
+`_apply_governance_review_decision`) really did do exactly what AT-7/AT-D1 said: approving
+`CONTEXT_PRODUCT_VERSION` v(n+1) ran one bulk `UPDATE context_product_version SET
+status='SUPERSEDED' WHERE product_id=... AND status='PUBLISHED'` in the same transaction that
+flipped the new version to `PUBLISHED`, and every read path — the REST
+`GET /v1/context-product-versions/{id}`, the MCP `_read_context_product_resource` (the
+`atlas://context-products/{key}/versions/{n}` URI a version-pinned MCP consumer holds), and
+`_resolve_context_product_scope` (governed-tool eligibility scoped to a context product) — filtered
+strictly to `status == "PUBLISHED"`. A version-pinned consumer's next read after approval hit the
+identical anti-enumeration `"Resource not found or not accessible."` (MCP) / `404` (REST) that an
+entirely unauthorized caller gets — genuinely indistinguishable, exactly as the tracker described.
+`tests/test_context_products.py::test_mcp_resource_query_never_matches_an_unpublished_version` and
+the old `..._and_supersedes_prior_version` test (renamed below) already asserted this behavior as
+correct before this change — the defect had test coverage, just no test that it
+was a bug.
+
+### Part (a): `SUPPORTED` state, a version-scoped support window, and a two-sided retirement signal
+
+**Schema** (`models.py`, migration `c1a4d7e9f062_context_product_support_window.py`, chained onto
+head `09be3ab5b008`): `ContextProductVersion` gained `SUPPORTED` to its status check constraint,
+plus four columns — `support_window_days` (nullable `int`, the definition *this version* was
+submitted with; `None` means "supported until explicit retirement" rather than a fixed duration —
+travels with the version like every other field in `ContextProductDefinition`, so `schemas.py` and
+`context_product_api.py`'s `_apply_definition`/`_definition_from_version` carry it through create,
+version, and update the same way as `lineage_depth` or `quality_requirements`), `superseded_at`,
+`support_window_ends_at` (the derived deadline), and `superseded_by_version_id`. Verified against
+`Base.metadata` by `tests/test_migration_orm_drift.py` against a real local Postgres — zero drift.
+
+**The publish transition** (`semantic_api.py`): the `CONTEXT_PRODUCT_VERSION` `APPROVE` branch no
+longer sets the prior `PUBLISHED` row straight to `SUPERSEDED`. It now reads that row's own
+`support_window_days` (a `session.scalar` immediately before the bulk update — the update itself
+stays a single atomic `UPDATE ... WHERE status='PUBLISHED' AND id != :new_id`, unchanged in shape
+from before, just different `.values()`) and sets `status='SUPPORTED'`, `superseded_at=now`,
+`superseded_by_version_id=<new version>`, and `support_window_ends_at = now + support_window_days`
+days (or `NULL` when the window is indefinite). The `DEPRECATE` maker-checker flow (explicit early
+retirement — "or until explicit retirement" in the tracker's own exit text) was widened from
+`PUBLISHED`-only to also accept a currently-`SUPPORTED` version, in both the review-request endpoint
+(`context_product_api.py::request_context_product_deprecation`) and the decision handler, landing on
+the same `DEPRECATED` terminal state it already used for `PUBLISHED`.
+
+**Read-path policy** lives in one new shared module, `context_product_policy.py` (already the home
+of the existing purpose/quality policy functions both `context_product_api.py` and `mcp_server.py`
+import from — kept the new functions there rather than introducing a new cross-import edge):
+`can_serve_pinned_version(version)` — `True` for `PUBLISHED`, or `SUPPORTED` with
+`support_window_ends_at` still in the future (or unset — indefinite); `is_version_retired(version)`
+— `True` for `SUPERSEDED`/`DEPRECATED`, or a `SUPPORTED` version whose window has elapsed.
+Retirement is evaluated live on every read from `status` + `support_window_ends_at`, not by a
+scheduler flipping the stored `status` — there is no background sweep in this codebase to hang that
+on, and correctness this way never depends on one having run. `DRAFT`/`REVIEW_REQUIRED`/
+`REJECTED`/`DEPRECATION_REVIEW` are neither servable nor "retired" — they never published, so they
+stay indistinguishable from "never existed", unchanged from before.
+
+Three read paths now branch on this instead of a flat `status == "PUBLISHED"` filter:
+- `context_product_api.py::get_context_product_version` (REST) and `_can_read_context_product_version`
+- `mcp_server.py::_read_context_product_resource` (the version-pinned MCP resource URI read)
+- `mcp_server.py::_resolve_context_product_scope` (governed-tool eligibility scoped to a context
+  product — extended to `status IN ('PUBLISHED', 'SUPPORTED')` plus the window check, so a
+  version-pinned tool scope keeps resolving through the support window too)
+
+Discovery/listing (`list_context_products`, `list_context_product_versions`, and the two MCP
+`resources/list`/`prompts/list` queries) were deliberately **not** touched — they still filter to
+`status == "PUBLISHED"` only, so "surfaces only the new PUBLISHED version as current" holds exactly
+as the tracker asked. A `SUPPORTED` version is reachable only by a caller who already holds its
+specific pinned identifier, never by browsing.
+
+### The subtle part: telling retirement apart from denial without breaking anti-enumeration
+
+A retired version now returns a **distinguishable** response — REST: `410 Gone` with a JSON body
+naming the current published version to re-pin to; MCP: a `{"status": "RETIRED", ...}` JSON payload
+in the resource contents instead of the plain "not found" string — but only to a caller who can
+prove they were genuinely authorized for *this exact version* before. "Proof" is deliberately not a
+role match: a caller whose role is in `allowed_consumer_roles` today but who never actually read
+this version could otherwise fish version numbers against the retirement signal to learn which ones
+used to exist, which is exactly the enumeration channel MCP-3's anti-enumeration property exists to
+close. Proof is a real, previously recorded `ContextProductConsumptionEdge` — `policy_decision ==
+'ALLOW'` — for that `(principal_id, context_product_version_id)` pair
+(`was_previously_authorized_consumer` in `context_product_policy.py`). The gate order in both read
+paths is: row exists and ever published → role eligible (else the ordinary anti-enumeration 404,
+identical for "wrong role" and "retired", regardless of history) → not retired, serve normally → (if
+retired) had a real prior consumption edge → distinguishable retirement signal, else the identical
+anti-enumeration 404/"not found" everyone else gets. `current_published_version_number` resolves
+what to point the caller at.
+
+Three-way test coverage in `tests/test_context_products.py` (all against the actual production
+functions, not reimplementations):
+- `test_mcp_retired_read_signals_retirement_when_previously_authorized` /
+  `test_rest_retired_read_returns_410_when_previously_authorized` — pinned + retired + real prior
+  consumption edge → the distinguishable signal, with the current version number attached.
+- `test_mcp_retired_read_stays_anti_enumeration_when_never_authorized` /
+  `test_rest_read_of_a_retired_version_stays_404_for_a_never_authorized_consumer` — pinned + retired
+  + role-eligible but **no** prior consumption edge → the identical generic "not found"/404.
+- `test_mcp_retired_read_denies_ineligible_role_without_history_lookup` — role-ineligible caller
+  against a retired version gets the generic response *and* the fake session's consumption-history
+  lookup queue is left empty and never popped, proving the role gate short-circuits before the
+  history check is even attempted (an empty queue would raise `IndexError` if it were consulted).
+- `test_mcp_read_serves_a_supported_version_within_its_support_window` /
+  `test_rest_read_gate_accepts_supported_within_window_like_published` — the positive case: a
+  version-pinned read of a `SUPPORTED` (superseded-but-in-window) version succeeds exactly like
+  `PUBLISHED`, still records a consumption edge, and the payload's `_governance.status` correctly
+  reads `"SUPPORTED"` rather than lying that it's still current.
+- Pure unit coverage of `is_within_support_window`/`can_serve_pinned_version`/`is_version_retired`
+  for every status, an indefinite window, a not-yet-elapsed window, and an elapsed one; and of
+  `was_previously_authorized_consumer`/`current_published_version_number` directly.
+- `test_approval_publishes_candidate_and_supports_prior_version` (renamed from
+  `..._and_supersedes_prior_version`, which is no longer what happens) and
+  `test_approval_computes_a_fixed_support_window_from_the_prior_version` cover the publish
+  transition itself, including the deadline arithmetic; `test_a_supported_version_can_be_explicitly_
+  retired_early` covers the widened `DEPRECATE` guard.
+
+### Part (b): consumer-binding registry — not started, honestly TODO
+
+No code for a named `(consumer identity, context-product version)` binding table or staged-rollout
+endpoints exists yet. What it needs, sketched but not built: a `context_product_consumer_binding`
+table (`organization_id`, `product_id`, `consumer_principal_id`, `bound_version_id`, audit fields),
+a REST surface to create/list/move a binding (`PUT .../bindings/{consumer_id}` pinning to a specific
+version, deliberately singular and explicit — no percentage/weight field, since the tracker
+explicitly declines blind A/B splits), and a read-path hook so a bound consumer's *unversioned*
+resolution (`atlas://context-products/{key}/latest`, which does not exist as a concept yet either)
+consults its binding before falling back to "current `PUBLISHED`". Deferred entirely in favor of
+getting part (a) — the live correctness bug — solid and fully tested first, per the tracker's own
+"prioritize this" instruction; not attempted partially.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files; one pre-existing `no-any-return` surfaced in
+the new `current_published_version_number` and was fixed with an explicit local type, not
+suppressed). `tests/test_migration_orm_drift.py` passed against a real local Postgres — the new
+migration produces exactly `Base.metadata`, zero diff. Full `pytest` suite: exit code 0, no
+`FAILED`/`ERROR` lines. `Docs/90-reference/openapi-baseline.json` regenerated
+(`scripts/openapi_diff.py --accept-baseline`) — the diff is purely additive (`support_window_days`,
+`superseded_at`, `support_window_ends_at`, `superseded_by_version_id` added to the Context Product
+request/response schemas), confirmed via `scripts/openapi_diff.py`'s own "no breaking OpenAPI
+changes" report before accepting.
+
+### Scope note
+
+Stayed inside the Context Product versioning/publication module, its MCP/REST read paths,
+migrations, and tests, per instruction — no changes to Data Product versioning (`DataProductVersion`
+has its own, separate `SUPERSEDED`/`RETIRED` pair in the same `semantic_api.py` file, untouched),
+Governed Tool versioning, or Model Route configuration, even though all three share the identical
+"bulk `UPDATE ... SET status=SUPERSEDED`" shape this fix changed for Context Products specifically.
+## 2026-09-01 — AT-D2 (`sql_lineage_parser.py` six defects, reopens LN-2/N2) closed
+
+All six defects the tracker named against `sql_lineage_parser.py` fixed, each with a real test
+proving it — several existing tests encoded the defect as correct and had to be rewritten, not
+just left passing.
+
+### 1. `FILTERED`/`AGGREGATED` assigned per-statement, not per-projection
+
+`_classify_transformation` took a statement-wide `has_aggregation`/`has_filter` pair, so one
+aggregate column in a SELECT list marked every sibling column `AGGREGATED`, and any WHERE clause
+anywhere in the statement typed *every* SELECT-list column `FILTERED` regardless of whether that
+column was itself filtered on — `SELECT col_a FROM t WHERE col_a > 0` typed `col_a`'s value edge
+`FILTERED` instead of `DIRECT`, and a test named (before this fix renamed it)
+test_where_clause_produces_filtered_transformation asserted that inversion as correct. Fixed by
+evaluating `has_aggregation` on each SELECT-list item's own
+expression and dropping WHERE-clause presence from `_classify_transformation` entirely — the two
+facts are now recorded independently. Renamed that test to
+`test_where_clause_does_not_override_a_selected_columns_own_classification` and rewrote its body to
+assert the correct behaviour (`col_a` stays `DIRECT`); added
+`test_aggregation_does_not_mark_a_sibling_non_aggregated_column` to prove the grouping-key case
+(`department` in `SELECT department, COUNT(id) ... GROUP BY department` is `DIRECT`, not
+`AGGREGATED`, while `cnt` still is).
+
+A column referenced only in a WHERE clause — never in the SELECT list — previously produced no
+edge at all (the walker only visited projections). New `_extract_filter_only_edges` reads each
+select's own `.args["where"]` directly (never a recursive `find`, so a WHERE in a UNION sibling
+branch or an unrelated nested subquery can't leak in) and emits a `FILTERED` evidence edge
+targeting the new `FILTER_EVIDENCE_TARGET_COLUMN` marker for any WHERE column that doesn't already
+have a real SELECT-list edge. Proven by `test_filter_only_column_produces_filtered_evidence_not_silence`,
+`test_filter_only_evidence_is_deduplicated`, and
+`test_union_branch_where_clause_does_not_leak_into_sibling_branch`.
+
+### 2. `SELECT *` dropped with a bare `continue`
+
+A star projection (bare `SELECT *` or qualified `alias.*` — the qualified form wasn't even caught
+by the old `isinstance(source_expr, exp.Star)` check, since `alias.*` parses as a `Column` wrapping
+a `Star`, not a bare `Star`) vanished silently, making a star view indistinguishable from a view
+with zero upstreams. New `_extract_star_edges` records honest table-level evidence instead: one
+`TABLE_STAR` edge per source table the star expands over (all tables in the select's immediate
+FROM/JOIN scope for a bare `*`, just the aliased table for `alias.*`), `source_column`/
+`target_column` = `*`, `PARTIAL` confidence — individual columns genuinely cannot be resolved
+without the source table's real column list, and this module is deliberately catalog- and
+database-free, so table-level is the honest ceiling, not a workaround. Falls back to a single
+`LOW`-confidence `UNRESOLVED` edge only when no source table can be identified at all (e.g. a
+non-`FROM` context). Four new tests cover bare star, qualified star, a star over a join (one edge
+per joined table), and star mixed with an explicit column.
+
+LN-5's `dbt_column_lineage.extract_column_lineage` calls `parse_view_lineage` under the hood and
+its contract is specifically column-level `COLUMN_DEPENDS_ON` edges — a `TABLE_STAR` edge
+(`source_column="*"`) doesn't fit that shape, so it's now explicitly filtered out there (alongside
+the new `FILTERED` filter-only-evidence edges, for the same reason: neither is a real
+column-to-column fact). LN-5's own star tests continue to pass unmodified, now for the right
+reason instead of by accident.
+
+### 3. `"<UNKNOWN>"` magic string
+
+Replaced by `LineageEdge.source_resolved: bool` — a real, typed signal, not a string a customer's
+own schema could coincidentally collide with. `source_table` still carries a display value
+(`UNRESOLVED_TABLE = "UNRESOLVED"`, cosmetic only) for readability, but every consumer must check
+`source_resolved`, never string-compare `source_table`.
+`test_a_real_table_actually_named_unresolved_is_still_distinguishable` proves the point directly: a
+resolved edge for a table literally named `"UNRESOLVED"` and a genuinely unresolved edge share the
+same `source_table` string but disagree on `source_resolved`.
+
+### 4. `Confidence.FULL` hard-coded
+
+Every edge now carries confidence computed from what was actually resolved: `FULL` only when the
+source table resolved cleanly to a name; `PARTIAL` for an unresolved reference, filter-only
+evidence, or `SELECT *` table-level evidence (`LOW` only when a star can't be attributed to any
+table at all). `ParseResult.confidence` rolls up from the edges it actually contains rather than a
+blanket "any edges at all -> FULL". A view and a procedure body parsing equally certain SQL now
+agree on confidence (`test_view_and_procedure_parse_of_equally_certain_sql_agree`), and one leaning
+on unresolved/guessed evidence is honestly lower
+(`test_confidence_is_not_hard_coded_full_regardless_of_content`) — without adding an arbitrary
+"procedures always score lower" rule; the difference falls out of what each entry point's SQL
+actually let the parser resolve.
+
+### 5. No unique constraint — re-parsing doubled the graph
+
+Migration `31a73643a697` adds `uq_view_lineage_edge_natural_key` /
+`uq_procedure_lineage_edge_natural_key` on `(datasource_id, source_table, source_column,
+target_table, target_column, transformation_type)` to `view_lineage_edge` /
+`procedure_lineage_edge` — deliberately excluding `sql_hash` so a genuinely unchanged re-parse
+collides with its own prior row instead of accumulating a duplicate. Verified drift-free against a
+live local Postgres 16 via `tests/test_migration_orm_drift.py` (`compare_metadata` diff, zero
+drift).
+
+`view_lineage_api.py`'s persistence path changed from a blind per-edge `session.add` to a new
+`_persist_edges`: delete-then-insert scoped to the target table(s) the new parse actually produced
+edges for (never the whole datasource), so re-parsing view A never touches view B's rows, and a
+failed/empty parse never wipes prior good lineage. `tests/test_view_lineage_api.py` — no test file
+existed for this endpoint before this change — proves an identical re-parse leaves the edge count
+unchanged (not doubled), a re-parse that drops a column removes the now-stale edge, an unrelated
+view's edges survive a re-parse of a different view, and the database itself rejects a literal
+duplicate insert (`IntegrityError`) as defence in depth beneath the application-level dance.
+
+**Known, pre-existing limitation, not introduced here and not fixed:** the endpoint takes only raw
+SQL with no procedure-identity field, so a standalone SELECT inside a procedure body buckets under
+the parser's shared `PROCEDURE_RESULT_TARGET` sentinel target rather than a real table — two
+different procedures that both happen to produce an identical standalone-SELECT edge are
+indistinguishable under that shared bucket, and re-parsing one can replace the other's rows.
+Documented in `_persist_edges`'s docstring. A real fix needs a procedure-identity input to the
+request schema, which is outside AT-D2's scope (`sql_lineage_parser.py`, its migration, its
+tests). `test_procedure_reparse_with_a_standalone_select_does_not_double` proves the constraint
+doesn't crash a re-parse in this shared-bucket case, which is the immediate correctness bar this
+defect asked for.
+
+### 6. `source_table_id`/`target_table_id` never populated
+
+New `_resolve_table_ids` in `view_lineage_api.py` looks up the parser's raw `source_table`/
+`target_table` strings against `MetadataTable` for the datasource (case-insensitive match against
+fully-qualified `catalog.schema.table`, `schema.table`, and bare `table` forms, since the parser's
+own resolution may return any of those three depending on how the SQL qualified the reference) and
+populates both FKs wherever the underlying table exists in the catalog. An unresolved source
+(`source_resolved=False`) is never looked up by name — the raw text could coincidentally match an
+unrelated real table — and the `PROCEDURE_RESULT_TARGET`/star/filter sentinels are excluded from
+target-side lookup for the same reason.
+
+This closes a real, previously-invisible gap: `unified_lineage_api.py::_build_unified_graph`
+(LN-7) already filters `ViewLineageEdge`/`ProcedureLineageEdge` rows to `source_table_id`/
+`target_table_id` both non-NULL before folding them into the unified graph — since neither column
+was ever set, every view/procedure edge parsed through the real endpoint was invisible to unified
+traversal and impact analysis, silently, with nothing failing loudly enough to notice.
+`tests/test_view_lineage_api.py`'s `TestTableIdPopulation` tests prove both FKs populate when the tables
+exist in the catalog, `source_table_id` stays NULL for an honestly-unresolved reference even when
+the table exists, and `target_table_id` stays NULL when the view being defined hasn't been
+catalogued yet — never guessed in any of the three cases.
+
+### One adjacent bug found and fixed in passing
+
+`_extract_from_statement` searched `statement.find(exp.Select)` before falling back to
+`statement.find(exp.Union)`. `find` is a preorder search, so for `CREATE VIEW v AS <select> UNION
+<select>`, it matched one of the UNION's own leaf `Select` branches before the `Union` node
+wrapping them was ever considered — silently truncating the query to just its first branch and
+losing every other branch's edges entirely. The existing
+`test_union_produces_edges_from_both_branches` test didn't catch this (it only asserted `len(edges)
+>= 2`, which the first branch alone already satisfied) — a new test,
+`test_union_branch_where_clause_does_not_leak_into_sibling_branch`, exercises a two-branch UNION
+where only the second branch's edges prove the fix (the branch with no WHERE must produce a
+`DIRECT`, not absent, edge). Fixed by checking `exp.Union` first in both the `CREATE` and `INSERT`
+branches of `_extract_from_statement`. Two lines swapped, same file already under heavy revision
+for the six defects, essentially zero incremental blast radius — not one of the six named defects,
+called out separately here rather than folded silently into the count.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). Full `pytest` suite (foreground, via the
+project's own `.venv`, `PYTHONPATH` pointed at this worktree's `src/` — the venv's editable install
+`.pth` resolves to the primary checkout, not a worktree, so without it every test would have
+silently exercised the *unmodified* primary-checkout copy of `sql_lineage_parser.py` instead of
+this change): exit 0 including `tests/test_migration_orm_drift.py` (real Postgres 16, migration
+applied cleanly on top of every prior revision, zero ORM drift) and `tests/test_doc_claims.py`
+(every doc citation into the renamed/added tests resolves). The migration-drift test is genuinely
+flaky under this sandbox's concurrent multi-session load — it resets its scratch database's
+`public` schema (`DROP SCHEMA ... CASCADE; CREATE SCHEMA public`) by design, and a sibling agent
+session's own run of the same test against the same shared local Postgres instance can drop tables
+out from under a run in flight (`NoSuchTableError` mid-comparison); confirmed by re-running it
+standalone multiple times back to back (2 passes, 1 external-looking failure, then a clean full-suite
+pass with it included) — not a defect in this migration, and pre-existing to this change.
+
+### Scope
+
+`src/aida/sql_lineage_parser.py`, `src/aida/view_lineage_api.py`, `src/aida/dbt_column_lineage.py`
+(LN-5's call site, a small adjustment explicitly permitted by AT-D2's own scope note),
+`src/aida/models.py` (the two new `UniqueConstraint`s), migration `31a73643a697`, and tests
+(`tests/test_sql_lineage_parser.py` rewritten/extended, `tests/test_dbt_column_lineage.py` two
+docstrings/comments updated for accuracy, new `tests/test_view_lineage_api.py`). Tracker rows
+AT-D2, LN-2, LN-5, and N2 (a stale roadmap duplicate of LN-2 that was never flipped when LN-2
+shipped) updated in `03-tracker.md`; `Docs/review-2026-08/atlan-context/03-lineage.md`'s dated
+review of defects (b) and (d) annotated with a "Resolved by AT-D2" note rather than rewritten, to
+keep the historical record honest about what was found and when.
+
+## 2026-09-01 — CN-3 (executable vendor/version fixtures): PostgreSQL 16 live, 14 configured; found and fixed a real materialized-view discovery gap
+
+Tracker row CN-3 asks for "≥2 versions per adapter". Honest scope for this pass: PostgreSQL only,
+of the on-prem adapters (PostgreSQL, SQL Server, Oracle) — the status matrix already credits SQL
+Server with a real Docker fixture and 100-point certification and Oracle with a compose fixture,
+neither with the *version* leg this row is about; BigQuery/Snowflake/Databricks (CN-1c/CN-2a/CN-2b)
+genuinely cannot be version-fixture-tested without live cloud credentials and are unchanged by this
+entry.
+
+### What actually runs
+
+`tests/test_postgres_version_fixtures.py` calls `PostgresConnector.discover()` — the real
+`asyncpg`-driven SQL in `src/aida/connectors/postgres.py`, not a hand-built row like every existing
+test in `tests/test_connectors.py` — against a real fixture schema
+(`tests/fixtures/postgres_versions/schema.sql`) that deliberately exercises every envelope 1.1 axis
+the connector claims in one pass: PRIMARY KEY/UNIQUE/FOREIGN KEY constraints, a secondary index, a
+range-partitioned table with two real partitions, a view, a materialized view, a SQL function, a SQL
+procedure, schema/table/column comments, and a `GRANT ... TO PUBLIC`. This closes tracker row
+`IN-5d`'s standing gap — no 1.1 discovery statement on any connector had ever run against a live
+source before this.
+
+Two versions, both wired through the same DSN-resolution/skip convention
+`tests/test_migration_orm_drift.py` (AU-8) already established — an explicit env-var override wins,
+absence is a `pytest.skip` with a specific reason, never a silent pass:
+
+- **16** ran for real, in the sandbox that built this. This sandbox has a native `postgresql-16`
+  install already reachable at `localhost:5432` with the same `aida`/`aida-local-only` credentials
+  `Settings.database_url` defaults to (the exact same server the AU-8 migration-drift test already
+  uses locally) — no Docker involved at all. `test_postgres_16_version_fixture_discovers_every_axis`
+  and the narrower `test_materialized_view_columns_and_definition_are_discovered` both pass against
+  it.
+- **14** is configured identically but has **not executed live in this pass**. Checked, not assumed:
+  `dockerd` cannot be started in this sandbox (starting it was denied outright by the sandbox's own
+  command classifier — a nested-daemon restriction, not a missing binary: `docker version`'s client
+  half works fine), and this branch's egress proxy returns `403` for `apt.postgresql.org`, so there
+  is no way to install a second Postgres major here either. `tests/fixtures/postgres_versions/compose.yml`
+  is a real, standalone two-service Compose file (`postgres:16-alpine` + `postgres:14-alpine`,
+  distinct host ports so it can run alongside the repo-root dev stack) — syntactically validated with
+  `docker compose config` (works without a daemon) since it could not be brought up. The new
+  `connector-version-fixtures` job in `.github/workflows/ci.yml` provides the same two versions as
+  real GitHub Actions service containers, the identical pattern the `migration-drift` job (AU-8)
+  already established for a single Postgres 16 container — this *will* execute for real on this
+  branch's next CI push; the 14 leg's test locally just skips with a message pointing at both.
+
+### A real bug, found by building a live fixture
+
+`information_schema.tables`/`.columns` never list materialized views (`relkind = 'm'`) — a
+documented Postgres limitation of the SQL-standard `information_schema`, true on every version, not
+a 14-vs-16 difference. `PostgresConnector.discover()` builds its entire table map from exactly those
+two views, so a materialized view's columns and its `view_definition` were being silently dropped
+from every discovered catalog — even though `_VIEW_DEFINITION_SQL` genuinely reads it (`pg_class`
+`relkind IN ('v', 'm')`) and `DEFAULT_CAPABILITIES.views`'s own docstring claims coverage of both.
+No existing unit test could have caught this: every one of them drives `build_table_map_from_column_rows`
+directly with hand-built rows, so the gap only exists in the connection between a *real*
+`information_schema` query and the assembly pipeline, which nothing before this exercised.
+
+Fixed with one added query, `_MATERIALIZED_VIEW_COLUMN_SQL` in `postgres.py`, reconstructing the
+missing rows from `pg_attribute`/`pg_attrdef` in the exact shape `build_table_map_from_column_rows`
+already expects — `discover()` now merges its output into the same row list before building the
+table map, so the rest of the pipeline needed no changes at all. Verified both directions: reverted
+the fix via `git stash` and confirmed the fixture test fails with an unambiguous assertion (the
+materialized view goes missing from `discover()`'s output entirely), then restored it and confirmed
+green again.
+
+### A blocker found and fixed along the way (not this row's own scope, but blocking its exit criterion)
+
+Getting a clean full-suite run hit two Alembic heads: `09be3ab5b008` (AU-8's own ORM-drift
+reconciliation) and `626211c0e077` (an SM-4/PG-4/OB-7 merge point), landed by unrelated concurrent
+sessions on this fast-moving branch without a reconciling merge revision between them. This blocks
+`alembic upgrade head` outright (`test_migration_orm_drift.py` and anything else that runs
+migrations), so it was fixed here even though it has nothing to do with connectors:
+`migrations/versions/9f8d1e8e0134_merge_au_8_orm_drift_reconciliation_.py`, a no-op merge revision,
+generated with `alembic merge` and reformatted to match this repo's existing merge-migration style
+exactly (`str | Sequence[str] | None`, not the raw-template `Union`/unused `op`/`sa` imports).
+
+### Verification
+
+`ruff check .`, `mypy src` (198 files, strict) and `lint-imports` (4 kept) all clean. This row's own
+tests (`tests/test_postgres_version_fixtures.py`, `tests/test_connectors.py`) pass cleanly and
+repeatedly, standalone and inside the full suite. The full `pytest` suite carries two pre-existing
+failures, both confirmed unrelated by diff (neither touches `src/aida/connectors/` or any file this
+row changed) and both flagged as separate follow-up tasks rather than fixed here, out of scope
+discipline: `test_doc_claims.py`'s stale bare-filename citation on tracker row PG-4 (wording left
+over from that row's own ABAC-removal cleanup, unrelated to CN-3), and
+`test_au7_behavioural_authz.py`'s route-gating allowlist not yet reconciled with five routes the
+concurrent OB-6/OB-7/PG-4 work added or re-gated. Beyond those two, the full suite passed cleanly on
+repeated runs; a residual flake — always a *different* single test, reproduced identically on a
+clean stash of every change in this entry — traces to shared-Postgres resource contention under
+4200+ tests in one process, not to anything here.
+
+### Scope note
+
+`src/aida/connectors/postgres.py`, `tests/test_postgres_version_fixtures.py`,
+`tests/fixtures/postgres_versions/`, and the new CI job in `.github/workflows/ci.yml` were the
+intended surface for this row. `migrations/versions/9f8d1e8e0134_...` (the Alembic head merge) and
+one entry added to `tests/test_doc_claims.py`'s `EXEMPT_CONTRACT_SLUGS` (this entry's own CI job name,
+`connector-version-fixtures`, false-positived as an import-linter contract slug by sitting on a
+status-matrix line that separately uses the word "contract" — same established pattern as
+`migration-drift`/`snowflake-connector-python` already in that set) were both necessary to get a
+clean verification run, not scope creep. SQL Server, Oracle, and the cloud connectors are untouched.

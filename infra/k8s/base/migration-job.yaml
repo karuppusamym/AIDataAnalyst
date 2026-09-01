@@ -1,0 +1,70 @@
+# One-shot schema migration, mirroring compose.yaml's `migrate` service
+# (`alembic upgrade head`) so the same image and env run migrations before
+# aida-api pods are expected to serve traffic. Not wired as an automatic
+# pre-install hook here (this is plain manifests, not a Helm chart) --
+# a deployer/CI pipeline runs `kubectl apply -f migration-job.yaml &&
+# kubectl wait --for=condition=complete job/aida-migrate` before rolling
+# out (or bumping) the aida-api Deployment. Re-running against an
+# up-to-date schema is a no-op (alembic is idempotent).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Suffix with a release/commit identifier in real usage (e.g. via
+  # kustomize's nameSuffix or a CI templating step) since Job names/specs
+  # are immutable -- a fixed name here blocks re-running until deleted.
+  name: aida-migrate
+  namespace: aida
+  labels:
+    app.kubernetes.io/name: aida-migrate
+    app.kubernetes.io/part-of: aida-platform
+spec:
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aida-migrate
+        app.kubernetes.io/part-of: aida-platform
+    spec:
+      restartPolicy: Never
+      serviceAccountName: aida-api
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: aida-migrate
+          # Same digest-pinned image as the Deployment -- migrations and
+          # the API they serve must come from the same build.
+          image: "REPLACE_ME_REGISTRY/aida-api@sha256:REPLACE_ME_WITH_REAL_DIGEST"
+          imagePullPolicy: IfNotPresent
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef:
+                name: aida-api-config
+            - secretRef:
+                name: aida-api-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

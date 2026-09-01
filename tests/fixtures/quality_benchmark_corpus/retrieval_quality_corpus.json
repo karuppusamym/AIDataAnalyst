@@ -1,0 +1,90 @@
+{
+  "description": "AG-8 retrieval-quality corpus: (question, expected object) pairs run against the real live retrieval path (aida.agent_intelligence.GovernedRetriever.retrieve -> aida.retrieval.hybrid_retrieve_enhanced) over a small deterministic seeded catalog (scripts/quality_benchmark.py::seed_catalog). Object keys reference the fixed slugs that builder assigns -- never raw production data (ADR-0014). min_rank is the worst acceptable 1-based rank of the expected object among returned hits for this corpus item to count as a hit at all (used for the recall@5 metric); every item also feeds hit@1 and MRR regardless of min_rank.",
+  "catalog": "core-warehouse",
+  "cases": [
+    {
+      "id": "orders-lexical-top1",
+      "question": "show me customer orders",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_orders",
+      "min_rank": 1
+    },
+    {
+      "id": "customer-lookup-tool-outranks",
+      "question": "who is the customer",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_customer",
+      "min_rank": 5
+    },
+    {
+      "id": "product-catalog-top1",
+      "question": "product catalog details",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_product",
+      "min_rank": 1
+    },
+    {
+      "id": "payments-top1",
+      "question": "payment transactions history",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_payments",
+      "min_rank": 1
+    },
+    {
+      "id": "branch-top1",
+      "question": "bank branch information",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_branch",
+      "min_rank": 1
+    },
+    {
+      "id": "loan-application-top1",
+      "question": "loan application status",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_loan_applications",
+      "min_rank": 1
+    },
+    {
+      "id": "employee-roster-top1",
+      "question": "employee roster",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_employee",
+      "min_rank": 1
+    },
+    {
+      "id": "account-balance-top1",
+      "question": "account balance snapshot",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_account_balances",
+      "min_rank": 1
+    },
+    {
+      "id": "merchant-top1",
+      "question": "merchant details for card transactions",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_merchant",
+      "min_rank": 1
+    },
+    {
+      "id": "fraud-alerts-top1",
+      "question": "fraud alert events",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "fact_fraud_alerts",
+      "min_rank": 1
+    },
+    {
+      "id": "orders-related-customer-recall",
+      "question": "orders and their related customer information",
+      "expected_object_type": "TABLE",
+      "expected_object_key": "dim_customer",
+      "min_rank": 5
+    },
+    {
+      "id": "governed-tool-top1",
+      "question": "customer account summary",
+      "expected_object_type": "GOVERNED_TOOL",
+      "expected_object_key": "customer-account-summary",
+      "min_rank": 1
+    }
+  ]
+}

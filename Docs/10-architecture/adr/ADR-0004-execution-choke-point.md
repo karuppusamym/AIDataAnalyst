@@ -23,6 +23,10 @@ The gateway requires: identity context, purpose, datasource, workload class, pol
 
 Connector execution methods are **module-private to the gateway**. The boundary is mechanically enforced by an import-linter contract, not by convention.
 
+**Implementation status (2026-08-30).** The contract now exists. It was outstanding as tracker item QG-7 from this ADR's acceptance until 2026-08-30, during which the boundary held in fact but not by construction. The mechanism is a three-way split described in `01-principles-and-invariants.md` (INV-2): the SQL-accepting methods were moved off `Connector` onto a separate `SqlExecutor` type, `aida.connectors.execution_access` is the sole source of one, and the import-linter contract permits only `aida.query_gateway` to import it. The contract was verified to fail when a second importer is introduced, not merely to pass as written.
+
+**Scope correction.** This ADR's decision list above says "profiler SQL" passes through the gateway. It does not, and never has: profiling calls `Connector.profile_table()` with structured arguments and no caller-supplied statement. See INV-2 for the corrected boundary. The distinction matters because the gateway governs *statements*, and a method that cannot carry a statement is not a bypass of it.
+
 ## Consequences
 
 ### Positive
@@ -55,4 +59,4 @@ Connector execution methods are **module-private to the gateway**. The boundary 
 ## Enforcement
 
 - INV-2 in `10-architecture/01-principles-and-invariants.md`
-- Test: `test_no_connector_execution_outside_gateway` (static import-graph analysis)
+- Test: `test_no_connector_execution_outside_gateway` (`tests/test_tier0_invariants.py`; AST scan, paired with the import-linter contract and the type-level guarantee — see `10-architecture/01-principles-and-invariants.md`)

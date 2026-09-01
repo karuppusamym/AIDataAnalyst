@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: aida
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - service.yaml
+  - poddisruptionbudget.yaml
+  - migration-job.yaml
+
+# Deliberately NOT listed here: secret.example.yaml. It is a template for
+# a deployer to populate out-of-band (kubectl create secret, or a secrets
+# operator) -- never applied by this kustomization. See ../README.md.

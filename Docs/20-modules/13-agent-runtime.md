@@ -37,6 +37,28 @@ Every transition is explicit, recorded, and pins the versions in force at that p
 
 **Two ordering properties carry the guarantee.** `SCREENED` precedes retrieval, so hostile input cannot influence what is retrieved or which tool is selected. `VALIDATED` is deterministic and downstream of `GENERATED`, so a model can propose anything but cannot widen what executes.
 
+> **Implementation status (2026-08-31).** All eleven states exist with a real transition table,
+> and the **SCREENED-before-retrieval ordering is verified in the code** — prompt-risk screening
+> runs in `src/aida/agent_orchestrator.py` before the retrieval transition. All eleven states are
+> individually gated and can refuse.
+>
+> **The last five (`gap/02` row `C3`).** `VALIDATED`, `COSTED`, `EXECUTED`, `EXPLAINED` and
+> `COMPLETED` are five separately-gated checkpoints
+> (`GovernedAgentOrchestrator._checkpoint_validated/_costed/_executed/_explained/_completed`),
+> each able to refuse the run independently, called in sequence after
+> `query_gateway.execute()` returns. The underlying work those states name — AST/allowlist
+> validation, the cost ceiling, read-only bounded masked execution — still happens exactly once,
+> inside that one `execute()` call (INV-2 keeps SQL execution to a single choke point, so it
+> cannot be re-run five times); each checkpoint is the orchestrator's own independent
+> re-verification of that work's *result* against policy it holds separately from the gateway,
+> so a defect in the gateway's internal enforcement does not silently pass through as a governed
+> answer. `EXPLAINED` also gained a real deny path that did not exist before: an open CRITICAL
+> quality incident on the answer's own source table now blocks the run via `check_quality_gate`
+> (the same gate TL-3 already uses to block a governed tool before it runs), not merely a
+> warning. Each checkpoint's independent refusal is proven in
+> `tests/test_agent_orchestrator_checkpoints.py`, one test per checkpoint, engineering a failure
+> specific to only that checkpoint with the other four held healthy.
+
 ## 4. Tool-first execution
 
 ```mermaid
