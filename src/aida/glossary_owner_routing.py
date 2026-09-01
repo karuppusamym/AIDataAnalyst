@@ -50,6 +50,15 @@ DEFAULT_ESCALATE_AFTER = timedelta(days=14)
 # second configurable notification rule.
 DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=7)
 
+# GL-6 tier 2: an entry still unaddressed a further week after its first
+# escalation (day 21 overall, continuing the 7/14-day progression above)
+# escalates a second time. Tier 2 does not just repeat the same channel --
+# it always produces an ITSM payload (see `sync_unowned_asset_backlog`
+# below), since the point of a second tier is to reach an operational queue
+# once the first escalation channel has not resolved it, whether or not any
+# notification rule matches at all.
+DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=21)
+
 
 @dataclass(frozen=True, slots=True)
 class TableFacts:
@@ -69,7 +78,14 @@ class TableFacts:
 
 @dataclass(frozen=True, slots=True)
 class BacklogRoutingResult:
-    """What one sync/route/escalate pass over the unowned backlog did."""
+    """What one sync/route/escalate pass over the unowned backlog did.
+
+    ``escalated`` is tier 1 (ROUTED -> ESCALATED, the originally matched
+    channel). ``escalated_tier2`` is a second, later tier (ESCALATED ->
+    ESCALATED_TIER_2) for an entry still unaddressed a further
+    ``escalate_tier2_after`` past its first escalation -- see
+    ``sync_unowned_asset_backlog``.
+    """
 
     created: list[UnownedAssetEscalation] = field(default_factory=list)
     routed: list[UnownedAssetEscalation] = field(default_factory=list)
@@ -307,6 +323,30 @@ def sync_unowned_asset_backlog(
                 )
                 entry.status = "ESCALATED_TIER_2"
                 entry.escalated_tier2_at = now
+                result.escalated_tier2.append(entry)
+                result.itsm_payloads.append(format_itsm_payload(incident))
+
+        if entry.status == "ESCALATED":
+            escalated_at = entry.escalated_at
+            if escalated_at is not None and now - escalated_at >= escalate_tier2_after:
+                incident = _incident_for(
+                    facts,
+                    first_detected_unowned_at=entry.first_detected_unowned_at,
+                    now=now,
+                    escalate_after=escalate_after,
+                    candidate_owner=entry.candidate_owner,
+                )
+                # Re-offer the incident to the same rules -- days, not the
+                # 60-minute dedup window, will have passed, so a rule can
+                # genuinely notify again. The outcome does not gate tier 2's
+                # own guarantee below: unlike tier 1 (which only produces an
+                # ITSM payload when a matched rule's own channel is ITSM),
+                # tier 2 always does, since its point is to reach an
+                # operational queue once the first channel has not resolved
+                # it -- whether or not any rule matches at all.
+                route_notification(incident, engine_rules, seen_dedup_keys=seen_dedup_keys)
+                entry.status = "ESCALATED_TIER_2"
+                entry.escalated_at = now
                 result.escalated_tier2.append(entry)
                 result.itsm_payloads.append(format_itsm_payload(incident))
 

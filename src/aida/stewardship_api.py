@@ -1662,6 +1662,13 @@ async def route_unowned_asset_backlog(
     ``{"domain": "unowned_asset_backlog"}`` in its conditions) is what makes
     routing actually dispatch; without one, tables are still tracked and
     escalation-aged but nothing is routed anywhere.
+
+    Escalation is two-tier (GL-6): ``ROUTED`` -> ``ESCALATED`` against the
+    originally matched rule's own channel, then, if still unaddressed a
+    further ``DEFAULT_ESCALATE_TIER2_AFTER`` later, ``ESCALATED`` ->
+    ``ESCALATED_TIER_2`` -- which always produces an ITSM payload, whether or
+    not a rule matches, since tier 2 exists to reach an operational queue
+    once the first channel has not resolved it.
     """
     enforce_organization(context, organization_id)
     await _validate_coverage_scope(
@@ -1804,7 +1811,12 @@ async def route_unowned_asset_backlog(
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
         ],
         escalated_tier2=[
+<<<<<<< Updated upstream
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated_tier2
+=======
+            UnownedAssetEscalationRead.model_validate(entry)
+            for entry in result.escalated_tier2
+>>>>>>> Stashed changes
         ],
         resolved_count=len(result.resolved),
     )
