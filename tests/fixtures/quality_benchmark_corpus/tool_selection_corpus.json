@@ -1,0 +1,46 @@
+{
+  "description": "AG-8 tool/generation-path selection corpus: each case runs the real live path (aida.agent_intelligence.GovernedRetriever.retrieve then aida.agent_intelligence.GovernedPlanner.plan -- the same objects the live orchestrator, agent_orchestrator.GovernedAgentOrchestrator, calls) against the seeded catalog and checks the resulting AgentPlan.strategy. This is the deterministic half of 'model/generation quality': whether the governed planner picks the approved tool, falls through to (simulated) controlled SQL, or requires model generation -- none of which needs a live model route to measure honestly, because tool-first selection happens entirely inside the deterministic planner (module 13's PLANNED state), before GENERATED. True generated-text quality is a separate, model-route-gated section of scripts/quality_benchmark.py (see its ModelGenerationPosture reporting) and is NOT covered by this corpus.",
+  "catalog": "core-warehouse",
+  "cases": [
+    {
+      "id": "approved-tool-analyst-selected",
+      "question": "customer account summary",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_key": "customer-account-summary"
+    },
+    {
+      "id": "approved-tool-role-denied-falls-to-development-sql",
+      "question": "customer account summary",
+      "roles": ["Viewer"],
+      "candidate_sql_available": true,
+      "expected_strategy": "DEVELOPMENT_SQL",
+      "expected_tool_key": null
+    },
+    {
+      "id": "approved-tool-role-denied-requires-generation",
+      "question": "customer account summary",
+      "roles": ["Viewer"],
+      "candidate_sql_available": false,
+      "expected_strategy": "MODEL_GENERATION",
+      "expected_tool_key": null
+    },
+    {
+      "id": "no-eligible-tool-falls-to-development-sql",
+      "question": "fraud alert events",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "expected_strategy": "DEVELOPMENT_SQL",
+      "expected_tool_key": null
+    },
+    {
+      "id": "no-eligible-tool-requires-generation",
+      "question": "fraud alert events",
+      "roles": ["Analyst"],
+      "candidate_sql_available": false,
+      "expected_strategy": "MODEL_GENERATION",
+      "expected_tool_key": null
+    }
+  ]
+}
