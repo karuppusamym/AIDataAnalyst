@@ -6478,5 +6478,102 @@ this row, so `ruff check`/`mypy` were not re-run — the change is Markdown-only
 `Docs/10-architecture/01-principles-and-invariants.md`,
 `Docs/review-2026-08/gap/09-inv7-audit-closeout.md` and this log.
 
+## 2026-09-01 — KG-2 closed: cross-source knowledge-graph traversal, bounded and policy-filtered
+
+Module 10's neighborhood traversal (`get_knowledge_graph_neighborhood`,
+`src/aida/intelligence_api.py:426`) previously never left the seed `datasource_id`: every
+constraint/candidate query in its BFS loop filtered on that one datasource, so a
+`RelationshipCandidate` whose `target_datasource_id` named a *different* datasource of the same
+organization was invisible to the graph even though ADR-0017 phase 5 already lets such rows exist
+(`RelationshipCandidate.datasource_id`/`target_datasource_id`, `src/aida/models.py:1161-1174`,
+populated by `discover_cross_source_relationship_candidates`,
+`src/aida/intelligence_api.py:1251`). No schema change was needed — the cross-datasource edge
+data already existed; only the traversal and its policy filtering were missing.
+
+### The pure core: `expand_cross_source_frontier`
+
+`src/aida/knowledge_graph.py:74` adds `expand_cross_source_frontier` alongside the existing,
+untouched `expand_frontier` (`knowledge_graph.py:44`) — both now share one hop-adjacency helper,
+`_candidate_targets` (`knowledge_graph.py:25`), so they can never disagree on what "one hop away"
+means. The new function takes the same bounded frontier/visited/links/direction/depth/node_limit
+contract plus two additions: `node_datasource_id` (which datasource owns each known node) and
+`is_datasource_authorized` (a synchronous predicate). A candidate node whose datasource fails that
+predicate is dropped **before** the `node_limit` budget is applied — it never displaces an
+authorized node for a slot, never appears in `node_ids`, and never flips `truncated`. That last
+part is what makes a denial indistinguishable from the edge never having existed: no reason code,
+no field, nothing in the pure result differs between "no such relationship" and "relationship
+exists, but you can't see the far side."
+
+### Per-datasource-touched policy filtering (`get_knowledge_graph_neighborhood`)
+
+Per BFS depth, the query set grew from two to three: same-source constraints/candidates as before
+(now scoped to the *growing* `touched_datasource_ids` set instead of the fixed seed id, so a
+second hop inside an already-authorized foreign datasource is found too, not just the first
+crossing), plus a `boundary_filters` probe (`intelligence_api.py:549`) for candidates whose two
+sides straddle `touched_datasource_ids` — i.e. would cross into a new one. For every
+newly-discovered datasource among those (`newly_seen_datasource_ids`, `intelligence_api.py:586`),
+authorization is resolved exactly once and cached in `datasource_allowed`, mirroring the
+per-distinct-datasource `gate()` cost `list_tables_composed` already pays in `api.py`: (1)
+`check_cross_boundary_grant` (`intelligence_api.py:613`) — the same ADR-0017 primitive
+`build_domain_unified_lineage_graph_payload` already enforces for the Unified Lineage Explorer —
+only invoked when the new datasource's `data_domain_id` differs from the seed's, since the
+function itself returns `True` for same-domain pairs; and (2) `authorization_gate.gate` with
+`action="READ_METADATA"`, `resource_type="datasource"` (`intelligence_api.py:622`) — the caller's
+own per-datasource RBAC, independent of domain governance. Both must pass before a datasource joins
+`touched_datasource_ids`; `AuthorizationDenied` is caught and recorded as `False` in the cache, not
+re-raised, so one denied crossing degrades the traversal rather than failing the whole request. An
+unresolvable or foreign-organization datasource fails closed the same way (INV-4/INV-5), regardless
+of what a stray candidate row claims. `allowed_boundary_candidates`
+(`intelligence_api.py:637`) then filters to only the candidates whose *both* sides passed, before
+they ever become a `GraphLink` or a `node_datasource_id` entry. The final table/constraint/candidate
+materialization queries (`intelligence_api.py:695` on) were re-scoped from `== datasource.id` to
+`.in_(touched_datasource_ids)` as belt-and-braces re-enforcement — a node that never cleared the
+per-hop check cannot appear in the response even if something upstream had a bug. No new
+`truncation_reasons` value, response field, or log line names a denied datasource — the schema
+(`GraphNodeRead`/`GraphEdgeRead`/`KnowledgeGraphRead`, none of which this row touches) has no field
+to name one in, which is itself consistent with the no-distinguishable-signal requirement.
+
+### Tests
+
+`tests/test_knowledge_graph.py` — 7 new pure, DB-free tests exercising
+`expand_cross_source_frontier` directly, mirroring `expand_frontier`'s existing convention
+(no live DB, `uid()` node ids, `DATASOURCE_A`/`DATASOURCE_B` UUID constants):
+`test_cross_source_frontier_follows_an_edge_into_an_authorized_datasource` (basic crossing),
+`test_cross_source_frontier_matches_expand_frontier_when_every_node_is_authorized` (byte-identical
+`node_ids`/`truncated` against plain `expand_frontier` on the same graph when nothing is denied —
+adding cross-source awareness changes nothing for the single-source case),
+`test_cross_source_frontier_rejects_an_invalid_budget` (same `ValueError` contract as
+`expand_frontier`), and two leak tests mirroring EE.10's shape
+(`tests/test_mcp_server.py:816` on) — proving denied-vs-nonexistent are indistinguishable, and
+that the check runs and excludes *before* any state (here, the node_limit budget) is spent:
+`test_leak_cross_source_frontier_denied_datasource_node_never_appears`
+(`tests/test_knowledge_graph.py:148`) asserts a caller authorized for A but not B gets a
+byte-identical `FrontierExpansion` whether the cross-source edge into B is present-but-denied or
+absent outright (`denied == no_such_edge`), with `node_ids == frozenset()`, `node_depths == {}`,
+and `truncated is False` in both cases; and
+`test_leak_cross_source_frontier_denied_node_does_not_consume_node_budget`
+(`tests/test_knowledge_graph.py:194`) proves a denied B-side candidate never steals the one
+remaining `node_limit` slot from a competing, authorized A-side candidate in the same frontier
+expansion.
+
+### Verification
+
+`ruff check src/aida/knowledge_graph.py src/aida/intelligence_api.py tests/test_knowledge_graph.py`
+clean. `uv run mypy src sdk/aida_tool_sdk` clean (`Success: no issues found in 263 source files`,
+the project's canonical invocation per `.github/workflows/ci.yml`). `tests/test_knowledge_graph.py`
+(10 tests, including the 4 pre-existing ones, all still pass unmodified) and the targeted
+regression sweep (`test_relationship_intelligence_review.py`, `test_high_stakes_behaviors.py`,
+`test_table_family_api.py` — the only other test files touching `intelligence_api`) all pass.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean. Extending
+`get_knowledge_graph_neighborhood`'s docstring changed its OpenAPI `description` text (a
+non-breaking diff per `scripts/openapi_diff.py`, confirmed with `--baseline` before regenerating);
+`Docs/90-reference/openapi-baseline.json` was regenerated with `--accept-baseline` (single-field
+diff, reviewed) and `tests/test_openapi_diff_gate.py` re-run clean.
+`scripts/generate_ui_types.py --accept-baseline` produced no diff in `ui-next/src/lib/types.ts`
+(descriptions aren't part of the generated type shapes), so nothing to commit there. Full-repo
+`uv run pytest -q` (no `AIDA_ENVIRONMENT` override, to avoid the pre-existing
+`test_config.py::test_environment_must_be_explicit_outside_tests` sensitivity already documented in
+the KG-7/AG-7/TL-5/SM-5 entries above): 5123 passed, 9 skipped, 1 xfailed, 0 failed.
+
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.

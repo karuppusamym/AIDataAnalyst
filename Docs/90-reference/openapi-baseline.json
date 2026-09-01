@@ -37188,7 +37188,7 @@
     },
     "/v1/datasources/{datasource_id}/knowledge-graph/neighborhood": {
       "get": {
-        "description": "Expand a bounded, value-free table neighborhood from one authorized node.",
+        "description": "Expand a bounded, value-free table neighborhood from one authorized node.\n\nKG-2: traversal is not confined to `datasource_id` -- a `RelationshipCandidate`\nwhose `datasource_id`/`target_datasource_id` differ (ADR-0017 phase 5) lets the\nfrontier cross into another datasource of the same organization. Every datasource\nthe traversal newly touches beyond the seed is checked twice before its tables can\njoin the response: `check_cross_boundary_grant` (an ACTIVE grant must let the\nseed's data_domain see into the other one, when they differ -- the same governance\nprimitive `build_domain_unified_lineage_graph_payload` already enforces for the\nUnified Lineage Explorer) and `authorization_gate.gate` with `READ_METADATA` on\nthat specific datasource (the caller's own RBAC, mirroring `list_tables_composed`\nin api.py). A datasource that fails either check is dropped exactly as if the\ncandidate row leading to it did not exist -- no truncation reason, no field, no\ndistinguishable signal names it, matching `AuthorizationDenied`'s INV-6 contract\nof carrying no resource detail.",
         "operationId": "get_knowledge_graph_neighborhood_v1_datasources__datasource_id__knowledge_graph_neighborhood_get",
         "parameters": [
           {
