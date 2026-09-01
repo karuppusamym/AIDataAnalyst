@@ -12,6 +12,16 @@ from aida.envelope_models import MetadataViewDefinition
 from aida.main import app
 from aida.mcp_server import _transformation_detail
 from aida.models import (
+    AiDecisionRecord,
+    BiArtifactImport,
+    BiConnection,
+    BiMetricColumnEdge,
+    BiMetricNode,
+    BiReportMetricEdge,
+    BiReportNode,
+    ContextProduct,
+    ContextProductConsumptionEdge,
+    ContextProductVersion,
     DataDomain,
     DataSource,
     DbtArtifactImport,
@@ -26,6 +36,7 @@ from aida.models import (
     Organization,
     ProcedureLineageEdge,
     Project,
+    QueryExecution,
     ViewLineageEdge,
 )
 from aida.schemas import UnifiedLineageGraphRead, UnifiedLineageImpactRead
@@ -924,3 +935,312 @@ async def test_view_definition_transformation_detail_withholds_quarantined_text(
     assert detail["definition_sql_redacted"] is None
     assert detail["screening_status"] == "QUARANTINED"
     assert detail["redaction_status"] == "PARSED"
+
+
+# ---------------------------------------------------------------------------
+# AT-10 investigation: gap-pinning tests for the still-orphaned producers
+#
+# AT-10 ("One canonical lineage graph -- join the orphaned edge producers")
+# re-checked all six producers `Docs/review-2026-08/atlan-context/03-lineage.md`
+# named as invisible to the unified graph. View/procedure edges (LN-2) were
+# already folded in by LN-7 (2026-08-31), before this row was claimed -- see
+# `test_unified_lineage_impact_chains_view_definition_into_foreign_key` above.
+# The remaining four -- BI report/metric edges (LN-4/LN-11), AI decision
+# edges (LN-3/AU-5), context-product consumption edges (CX-4), and gateway
+# executed-query column lineage (`query_gateway.extract_column_lineage`) --
+# were investigated and found genuinely blocked from joining
+# `_build_unified_graph` in this pass, not merely deferred for convenience:
+#
+#   * `UnifiedLineageEdgeSource` and `UnifiedLineageNodeKind` (both in
+#     `schemas.py`) are closed `Literal`s -- pydantic rejects any value
+#     outside the declared set at construction time, proven directly:
+#     `UnifiedLineageEdgeRead(edge_source="GATEWAY_QUERY_LINEAGE", ...)`
+#     raises a `ValidationError`, it does not silently pass through.
+#   * Every one of these four producers needs a *new* member on one or both
+#     of those Literals to be represented honestly. Reusing an existing tag
+#     (e.g. tagging an AI decision as `SUGGESTED_RELATIONSHIP`) would
+#     misrepresent provenance -- the opposite of what this row exists to fix
+#     -- so it was declined rather than done.
+#   * BI, AI-decision, and consumption edges additionally need a brand-new
+#     `UnifiedLineageNodeKind` on their non-table side: `BiReportNode`/
+#     `BiMetricNode` are not `MetadataTable` rows (already tracked
+#     separately as LN-11 for exactly this reason -- see LN-7's row);
+#     `AiDecisionRecord.source_node` is always a synthetic AI-component tag
+#     ("governed_retriever", "governed_planner", ...), never a catalog
+#     entity, and `AiDecisionRecord` itself carries no `datasource_id`;
+#     `ContextProduct`/`ContextProductVersion` are `project_id`-scoped, not
+#     `datasource_id`- or `MetadataTable`-scoped at all, and
+#     `ContextProductConsumptionEdge`'s other side is a bare `principal_id`
+#     string (a human or agent identity), not an asset.
+#   * Gateway executed-query lineage (`QueryExecution.column_lineage`) is
+#     table-resolvable on the source side, but its "target" is an ephemeral
+#     query result, not a catalog table -- and the platform's own decision
+#     record (`Docs/60-delivery/03-tracker.md` AT-12) already routes
+#     query-log-derived lineage through the *candidate* review queue
+#     (`RelationshipCandidate`, AT-12, still TODO) rather than asserting it
+#     directly, which is a different, not-yet-built mechanism this row does
+#     not build.
+#
+# This pass's hard rule forbids editing `schemas.py`, so all four stay out
+# of scope, honestly, rather than joined by reusing an inaccurate existing
+# tag. These tests pin the current, real gap with real persisted rows (not
+# just a design assertion) so a future session that *is* allowed to extend
+# the Literals has a concrete regression test to flip green, and so a silent
+# accidental "fix" that only half-works cannot go unnoticed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph(
+    db_session,
+) -> None:
+    """A `BiMetricColumnEdge` resolved all the way to a real `MetadataTable`
+    (`matched_table_id` populated, exactly like the FK/view/procedure edges
+    the graph already folds in) still does not surface as a unified-graph
+    edge or add to `counts_by_source` -- `BiReportNode`/`BiMetricNode` have
+    no `UnifiedLineageNodeKind` to render as, so there is no node for a BI
+    edge to connect the table to. Blocked on LN-11 (new node kinds), out of
+    this row's `schemas.py`-free scope."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    connection = BiConnection(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        project_id=datasource.project_id,
+        datasource_id=datasource.id,
+        bi_tool="TABLEAU",
+        connection_key="site-1",
+        display_name="Tableau Site",
+        created_by="test-harness",
+    )
+    db_session.add(connection)
+    await db_session.flush()
+    artifact_import = BiArtifactImport(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        connection_id=connection.id,
+        artifact_fingerprint="fp-1",
+        bi_tool="TABLEAU",
+        status="IMPORTED",
+        report_count=1,
+        metric_count=1,
+        report_metric_edge_count=1,
+        metric_column_edge_count=1,
+        matched_column_count=1,
+        unmatched_column_count=0,
+        imported_by="test-harness",
+    )
+    db_session.add(artifact_import)
+    await db_session.flush()
+    report = BiReportNode(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        artifact_import_id=artifact_import.id,
+        external_id="wb-1",
+        name="Revenue Dashboard",
+        report_type="DASHBOARD",
+    )
+    metric = BiMetricNode(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        artifact_import_id=artifact_import.id,
+        external_id="fld-1",
+        name="Net Revenue",
+        field_type="CALCULATED",
+    )
+    db_session.add_all([report, metric])
+    await db_session.flush()
+    db_session.add(
+        BiReportMetricEdge(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            artifact_import_id=artifact_import.id,
+            report_id=report.id,
+            metric_id=metric.id,
+        )
+    )
+    db_session.add(
+        BiMetricColumnEdge(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            artifact_import_id=artifact_import.id,
+            metric_id=metric.id,
+            source_table_name="orders",
+            source_column_name="amount",
+            matched_table_id=orders.id,
+        )
+    )
+    await db_session.flush()
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    assert result.counts_by_source.get("BI_LINEAGE", 0) == 0
+    assert not any("BI" in edge.edge_source for edge in result.edges)
+    assert not any(
+        edge.evidence.get("source") in {"BI", "BI_LINEAGE", "TABLEAU"} for edge in result.edges
+    )
+
+
+@pytest.mark.asyncio
+async def test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impact(
+    db_session,
+) -> None:
+    """A real `AiDecisionRecord` (`RETRIEVAL_SELECTED`, the same shape
+    `agent_orchestrator.py` writes via AU-5) naming a real table as its
+    `target_node` still contributes nothing to the unified graph or to that
+    table's impact traversal -- `source_node` is always a synthetic
+    AI-component tag ("governed_retriever"), never a catalog entity, so
+    there is no second real node for an edge to connect it to, and
+    `AiDecisionRecord` itself carries no `datasource_id` to scope a query by.
+    Blocked on a new `UnifiedLineageNodeKind` for the AI-component side, out
+    of this row's `schemas.py`-free scope."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+    run_id = uuid4()
+
+    db_session.add(
+        AiDecisionRecord(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            run_id=run_id,
+            decision_type="RETRIEVAL_SELECTED",
+            source_node="governed_retriever",
+            target_node=f"table:{orders.id}",
+            reason="fusion_rank_1",
+            evidence={"score": 0.92},
+        )
+    )
+    await db_session.flush()
+
+    graph_result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+    assert graph_result.counts_by_source.get("AI_DECISION", 0) == 0
+    assert not any("AI_DECISION" in edge.edge_source for edge in graph_result.edges)
+    assert not any(node.id == "governed_retriever" for node in graph_result.nodes)
+
+    impact_result = await build_unified_lineage_impact_payload(
+        db_session, datasource, str(orders.id), depth=5, node_limit=50, settings=None
+    )
+    assert impact_result.upstream == []
+    assert impact_result.downstream == []
+
+
+@pytest.mark.asyncio
+async def test_at10_consumption_edges_do_not_appear_in_the_unified_graph(db_session) -> None:
+    """A real `ContextProductConsumptionEdge` (the immutable per-read record
+    CX-4 emits) still contributes nothing to the unified graph: the version
+    it points at is `ContextProductVersion`, `project_id`-scoped with no
+    `datasource_id`/`MetadataTable` link at all even though it names real
+    tables in its own `table_ids` JSON column, and its other side,
+    `principal_id`, is a bare consumer-identity string, not an asset. Both
+    sides need a `UnifiedLineageNodeKind` that does not exist. Blocked, out
+    of this row's `schemas.py`-free scope."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+
+    product = ContextProduct(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        project_id=datasource.project_id,
+        product_key="revenue-context",
+        created_by="test-harness",
+    )
+    db_session.add(product)
+    await db_session.flush()
+    version = ContextProductVersion(
+        id=uuid4(),
+        organization_id=datasource.organization_id,
+        product_id=product.id,
+        version=1,
+        status="PUBLISHED",
+        name="Revenue context",
+        description="Revenue context product",
+        purpose="Answer revenue questions",
+        owner_principal="steward@example.com",
+        table_ids=[str(orders.id)],
+        allowed_consumer_roles=["Analyst"],
+        fingerprint="fp-cp-1",
+        created_by="test-harness",
+    )
+    db_session.add(version)
+    await db_session.flush()
+    db_session.add(
+        ContextProductConsumptionEdge(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            context_product_version_id=version.id,
+            principal_id="agent-run-123",
+            principal_type="AGENT",
+            channel="MCP",
+            correlation_id="corr-1",
+            product_fingerprint="fp-cp-1",
+            policy_decision="ALLOWED",
+        )
+    )
+    await db_session.flush()
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    assert result.counts_by_source.get("CONSUMPTION", 0) == 0
+    assert not any("CONSUMPTION" in edge.edge_source for edge in result.edges)
+    assert not any(node.id == "agent-run-123" for node in result.nodes)
+    assert not any(node.id == str(version.id) for node in result.nodes)
+
+
+@pytest.mark.asyncio
+async def test_at10_gateway_query_lineage_does_not_appear_in_the_unified_graph(
+    db_session,
+) -> None:
+    """A real `QueryExecution` row carrying real `extract_column_lineage`
+    output (`orders.amount -> net_amount`) over two real catalog tables
+    still contributes nothing to the unified graph -- `column_lineage` is a
+    JSON column with no edge table and no `UnifiedLineageEdgeSource` member
+    of its own, and the platform's own decision record (AT-12, still TODO)
+    already routes query-log-derived lineage through the candidate review
+    queue rather than asserting it directly here."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    orders = await _seed_table(db_session, datasource, schema, "orders")
+    revenue_agg = await _seed_table(db_session, datasource, schema, "revenue_agg")
+
+    db_session.add(
+        QueryExecution(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            principal_id="analyst-1",
+            status="COMPLETED",
+            dialect="postgres",
+            sql_hash="sql-hash-1",
+            referenced_tables=["bank.public.orders"],
+            referenced_columns=["orders.amount"],
+            column_lineage=[
+                {
+                    "output_column": "net_amount",
+                    "lineage_type": "DERIVED",
+                    "source_columns": [{"table": "orders", "column": "amount"}],
+                    "transformations": ["SUM"],
+                }
+            ],
+        )
+    )
+    await db_session.flush()
+
+    result = await build_unified_lineage_graph_payload(
+        db_session, datasource, node_limit=50, edge_limit=50, settings=None
+    )
+
+    assert result.counts_by_source.get("GATEWAY_QUERY_LINEAGE", 0) == 0
+    assert not any("GATEWAY" in edge.edge_source for edge in result.edges)
+    # Both tables are real, resolved nodes in the graph on their own merits
+    # (the catalog scan always includes every ACTIVE table) -- proving the
+    # absence above is a genuine gap in edges, not an artifact of the tables
+    # themselves being invisible.
+    node_ids = {node.id for node in result.nodes}
+    assert str(orders.id) in node_ids
+    assert str(revenue_agg.id) in node_ids

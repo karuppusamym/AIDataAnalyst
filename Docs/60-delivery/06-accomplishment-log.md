@@ -9210,3 +9210,144 @@ baseline regen and no `ui-next` type regen; no new `event_type=` emitted via `re
 `platform_schemas.py`/`contracts.py` file touched (the hard constraint this row's owner flagged)
 and no Alembic migration -- eval cases are plain versioned Python files, which is also why no DB
 table was needed or considered further once that was clear.
+
+## 2026-09-01 — AT-10 investigated, BLOCKED: two of the three "orphaned" producers were already joined, and the remaining four are genuinely schema-blocked, not deferred
+
+`Docs/60-delivery/03-tracker.md` row AT-10 ("One canonical lineage graph — join the orphaned edge
+producers") reads: gateway query lineage, view edges, procedure edges, BI edges, AI-decision edges
+and consumption edges are each in their own table and invisible to the unified graph; `LN-9` was
+closed as "one canonical graph" and three edge producers shipped afterwards without joining it.
+That framing was current on 2026-08-30 (`Docs/review-2026-08/atlan-context/03-lineage.md` §2, the
+research finding that opened this row) but stale by the time this row was claimed: LN-7 (closed
+2026-08-31, a day *before* AT-10 existed as a row) already folded view and procedure edges into
+`unified_lineage_api.py::_build_unified_graph` as `VIEW_DEFINITION`/`PROCEDURE_DEFINITION`. Two of
+the original six named producers were therefore already done. This entry investigates the
+remaining four.
+
+### What was re-verified as already joined (no new work needed)
+
+Read `unified_lineage_api.py::_build_unified_graph` in full. Confirmed six edge kinds already
+merge into one graph: `FOREIGN_KEY` (declared constraints), `SUGGESTED_RELATIONSHIP`
+(`RelationshipCandidate`), `DBT_DEPENDENCY` (dbt manifest), `OPENLINEAGE_ETL`, and
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` (`ViewLineageEdge`/`ProcedureLineageEdge`, folded in by
+LN-7). All six feed both `build_unified_lineage_graph_payload` and, through the shared
+`traverse`/`expand_frontier` algorithm in `unified_lineage.py`,
+`build_unified_lineage_impact_payload`.
+
+### The four still-orphaned producers, and exactly why each is blocked
+
+`Docs/review-2026-08/atlan-context/03-lineage.md` §2's table names six producers total; the four
+still outside the unified graph, checked one by one against their real persistence:
+
+1. **Gateway executed-query column lineage** — `QueryExecution.column_lineage`
+   (`src/aida/models.py:775`), a JSON column populated by
+   `query_gateway.extract_column_lineage`. Per-row shape:
+   `{output_column, lineage_type, source_columns: [{table, column}], transformations}` — the
+   source side names real tables (via `referenced_tables`, also JSON), but there is no "target"
+   catalog table: the query's output is an ephemeral result set, not something the catalog scan
+   ever registers as a `MetadataTable`. Even setting that aside, folding it in needs a new
+   `UnifiedLineageEdgeSource` member (below). Separately: the platform's own decision record
+   already routes query-log-derived lineage through the *candidate* review queue rather than
+   direct assertion — `Docs/60-delivery/03-tracker.md` row AT-12 ("Semantic mining of warehouse
+   query history"), still `TODO`, states explicitly "a query-log edge may enter the review queue
+   as a candidate and is never asserted." Building a `RelationshipCandidate`-emitting bridge from
+   gateway query lineage is AT-12's job, not this row's, and doing anything else here would
+   duplicate a mechanism that does not exist yet under a different name.
+
+2. **BI report/metric edges** — `BiReportMetricEdge`/`BiMetricColumnEdge`
+   (`src/aida/models.py:4014,4044`). `BiMetricColumnEdge.matched_table_id`/`matched_column_id`
+   *are* populated against the real catalog (LN-4's own resolution work) — the table-facing side
+   of this producer is exactly as real as an FK or a view edge. The blocker is the other side:
+   `BiReportNode`/`BiMetricNode` (`:3964,3989`) are not `MetadataTable` rows and have no
+   `UnifiedLineageNodeKind` to render as. This is not a new finding — LN-7's own tracker row
+   already named it: *"BI lineage (LN-4, Tableau/Power BI) still has its own `BiReportNode`/
+   `BiMetricNode` node kinds not yet folded in — tracked as LN-11... not required for this exit
+   criterion"* — independent corroboration from a different session on a different day.
+
+3. **AI-decision edges** — `AiDecisionRecord` (`src/aida/models.py:3216`), written by
+   `ai_decision_lineage.record_decision`, real call sites in `agent_orchestrator.py` since AU-5.
+   Read every `AiDecisionEdge(...)` call site: `source_node` is *always* one of a small set of
+   synthetic AI-component tags (`"governed_retriever"`, `"governed_planner"`,
+   `"query_execution_gateway"`, `"governed_agent_orchestrator"`, `"checkpoint:<name>"`) — never a
+   catalog entity — while `target_node` is `f"{object_type}:{object_id}"` (sometimes a real table,
+   sometimes a tool version or an agent run). So an AI-decision edge never connects two real graph
+   nodes; folding it in needs a new node kind for the AI-component side, which does not exist.
+   `AiDecisionRecord` also carries no `datasource_id` column at all, so even a synthetic-node
+   solution would need a name-based `run_id -> AgentRun -> datasource` join to scope a query by
+   datasource, adding complexity on top of the node-kind blocker rather than instead of it.
+
+4. **Consumption edges** — `ContextProductConsumptionEdge` (`src/aida/models.py:2634`), CX-4's
+   immutable per-read record. Traced its FK: `context_product_version_id` points at
+   `ContextProductVersion` (`:2521`), which is `project_id`-scoped — no `datasource_id`, no FK to
+   `MetadataTable` at all, even though it carries a `table_ids: JSON list[str]` column naming the
+   tables the product bundles (not a queryable relationship, just an opaque string list). The
+   edge's other side, `principal_id`/`principal_type`, is a bare consumer-identity string (a human
+   or an agent run), not an asset. Both ends need a `UnifiedLineageNodeKind` that does not exist.
+
+### The actual blocker, verified directly rather than assumed
+
+`UnifiedLineageEdgeSource` and `UnifiedLineageNodeKind` (`src/aida/schemas.py:1287,1290`) are
+closed `Literal`s with exactly six and six members respectively — no unused/reserved slot the way
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` were pre-reserved for LN-7 to fill. Proven, not assumed,
+that pydantic actually rejects an out-of-set value rather than silently coercing it:
+
+```
+>>> UnifiedLineageEdgeRead(id="x", edge_source="GATEWAY_QUERY_LINEAGE", ...)
+ValidationError: Input should be 'FOREIGN_KEY', 'SUGGESTED_RELATIONSHIP', 'DBT_DEPENDENCY',
+'OPENLINEAGE_ETL', 'VIEW_DEFINITION' or 'PROCEDURE_DEFINITION' [type=literal_error]
+```
+
+Reusing one of the six existing values for a new producer was considered and declined: none of
+them honestly describes an AI decision, a BI edge, a consumption read, or a gateway-parsed query
+(`SUGGESTED_RELATIONSHIP` in particular is tied to `RelationshipCandidate`'s maker-checker review
+semantics, which none of these four share), and doing so would misrepresent provenance — the exact
+opposite of what this row exists to fix (`evidence["source"]`-only sub-tagging, the pattern
+`DATABASE_CONSTRAINT`/`DBT_MANIFEST`/`OPENLINEAGE` already use *inside* an honestly-chosen
+top-level bucket, was considered too, but there is no honest top-level bucket for any of these
+four to sit inside). Extending these Literals is a normal, precedented step on this platform —
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` were added to the exact same Literal for LN-7 — but this
+row's hard constraints forbid editing `schemas.py` for any reason, so it is out of scope for this
+pass specifically, not architecturally impossible.
+
+### Gap-pinning tests, not a design assertion
+
+Four new tests in `tests/test_unified_lineage.py`, each seeding real rows in the producer's real
+table alongside a real 2-table FK graph, proving the producer's data does not surface as a
+unified-graph edge, a `counts_by_source` entry, or (where relevant) a node — concrete evidence of
+the gap, not just a claim about it:
+
+- `test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph` — a `BiMetricColumnEdge`
+  resolved to a real table via `matched_table_id` still contributes nothing.
+- `test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impact` — a real
+  `RETRIEVAL_SELECTED` `AiDecisionRecord` naming a real table as `target_node` contributes nothing
+  to the graph *or* to that table's own impact traversal (`upstream`/`downstream` both empty).
+- `test_at10_consumption_edges_do_not_appear_in_the_unified_graph` — a real
+  `ContextProductConsumptionEdge` contributes nothing; neither the `principal_id` string nor the
+  `ContextProductVersion` id appear as graph nodes.
+- `test_at10_gateway_query_lineage_does_not_appear_in_the_unified_graph` — a real `QueryExecution`
+  row with real `extract_column_lineage` output over two real catalog tables contributes no edge,
+  while the test also asserts both tables *are* present as ordinary resolved nodes (isolating the
+  gap to edges specifically, not an artifact of the tables being invisible for some other reason).
+
+### Verification
+
+`tests/test_unified_lineage.py` (21 tests total, 4 new): `AIDA_ENVIRONMENT=development uv run
+pytest tests/test_unified_lineage.py -q` all green. `ruff check tests/test_unified_lineage.py`
+clean. `mypy src` unaffected — no `src/` file touched; same pre-existing 44 `"object" not
+callable"` Temporal-decorator errors documented in AT-13's entry, none in a file this row touched.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean (full suite, no
+failures). No HTTP route added, so no OpenAPI baseline/`ui-next` regen; no new `event_type=`
+emitted via `record_outbox`, so no `tests/test_event_catalog_gate.py` change needed. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file touched and no Alembic
+migration — the hard constraints this row's owner set.
+
+### Honest scope statement
+
+0 of the 4 remaining orphaned producers were joined. 2 of the original 6 (view, procedure) were
+already joined by LN-7 before this row was claimed. All 4 remaining are blocked on extending
+`UnifiedLineageEdgeSource`/`UnifiedLineageNodeKind` in `schemas.py` (BI/AI-decision/consumption
+additionally need a new `UnifiedLineageNodeKind`), which this pass's hard constraints forbid. This
+is reported as `BLOCKED`, not `DONE` or a silently-abandoned `TODO` — the row's exit criterion
+("every edge producer writes to the canonical edge table and impact analysis traverses all of
+them") is not met, and AT-21 (impact-as-PR-gate), which names itself "blocked on AT-10," should
+still be read that way.
