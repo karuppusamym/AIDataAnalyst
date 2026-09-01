@@ -1,15 +1,30 @@
 from dataclasses import replace
 from datetime import UTC, datetime
 from fnmatch import fnmatchcase
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import current_version_alias
+from aida.catalog_read_model import (
+    _business_annotations,
+    _description,
+    _latest_approved_documentation,
+    _latest_pending_drafts,
+)
+from aida.config import Settings, get_settings
+from aida.consumption_lineage import get_consumption_by_resource_counts
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.documentation_worklist import (
+    DocumentationWorklistEntry,
+    TableQuerySignal,
+    rank_documentation_worklist,
+)
 from aida.events import record_audit, record_outbox
 from aida.glossary_owner_routing import TableFacts, sync_unowned_asset_backlog
 from aida.models import (
@@ -37,8 +52,10 @@ from aida.models import (
     OwnershipAssignment,
     OwnershipRule,
     Project,
+    QueryExecution,
     UnownedAssetEscalation,
 )
+from aida.quality_coupling import resolve_table_ids
 from aida.schemas import (
     BulkStewardshipOperationCreate,
     BulkStewardshipOperationRead,
@@ -1768,4 +1785,349 @@ async def route_unowned_asset_backlog(
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
         ],
         resolved_count=len(result.resolved),
+    )
+
+
+# --- AT-5: query-history-ranked documentation worklist ---------------------
+#
+# Distinct from GL-6's unowned-asset backlog above: GL-6 tracks a *stateful*
+# routing lifecycle (an `UnownedAssetEscalation` row per table, with a status
+# machine and escalation timestamps this module writes to on
+# `route_unowned_asset_backlog`). This worklist has no such state -- it is
+# computed fresh on every request from real query-history and documentation
+# signals, with no ownership/routing concept at all. Bolting a "backlog kind"
+# switch onto the GL-6 endpoint would make one route sometimes read a
+# persisted table and sometimes compute an aggregate over `QueryExecution`/
+# `ConsumptionRecord`, two response shapes wearing one signature -- a
+# genuinely separate concern, so it gets its own endpoint (`ApiModel`
+# reused belongs to a local read model, exactly `operational_api.py`'s own
+# reasoning for `ConnectorHealthScoreRead` not living in `aida.schemas`).
+#
+# Real query-volume sources (tracker AT-5's own framing; the two are simply
+# added together as `query_volume` -- see `documentation_worklist.py`):
+#   - `query_execution_count`: `QueryExecution.referenced_tables` from
+#     governed SQL execution (`aida.query_gateway`) -- resolved to table ids
+#     per datasource, the same technique RT-6 already uses
+#     (`aida.retrieval._table_execution_counts`), bounded by the same
+#     `Settings.agent_retrieval_scan_limit` scan budget RT-6 spends on the
+#     identically-shaped query.
+#   - `consumption_read_count`: `ConsumptionRecord` rows with
+#     `resource_type="metadata_table"` (CX-4, MCP/context-product reads) --
+#     `resource_id` is already the real table id, so this is a single grouped
+#     aggregate query (`consumption_lineage.get_consumption_by_resource_counts`),
+#     no name resolution needed.
+#
+# "Documented" is UX-12's own determination
+# (`catalog_read_model._description`), reused verbatim rather than re-derived
+# -- see `documentation_worklist.py`'s module docstring for the precedence
+# chain and why a `PENDING_APPROVAL` draft alone does not count.
+
+
+class ApiModel(BaseModel):
+    """Local response-model base, same shape as `operational_api.ApiModel` /
+    `sql_validation_api.ApiModel` -- a page composed from two other modules'
+    persisted rows plus a pure ranking function has no natural home in
+    `aida.schemas` and does not need one.
+    """
+
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+
+
+class DocumentationWorklistEntryRead(ApiModel):
+    table_id: UUID
+    table_name: str
+    schema_name: str
+    datasource_name: str
+    rank: int
+    query_execution_count: int
+    consumption_read_count: int
+    query_volume: int
+    last_queried_at: datetime | None
+    last_consumed_at: datetime | None
+    description_is_proposed: bool
+
+
+# Mirrors GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT` bound: caps both (a) how
+# many tables the CX-4 consumption side contributes as ranking candidates,
+# and (b) how many additional zero-query-volume tables `include_zero_volume`
+# pulls in. The gateway-execution side is bounded separately, by
+# `Settings.agent_retrieval_scan_limit` (RT-6's own budget) on *rows scanned*
+# per datasource rather than tables returned -- a row-scan bound naturally
+# limits the number of distinct tables that can appear from it too.
+DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT = 500
+
+
+async def _query_execution_volume(
+    session: AsyncSession,
+    *,
+    datasources: list[DataSource],
+    scan_limit: int,
+) -> dict[UUID, tuple[int, datetime]]:
+    """How many recent `COMPLETED` `QueryExecution` rows referenced each
+    table, aggregated across every datasource in ``datasources``.
+
+    `QueryExecution.referenced_tables` stores SQL-qualified name strings, not
+    ids, and a name only resolves unambiguously within one datasource's own
+    catalog (two datasources can both have a table named ``customers``), so
+    the scan and resolution happen per datasource -- exactly RT-6's own
+    `aida.retrieval._table_execution_counts`, reused at the technique level
+    (same `aida.quality_coupling.resolve_table_ids` resolver, same
+    most-recent-first bounded scan) since AT-5 needs a different aggregate
+    (every touched table, not lookup counts for a caller-given set), not a
+    fork of RT-6's private, retrieval-scoped helper itself.
+    """
+    counts: dict[UUID, int] = {}
+    last_seen: dict[UUID, datetime] = {}
+    for datasource in datasources:
+        rows = (
+            await session.execute(
+                select(QueryExecution.referenced_tables, QueryExecution.created_at)
+                .where(
+                    QueryExecution.datasource_id == datasource.id,
+                    QueryExecution.organization_id == datasource.organization_id,
+                    QueryExecution.status == "COMPLETED",
+                )
+                .order_by(QueryExecution.created_at.desc())
+                .limit(scan_limit)
+            )
+        ).all()
+        if not rows:
+            continue
+        all_names: set[str] = set()
+        for referenced_tables, _created_at in rows:
+            all_names.update(referenced_tables or [])
+        if not all_names:
+            continue
+        name_to_id = await resolve_table_ids(
+            session, datasource=datasource, table_names=sorted(all_names)
+        )
+        for referenced_tables, created_at in rows:
+            # A table referenced twice in one statement counts once for that
+            # execution -- this measures how many past *queries* touched the
+            # table, the same "queries, not raw name occurrences" rule RT-6
+            # applies for the identical reason.
+            touched = {
+                table_id
+                for name in (referenced_tables or [])
+                if (table_id := name_to_id.get(name)) is not None
+            }
+            for table_id in touched:
+                counts[table_id] = counts.get(table_id, 0) + 1
+                if table_id not in last_seen or created_at > last_seen[table_id]:
+                    last_seen[table_id] = created_at
+    return {table_id: (count, last_seen[table_id]) for table_id, count in counts.items()}
+
+
+async def _consumption_volume(
+    session: AsyncSession, *, organization_id: UUID, limit: int
+) -> dict[UUID, tuple[int, datetime]]:
+    """CX-4 consumption-read counts per table, top ``limit`` tables by count.
+
+    `ConsumptionRecord.resource_id` for `resource_type="metadata_table"` is
+    already the real `MetadataTable.id` (set by `mcp_server.py`'s
+    `record_consumption` call at the point a table is read via MCP), so --
+    unlike the gateway-execution side -- no name resolution is needed here.
+    """
+    rows = await get_consumption_by_resource_counts(
+        session,
+        organization_id=organization_id,
+        resource_type="metadata_table",
+        limit=limit,
+    )
+    result: dict[UUID, tuple[int, datetime]] = {}
+    for resource_id, count, last_consumed_at in rows:
+        try:
+            table_id = UUID(resource_id)
+        except ValueError:  # pragma: no cover - defensive, ids are always UUIDs
+            continue
+        result[table_id] = (count, last_consumed_at)
+    return result
+
+
+async def _documentation_state(
+    session: AsyncSession, tables: list[MetadataTable]
+) -> dict[UUID, tuple[bool, bool]]:
+    """table id -> (is_documented, description_is_proposed), reusing UX-12's
+    exact precedence chain (`catalog_read_model._description`) rather than a
+    second "is this documented" rule -- see `documentation_worklist.py`'s
+    module docstring for why a pending, unapproved draft does not count as
+    documented here even though `catalog_read_model` surfaces it as a
+    proposal.
+    """
+    if not tables:
+        return {}
+    table_ids = [table.id for table in tables]
+    documentation = await _latest_approved_documentation(session, table_ids)
+    pending_drafts = await _latest_pending_drafts(session, table_ids)
+    annotations = await _business_annotations(session, table_ids)
+    state: dict[UUID, tuple[bool, bool]] = {}
+    for table in tables:
+        description, description_is_proposed = _description(
+            table,
+            documentation=documentation.get(table.id),
+            pending_draft=pending_drafts.get(table.id),
+            annotation=annotations.get(table.id),
+        )
+        is_documented = bool(description) and not description_is_proposed
+        state[table.id] = (is_documented, description_is_proposed)
+    return state
+
+
+async def _documentation_worklist_signals(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    scan_limit: int,
+    include_zero_volume: bool,
+) -> list[TableQuerySignal]:
+    """Gather every DB-touching input `rank_documentation_worklist` needs,
+    then hand off to that pure function -- this is the only place in AT-5
+    that talks to the database.
+
+    The candidate table set is driven by real activity rather than a full
+    catalog scan: a table that appears in neither the bounded
+    `QueryExecution` scan nor the top-`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT`
+    consumption reads has, by construction, no real query-volume signal to
+    rank it by, so it is simply never fetched -- consistent with
+    `rank_documentation_worklist`'s own default of excluding zero-volume
+    tables, and a lot cheaper than the alternative (composing documentation
+    state for an org's entire active-table catalog on every request, which
+    `list_catalog_rows`'s own 1M-table docstring notes is exactly the scale
+    this platform's catalog surfaces are built not to assume). Only when a
+    caller opts into ``include_zero_volume`` does this reach for an
+    additional bounded slice of zero-volume active tables.
+    """
+    datasources = (
+        await session.scalars(
+            select(DataSource).where(DataSource.organization_id == organization_id)
+        )
+    ).all()
+
+    execution_volume = await _query_execution_volume(
+        session, datasources=list(datasources), scan_limit=scan_limit
+    )
+    consumption_volume = await _consumption_volume(
+        session,
+        organization_id=organization_id,
+        limit=DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT,
+    )
+    candidate_ids = set(execution_volume) | set(consumption_volume)
+
+    if include_zero_volume:
+        zero_volume_filters: list[Any] = [
+            MetadataTable.organization_id == organization_id,
+            MetadataTable.status == "ACTIVE",
+        ]
+        if candidate_ids:
+            zero_volume_filters.append(MetadataTable.id.notin_(candidate_ids))
+        zero_volume_ids = (
+            await session.scalars(
+                select(MetadataTable.id)
+                .where(*zero_volume_filters)
+                .order_by(MetadataTable.id)
+                .limit(DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT)
+            )
+        ).all()
+        candidate_ids |= set(zero_volume_ids)
+
+    if not candidate_ids:
+        return []
+
+    rows = (
+        await session.execute(
+            select(MetadataTable, MetadataSchema, DataSource)
+            .join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id)
+            .join(DataSource, DataSource.id == MetadataTable.datasource_id)
+            .where(
+                MetadataTable.organization_id == organization_id,
+                MetadataTable.id.in_(candidate_ids),
+            )
+        )
+    ).all()
+    candidate_rows = [(table, schema, datasource) for table, schema, datasource in rows]
+    documentation_state = await _documentation_state(
+        session, [table for table, _, _ in candidate_rows]
+    )
+
+    signals: list[TableQuerySignal] = []
+    for table, schema, datasource in candidate_rows:
+        exec_count, last_queried_at = execution_volume.get(table.id, (0, None))
+        consumption_count, last_consumed_at = consumption_volume.get(table.id, (0, None))
+        is_documented, description_is_proposed = documentation_state.get(
+            table.id, (False, False)
+        )
+        signals.append(
+            TableQuerySignal(
+                table_id=table.id,
+                table_name=table.name,
+                schema_name=schema.name,
+                datasource_name=datasource.name,
+                query_execution_count=exec_count,
+                consumption_read_count=consumption_count,
+                last_queried_at=last_queried_at,
+                last_consumed_at=last_consumed_at,
+                is_documented=is_documented,
+                description_is_proposed=description_is_proposed,
+            )
+        )
+    return signals
+
+
+@router.get(
+    "/organizations/{organization_id}/stewardship/documentation-worklist",
+    response_model=Page,
+)
+async def list_documentation_worklist(
+    organization_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    include_zero_volume: bool = Query(
+        default=False,
+        description=(
+            "Include tables with zero real query volume (no gateway execution, no "
+            "MCP consumption read), sorted after every real-volume row. Off by "
+            "default: this worklist ranks by real usage, and a zero-volume table "
+            "has none to rank it by (see `documentation_worklist.py`)."
+        ),
+    ),
+    context: SecurityContext = Depends(require_roles(*READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> Page:
+    """AT-5: undocumented/under-described tables ranked by real query volume.
+
+    Distinct from RT-6's `usage_popularity` retrieval signal
+    (`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate
+    tables for an agent's next SQL statement*; this ranks *tables a human
+    steward should document next*, and excludes any table that already has a
+    real (non-proposed) description rather than merely weighting it down.
+
+    Paginated with the same bounded offset/limit `Page` contract GL-6's own
+    backlog endpoint above uses, not CT-2's keyset convention: keyset
+    pagination continues a page via a `WHERE` predicate over an indexed,
+    stored ordering column, and there is no such column here -- `query_volume`
+    is a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`
+    scan (`_documentation_worklist_signals`), recomputed and re-sorted by the
+    pure `rank_documentation_worklist` on every request. `Page.total` still
+    reports the full ranked-candidate count, independent of `limit`.
+    """
+    enforce_organization(context, organization_id)
+    signals = await _documentation_worklist_signals(
+        session,
+        organization_id=organization_id,
+        scan_limit=settings.agent_retrieval_scan_limit,
+        include_zero_volume=include_zero_volume,
+    )
+    entries: list[DocumentationWorklistEntry]
+    entries, total = rank_documentation_worklist(
+        signals,
+        limit=limit,
+        offset=offset,
+        include_zero_volume=include_zero_volume,
+    )
+    return Page(
+        items=[DocumentationWorklistEntryRead.model_validate(entry) for entry in entries],
+        limit=limit,
+        offset=offset,
+        total=total,
     )

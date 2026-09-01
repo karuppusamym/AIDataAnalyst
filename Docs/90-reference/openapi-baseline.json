@@ -60924,6 +60924,170 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/stewardship/documentation-worklist": {
+      "get": {
+        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
+        "operationId": "list_documentation_worklist_v1_organizations__organization_id__stewardship_documentation_worklist_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include tables with zero real query volume (no gateway execution, no MCP consumption read), sorted after every real-volume row. Off by default: this worklist ranks by real usage, and a zero-volume table has none to rank it by (see `documentation_worklist.py`).",
+            "in": "query",
+            "name": "include_zero_volume",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Include tables with zero real query volume (no gateway execution, no MCP consumption read), sorted after every real-volume row. Off by default: this worklist ranks by real usage, and a zero-volume table has none to rank it by (see `documentation_worklist.py`).",
+              "title": "Include Zero Volume",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Documentation Worklist",
+        "tags": [
+          "glossary-stewardship"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/stewardship/leaver-reassignment": {
       "post": {
         "description": "GL-7: reassign a leaving principal's *whole* active ownership\nportfolio -- every ACTIVE `OwnershipAssignment` row it holds, table and\nglossary-term stewardship alike (any subject_type GL-2's ownership model\ncovers) -- to a successor in one governed action, reusing the exact\n`BulkStewardshipOperation` / `GovernanceReview` maker-checker contract\nGL-2/GL-5/GL-8 already established (module 08 SS7) rather than a\nbespoke mechanism: `_apply_governance_review_decision`'s existing\n`BULK_STEWARDSHIP_OPERATION` dispatch (`semantic_api.py`) requires no\nchange at all -- it already calls `apply_bulk_operation` generically for\nwhatever `operation_type` the row carries.\n\nSelection mirrors CT-1's explicit-vs-filter split: an explicit\n`assignment_ids` list must name only ACTIVE assignments currently owned\nby `leaving_principal` (409 otherwise), and is capped at\n`LEAVER_REASSIGNMENT_MAX_ITEMS` by the request schema itself (a 422 over\nthe limit, exactly CT-1's explicit-selection behavior); omitting it\ndiscovers the leaving principal's whole current portfolio server-side,\ncapped at the same limit with `truncated=True` recorded in the\noperation's own parameters -- never silently dropped, CT-1's\nfilter-selection behavior.\n\nA validated `OwnershipAssignment.id` list is exactly what\n`BulkStewardshipOperation.subject_ids` holds here\n(`subject_type=\"OWNERSHIP_ASSIGNMENT\"`), which is what lets one operation\nspan every asset kind the leaver owned -- table *and* term -- in a\nsingle governed decision; the other three operation types this module\ndefines are each constrained to one subject_type per operation because\ntheir subjects are bare catalog/glossary ids, not already-typed\nassignment rows.\n\nCertifications (`AssetCertification.certified_by`) are a historical\nattestation, not an ownership assignment, and are deliberately out of\nscope -- consistent with this module's \"never last-write-wins\"\nretained-evidence principle (module 08 SS6): reassigning who currently\nowns a table must never rewrite the historical record of who certified\nit.",
