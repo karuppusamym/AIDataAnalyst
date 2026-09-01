@@ -328,7 +328,7 @@ maintained as status.
 | N8 | Document ingestion — upload, parse, section, map, claims | 6 | Medium | TODO | Data-dictionary spreadsheets are the highest-value case; build that path first |
 | N9 | Business graph | — | — | **DONE** | Recursive CTE traversal, effective-dated assignments, `as_of` history, materialised roll-up |
 | N10 | Knowledge compilation — pages, blocks, provenance, staleness, diff proposals | 10–12 | Medium | TODO | The differentiator, the largest new build, and the one nobody else has |
-| N11 | Tool generator B — view → tool | 3 | Low | TODO | Views are pre-curated queries; best quality per unit of effort |
+| N11 | Tool generator B — view → tool | 3 | Low | IN PROGRESS | Owner: Claude (worktree feature/snowflake-dbt-lineage-mcp, claimed 2026-09-01). Composing SM-5's blueprint/persist-draft pattern with AT-19's redaction gating to turn a curated `MetadataViewDefinition` into a governed tool draft |
 | N12 | Tool generator C — procedure → tool | 4 | Medium | TODO | Depends on N3. Eligible only when a parse *proves* the procedure read-only |
 | N13 | Federation planner + DuckDB join layer | 8 | **High** | TODO | Must preserve INV-2 — a leaf query per source, each through the gateway |
 | N14 | `validate_sql` tool | 2 | Low | **DONE** | Shares `_run_validation` with `execute`, so validation and execution cannot drift |
