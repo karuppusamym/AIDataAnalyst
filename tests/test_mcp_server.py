@@ -775,6 +775,134 @@ async def test_native_lineage_tool_get_transformation_detail_surfaces_not_found(
 
 
 # ---------------------------------------------------------------------------
+# EE.10 leak test -- for `resolve_entity` and `get_transformation_detail`
+# specifically, the role-eligibility check in
+# `_handle_native_lineage_tool_call` must run and return *before* any
+# traversal/lookup work (datasource resolution, `_resolve_governed_entities`,
+# `_transformation_detail`). A caller who lacks a lineage-reader role must be
+# unable to distinguish "this entity exists but you can't see it" from "this
+# entity doesn't exist" -- proven two ways: (1) byte-for-byte identical
+# responses for an entity standing in for "real" versus one standing in for
+# "missing", for the same denied caller, mirroring
+# `test_tools_call_reports_identical_response_for_unknown_and_denied_tool_names`
+# above; and (2) the traversal/lookup collaborator and the session are never
+# touched at all -- a spy session raises if `.get()` is called, and the
+# monkeypatched resolver/detail function raises if invoked, so either
+# assertion would fail loudly if the check moved after traversal.
+# ---------------------------------------------------------------------------
+
+
+class DeniedCallerSpySession:
+    """Fake session for a denied caller: any DB access at all -- even the
+    datasource lookup that would precede real traversal -- is a bug, so
+    `.get()` raises rather than silently returning None."""
+
+    def __init__(self) -> None:
+        self.get_called = False
+
+    async def get(self, _model: type[object], _identity: object) -> object:
+        self.get_called = True
+        raise AssertionError(
+            "session.get() must not run before the role-eligibility check returns"
+        )
+
+    def add(self, _value: object) -> None:
+        raise AssertionError("no audit/outbox evidence should be recorded for a denied caller")
+
+    async def commit(self) -> None:
+        raise AssertionError("commit must not happen for a denied caller")
+
+
+async def test_leak_resolve_entity_denied_caller_cannot_distinguish_existing_from_missing_entity(
+    monkeypatch: object,
+) -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),  # disjoint from UNIFIED_LINEAGE_READER_ROLES
+    )
+
+    def _forbidden_resolver(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("_resolve_governed_entities must not run before the role check denies")
+
+    monkeypatch.setattr(mcp_server, "_resolve_governed_entities", _forbidden_resolver)  # type: ignore[attr-defined]
+
+    # `session_for_real_entity`'s query stands in for a name that resolves to
+    # a real, existing entity; `session_for_missing_entity`'s stands in for
+    # one that resolves to nothing. Both are denied identically, before
+    # either query is ever evaluated against real data.
+    session_for_real_entity = DeniedCallerSpySession()
+    result_for_real_entity = await _handle_native_lineage_tool_call(
+        "resolve_entity",
+        {"datasource_id": str(uuid4()), "query": "a real customers table"},
+        session_for_real_entity,
+        caller,  # type: ignore[arg-type]
+    )
+
+    session_for_missing_entity = DeniedCallerSpySession()
+    result_for_missing_entity = await _handle_native_lineage_tool_call(
+        "resolve_entity",
+        {"datasource_id": str(uuid4()), "query": "zzz-definitely-absent-entity-zzz"},
+        session_for_missing_entity,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result_for_real_entity == result_for_missing_entity
+    assert result_for_real_entity == {
+        "isError": True,
+        "content": [{"type": "text", "text": "Tool 'resolve_entity' not found or not published."}],
+    }
+    assert session_for_real_entity.get_called is False
+    assert session_for_missing_entity.get_called is False
+
+
+async def test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity(
+    monkeypatch: object,
+) -> None:
+    caller = SecurityContext(
+        principal_id="viewer-with-no-lineage-role",
+        principal_type="USER",
+        organization_id=uuid4(),
+        roles=frozenset(),  # disjoint from UNIFIED_LINEAGE_READER_ROLES
+    )
+
+    async def _forbidden_detail(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("_transformation_detail must not run before the role check denies")
+
+    monkeypatch.setattr(mcp_server, "_transformation_detail", _forbidden_detail)  # type: ignore[attr-defined]
+
+    real_entity_id = uuid4()  # stands in for a dbt-resource/table id that genuinely exists
+    missing_entity_id = uuid4()  # stands in for one that does not
+
+    session_for_real_entity = DeniedCallerSpySession()
+    result_for_real_entity = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(uuid4()), "entity_id": str(real_entity_id)},
+        session_for_real_entity,
+        caller,  # type: ignore[arg-type]
+    )
+
+    session_for_missing_entity = DeniedCallerSpySession()
+    result_for_missing_entity = await _handle_native_lineage_tool_call(
+        "get_transformation_detail",
+        {"datasource_id": str(uuid4()), "entity_id": str(missing_entity_id)},
+        session_for_missing_entity,
+        caller,  # type: ignore[arg-type]
+    )
+
+    assert result_for_real_entity == result_for_missing_entity
+    assert result_for_real_entity == {
+        "isError": True,
+        "content": [
+            {"type": "text", "text": "Tool 'get_transformation_detail' not found or not published."}
+        ],
+    }
+    assert session_for_real_entity.get_called is False
+    assert session_for_missing_entity.get_called is False
+
+
+# ---------------------------------------------------------------------------
 # AG-1/AG-2/TS-6 -- `_transformation_detail` is the live model-context builder for a
 # dbt resource's `description` (a manifest `description:` field, source-controlled,
 # with no stored `screening_status` of its own the way `MetadataViewDefinition`/
