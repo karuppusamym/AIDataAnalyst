@@ -1011,6 +1011,26 @@ export interface ConnectorHealthScoreRead {
   computed_at: string;
 }
 
+/** One consumer of the resource: who/what, over which channel it most */
+export interface ConsumerFooterEntryRead {
+  consumer_id: string;
+  consumer_type: string;
+  channel: string;
+  consumption_count: number;
+  last_consumed_at: string;
+}
+
+/** CX-4 consumption lineage, scoped to one specific version of one */
+export interface ConsumerFooterRead {
+  resource_type: string;
+  resource_id: string;
+  version: number | null;
+  generated_at: string;
+  total_consumption_events: number;
+  consumers: ConsumerFooterEntryRead[];
+  total_consumers: number;
+}
+
 export interface ConsumptionRecordPage {
   items: ConsumptionRecordRead[];
   total: number;

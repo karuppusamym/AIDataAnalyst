@@ -16,6 +16,7 @@ from aida.asset_description_service import (
     apply_asset_description_draft,
     reject_asset_description_draft,
 )
+from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -236,6 +237,38 @@ async def list_semantic_model_versions(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+@router.get(
+    "/semantic-model-versions/{model_id}/consumers",
+    response_model=ConsumerFooterRead,
+)
+async def get_semantic_model_version_consumers(
+    model_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ConsumerFooterRead:
+    """UX-18: the consumer footer for one semantic model version -- who/what
+    currently consumes *this exact version*, from CX-4 consumption lineage
+    (`aida.consumer_footer`), so a steward opening it for edit is never
+    blind to its downstream impact. `resource_id` is `model_id` itself
+    (each version is its own row), matching the `resource_type=
+    "semantic_model_version"` convention this module's own `record_audit`
+    calls already use.
+    """
+    model = await session.get(SemanticModelVersion, model_id)
+    if model is None:
+        raise HTTPException(status_code=404, detail="semantic model version not found")
+    enforce_organization(context, model.organization_id)
+    return await compose_consumer_footer(
+        session,
+        organization_id=model.organization_id,
+        resource_type="semantic_model_version",
+        resource_id=str(model.id),
+        version=model.version,
     )
 
 
@@ -475,6 +508,35 @@ async def list_metric_versions(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+@router.get(
+    "/semantic-metric-versions/{version_id}/consumers",
+    response_model=ConsumerFooterRead,
+)
+async def get_semantic_metric_version_consumers(
+    version_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ConsumerFooterRead:
+    """UX-18: the consumer footer for one semantic metric version. See
+    `get_semantic_model_version_consumers` above -- same composition, same
+    version-specific `resource_id` convention, scoped here to
+    `resource_type="semantic_metric_version"`.
+    """
+    version = await session.get(SemanticMetricVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="semantic metric version not found")
+    enforce_organization(context, version.organization_id)
+    return await compose_consumer_footer(
+        session,
+        organization_id=version.organization_id,
+        resource_type="semantic_metric_version",
+        resource_id=str(version.id),
+        version=version.version,
     )
 
 

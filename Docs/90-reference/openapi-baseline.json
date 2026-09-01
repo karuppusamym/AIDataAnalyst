@@ -6005,6 +6005,99 @@
         "title": "ConnectorHealthScoreRead",
         "type": "object"
       },
+      "ConsumerFooterEntryRead": {
+        "additionalProperties": false,
+        "description": "One consumer of the resource: who/what, over which channel it most\nrecently read this exact version, how many times (within the composed\nwindow), and when it last did so.",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "consumer_id": {
+            "title": "Consumer Id",
+            "type": "string"
+          },
+          "consumer_type": {
+            "title": "Consumer Type",
+            "type": "string"
+          },
+          "consumption_count": {
+            "title": "Consumption Count",
+            "type": "integer"
+          },
+          "last_consumed_at": {
+            "format": "date-time",
+            "title": "Last Consumed At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "consumer_id",
+          "consumer_type",
+          "channel",
+          "consumption_count",
+          "last_consumed_at"
+        ],
+        "title": "ConsumerFooterEntryRead",
+        "type": "object"
+      },
+      "ConsumerFooterRead": {
+        "additionalProperties": false,
+        "description": "CX-4 consumption lineage, scoped to one specific version of one\nsemantic object -- \"no semantic edit is made blind\" (tracker UX-18).\n\n`total_consumption_events` is the exact count of matching\n`ConsumptionRecord` rows (`get_consumption_for_resource`'s own `COUNT(*)`,\nindependent of the window `consumers` was built from); `total_consumers`\nis the number of distinct consumers found within that window, so it can\nlegitimately undercount when a resource's consumption history is larger\nthan the composed window -- an honestly-bounded summary, not a claim of\nexhaustiveness.",
+        "properties": {
+          "consumers": {
+            "items": {
+              "$ref": "#/components/schemas/ConsumerFooterEntryRead"
+            },
+            "title": "Consumers",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "resource_id": {
+            "title": "Resource Id",
+            "type": "string"
+          },
+          "resource_type": {
+            "title": "Resource Type",
+            "type": "string"
+          },
+          "total_consumers": {
+            "readOnly": true,
+            "title": "Total Consumers",
+            "type": "integer"
+          },
+          "total_consumption_events": {
+            "title": "Total Consumption Events",
+            "type": "integer"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          }
+        },
+        "required": [
+          "resource_type",
+          "resource_id",
+          "version",
+          "generated_at",
+          "total_consumption_events",
+          "consumers",
+          "total_consumers"
+        ],
+        "title": "ConsumerFooterRead",
+        "type": "object"
+      },
       "ConsumptionRecordPage": {
         "additionalProperties": false,
         "properties": {
@@ -45250,6 +45343,135 @@
         ]
       }
     },
+    "/v1/glossary-term-versions/{version_id}/consumers": {
+      "get": {
+        "description": "UX-18: the consumer footer for one glossary term version -- who/what\ncurrently consumes *this exact version*, from CX-4 consumption lineage\n(`aida.consumer_footer`), so a steward opening a term for edit is never\nblind to its downstream impact. Same version-specific `resource_id`\nconvention as the semantic-object footers in `semantic_api.py`, scoped\nto `resource_type=\"glossary_term_version\"` -- the same string this\nmodule's own `record_audit` calls already use.",
+        "operationId": "get_glossary_term_version_consumers_v1_glossary_term_versions__version_id__consumers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumerFooterRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Glossary Term Version Consumers",
+        "tags": [
+          "glossary-and-documentation"
+        ]
+      }
+    },
     "/v1/glossary-term-versions/{version_id}/submit": {
       "post": {
         "operationId": "submit_glossary_term_version_v1_glossary_term_versions__version_id__submit_post",
@@ -69239,6 +69461,135 @@
         ]
       }
     },
+    "/v1/semantic-metric-versions/{version_id}/consumers": {
+      "get": {
+        "description": "UX-18: the consumer footer for one semantic metric version. See\n`get_semantic_model_version_consumers` above -- same composition, same\nversion-specific `resource_id` convention, scoped here to\n`resource_type=\"semantic_metric_version\"`.",
+        "operationId": "get_semantic_metric_version_consumers_v1_semantic_metric_versions__version_id__consumers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumerFooterRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Semantic Metric Version Consumers",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
     "/v1/semantic-metrics/{metric_id}/glossary-bindings": {
       "get": {
         "description": "SM-2, object -> term direction: which glossary terms are bound to this metric.",
@@ -69541,6 +69892,135 @@
           }
         },
         "summary": "Create Term Semantic Binding",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/semantic-model-versions/{model_id}/consumers": {
+      "get": {
+        "description": "UX-18: the consumer footer for one semantic model version -- who/what\ncurrently consumes *this exact version*, from CX-4 consumption lineage\n(`aida.consumer_footer`), so a steward opening it for edit is never\nblind to its downstream impact. `resource_id` is `model_id` itself\n(each version is its own row), matching the `resource_type=\n\"semantic_model_version\"` convention this module's own `record_audit`\ncalls already use.",
+        "operationId": "get_semantic_model_version_consumers_v1_semantic_model_versions__model_id__consumers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "model_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Model Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumerFooterRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Semantic Model Version Consumers",
         "tags": [
           "semantic-governance"
         ]
