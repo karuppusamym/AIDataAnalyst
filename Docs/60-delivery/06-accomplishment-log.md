@@ -6973,3 +6973,149 @@ own delivery note).
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched. No database migration involved (a pure frontend/rendering change).
+
+## 2026-09-01 — DQ-6 closed: seasonality-aware thresholds for the VOLUME_CHANGE quality control
+
+### The false positive this closes
+
+`quality_service.evaluate_analysis_run`'s VOLUME_CHANGE control compared a table's current
+`TableProfile.row_count` only to its single most recent prior profile for that table (a
+`baseline_rank == 1` `row_number()` window over `TableProfile.created_at`). A table with a genuine,
+fully-normal weekly cycle -- e.g. `daily_transactions` running ~1000 rows/day on weekdays and ~400
+rows/day on weekends, every week, by design -- tripped the 30%-default `volume_change_percent`
+threshold on every single Friday->Saturday and Sunday->Monday transition, because the comparison had
+no notion of day-of-week at all: it was always "today vs. whatever day ran last."
+
+### The baseline data: already persisted, genuinely usable, not synthetic-only
+
+Per this row's own stop condition, `models.py` (read-only) was checked before writing any
+implementation: `TableProfile` is documented as "Immutable, run-scoped table statistics," carries a
+real `created_at` timestamp (`DateTime(timezone=True)`, indexed via
+`ix_table_profile_org_created`), and one row is written per table per analysis run -- never
+overwritten. Grepping the whole `src/aida` tree for `TableProfile`/`table_profile` alongside
+`retention`/`prune`/`purge`/`cleanup`/`delete` found no job that prunes or ages out old profiles (the
+existing single-baseline query already reads whatever is oldest without a lookback bound). So a
+table with several weeks of profiling scans already has several real, timestamped points per weekday
+sitting in the database -- no new persisted state, no retention-policy change, no migration needed to
+compute a real day-of-week baseline from it.
+
+### The pure function: `data_quality.day_of_week_baseline`
+
+New in `data_quality.py`, DB-free by construction -- it takes only a `Sequence[tuple[datetime, int]]`
+of already-observed points and an `observed_at` timestamp:
+
+```python
+def day_of_week_baseline(
+    history: Sequence[tuple[datetime, int]], observed_at: datetime, *, min_samples: int = 3
+) -> SeasonalBaseline | None:
+    weekday = observed_at.weekday()
+    same_weekday_values = [float(v) for ts, v in history if ts.weekday() == weekday]
+    if len(same_weekday_values) < min_samples:
+        return None
+    mean = statistics.fmean(same_weekday_values)
+    stdev = statistics.pstdev(same_weekday_values) if len(same_weekday_values) > 1 else 0.0
+    return SeasonalBaseline(weekday=weekday, mean=mean, stdev=stdev, sample_count=len(same_weekday_values))
+```
+
+Returns `None` -- explicit "not enough same-weekday history yet" -- below `min_samples`, so a caller
+always has a safe fallback rather than trusting a thin sample.
+
+`evaluate_quality` gained optional `row_count_history`/`current_observed_at`/`seasonality_enabled`/
+`seasonality_min_samples`/`seasonality_zscore_threshold` keyword parameters (all default off/`None`,
+so every existing positional call site and every existing test is unaffected). The existing
+`volume_change_percent`-vs-previous-profile number is still always computed and recorded in
+`evidence` for continuity/audit. When seasonality is enabled and `day_of_week_baseline` returns a
+real baseline, the *anomaly verdict itself* switches: if the baseline has observed variance
+(`stdev > 0`), the decision is a z-score against that weekday's own mean/stdev (`> zscore_threshold`,
+default 3.0, severity escalating to CRITICAL past `2x` the threshold via the same `_severity` helper
+every other control already uses); with no observed variance yet (a single same-weekday sample),
+it falls back to a percent-of-seasonal-mean comparison using the same `volume_change_percent`
+threshold as the non-seasonal path. Either way, `evidence["threshold_strategy"]` records
+`"SEASONAL_DAY_OF_WEEK"` or `"ROLLING_PREVIOUS"` so which comparison decided a given verdict is
+always auditable, not just inferred from whether an incident exists.
+
+### Wiring: an off-by-default flag, not a new policy-table column
+
+`quality_service.evaluate_analysis_run` now optionally issues one extra bounded query (at most 120
+of a table's most recent prior `TableProfile` rows, reusing the exact same `baseline_rank` window
+subquery the existing single-baseline query already builds) to assemble each table's
+`row_count_history`, and threads it plus a per-table `current_observed_at=profile.created_at` into
+`evaluate_quality`. This only happens when the new `Settings.quality_seasonal_thresholds_enabled`
+flag (`src/atlas/platform/config.py`, off by default, plus `quality_seasonal_min_samples`/
+`quality_seasonal_zscore_threshold` knobs) is on, so an org that has not opted in pays no extra query
+cost and sees byte-identical behavior to before.
+
+This flag deliberately lives in global `Settings`, not as a new column on the DB-backed
+`DataQualityPolicy` table `custom_quality_rules`/DQ-4 already extends: `data_quality.py`'s
+`normalized_policy()`/`DEFAULT_POLICY` dict is asserted 1:1 against the Pydantic
+`DataQualityPolicyUpsert` contract in `test_data_quality.py::test_quality_contracts_validate_bounds_and_routes`
+(`defaults.model_dump(...) == normalized_policy()`), and `schemas.py` is off-limits for this item, so
+adding a policy-table field was not an option without touching a forbidden file. A `Settings` flag
+follows the exact rollout shape this repo already uses for a new, off-by-default quality/agent
+strategy (e.g. AG-7's `agent_query_memory_enabled`).
+
+The result reaches the *same* `DataQualityObservation`/`DataQualityIncident` creation code DQ-1's
+notification routing and DQ-3's runtime coupling (tool gating, answer trust warnings, retrieval
+demotion) already consume -- nothing downstream of `evaluate_quality`'s return value changed.
+
+### Reduced false positives, measured
+
+`tests/test_data_quality_seasonality.py` (pure-function level, no DB): a deterministic 12-week
+synthetic series (weekday ~1000 rows, weekend ~400 rows, +/-0.5% jitter so no two same-weekday values
+are identical, all fully "normal" for their day). Eight weeks establish the history; the next four
+weeks' 8 weekday<->weekend transitions (Fri->Sat and Sun->Mon x4) are each evaluated both ways:
+
+- **Naive rolling-previous baseline (today's unmodified behavior): 8/8 (100%) flagged as
+  `VOLUME_CHANGE`** -- every single normal weekend transition is a false positive.
+- **Seasonal day-of-week baseline: 0/8 (0%) flagged** -- the exact same 8 transitions, judged
+  against each table's own day-of-week history, produce zero false positives.
+- **One transition in numeric detail**: a normal ~400-row Saturday scores `volume_change_percent`
+  ~60% against the Friday before it under the old logic (flagged, threshold is 30%) but a
+  `seasonal_zscore` under 1.5 against its own Saturdays (not flagged, `status == "HEALTHY"`).
+- **True positive preserved**: a genuine collapse to 20 rows on a Saturday whose normal baseline is
+  ~400 still trips `VOLUME_CHANGE` under the seasonal comparison (`seasonal_zscore > 3`, severity
+  `CRITICAL`) -- switching baselines does not mean weekend anomalies stop being detected, only that
+  a normal weekend stops being misjudged as one.
+- `day_of_week_baseline` itself is proven to group strictly by weekday (a 3-Saturday-only mean stays
+  ~400, never drifts toward the ~1000 weekday values mixed into the same history array) and to return
+  `None` -- triggering the automatic fallback -- when fewer than `min_samples` same-weekday points
+  exist yet.
+
+`tests/test_quality_seasonality_wiring.py` proves the identical effect through the real
+`evaluate_analysis_run` call, against a real in-memory sqlite database seeded through the ORM (the
+same pattern DQ-4's `test_custom_quality_rules.py` established) with 61 real, individually-inserted,
+timestamped `TableProfile` rows -- not a mock, not a synthetic in-memory list handed straight to the
+pure function:
+
+- **Flag off (default)**: a normal Saturday still opens 1 `VOLUME_CHANGE` incident
+  (`counts["incidents_opened"] == 1`), `DataQualityObservation.evidence["threshold_strategy"] ==
+  "ROLLING_PREVIOUS"` -- proving the rollout is genuinely opt-in, not a silent behavior change.
+- **Flag on** (`monkeypatch.setattr(quality_service, "get_settings", ...)`, matching
+  `test_profiling_exception_policy.py`'s established settings-injection pattern), same shape of
+  real persisted history, same normal Saturday: 0 incidents opened (`counts["incidents_opened"] ==
+  0`, `counts["healthy"] == 1`), with the persisted observation's evidence recording
+  `threshold_strategy: "SEASONAL_DAY_OF_WEEK"` and `seasonal_sample_count >= 3` as the auditable
+  reason no incident exists.
+
+### Tests, lint, scope
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_data_quality.py
+tests/test_data_quality_seasonality.py tests/test_quality_seasonality_wiring.py
+tests/test_quality_coupling.py tests/test_quality_runtime_coupling.py tests/test_custom_quality_rules.py
+tests/test_rt7_quality_trust_ranking.py tests/test_dbt_quality_bridge.py -q`: all green, including
+every pre-existing exact-evidence assertion in `test_data_quality.py` (`volume_change_percent`,
+`max_null_rate_change_percent`, the policy-contract 1:1 equality check) unaffected by the new
+additive `evidence["threshold_strategy"]` key. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. `ruff check` and `mypy src` clean on every changed/added file
+(`data_quality.py`, `quality_service.py`, `src/atlas/platform/config.py`,
+`tests/test_data_quality_seasonality.py`, `tests/test_quality_seasonality_wiring.py`).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched (per this row's own constraint) -- confirmed unnecessary precisely because `TableProfile`'s
+existing, unpruned, timestamped history already supports a real day-of-week baseline. Honest gaps:
+only day-of-week grouping ships; broader seasonality (day-of-month, holiday calendars) that the
+exit condition allows "if the existing scan-history data supports it" is not attempted here -- the
+data would support it (unbounded, timestamped history), but it is a larger follow-up, not needed for
+the weekly-cycle case this row's exit condition names. No live-Postgres verification of the new query
+(the same standing sandbox limitation CN-1c/CN-2a/DQ-4 already carry). The 120-row-per-table lookback
+bound is a deliberate cost cap, not tuned against a real production history size.
