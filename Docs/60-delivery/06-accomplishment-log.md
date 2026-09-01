@@ -8951,3 +8951,81 @@ regenerated for the one new additive route). No `models.py`/`schemas.py`/`platfo
 `contracts.py` file or Alembic migration touched — this session finished the close-out after the
 implementing agent paused waiting on a background test run; the diff it left was reviewed, tested
 fresh, and found sound before pushing.
+
+## 2026-09-01 — AT-3 closed: conversational natural-language entry point for marketplace discovery
+
+### What shipped
+
+`GET /v1/marketplace/products/ask` (`src/aida/marketplace_discovery.py`) answers a "find me X"
+marketplace question through the same three governed-question steps
+`agent_orchestrator.GovernedAgentOrchestrator.run()` applies to every other question, without
+standing up a second search stack:
+
+1. **Screening** — `marketplace_discovery.screen_marketplace_question` calls the identical
+   `prompt_risk.DeterministicPromptRiskClassifier` class the orchestrator constructs in its own
+   `__init__`, before any retrieval or model call. A BLOCK raises `MarketplaceDiscoveryBlocked`
+   with the same reason codes/score/classifier version the orchestrator's own
+   `AgentPolicyRejected` path would compute for the identical text — proven directly, not by
+   assertion: `test_malicious_question_gets_the_identical_block_decision_as_a_governed_question`
+   constructs a real `GovernedAgentOrchestrator`, reads its `prompt_risk_classifier`, and asserts
+   the two assessments are equal field-for-field. A second test confirms a BLOCKed question never
+   reaches route resolution or the database at all.
+2. **Resolution** — `resolve_marketplace_filters` calls `model_gateway.ProviderNeutralModelGateway
+   .structured_completion` (an organization-approved, `CLASSIFICATION`-capable route — the same
+   non-SQL model capability `semantic_inference.py`'s metadata inference already uses, chosen
+   deliberately over `SQL_GENERATION` because a marketplace question resolves to filter
+   arguments, never SQL) to translate the question into `MarketplaceFilterResolution`: exactly
+   `search_marketplace`'s own `q`/`domain`/`classification`/`sort` arguments. INV-2 ("SQL
+   execution only through the query gateway") does not apply here — this never generates or
+   executes SQL, only metadata-search filter values — but the discipline that invariant stands
+   for (never trust model output into a query unvalidated) is kept anyway: the pydantic contract
+   itself is the first bound (`classification` restricted to the same literal set
+   `search_marketplace` accepts, `q`/`domain` capped at its 200-char `Query(...)` length — an
+   out-of-contract response fails validation before it ever becomes an argument), and the one
+   open-vocabulary field, `domain`, is independently re-checked against the caller's own
+   discoverable catalog (read through a real `search_marketplace(sort="catalog")` call under the
+   caller's own context, never a separate unfiltered query) and dropped back to `None` — no
+   filter — if it names nothing real, so a hallucinated domain can never silently stand in for
+   the actual answer.
+3. **Policy** — the bounded filters are handed to the real, unmodified `search_marketplace`
+   function with the caller's own unmodified `SecurityContext`. EE.8's SQL-level `DISCOVER`-role
+   filtering therefore applies exactly as it would to a structured call with the same filters —
+   this row never constructs a parallel query path and never post-filters a broader query in
+   application code.
+
+The endpoint lives in its own `APIRouter` (`marketplace_discovery.router`, wired into `main.py`)
+rather than as a new route on `product_marketplace_api.router`: `marketplace_discovery.py` imports
+the real `search_marketplace` from `product_marketplace_api.py`, so that module cannot also import
+back from here without a circular import — a second router, included alongside the first, avoids
+it cleanly instead of reaching for a lazy in-function import that would have cost FastAPI proper
+`response_model` typing/OpenAPI generation for the new schemas.
+
+### Authorization-parity proof
+
+`test_role_restricted_caller_sees_identical_results_via_conversational_and_direct_search`
+seeds two published products — one `DISCOVER`-bound to `"*"`, one bound only to a
+`"RiskCommittee"` role a test-only `Analyst` caller does not hold — points a deterministic
+mocked model-gateway response at an unfiltered "browse everything" resolution (the shape most
+likely to smuggle a hidden product through if the conversational path ever bypassed
+`search_marketplace`'s own filtering), and asserts the conversational and direct-`search_marketplace`
+result sets are identical and both exclude the restricted product. A second half of the same test
+repeats it with a caller who *does* hold `RiskCommittee`, getting both products through both
+paths — confirming the difference is real role-based filtering, not the restricted product being
+broken or unpublished.
+
+### Verification
+
+8 tests in `tests/test_marketplace_discovery.py` (real in-memory SQLite via aiosqlite, same style
+`test_marketplace_personalization.py` uses): screening parity (2), filter resolution against a
+`model_gateway.DeterministicTestProvider` mocked response including the hallucinated-domain bound
+and an out-of-contract `classification` rejection (3), authorization parity plus one unavailable
+-model-route case (2), one blocked-before-DB case (1). `ruff check`/`mypy src` clean on every
+touched file (the same 44 pre-existing `"object" not callable` Temporal-decorator errors as
+before this change, none in the new files); `lint-imports` 8/8 kept;
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean;
+`tests/test_event_catalog_gate.py` clean (no new `record_outbox` call, so no catalog row needed).
+New route changed `app.openapi()` — `Docs/90-reference/openapi-baseline.json` regenerated
+(additive-only, `git diff --stat` confirmed: 259 insertions, 0 deletions) and
+`ui-next/src/lib/types.ts` regenerated (`MarketplaceFilterResolution`/`MarketplaceDiscoveryResponse`
+added, 18 insertions, 0 deletions). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file touched and no Alembic migration.
