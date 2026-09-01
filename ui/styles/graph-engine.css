@@ -33,6 +33,9 @@
 /* LN-8: count of HTML node cards currently mounted vs. total graph nodes --
    the same "showing X of Y" idiom as the virtualized catalog table. */
 .atlas-graph-window-readout { padding: 0 4px; font-size: 9px; font-weight: 700; color: var(--muted); white-space: nowrap; }
+/* KG-3: level-of-detail clustering status -- empty text when clustering is
+   inactive (zoomed in past the threshold, or the graph is small). */
+.atlas-graph-cluster-readout { padding: 0 4px; font-size: 9px; font-weight: 700; color: #3f6fa8; white-space: nowrap; }
 
 .atlas-graph-minimap {
   position: absolute; right: 10px; bottom: 10px; z-index: 30;
@@ -99,6 +102,18 @@
 .atlas-node-card.compact { width: 148px; padding: 7px 8px 6px; }
 .atlas-node-card.compact .ag-title { font-size: 10px; }
 .atlas-node-card.compact .ag-sub { font-size: 8px; }
+
+/* KG-3: level-of-detail cluster summary card -- stands in for a whole group
+   of same-schema/namespace nodes at zoomed-out scale. Distinct dashed
+   border (matches the node[isCluster] canvas placeholder) and a large count
+   badge so it reads at a glance as "many nodes", not one real table. */
+.atlas-node-card.atlas-cluster-card {
+  width: 168px; border-style: dashed; border-color: #3f6fa8; border-left-width: 1px;
+  background: #eef3fa; text-align: center; cursor: default;
+}
+.atlas-node-card.atlas-cluster-card .ag-cluster-count { display: block; font-size: 20px; font-weight: 800; color: #1b4d77; line-height: 1.1; }
+.atlas-node-card.atlas-cluster-card .ag-cluster-label { display: block; font-size: 9px; font-weight: 700; color: #3f6fa8; text-transform: uppercase; letter-spacing: .03em; margin-top: 2px; }
+.atlas-node-card.atlas-cluster-card .ag-sub { margin-top: 5px; text-align: center; }
 
 @media (max-width: 900px) {
   .atlas-graph-stage { height: 460px; }

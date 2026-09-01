@@ -6830,3 +6830,146 @@ touched by this row; this run only confirms no regression in the separate React 
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched. No database migration involved (a pure frontend/rendering change).
+
+## 2026-09-01 — KG-3 closed: level-of-detail (clustering) rendering for the shared lineage/knowledge-graph renderer
+
+Frontend-only, and deliberately composed with (not layered independently on top of) LN-8's
+large-DAG virtualization, landed earlier the same day on the same shared component. The API
+boundary is the hard constraint this row was scoped around from the start: `unified_lineage_api.py`
+and `intelligence_api.py::get_knowledge_graph`/`get_knowledge_graph_neighborhood` already return
+bounded, truncated node/edge sets per ADR-0010/EA.14 (LN-8's own delivery confirmed this, and KG-3
+does not revisit it) -- neither file was touched by this row (verified structurally, see the test
+below), and no new endpoint exists to ask the server for pre-clustered data.
+
+### The gap LN-8 explicitly left open
+
+LN-8's windowing bounded how many rich HTML `<div>` cards mount at once (`node[agWindowed]`,
+`computeWindowedNodeIds`, capped at `DEFAULT_HTML_WINDOW_CAP = 220`), but every real node stayed in
+the Cytoscape model regardless of windowing state -- non-windowed nodes fell back to a cheap
+canvas-only placeholder rectangle, but at the platform's own bound (`unified_lineage_api.py`'s
+full-graph route, `node_limit` up to 4,000) that is still 4,000 real nodes and their edges in the
+Cytoscape graph, all participating in canvas layout/hit-testing/minimap rendering at every zoom
+level. LN-8's own row explicitly named this "KG-3's separate, still-open level-of-detail work" and
+scoped itself out of it.
+
+### The mechanism: zoom-threshold clustering, not Cytoscape compound nodes
+
+Cytoscape core's native compound-node support (a `parent` data field) renders a bounding container
+*around* its children -- it does not hide/collapse them into a single visual node without an
+`expand-collapse` plugin, and none is vendored (`ui/vendor/` holds only `cytoscape.min.js`,
+`cytoscape-dagre.js`, `cytoscape-node-html-label.min.js`; no CDN calls are permitted). Rather than
+add a new vendored dependency, KG-3 hand-rolls the collapse: real nodes/edges are never restructured
+into a parent/child hierarchy, only shown or hidden (`ele.style("display", "none" | "element")`,
+never `.remove()`d), while synthetic "cluster" nodes/edges are added/updated/removed to stand in for
+whichever groups are currently collapsed. This is deliberately the same "hide, don't remove" idiom
+LN-8 established for its own canvas placeholder/HTML-card duality, applied one level up.
+
+The pure decision function, `computeClusterView(nodeBoxes, edgeList, zoom, options)` -- module-scope
+in `ui/scripts/graph-engine.js`, no Cytoscape/DOM dependency, same convention as LN-8's
+`computeWindowedNodeIds` right above it -- takes `{id, x, y, w, h, groupKey}` boxes and
+`{id, source, target}` edges and the current `cy.zoom()` level:
+
+- **At/above `DEFAULT_CLUSTER_ZOOM_THRESHOLD` (0.45):** inactive; the raw graph passes through with
+  every node individual and every edge keeping its original id/endpoints (`original: true`), so a
+  small graph or a zoomed-in view is completely unaffected.
+- **Below the threshold:** nodes are grouped by `groupKey`; any group of `DEFAULT_CLUSTER_MIN_SIZE`
+  (3) or more collapses into one synthetic node at the group's centroid, width/height scaled by
+  `sqrt(count)` and capped, carrying `count` for a count badge -- a pair of tables sharing a schema
+  is not worth turning into a "cluster of 2", so smaller groups stay individual. The selected/
+  focused node is always excluded from grouping (a `__pinned__:<id>` singleton group), mirroring
+  LN-8's own `pinnedId` behavior for windowing -- selecting/focusing a node must never make it
+  invisible behind a cluster.
+- **Edges:** an edge between two nodes that both stayed individual keeps its original id/classes
+  untouched (`original: true`) so its declared/suggested/dbt/openlineage styling survives; any edge
+  touching a cluster (or dropped entirely because both ends collapsed into the *same* cluster) is
+  folded into one deduplicated aggregate edge per rendered-id pair (`original: false`, `weight` =
+  how many real edges it represents), styled distinctly (`edge[isClusterEdge]`, dashed grey).
+
+### The grouping key: `qualified_name`, already on every node, no new API field
+
+`defaultClusterKey(nodeData)` takes everything before the last `.` in `nodeData.qualified_name` --
+the schema/namespace a node lives in. This field is already present on every node object all four
+graph surfaces pass to `AtlasGraph.setData()` today (`ui/app.js`'s `knowledgeGraphNodeHtml`/
+`renderGraphStage`, `context-lineage-control-plane.js`'s unified-lineage node builder), and is
+populated by the API for every node kind already (`unified_lineage_api.py`: TABLE nodes get
+`f"{catalog.name}.{schema.name}.{table.name}"`; dbt resource nodes get `relation_name` or
+`unique_id`, both dotted). A node without a dotted `qualified_name` falls back to `node_kind`/
+`object_type`, then a single `"ungrouped"` catch-all -- no crash, no new field required anywhere.
+Callers may override the key entirely via `opts.clusterKey` (e.g. to group by a different
+dimension) without touching the pure function.
+
+### Composing with LN-8's windowing, not duplicating or fighting it
+
+This was the row's second hard constraint, and it is structural, not just documented:
+
+- `AtlasGraph._refreshClusterState()` recomputes the cluster plan and `_applyClusterPlan()` applies
+  it (hide/show real elements, add/update/remove synthetic ones) **before** `_computeWindowedIds()`
+  runs, inside the same coalesced `requestAnimationFrame` callback LN-8's `_scheduleWindowRefresh()`
+  already used for pan/zoom/`layoutstop` -- windowing always sees this frame's cluster/hidden state,
+  never a stale one, and the two never race across separate rAF schedules.
+- `_computeWindowedIds()` now boxes up only *visible* Cytoscape nodes
+  (`node.style("display") !== "none")`). A real node hidden behind an active cluster is excluded
+  entirely -- it costs 0 window slots, same as if it didn't exist for windowing's purposes -- while
+  the one cluster node standing in for it is an ordinary box like any other, so it costs exactly 1
+  slot regardless of whether it represents 3 real nodes or 3,000. This is the literal mechanism
+  behind "a cluster node counts as one window slot, not N."
+- Cluster nodes get their own built-in HTML card template (`AtlasGraph._clusterCardHtml`, a count
+  badge plus the group key), bypassing the caller's `nodeHtml` entirely (`knowledgeGraphNodeHtml` et
+  al. expect real-node fields like `column_count`/`qualified_name` a synthetic cluster node doesn't
+  have) -- but they still mount through the exact same `node[agWindowed]` gate LN-8 built, so they
+  respect the same HTML-card budget as everything else. A `node[isCluster]` canvas-only placeholder
+  (dashed border, a native canvas-drawn count label) means a cluster is legible even before/without
+  its HTML card mounting, the same "cheap canvas first" idiom LN-8 established for real nodes.
+- `setData()` resets `_clusterActive = false` whenever elements are replaced (a full clustering
+  recompute follows from the next `_scheduleWindowRefresh()` pass rather than diffing against
+  synthetic elements that `cy.elements().remove()` just discarded).
+
+A new `atlas-graph-cluster-readout` toolbar element (`"Zoomed out: N clusters grouping M nodes"`)
+sits beside LN-8's `atlas-graph-window-readout`, the same live-region idiom, empty when clustering
+is inactive.
+
+### Proof
+
+Same convention as LN-8: `ui/` has no JS test runner, so `ui/scripts/graph-engine.clustering.
+test.mjs` (plain Node, `node:vm` to load the IIFE against a bare `{window: {AtlasUI: {}}}` sandbox,
+`node:assert`) actually executes `computeClusterView` rather than only asserting against source
+text. Seven scenarios: (1) at the zoom threshold itself, clustering is inactive and every one of
+200 raw nodes/edges passes through unchanged, with every edge marked `original: true`; (2) at
+`unified_lineage_api.py`'s own 4,000-node full-graph `node_limit` ceiling (100 groups of 40), zoomed
+past the threshold, exactly 100 cluster nodes render (each carrying `count: 40`, every raw node
+accounted for by exactly one cluster) and the aggregated edge count drops below the raw edge count
+too; (3) the same 4,000-node input at a zoom at/above the threshold recovers all 4,000 individual
+nodes exactly, proving expansion is lossless (the function is pure/stateless, so nothing "sticky"
+survives from having been clustered a moment ago); (4) a 2-member group stays individual while a
+40-member group in the same graph still collapses; (5) a pinned/selected node stays individual even
+while the other 79 members of its group collapse into one cluster; (6) simulating
+`_computeWindowedIds()`'s own box-building on top of a clustered 4,000-node plan (100 boxes) proves
+all 100 clusters fit under the 220 HTML-card cap where the raw 4,000 nodes would have hit it (per
+LN-8's own test 1) -- the composition contract, actually executed, not just asserted by source
+inspection; (7) `defaultClusterKey` derives from `qualified_name` alone, with the documented
+node_kind/object_type/`"ungrouped"` fallback chain. `tests/test_ui_lineage_graph_clustering.py` (8
+tests, following `tests/test_ui_accessibility.py`'s established ui/-source-assertion convention)
+shells out to that script (`subprocess.run(["node", ...])`, skipped if `node` is unavailable) and
+parses its JSON summary to assert the same numeric bounds under `pytest`, plus structurally asserts
+the windowing-composition point (`_refreshClusterState()` before `_computeWindowedIds()` in the same
+coalesced pass), the hide-never-remove invariant, the pinned-node exclusion, and -- by grepping
+`unified_lineage_api.py`/`intelligence_api.py` for `cluster`/`clustering`/`level_of_detail`/`lod` and
+asserting none of those strings appear -- that no clustering-related server logic was added.
+
+### Verification
+
+`node --check ui/scripts/graph-engine.js` and `node --check ui/scripts/graph-engine.clustering.
+test.mjs` clean. `node ui/scripts/graph-engine.clustering.test.mjs` clean (all 7 scenarios pass).
+`node ui/scripts/graph-engine.virtualization.test.mjs` (LN-8's own proof) still clean, unmodified.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_ui_lineage_graph_clustering.py
+tests/test_ui_lineage_graph_virtualization.py tests/test_ui_accessibility.py -q`: 21 passed (8 new +
+13 pre-existing, unmodified -- no regression in LN-8's own suite). `AIDA_ENVIRONMENT=development uv
+run pytest tests/test_doc_claims.py -q` clean. No HTTP route added or changed and neither
+`unified_lineage_api.py` nor `intelligence_api.py` was touched (confirmed by `git diff --stat`
+showing zero changes to either file, and by the grep-based test above), so
+`tests/test_openapi_diff_gate.py` and the generated `ui-next/src/lib/types.ts` are untouched;
+`ui-next` itself was not touched by this row (it has no lineage/graph component at all, per LN-8's
+own delivery note).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No database migration involved (a pure frontend/rendering change).
