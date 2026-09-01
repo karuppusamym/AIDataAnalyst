@@ -6,6 +6,7 @@ import pytest
 from aida.connectors.registry import connector_registry
 from aida.connectors.snowflake import (
     SnowflakeConnector,
+    _assemble_snowflake_catalog,
     _build_routine,
     _build_view_definition,
     _extract_snowflake_explain_estimate,
@@ -13,6 +14,7 @@ from aida.connectors.snowflake import (
     _parse_dsn,
     _quote_identifier,
     _quote_literal,
+    _SnowflakeEnvelopeRows,
     _unqualified_name,
 )
 
@@ -600,6 +602,84 @@ def test_show_grants_object_names_are_unqualified() -> None:
     assert _unqualified_name("TEST_DB.PUBLIC") == "PUBLIC"
     assert _unqualified_name('"TEST_DB"."PUBLIC"') == "PUBLIC"
     assert _unqualified_name(None) == ""
+
+
+def test_a_schema_known_only_through_a_routine_still_surfaces() -> None:
+    """A schema holding only a stored procedure has no row in `INFORMATION_SCHEMA.COLUMNS`.
+
+    `assemble_catalog` unions schema names across every 1.1 axis precisely for this
+    case (INV-9); the schema must not silently vanish just because Snowflake's
+    routine inventory outruns its table inventory.
+    """
+    catalogs = _assemble_snowflake_catalog(
+        "TEST_DB",
+        [],
+        [],
+        [],
+        envelope=_SnowflakeEnvelopeRows(
+            routines=(
+                {
+                    "routine_schema": "BATCH",
+                    "routine_name": "NIGHTLY_CLOSE",
+                    "routine_type": "PROCEDURE",
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "BATCH"
+    assert schema.tables == ()
+    assert len(schema.routines) == 1
+    assert schema.routines[0].name == "NIGHTLY_CLOSE"
+
+
+def test_a_schema_known_only_through_a_grant_still_surfaces() -> None:
+    catalogs = _assemble_snowflake_catalog(
+        "TEST_DB",
+        [],
+        [],
+        [],
+        envelope=_SnowflakeEnvelopeRows(
+            grants=(
+                {
+                    "schema_name": "AUDIT",
+                    "grantee_name": "REPORTING_ROLE",
+                    "granted_to": "ROLE",
+                    "privilege": "USAGE",
+                    "granted_on": "SCHEMA",
+                    "name": "AUDIT",
+                    "grant_option": False,
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "AUDIT"
+    assert schema.tables == ()
+    assert len(schema.grants) == 1
+    assert schema.grants[0].grantee == "REPORTING_ROLE"
+
+
+def test_a_schema_known_only_through_its_own_comment_still_surfaces() -> None:
+    catalogs = _assemble_snowflake_catalog(
+        "TEST_DB",
+        [],
+        [],
+        [],
+        envelope=_SnowflakeEnvelopeRows(
+            schemata=({"schema_name": "REPORTING", "comment": "Reporting schema"},),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "REPORTING"
+    assert schema.tables == ()
+    assert schema.source_description == "Reporting schema"
 
 
 def test_get_ddl_object_names_are_escaped_as_string_literals() -> None:

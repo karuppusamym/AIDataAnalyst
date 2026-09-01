@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from typing import Any
 from uuid import UUID
@@ -67,6 +68,9 @@ from aida.agent_orchestrator import (
     GovernedAgentOrchestrator,
     ModelRouteUnavailable,
 )
+from aida.asset_context import compose_asset_context_signals
+from aida.asset_usage_decision import compute_usage_decision
+from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.consumption_lineage import ConsumptionEdge, record_consumption
 from aida.context import get_correlation_id
@@ -80,6 +84,7 @@ from aida.context_product_policy import (
     was_previously_authorized_consumer,
 )
 from aida.db import get_session
+from aida.envelope_models import MetadataViewDefinition
 from aida.events import record_audit, record_outbox
 from aida.ingest_screening import is_eligible_for_model_context, screen_text
 from aida.mcp_budget import (
@@ -239,8 +244,13 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "slug": "get_transformation_detail",
         "description": (
-            "Return value-safe dbt transformation evidence for a dbt resource or matched table: "
-            "redacted compiled SQL, dependencies, tests, materialization, and source artifact hash."
+            "Return value-safe transformation evidence -- the code that produced a lineage "
+            "edge -- for a dbt resource, a matched table, or a view. dbt-matched entities "
+            "get redacted compiled SQL, dependencies, tests, materialization and source "
+            "artifact hash; a view table (AT-19, envelope 1.1) gets its redacted definition "
+            "SQL, redaction status and screening status. Answers 'why do you say so' for a "
+            "VIEW_DEFINITION or DBT_DEPENDENCY edge from get_lineage_graph -- not just that "
+            "the edge exists."
         ),
         "inputSchema": {
             "type": "object",
@@ -252,6 +262,31 @@ NATIVE_LINEAGE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
             },
             "required": ["datasource_id", "entity_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        # AT-13: Atlan's own MCP transcript has the *model* concluding
+        # "safe to use, ensure your pipeline respects that policy" for one
+        # asset -- a model acting as policy oracle and handing enforcement
+        # back to the caller. This tool composes the same facts in one call,
+        # with the usage decision computed server-side (aida.asset_usage_decision)
+        # and every contributing factor named in the response, never a bare
+        # label the caller has to trust.
+        "slug": "get_asset_context",
+        "description": (
+            "Return one table's certification, quality, classification, lineage depth "
+            "and owner in a single call, plus a server-computed usage_decision "
+            "(ALLOWED / ALLOWED_WITH_CAUTION / BLOCKED) with every contributing factor "
+            "named -- never a bare label. One policy evaluation and one audit record "
+            "cover the whole composite read."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "table_id": {"type": "string", "description": "MetadataTable UUID"},
+            },
+            "required": ["table_id"],
             "additionalProperties": False,
         },
     },
@@ -920,6 +955,31 @@ async def _transformation_detail(
     datasource: DataSource,
     entity_id: UUID,
 ) -> dict[str, Any] | None:
+    """Resolve one entity id to its transformation evidence.
+
+    Two independent sources, tried in order:
+
+    1. dbt-compiled SQL (`DbtResource`, unchanged from EE.10) -- `entity_id` is
+       a `DbtResource.id` or the `MetadataTable.id` it matched to.
+    2. AT-19: connector-discovered view DDL (`MetadataViewDefinition`, envelope
+       1.1) -- `entity_id` is the `MetadataTable.id` of the view itself.
+       `MetadataViewDefinition.table_id` carries a `UniqueConstraint`, so this
+       is a genuine 1:1 lookup, not a guess: exactly the view/procedure
+       identity `unified_lineage_api.py`'s `VIEW_DEFINITION` edges reference
+       via `transformation_reference.entity_id` in their `evidence`, so the
+       edge and this tool can never present two disconnected representations
+       of the same fact.
+
+       Stored-procedure bodies (`MetadataRoutine`) are deliberately NOT
+       resolved here: `ProcedureLineageEdge` carries no FK, specific_name, or
+       any other identity field back to the `MetadataRoutine` row a given
+       edge was parsed from (`view_lineage_api.py`'s `_persist_edges` takes
+       only raw SQL text with no routine-identity parameter), so there is no
+       stable per-edge link to follow -- fabricating one here would present
+       an unverifiable guess as fact. `PROCEDURE_DEFINITION` edges keep their
+       existing `sql_hash`/`dialect` evidence and do not get a
+       `transformation_reference`. See AT-19's tracker note.
+    """
     resource = await session.scalar(
         select(DbtResource)
         .join(DbtArtifactImport, DbtArtifactImport.id == DbtResource.artifact_import_id)
@@ -933,7 +993,7 @@ async def _transformation_detail(
         .limit(1)
     )
     if resource is None:
-        return None
+        return await _view_definition_transformation_detail(session, datasource, entity_id)
     artifact = await session.get(DbtArtifactImport, resource.artifact_import_id)
     # `resource.description` is source-controlled free text pulled from a dbt manifest
     # (a model/source `description:` in someone's YAML) and this tool call hands it
@@ -955,6 +1015,7 @@ async def _transformation_detail(
         if not is_eligible_for_model_context(verdict.status):
             description = None
     return {
+        "transformation_source": "DBT_COMPILED_SQL",
         "dbt_resource_id": str(resource.id),
         "lineage_node_id": (
             str(resource.matched_table_id)
@@ -987,6 +1048,278 @@ async def _transformation_detail(
     }
 
 
+async def _view_definition_transformation_detail(
+    session: AsyncSession,
+    datasource: DataSource,
+    entity_id: UUID,
+) -> dict[str, Any] | None:
+    """AT-19: transformation evidence sourced from envelope 1.1's connector-
+    discovered view DDL, for entities `_transformation_detail`'s dbt lookup
+    did not match.
+
+    `entity_id` is a `MetadataTable.id`; `MetadataViewDefinition.table_id` is
+    unique per table (see `envelope_models.py`), so this is a genuine 1:1
+    lookup -- the same `table_id` `unified_lineage_api.py`'s `VIEW_DEFINITION`
+    edges carry as `evidence.transformation_reference.entity_id`, so an edge's
+    reference and this read always describe the same underlying row, never
+    two representations that could drift apart.
+
+    `definition_sql_redacted` was already literal-redacted (INV-6) and
+    prompt-risk-screened (`ingest_screening.screen_text`) once, at write time
+    (`ingestion.py::_upsert_view_definition`) -- unlike a dbt resource's
+    free-text `description`, `MetadataViewDefinition` carries a *stored*
+    `screening_status`, so this read honours it rather than re-screening.
+    """
+    table = await session.get(MetadataTable, entity_id)
+    if (
+        table is None
+        or table.datasource_id != datasource.id
+        or table.organization_id != datasource.organization_id
+    ):
+        return None
+    view_definition = await session.scalar(
+        select(MetadataViewDefinition).where(MetadataViewDefinition.table_id == entity_id)
+    )
+    if view_definition is None:
+        return None
+
+    definition_sql = view_definition.definition_sql_redacted
+    eligible = is_eligible_for_model_context(view_definition.screening_status)
+    if not eligible:
+        definition_sql = None
+    return {
+        "transformation_source": "VIEW_DEFINITION",
+        "view_definition_id": str(view_definition.id),
+        "lineage_node_id": str(table.id),
+        "table_id": str(table.id),
+        "name": table.name,
+        "definition_sql_redacted": definition_sql,
+        "definition_fingerprint": view_definition.definition_fingerprint,
+        "redaction_status": view_definition.redaction_status,
+        "screening_status": view_definition.screening_status,
+        "screening_reason_codes": view_definition.screening_reason_codes,
+        "is_materialized": view_definition.is_materialized,
+        "is_updatable": view_definition.is_updatable,
+        "truncated": view_definition.truncated,
+        "availability": view_definition.availability,
+        "unavailable_reason": view_definition.unavailable_reason,
+        "governance": {
+            "value_free": True,
+            "definition_sql_literals_redacted": True,
+            "raw_definition_persisted": False,
+        },
+    }
+
+
+_ASSET_CONTEXT_LINEAGE_DEPTH = 5
+_ASSET_CONTEXT_LINEAGE_NODE_LIMIT = 200
+
+
+async def _handle_get_asset_context(
+    arguments: dict[str, Any],
+    session: AsyncSession,
+    context: SecurityContext,
+    correlation_id: str,
+    settings: Settings | None,
+) -> dict[str, Any]:
+    """AT-13: `atlas__get_asset_context` -- one composite call for one table.
+
+    Certification, quality, classification, lineage depth and owner,
+    composed from `asset_context.compose_asset_context_signals` (itself
+    reusing UX-13's `catalog_read_model` typed helpers) and EA.14's
+    `unified_lineage_api.build_unified_lineage_impact_payload` -- the same
+    traversal `atlas__get_lineage_impact` calls, at this table's own node id
+    -- plus a `usage_decision` computed by the pure, DB-free
+    `asset_usage_decision.compute_usage_decision`, with every contributing
+    factor named in the response (never a bare label).
+
+    Exactly ONE policy evaluation for the whole call: the same `gate()` call
+    `asset_evidence_api.py`'s `GET /v1/metadata/tables/{id}/evidence` route
+    already makes to authorize a catalog read of this table (READ_METADATA
+    on the table's datasource) -- not a second/different evaluation, and
+    none of the five composed facts is separately gated. Exactly ONE audit
+    record and outbox event cover the whole composite read, recorded once
+    after every fact has been composed -- never once per fact.
+
+    Same anti-enumeration shape as the sibling native lineage tools: a
+    nonexistent table id and one in another organization return the
+    identical response, and role ineligibility was already turned away
+    before this function was reached.
+    """
+    try:
+        table_id = UUID(str(arguments.get("table_id")))
+    except (TypeError, ValueError):
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "table_id must be a UUID."}],
+        }
+
+    table = await session.get(MetadataTable, table_id)
+    if table is None or table.organization_id != context.organization_id:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Asset not found or not accessible."}],
+        }
+
+    datasource = await session.get(DataSource, table.datasource_id)
+    if datasource is None or datasource.organization_id != context.organization_id:
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Asset not found or not accessible."}],
+        }
+
+    resolved_settings = settings or get_settings()
+    try:
+        # The one policy evaluation for the whole composite call -- same
+        # shape as asset_evidence_api.py's gate() call, reused verbatim.
+        await gate(
+            session,
+            context,
+            settings=resolved_settings,
+            action="READ_METADATA",
+            resource_type="datasource",
+            resource_id=str(datasource.id),
+            datasource_id=datasource.id,
+        )
+    except AuthorizationDenied:
+        # Same anti-enumeration response as a nonexistent table: a denied
+        # caller cannot distinguish "not authorized" from "does not exist".
+        return {
+            "isError": True,
+            "content": [{"type": "text", "text": "Asset not found or not accessible."}],
+        }
+
+    moment = datetime.now(UTC)
+    signals = await compose_asset_context_signals(session, table, now=moment)
+
+    node_id = str(table.id)
+    lineage_summary: dict[str, Any]
+    try:
+        impact = await build_unified_lineage_impact_payload(
+            session,
+            datasource,
+            node_id,
+            depth=_ASSET_CONTEXT_LINEAGE_DEPTH,
+            node_limit=_ASSET_CONTEXT_LINEAGE_NODE_LIMIT,
+            settings=resolved_settings,
+        )
+        lineage_summary = {
+            "available": True,
+            "upstream_node_count": len(impact.upstream),
+            "downstream_node_count": len(impact.downstream),
+            "max_upstream_depth": max((node.depth for node in impact.upstream), default=0),
+            "max_downstream_depth": max((node.depth for node in impact.downstream), default=0),
+            "requested_depth": impact.requested_depth,
+            "upstream_truncated": impact.upstream_truncated,
+            "downstream_truncated": impact.downstream_truncated,
+            "source": "unified_lineage_api.build_unified_lineage_impact_payload (EA.14)",
+        }
+    except LineageNodeNotFoundError:
+        # Honest zero, not an error: a table the unified graph never
+        # registered as a node (deprecated, or beyond its own node cap) --
+        # the composite call still answers with everything else it has.
+        lineage_summary = {
+            "available": False,
+            "reason": "table is not a node in this datasource's unified lineage graph",
+            "source": "unified_lineage_api.build_unified_lineage_impact_payload (EA.14)",
+        }
+
+    usage = compute_usage_decision(
+        certification_state=signals.certification_state,
+        quality_state=signals.quality_state,
+        has_open_critical_incident=signals.has_open_critical_incident,
+        has_owner=signals.owner is not None,
+        has_sensitive_classification=signals.classification.has_sensitive_classification,
+    )
+
+    body: dict[str, Any] = {
+        "table_id": str(table.id),
+        "table_name": table.name,
+        "generated_at": moment.isoformat(),
+        "owner": signals.owner,
+        "owner_source": signals.owner_source,
+        "certification": {
+            "state": signals.certification_state,
+            "expires_at": (
+                signals.certification_expires_at.isoformat()
+                if signals.certification_expires_at
+                else None
+            ),
+            "source": "asset_certification (GL-5/CT-5), same query-time projection as UX-12/UX-13",
+        },
+        "quality": {
+            "state": signals.quality_state,
+            "open_incident_count": signals.open_incident_count,
+            "has_open_critical_incident": signals.has_open_critical_incident,
+            "source": "data_quality_incident + data_quality_observation (module 11), "
+            "same predicate as UX-12/UX-13",
+        },
+        "classification": {
+            "total_columns": signals.classification.total_columns,
+            "classified_columns": signals.classification.classified_columns,
+            "distinct_classifications": list(signals.classification.distinct_classifications),
+            "has_sensitive_classification": signals.classification.has_sensitive_classification,
+            "gap": (
+                "No table-level classification is stored anywhere on this platform -- "
+                "AT-11 (classification propagation along lineage) is still TODO. This "
+                "rolls up the existing per-column metadata_column.classification values "
+                "(the same ABAC input query_gateway.py masks reads against), it is not "
+                "a new classification decision."
+            ),
+        },
+        "lineage": lineage_summary,
+        "usage_decision": usage.as_dict(),
+    }
+
+    # The one audit record and one outbox event for the whole composite
+    # call -- recorded once, here, after every fact above is composed, not
+    # once per fact.
+    record_audit(
+        session,
+        context,
+        action="mcp.asset_context.read",
+        resource_type="metadata_table",
+        resource_id=str(table.id),
+        outcome="SUCCESS",
+        correlation_id=correlation_id,
+        details={
+            "tool_slug": "get_asset_context",
+            "datasource_id": str(datasource.id),
+            "usage_decision": usage.decision,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=context.organization_id,
+        aggregate_type="metadata_table",
+        aggregate_id=str(table.id),
+        event_type="asset_context.consumed.v1",
+        payload={
+            "tool_slug": "get_asset_context",
+            "principal_id": context.principal_id,
+            "channel": "MCP",
+            "usage_decision": usage.decision,
+        },
+    )
+    await session.commit()
+
+    return {
+        "content": [
+            {
+                "type": "text",
+                "text": (
+                    "✅ Asset context composed -- one policy evaluation, one audit "
+                    "record.\n"
+                    "- Tool: `atlas__get_asset_context`\n"
+                    f"- Table: `{table.id}` ({table.name})\n"
+                    f"- Usage decision: {usage.decision}"
+                ),
+            },
+            {"type": "text", "text": f"```json\n{json.dumps(body, indent=2, default=str)}\n```"},
+        ]
+    }
+
+
 async def _handle_native_lineage_tool_call(
     slug: str,
     arguments: dict[str, Any],
@@ -1009,6 +1342,14 @@ async def _handle_native_lineage_tool_call(
             "isError": True,
             "content": [{"type": "text", "text": f"Tool '{slug}' not found or not published."}],
         }
+
+    if slug == "get_asset_context":
+        # Keyed by table_id, not datasource_id -- resolved independently
+        # below rather than forced through the datasource_id parsing shared
+        # by the other four native lineage tools.
+        return await _handle_get_asset_context(
+            arguments, session, context, correlation_id, settings
+        )
 
     raw_datasource_id = arguments.get("datasource_id")
     try:

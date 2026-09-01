@@ -21,6 +21,25 @@ import "./ReviewQueueScreen.css";
    no way to audit the threshold that let it through.
 --------------------------------------------------------------------------- */
 
+/**
+ * AT-D4: the "Why orders_raw is currently blocked" `PropagationLog` below is a
+ * hard-coded, four-step lineage-propagation narrative — it is not fed by any
+ * fetch, fixture generator, or backend endpoint, and no such endpoint exists.
+ * `quality_coupling.check_tool_gate` (`src/aida/quality_coupling.py`, wired
+ * into `tool_api.py::execute_tool`) only gates on a tool's own *declared*
+ * dependency tables having an open incident directly; there is no lineage
+ * walk that makes "orders_raw inherits the incident via column lineage from
+ * raw_sales" a real, traversed chain, and no `classification_derived`
+ * propagation mechanism exists anywhere in `src/aida` at all (AT-11, which
+ * would build one, is still TODO). Rendering this unconditionally would show
+ * a steward a mechanism the platform cannot back with evidence — gated
+ * behind `VITE_ENABLE_PROPAGATION_LOG`, default OFF, until AT-11 (or an
+ * equivalent real, lineage-resolved read model) ships something to show
+ * here honestly. `PropagationLog` itself stays in place, unmodified, for
+ * that day.
+ */
+const PROPAGATION_LOG_ENABLED = import.meta.env.VITE_ENABLE_PROPAGATION_LOG === "1";
+
 export function ReviewQueueScreen() {
   const [batch, setBatch] = useState<ReviewBatch | null>(null);
   const [decisions, setDecisions] = useState<Record<string, Proposal["state"]>>({});
@@ -136,34 +155,36 @@ export function ReviewQueueScreen() {
         </section>
       ) : null}
 
-      <section className="rq__sec">
-        <h2 className="rq__h2">Why orders_raw is currently blocked</h2>
-        <PropagationLog
-          title="Quality propagation · ADR-0016 fails closed"
-          steps={[
-            {
-              kind: "origin",
-              text: "raw_sales failed 12 of 15 quality rules (null counts, type mismatches)",
-              mechanism: "data_quality.py · rule set dq_raw_sales@4",
-            },
-            {
-              kind: "hop",
-              text: "orders_raw inherits the incident",
-              mechanism: "via column lineage — orders_raw.amount derives from raw_sales.amount",
-            },
-            {
-              kind: "hop",
-              text: "revenue_agg inherits the incident",
-              mechanism: "via column lineage — reads orders_raw.amount",
-            },
-            {
-              kind: "blocked",
-              text: "tool_revenue_by_lob refused while the incident is open",
-              mechanism: "recorded as a refusal edge · ai_decision_lineage.py (LN-3)",
-            },
-          ]}
-        />
-      </section>
+      {PROPAGATION_LOG_ENABLED ? (
+        <section className="rq__sec">
+          <h2 className="rq__h2">Why orders_raw is currently blocked</h2>
+          <PropagationLog
+            title="Quality propagation · ADR-0016 fails closed"
+            steps={[
+              {
+                kind: "origin",
+                text: "raw_sales failed 12 of 15 quality rules (null counts, type mismatches)",
+                mechanism: "data_quality.py · rule set dq_raw_sales@4",
+              },
+              {
+                kind: "hop",
+                text: "orders_raw inherits the incident",
+                mechanism: "via column lineage — orders_raw.amount derives from raw_sales.amount",
+              },
+              {
+                kind: "hop",
+                text: "revenue_agg inherits the incident",
+                mechanism: "via column lineage — reads orders_raw.amount",
+              },
+              {
+                kind: "blocked",
+                text: "tool_revenue_by_lob refused while the incident is open",
+                mechanism: "recorded as a refusal edge · ai_decision_lineage.py (LN-3)",
+              },
+            ]}
+          />
+        </section>
+      ) : null}
     </div>
   );
 }

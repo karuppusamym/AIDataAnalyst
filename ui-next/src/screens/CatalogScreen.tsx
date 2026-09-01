@@ -214,7 +214,11 @@ export function CatalogScreen() {
             loadingMore={loadingMore}
           />
         )}
-        <EvidencePane row={selected} onClose={() => setParams({ asset: null })} />
+        <EvidencePane
+          tableId={selectedId}
+          row={selected}
+          onClose={() => setParams({ asset: null })}
+        />
       </div>
     </div>
   );

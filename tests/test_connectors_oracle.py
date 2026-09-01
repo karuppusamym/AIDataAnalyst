@@ -704,6 +704,68 @@ def test_a_refused_grant_query_is_recorded_rather_than_read_as_no_grants() -> No
     assert "ORA-00942" in recorded["grants"]
 
 
+def test_a_schema_known_only_through_a_routine_still_surfaces() -> None:
+    """A schema holding only a stored package has no row in `ALL_TAB_COLUMNS`.
+
+    `assemble_catalog` unions schema names across every 1.1 axis precisely for this
+    case (INV-9); the schema must not silently vanish just because Oracle's routine
+    inventory outruns its table inventory.
+    """
+    catalogs = _assemble_catalog(
+        "BANK",
+        [],
+        [],
+        [],
+        envelope=_OracleEnvelopeRows(
+            routines=(
+                {
+                    "OWNER": "BATCH",
+                    "OBJECT_NAME": "NIGHTLY_CLOSE",
+                    "OBJECT_TYPE": "PROCEDURE",
+                    "DETERMINISTIC": None,
+                    "AUTHID": "DEFINER",
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "BATCH"
+    assert schema.tables == ()
+    assert len(schema.routines) == 1
+    assert schema.routines[0].name == "NIGHTLY_CLOSE"
+
+
+def test_a_schema_known_only_through_a_grant_still_surfaces() -> None:
+    catalogs = _assemble_catalog(
+        "BANK",
+        [],
+        [],
+        [],
+        envelope=_OracleEnvelopeRows(
+            grants=(
+                {
+                    "GRANTEE": "REPORTING_ROLE",
+                    "TABLE_SCHEMA": "AUDIT",
+                    "TABLE_NAME": "LOG_TABLE",
+                    "PRIVILEGE": "SELECT",
+                    "GRANTABLE": "NO",
+                    "OBJECT_TYPE": "TABLE",
+                    "GRANTEE_TYPE": "ROLE",
+                },
+            ),
+        ),
+    )
+
+    assert len(catalogs[0].schemas) == 1
+    schema = catalogs[0].schemas[0]
+    assert schema.name == "AUDIT"
+    assert schema.tables == ()
+    assert len(schema.grants) == 1
+    assert schema.grants[0].grantee == "REPORTING_ROLE"
+
+
 def test_an_absent_envelope_leaves_the_v10_catalog_untouched() -> None:
     """The v1.0 assembly path stays byte-for-byte what it was.
 

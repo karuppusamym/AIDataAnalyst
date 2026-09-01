@@ -7912,3 +7912,617 @@ deliberately left for a separate pass rather than folded in here. The month-end 
 last 3 calendar days of a month) is a deliberate, untuned default, not fit to any real production
 close calendar. No live-Postgres verification of the query (already shared with DQ-6, same standing
 sandbox limitation as CN-1c/CN-2a/DQ-4).
+
+---
+
+## 2026-09-01 — AT-D4 closed: `PropagationLog.tsx`'s phantom mechanism gated behind a default-off flag
+
+`ui-next/src/screens/ReviewQueueScreen.tsx`'s "Why orders_raw is currently blocked" section rendered
+`PropagationLog` (`ui-next/src/components/PropagationLog.tsx`) with a hard-coded, four-step
+narrative — `raw_sales` fails quality rules, `orders_raw` "inherits the incident... via column
+lineage", `revenue_agg` "inherits the incident", `tool_revenue_by_lob` refused — unconditionally, on
+every load, for every user. It was not fed by any fetch, fixture generator, or backend endpoint: the
+`steps` array was literally inline JSX data. `PropagationLog.tsx` itself is a reusable, prop-driven
+list renderer with no backend calls of its own, so the phantom mechanism lived entirely in how its
+one call site used it.
+
+**Confirmed the row's claim of no backend mechanism**, on two counts:
+- No `classification_derived` column and no classification-propagation-along-lineage logic exists
+  anywhere in `src/aida` (`grep -ri classification.*propagat` / `propagat.*classification` across
+  `src` returns nothing) — AT-11, which would build it, is still `TODO`.
+- The rendered narrative's actual claim — multi-hop lineage propagation of a *quality* incident — is
+  also not real as depicted. The one real coupling mechanism, `quality_coupling.check_tool_gate`
+  (`src/aida/quality_coupling.py:153`, wired into `tool_api.py::execute_tool` at line ~800), only
+  gates a tool call on its own **declared** dependency tables (`version.referenced_tables`, resolved
+  by `resolve_table_ids`) having an open incident directly — a single-hop, direct-dependency check.
+  There is no lineage graph walk anywhere that makes "`orders_raw` inherits from `raw_sales` via
+  column lineage, `revenue_agg` inherits from `orders_raw`" a traversed, evidenced chain. The fixture
+  overstated even the mechanism it was nominally illustrating.
+
+**Fix (UI-honesty only, no AT-11 work attempted)**: gated the section behind a new
+`VITE_ENABLE_PROPAGATION_LOG` flag (`ui-next/src/vite-env.d.ts`), following the same
+`import.meta.env.VITE_*` convention as the existing `VITE_USE_FIXTURES` (`ui-next/src/lib/api.ts`),
+but inverted to default OFF (`=== "1"` to enable, vs. `VITE_USE_FIXTURES`'s `!== "0"` default-on) —
+no repo `.env` file sets it, so it renders nothing for a real user today. `PropagationLog.tsx` and
+its call site's JSX are left fully in place, unmodified in substance, for the day AT-11 (or an
+equivalent real, lineage-resolved read model) ships something honest to show there; a code comment
+directly above the new `PROPAGATION_LOG_ENABLED` constant in `ReviewQueueScreen.tsx` records why the
+gate exists and what would need to be true to remove it. Considered and declined: replacing the
+section with a "coming soon" placeholder — hiding it entirely is what the row's own wording asks for
+("hide it behind the AT-11 feature flag"), and there is no user-facing surface today that promises
+this narrative exists, so a placeholder would only be adding a new thing to explain rather than
+removing a false claim.
+
+**Test**: new `ui-next/src/screens/ReviewQueueScreen.test.tsx` (3 tests, `@testing-library/react` +
+`vi.stubEnv`/`vi.resetModules`, the same dynamic-reimport pattern `App.test.tsx` uses for env/module
+state): the propagation section and its text are absent from the rendered DOM with the flag unset,
+absent with it explicitly `"0"`, and present only once it is explicitly stubbed to `"1"` — proving
+the gate is real (a hidden-but-mounted node would still count as reachable) rather than asserting on
+internal component state.
+
+**Verification**: `ui-next` had no `node_modules` in this worktree; ran `npm install` first (185
+packages, from the committed `package.json`/no lockfile drift). `npm run typecheck` clean. `npm run
+test`: 15/15 tests pass across all three suites (`PersonaNav.test.tsx`, `App.test.tsx`, the new
+`ReviewQueueScreen.test.tsx`) — no existing test broken. `npm run build` succeeds (`tsc -b && vite
+build`, `dist/` produced, not committed per `ui-next/.gitignore`). `AIDA_ENVIRONMENT=development uv
+run pytest tests/test_doc_claims.py -q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — nothing here needed one; this was a frontend-only gate on an already-existing, purely
+presentational component. AT-11 itself (the `classification_derived` column, propagation along
+`DECLARED`/`VIEW_DDL`/`EXECUTED_QUERY`/`OPENLINEAGE` edges, review-queue-gated promotion) remains
+entirely unbuilt, as scoped — this entry closes the honesty gap, not the feature.
+
+## 2026-09-01 — N16 closed: negative knowledge surfaced as a context-product section
+
+### What EE.3 already provided
+
+EE.3 (module 06/07, shipped as AI-4) built the queryable "what we decided is not true" surface
+this row asks to reuse: `NegativeAssertionRecord` (`negative_assertion` table, indexed on
+`(organization_id, subject_id)`, `(organization_id, assertion_type)` and
+`(organization_id, suppression_active)`) plus `aida.negative_knowledge`'s `record_negative`,
+`query_negatives`, `search_negatives`, `check_re_proposal` and `auto_lift_on_material_change` —
+rejected relationships/inferences/term conflicts/classifications, keyed by a `subject_id` string,
+with active-suppression re-proposal blocking and a "previously rejected" auto-lift when the
+predicate hash changes materially. This was genuinely queryable, reusable data — no new persisted
+state was needed, and none was added.
+
+### What N16 adds
+
+`aida.negative_knowledge` gained `query_negatives_for_scope(session, organization_id, asset_ids,
+suppression_active_only=True)`: an asset-scoped read over the existing table (no schema change),
+matching a `subject_id` against a set of asset ids either as the bare id or as one of its
+colon-delimited segments (`"table:<id>"`, `"col:<id>:<column>"`, …) — convention-agnostic since no
+production caller populates `subject_id` yet, so this matches whichever shape callers settle on.
+
+`aida.context_compiler.compile_context_product` gained a fifth, optional `negative_knowledge:
+list[ResolvedNegativeAssertion] | None` argument. `ResolvedNegativeAssertion` is a frozen dataclass
+(pre-scoped, pre-serialized — `rejected_at` arrives as an ISO-8601 string, not a `datetime`) so the
+function stays exactly what it already was: a pure transform of its arguments with no DB access and
+no clock read, the same discipline `tables` already followed. The new `negative_knowledge` object
+(`{"count": N, "assertions": [...]}`, list sorted by `(subject_id, assertion_type, rejected_at)` for
+a stable order) is folded into `common` only for the Atlas-native envelope, producing a separate
+`atlas_common` used by MCP/REST/YAML; the plain `common` (unchanged) still goes to OSI, so the
+section cannot leak into any vendor-schema payload through a shared dict.
+
+`aida.context_compiler_api._load_source` (the single place all three compile/download/drift
+endpoints resolve their inputs) now also calls a new `_load_negative_knowledge` helper, which runs
+`query_negatives_for_scope` against `version.organization_id` and `version.table_ids` — the context
+product version's own declared table scope, the same scope its table resolution already uses — and
+maps the DB rows to `ResolvedNegativeAssertion`s before handing them to `compile_context_product`.
+
+### Target selection, and why
+
+MCP, REST and YAML carry the section — the three targets whose payload is Atlas's own
+`context`/`spec` envelope, not a vendor-defined schema. OSI, ODCS, `SNOWFLAKE_SEMANTIC_VIEW` and
+`DATABRICKS_METRIC_VIEW` do not: none of those specs has a field for "what we decided is not true",
+and `validate_compiled_artifact`'s structural checks for those targets assert a fixed required-field
+set for a reason — silently smuggling Atlas-only content into an artifact meant to deploy into a
+vendor's own semantic-layer product would be surprising there, not additive.
+
+### Determinism and scope, proved
+
+`compile_context_product(..., negative_knowledge=[...])` called twice with independently-built
+(not object-identical) `ResolvedNegativeAssertion` lists carrying the same values produces
+byte-identical `content` and `artifact_hash`; called with no `negative_knowledge` argument at all
+produces the same hash as calling it with an explicit empty list, so every pre-existing caller's
+artifact is unaffected in shape (only in the literal bytes, since the key is now always present —
+no test in the repo asserted a specific historical hash, only self-consistency, so this is not a
+breaking change to any contract). `query_negatives_for_scope` and `_load_negative_knowledge` are
+each proven, against a real (in-memory SQLite) database, to return a rejection whose `subject_id`
+references an in-scope table and to omit one whose `subject_id` references a table outside the
+version's `table_ids` — never the organization's full negative-knowledge surface.
+
+### Tests (`tests/test_context_product_negative_knowledge.py`, 8 new tests)
+
+- `test_negative_knowledge_section_is_deterministic` / `test_negative_knowledge_absence_is_also_
+  deterministic` — same rejected-inference state (and the no-knowledge case) compiled twice →
+  identical content and `artifact_hash`.
+- `test_query_negatives_for_scope_excludes_out_of_scope_subject` /
+  `test_query_negatives_for_scope_excludes_lifted_suppression_by_default` — DB-backed scope and
+  suppression-filter proof at the `negative_knowledge.py` layer.
+- `test_load_negative_knowledge_feeds_scoped_rejections_into_compilation` — end-to-end glue proof:
+  an out-of-scope rejection's `subject_id` never appears in the compiled artifact.
+- `test_negative_knowledge_present_only_on_atlas_native_targets` — the section parses out of
+  MCP/REST/YAML and is byte-absent from OSI/ODCS/`SNOWFLAKE_SEMANTIC_VIEW`/
+  `DATABRICKS_METRIC_VIEW`.
+
+### Verification
+
+`ruff check src tests/test_context_product_negative_knowledge.py`: clean. `AIDA_ENVIRONMENT=
+development uv run mypy src`: clean on every file this row touched (`context_compiler.py`,
+`context_compiler_api.py`, `negative_knowledge.py`); the 44 pre-existing `"object" not callable"`
+errors elsewhere (`workflows/activities.py`, `workflows/scheduler.py`, `main.py`, …) are unrelated
+and unchanged by this work. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_context_product_negative_knowledge.py tests/test_negative_knowledge.py
+tests/test_agentic_platform.py tests/test_context_products.py tests/test_doc_claims.py
+tests/test_openapi_diff_gate.py -q`: all pass, nothing broken. No HTTP route was added or its
+signature changed (only the internal `_load_source`/`_load_negative_knowledge` composition and the
+compiled artifact's own content changed), so the OpenAPI schema is unaffected — confirmed by
+`test_openapi_diff_gate.py` passing with no baseline regeneration needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — `NegativeAssertionRecord` already carried everything this needed.
+
+## 2026-09-01 — AT-13 closed: `get_asset_context` composite MCP call, usage decision computed server-side
+
+### The anti-pattern this row names
+
+Atlan's own MCP transcript has the *model* concluding "safe to use, ensure your pipeline respects
+that policy" after reading a table's certification/quality/lineage separately — the model acting as
+policy oracle, and enforcement handed back to whatever calls it next. A second failure mode sits
+right behind the first one: composing those facts as several separate tool calls means several
+separate policy evaluations and several separate audit records for what is really one read. This
+row fixes both: one call, one policy evaluation, one audit record, and a decision the *server*
+computes, not the model.
+
+### What shipped
+
+`atlas__get_asset_context`, a new native MCP tool (`mcp_server.py`, dispatched from
+`_handle_native_lineage_tool_call` alongside `get_lineage_graph`/`get_lineage_impact`/
+`resolve_entity`/`get_transformation_detail` — same role-eligibility gate, same anti-enumeration
+response shape). For one `table_id` it returns:
+
+- **Certification / quality / owner** — `aida.asset_context.compose_asset_context_signals` calls
+  UX-13's `catalog_read_model.py` typed helpers directly (`_earliest_active_owners`,
+  `_latest_approved_documentation`, `_latest_certifications`, `_certification_state`,
+  `_open_incident_table_ids`, `_latest_observation_at`, `_quality_state`) — the exact precedence
+  `asset_evidence.py`'s own OWNERSHIP/CERTIFICATION/DATA_QUALITY sections use, not re-derived.
+  `compose_asset_evidence` itself is deliberately *not* called: it also composes business-meaning,
+  consumption (CX-4) and AI-decision (LN-3) evidence outside this row's five-fact scope, and returns
+  human-readable prose claims rather than typed state — reusing the lower typed layer avoids both
+  the extra unrelated reads and re-parsing prose back into state.
+- **Classification** — honestly new. No table-level classification field or function exists
+  anywhere on this platform today (AT-11, "classification propagation along lineage", is still
+  TODO). What does exist is column-level `metadata_column.classification` — already the ABAC input
+  `query_gateway.py` masks reads against. `asset_context._classification_summary` rolls that
+  existing per-column data up to the table (`total_columns`, `classified_columns`,
+  `distinct_classifications`, `has_sensitive_classification` via `aida.classification.
+  SENSITIVE_CLASSES`) and the response says explicitly that this is a rollup of existing per-column
+  facts, not a stored table-level classification the way GL-5 certification is.
+- **Lineage depth** — EA.14's `unified_lineage_api.build_unified_lineage_impact_payload` called
+  verbatim at the table's own node id (the same traversal `atlas__get_lineage_impact` calls),
+  summarized as upstream/downstream node counts and max depth reached. A table the unified graph
+  never registered as a node (deprecated, or beyond the graph builder's node cap) degrades to
+  `lineage.available=false` with a named reason — the composite call still answers with everything
+  else it has, rather than failing outright on `LineageNodeNotFoundError`.
+- **`usage_decision`** — `aida.asset_usage_decision.compute_usage_decision`, a pure, DB-free
+  function taking only already-composed scalars (`certification_state`, `quality_state`,
+  `has_open_critical_incident`, `has_owner`, `has_sensitive_classification`) and returning
+  `ALLOWED` / `ALLOWED_WITH_CAUTION` / `BLOCKED` plus **every** contributing factor, each with its
+  own `OK`/`CAUTION`/`BLOCKED` flag — never a bare label. Decision table: `REVOKED` certification or
+  an open `CRITICAL`-severity incident (the same `severity == "CRITICAL"` +
+  `status.in_(("OPEN","ACKNOWLEDGED"))` filter `quality_coupling.py`/`context_product_policy.py`/
+  `quality_api.py` already use) → `BLOCKED`; a non-critical open incident, stale/unknown quality, an
+  uncertified/expired certification, no assigned owner, or any sensitive-classified column →
+  `CAUTION`; everything healthy → `ALLOWED`. The overall decision is simply the worst individual
+  factor's flag (`BLOCKED` > `CAUTION` > `OK`) — not a separate, potentially-inconsistent judgement.
+
+### One policy evaluation, one audit record — proved, not just claimed
+
+`_handle_get_asset_context` calls `gate()` exactly once, with the identical shape
+`asset_evidence_api.py`'s `GET /v1/metadata/tables/{id}/evidence` route already uses
+(`action="READ_METADATA"`, `resource_type="datasource"`, `resource_id=str(datasource.id)`,
+`datasource_id=datasource.id`) — reused verbatim, not a second/different evaluation, and none of the
+five composed facts triggers its own gate call. Exactly one `AuditEvent`
+(`action="mcp.asset_context.read"`) and one `OutboxEvent` (`event_type="asset_context.consumed.v1"`)
+are recorded once, after every fact above has been composed — never once per fact.
+`tests/test_mcp_server.py::test_get_asset_context_makes_exactly_one_policy_evaluation_and_one_audit_record`
+monkeypatches `gate`/`compose_asset_context_signals`/`build_unified_lineage_impact_payload` to
+counting fakes and asserts `len(gate_calls) == 1`, `signals_calls == 1`, and `len(session.added) == 2`
+(one `AuditEvent` + one `OutboxEvent`, checked by `isinstance`) — the composite call's whole point,
+proved rather than asserted by comment.
+
+### Authorization and anti-enumeration shape
+
+Role eligibility (`UNIFIED_LINEAGE_READER_ROLES`, the same set `get_lineage_graph`/`get_lineage_impact`
+already use) is checked before any table lookup — a leak test
+(`test_leak_get_asset_context_denied_caller_cannot_distinguish_existing_from_missing_table`) proves a
+denied caller's session `.get()` is never called and a "real" vs. "missing" table id produce
+byte-identical responses, mirroring EE.10's own leak-test convention for `resolve_entity`/
+`get_transformation_detail`. A nonexistent table id, a table in another organization, and a `gate()`
+`AuthorizationDenied` all return the identical `"Asset not found or not accessible."` — a policy
+denial is never distinguishable from "does not exist," matching the sibling native lineage tools'
+"Datasource not accessible." idiom at table granularity.
+
+### Tests
+
+- `tests/test_asset_usage_decision.py` (21 tests, pure/DB-free, no session or mocking anywhere) —
+  each of the tracker row's own named examples ("certified + healthy quality + no open incidents →
+  ALLOWED", "an open critical quality incident → BLOCKED", "uncertified + no owner → caution") plus
+  every individual factor in isolation, an unknown-state `ValueError` guard, and
+  `test_every_combination_of_states_produces_a_decision_without_raising` — an exhaustive 256-case
+  sweep (4 certification states × 4 quality states × 2×2×2 booleans) proving the worst-flag-wins
+  invariant and determinism hold everywhere in the input space, not just the hand-picked scenarios.
+- `tests/test_mcp_server.py` (10 new tests) — role-ineligibility denial (identical to an unknown
+  tool), the leak/anti-enumeration proof above, non-UUID `table_id` rejection, identical not-found
+  for a missing table and a cross-org table, identical not-found for a `gate()` denial (with
+  `compose_asset_context_signals` monkeypatched to raise if reached, proving the gate check runs
+  first), the exactly-one-gate/exactly-one-audit proof, and lineage-unavailable degrading the
+  `lineage` field without failing the whole call.
+
+### Verification
+
+`ruff check` clean on every touched file (`mcp_server.py`, `asset_context.py`,
+`asset_usage_decision.py`, `tests/test_mcp_server.py`, `tests/test_asset_usage_decision.py`) — one
+pre-existing `E501` on an unrelated line in `test_mcp_server.py` (`test_leak_get_transformation_
+detail_denied_caller_cannot_distinguish_existing_from_missing_entity`'s def line) confirmed present
+on `origin/feature/snowflake-dbt-lineage-mcp` before this change, left alone. `AIDA_ENVIRONMENT=
+development uv run mypy src`: clean on every file this row touched; the 44 pre-existing `"object"
+not callable"` errors elsewhere (`workflows/activities.py`, `task_tracking.py`, `main.py`, …) are
+unrelated and unchanged, confirmed present on `origin/feature/snowflake-dbt-lineage-mcp` before this
+change. `lint-imports`: 8 contracts kept, 0 broken (`asset_context.py`/`asset_usage_decision.py`
+import only `catalog_read_model`, `classification` and `models` — no query-gateway/authorization
+dependency the lineage/intelligence import-linter contract would flag). `AIDA_ENVIRONMENT=development
+uv run pytest tests/test_mcp_server.py tests/test_asset_usage_decision.py tests/test_asset_evidence.py
+tests/test_doc_claims.py -q`: all pass, nothing broken. No HTTP route was added (MCP-tool-only), so
+no OpenAPI baseline regeneration was needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — every composed field reads existing columns (`metadata_column.classification`,
+`data_quality_incident.severity`, `asset_certification`, `ownership_assignment`,
+`asset_documentation_version`) through existing or newly-added read-only query helpers.
+
+---
+
+## 2026-09-01 — IN-5g closed: Oracle/Snowflake/BigQuery surface schemas known only through a routine, grant, or comment
+
+### Not IN-5f's dedup regressing -- IN-5f's dedup deliberately preserving a pre-existing gap
+
+IN-5f folded Oracle/Snowflake/BigQuery's envelope-1.1 assembly onto `connectors/discovery.py`'s
+shared helpers, and in doing so found that each connector's own `_assemble_catalog` (Snowflake:
+`_assemble_snowflake_catalog`) filtered its routines/grants/schema_descriptions dicts down to schema
+names already present in the table map before handing them to `assemble_catalog`. That filter exactly
+reproduced each connector's *prior*, pre-IN-5f rebuild-based assembly -- which only ever walked
+schemas derived from the table query -- so IN-5f kept it rather than silently changing behavior mid
+dedup, and queued the actual fix as separate work (this row).
+
+The filtered-out behavior was itself the bug: `assemble_catalog` unions schema names across `tables`,
+`routines`, `grants`, and `schema_descriptions` specifically so that a schema holding only a stored
+procedure, only a grant, or only its own schema-level comment -- and zero tables -- still appears in
+the discovered catalog (`connectors/discovery.py`'s own docstring;
+`test_a_schema_with_only_routines_survives_assembly` in `tests/test_connectors.py`). postgres.py and
+sqlserver.py already get this right, because they pass `routines=`/`grants=`/`schema_descriptions=`
+straight through unfiltered. Oracle, Snowflake, and BigQuery did not: a schema containing, say, only a
+PL/SQL package with no tables has been silently invisible to discovery on these three sources since
+before IN-5f, and remained so after it.
+
+### The fix
+
+Removed the three filters, one per connector:
+
+- `oracle.py::_assemble_catalog`: dropped the `if schema_name in tables` comprehension guards on both
+  `routines` and `grants`, now built directly from `_envelope_routines(envelope)` and
+  `build_grants(_grant_rows(envelope))`.
+- `bigquery.py::_assemble_catalog`: same shape, dropped `if schema_name in tables` on `routines` and
+  on `schema_descriptions` (kept the pre-existing `description is not None` filter, which is unrelated
+  -- it drops a schema whose only OPTIONS row isn't actually a description).
+- `snowflake.py::_assemble_snowflake_catalog`: dropped `if schema_name in table_map` on the routines
+  loop, the grants comprehension, and the schema_descriptions comprehension (kept its own unrelated
+  `description is not None` filter via the walrus assignment).
+
+No change to `connectors/discovery.py` itself -- `assemble_catalog` already had the right contract;
+these three connectors were the only callers not using it.
+
+### Tests (`tests/test_connectors_oracle.py` +2, `tests/test_connectors_bigquery.py` +2,
+`tests/test_connectors_snowflake.py` +3)
+
+One reproduction test per axis each connector actually supports (Oracle: routines, grants; BigQuery:
+routines, schema_descriptions -- no grants axis on BigQuery at all; Snowflake: routines, grants,
+schema comments), each building a catalog from zero table rows plus one routine/grant/comment row for
+a schema name that appears nowhere else, and asserting that schema now appears with `tables == ()`.
+All 7 were run and confirmed **failing** against the pre-fix code (`assert len(catalogs[0].schemas) ==
+1` / `== 0`), then confirmed passing after the fix -- a genuine before/after, not an assertion written
+to match whatever the code already did.
+
+### Verification
+
+`PYTHONPATH=src pytest tests/test_connectors_oracle.py tests/test_connectors_snowflake.py
+tests/test_connectors_bigquery.py tests/test_connectors.py`: 125 passed before the fix, 132 passed
+after (the 7 new tests), zero other diffs in outcome -- no existing assertion about which schemas
+appear, what they contain, or how unavailable axes are recorded changed. `ruff check` and `mypy
+--strict` clean on all six touched files (`oracle.py`, `bigquery.py`, `snowflake.py`, plus their three
+test files).
+
+### This fix was lost twice before landing, and why that changed how it landed
+
+First implementation: in worktree `claude/vibrant-mclaren-93e006`. Before it could be committed, a
+concurrent session merged `origin/feature/snowflake-dbt-lineage-mcp` into that same branch (commit
+`e9386de`, whose own message names the cause: "rebase blocked by dirty worktree from a concurrent
+session's uncommitted connector work") -- the merge process discarded this session's uncommitted
+working-tree changes rather than stashing or preserving them. Second implementation: redone
+immediately after discovery, in the same worktree, same approach, re-verified green -- then, mid-edit
+on the next file, the entire worktree directory was found empty (confirmed three independent ways:
+PowerShell `Get-ChildItem -Force`, .NET `Directory.GetFileSystemEntries`, `cmd /c dir /a`, all reporting
+zero entries) and its `git worktree list` registration gone, apparently torn down by another process
+while this session was actively editing inside it.
+
+Recovery: the branch ref `claude/vibrant-mclaren-93e006` no longer existed either, but its last commit
+(`e9386de`) was still reachable in the local object database (`git cat-file -t e9386de` → `commit`) --
+not yet garbage-collected. A fresh worktree was created from that commit (`git worktree add
+../vibrant-mclaren-recovered -b claude/vibrant-mclaren-recovered e9386de`), and this fix was
+implemented a third time there. This time the result is committed immediately rather than left as
+uncommitted working-tree state, specifically because leaving it uncommitted is what made it
+disposable to an external process twice in one session -- a git commit is durable in a way an editor
+buffer or working-tree diff is not.
+
+---
+
+## 2026-09-01 — IN PROGRESS sweep: all 26 rows reverified; AU-6 and KG-1 closed
+
+Requested: re-verify every tracker row still marked IN PROGRESS (26 of them) and, per row, either
+close it (if actually complete), fix it (if a concrete remaining piece is actually finishable here),
+or leave it honestly open with the real blocker restated. Read every one of the 26 rows' full
+evidence text against the current code/tests rather than trusting the status column alone.
+
+### Closed this pass
+
+**AU-6** (wire or delete the remaining unreachable modules): the row's own last update deferred to
+RT-7 ("the third...stays open as its own row -- see RT-7"). RT-7 closed 2026-08-31, later the same
+day AU-6 was last touched. Reverified `tests/test_reachability_gate.py` fresh: 5/5 pass, and the live
+`ALLOWLIST` in that file is down to exactly 2 entries (`aida.vector_store`, `aida.injection_corpus`),
+each citing a tracker row that either states the gap explicitly as a known limitation (RT-1, DONE) or
+whose module is confirmed-by-docstring to be test-fixture data never meant to be production-wired
+(`injection_corpus.py`: "Test corpus for indirect prompt injection detection... used by the test suite
+to verify zero bypasses" -- the live detection logic it supplies cases for, `injection_defense.py`, is
+separately wired per AG-1/AG-2/TS-6). No open thread left under this row. Flipped IN PROGRESS -> DONE.
+
+**KG-1** (project approved relationships, module 10/Knowledge Graph): its own evidence text has read
+"Same as RL-4" since it was written. RL-4 (module 06/10, the same capability tracked under Relationships)
+closed 2026-08-30 with one honestly-stated remaining gap (cross-source candidates have no Neo4j
+projection path). KG-1 was simply never flipped when RL-4 closed -- a duplicate-tracking row falling
+out of sync with its twin, not a real second gap. Flipped IN PROGRESS -> DONE, pointing at RL-4.
+
+`pytest tests/test_reachability_gate.py tests/test_rt7_quality_trust_ranking.py
+tests/test_quality_runtime_coupling.py`: 15 passed, confirming the evidence behind both closures.
+
+### Read and reconfirmed genuinely open (no action -- restating the real blocker would not change it)
+
+The other 24 IN PROGRESS rows were read in full and fall into two honest categories, neither of which
+a coding pass in this sandbox can close by itself:
+
+- **Blocked on infrastructure or data this sandbox does not have**, already stated as such in the
+  row's own text: CN-1a/CN-1c/CN-2a/CN-2b (no live Oracle/BigQuery/Snowflake/Databricks credentials),
+  CN-3 (PostgreSQL 14 leg configured but `dockerd` cannot start here), CT-2/PR-5 (no 1M-object/1M-table
+  live-scale rig), RL-7 (no labelled banking corpus), QG-2/QG-5/QG-6/AU-10 (no live Vault/Postgres/SQL
+  Server instance to run the apply/fetch path against), LN-1/LN-4/TL-1 (the "no-DB-test-harness"
+  systemic gap named across CT-1/LN-4/TL-1), N5 (embedding the real catalogue and running a recall@10
+  eval needs a live, populated warehouse plus a paid embedding-provider key, not present here), UX-5
+  (the interactive axe-core/screen-reader WCAG AA audit needs a running browser against a live UI,
+  which this pass did not attempt to stand up), TS-3 (the trace-span sentinel scanner is genuinely
+  unbuilt, not infra-blocked, but is new scope rather than a "verify and finish" item -- see below).
+- **Real, unfinished feature scope, explicitly and honestly labeled "not started"/"remaining" in the
+  row's own text**, each large enough to be its own piece of work rather than a quick finish: ST-04/05/06
+  (module-by-module `models.py`/`schemas.py`/`platform/` extraction, explicitly phased -- Phase 3 done,
+  Phase 4+ covers 16 more modules by design), GL-6 (escalation is single-tier, multi-tier not built),
+  MG-3 (private-endpoint routing not started), AT-7 part (b) (consumer-binding registry with staged
+  rollout -- part (a) is DONE), TS-3 (trace-span sentinel scan not built).
+
+No row in this second group was force-closed or given cosmetic evidence to make it look done -- per
+this file's own entry conventions, a status change without a genuinely satisfied exit condition is
+worse than leaving the row visibly open. Recommendation handed back to the requester rather than acted
+on unilaterally: of the "real, unfinished feature scope" group, MG-3's private-endpoint routing,
+AT-7(b)'s consumer-binding registry, GL-6's multi-tier escalation, and TS-3's trace-span sentinel scan
+are all buildable in this sandbox without external infrastructure, unlike the rest of the list -- worth
+prioritizing explicitly rather than attempting all four unguided in one pass.
+
+---
+
+## 2026-09-01 — AT-19 closed: transformation code rendered on the lineage edge, view definitions fully wired, procedures a documented gap
+
+### What was already there vs. what was missing
+
+`get_transformation_detail` (EE.10, `mcp_server.py`) was read fully first, per the row's own framing.
+It resolves only against `DbtResource` -- dbt-compiled SQL, dependencies, tests, materialization,
+source artifact hash -- and never touches `MetadataViewDefinition`/`MetadataRoutine` at all (envelope
+1.1's connector-discovered view DDL / routine body storage, `envelope_models.py`); the one place it
+even mentions those two models is a comment explaining *why* it doesn't need to live-screen them (they
+already carry a stored `screening_status`, unlike a dbt resource's free-text `description`). So the
+premise that "the tool already delivers this row's content, only the graph pointer is missing" did not
+hold as stated -- the tool itself needed extending, not just the edge.
+
+Separately, `unified_lineage_api.py`'s `_build_unified_graph` already folds `ViewLineageEdge`/
+`ProcedureLineageEdge` (LN-2's SQL-parsed lineage) into `VIEW_DEFINITION`/`PROCEDURE_DEFINITION` edges,
+with `evidence` carrying `dialect`/`sql_hash`/`column_edge_count` -- real facts, but nothing a caller
+could resolve back to actual code text or a redaction status without knowing to go look elsewhere, and
+no "elsewhere" that worked existed anyway (previous paragraph).
+
+### The fix, and why it only covers views
+
+`VIEW_DEFINITION` edges' `target_table_id` **is** the view's own `MetadataTable.id`, and
+`MetadataViewDefinition.table_id` carries a `UniqueConstraint` -- a genuine 1:1 lookup, not a
+heuristic. That made a real, resolvable reference possible:
+
+- `unified_lineage_api.py`: each `VIEW_DEFINITION` edge's `evidence` now carries
+  `transformation_reference: {tool: "get_transformation_detail", entity_id, kind: "VIEW_DEFINITION"}`
+  plus `redaction_status`/`availability`, populated from one narrow, column-only
+  `MetadataViewDefinition` query (`table_id`, `redaction_status`, `availability` -- never
+  `definition_sql_redacted`) scoped to just the distinct view target-table ids the batch of edges
+  touches. Keeping the DDL text itself out of this query, and out of the graph response, is what keeps
+  ADR-0010's bounded-response contract intact -- the reference is an id, not inlined text. `FOREIGN_KEY`
+  and `PROCEDURE_DEFINITION` edges get neither field: verified by test that they don't.
+- `mcp_server.py`: `_transformation_detail` gained a fallback,
+  `_view_definition_transformation_detail`, run when the dbt lookup finds nothing. It resolves
+  `entity_id` as a `MetadataTable.id`, loads that table's `MetadataViewDefinition` (1:1), and returns
+  `definition_sql_redacted` (withheld, same as the dbt path already does for `description`, when the
+  row's own stored `screening_status` is not `CLEAN` -- `ingest_screening.is_eligible_for_model_context`),
+  `redaction_status`, `screening_status`, `screening_reason_codes`, `availability`/`unavailable_reason`,
+  `is_materialized`, under a `transformation_source: "VIEW_DEFINITION"` discriminator (the existing dbt
+  branch now tags itself `"DBT_COMPILED_SQL"` for symmetry, an additive, non-breaking key).
+  `NATIVE_LINEAGE_TOOL_DEFINITIONS`'s description string was updated to say so.
+
+**Procedures are a confirmed, deliberately un-fabricated gap, not an oversight.** `ProcedureLineageEdge`
+carries no FK, no `specific_name`, no identity field of any kind back to the `MetadataRoutine` row a
+given edge was parsed from -- `view_lineage_api.py`'s `parse_procedure_lineage_endpoint` takes only raw
+SQL text with no routine-identity parameter (the same pre-existing limitation AT-D2's exit note already
+named for `PROCEDURE_RESULT_TARGET`). `MetadataRoutine` is keyed on `(schema_id, name, signature)` with
+no link to any specific table either, so there is no way -- short of a `models.py` schema change adding
+routine identity to `ProcedureLineageEdge`, out of this row's scope -- to say *which* routine a given
+`PROCEDURE_DEFINITION` edge came from. Rather than pick an arbitrary routine and present it as fact,
+`PROCEDURE_DEFINITION` edges keep their existing `sql_hash`/`dialect` evidence and get no
+`transformation_reference`/`redaction_status`. Documented in both modules (`unified_lineage_api.py`'s
+module docstring and inline comment; `mcp_server.py`'s new function docstring) so the gap stays visible
+rather than silently absent.
+
+### Tests (`tests/test_unified_lineage.py`, 4 new)
+
+- `test_view_definition_edge_carries_a_resolvable_transformation_reference`: builds a graph with a
+  `VIEW_DEFINITION` edge (with a `MetadataViewDefinition` row), a sibling `FOREIGN_KEY` edge, and a
+  sibling `PROCEDURE_DEFINITION` edge in the *same* graph; asserts the view edge carries the exact
+  reference shape and `redaction_status`/`availability`, and that neither sibling edge carries either
+  field -- proving no cross-contamination and no fabrication.
+- `test_view_definition_edge_omits_the_reference_when_no_definition_is_ingested_yet`: a
+  `VIEW_DEFINITION` edge whose target table has no `MetadataViewDefinition` row yet gets no reference
+  at all, rather than one that would 404.
+- `test_view_definition_transformation_reference_round_trips_to_the_real_fragment`: takes the edge's
+  own `transformation_reference.entity_id`, calls the real `_transformation_detail` (not a mock) with
+  it, and asserts the returned `definition_sql_redacted`/`redaction_status`/`availability` are the
+  *same* values the edge's evidence already reported -- the graph and the tool describe one fact, not
+  two representations that could drift.
+- `test_view_definition_transformation_detail_withholds_quarantined_text`: a quarantined
+  `screening_status` withholds `definition_sql_redacted` while still surfacing
+  `screening_status`/`redaction_status`, mirroring the dbt path's existing description-screening
+  contract.
+
+### Verification
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/migration touched -- `UnifiedLink.evidence`/
+`UnifiedLineageEdgeRead.evidence` were already an untyped `dict[str, object]`/`dict[str, Any]`, extended
+in place; `get_transformation_detail`'s MCP return is a raw dict, not a pydantic contract. No HTTP route
+added or changed, so no OpenAPI baseline regen or `test_openapi_diff_gate.py` run needed. `ruff check`
+and `mypy` clean on both touched src files (`mcp_server.py`, `unified_lineage_api.py`).
+`tests/test_unified_lineage.py` (21 passed), `tests/test_mcp_server.py`, `tests/test_view_lineage_api.py`
+all green together; `AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py -q` passes (clean,
+only its usual skips).
+
+---
+
+## 2026-09-01 — UX-7 closed: evidence permalinks and export, permission-aware
+
+### The permalink half was already (mostly) there
+
+UX-13's `GET /v1/metadata/tables/{table_id}/evidence` (`src/aida/asset_evidence_api.py`) was already
+a genuine permalink at the API level: a durable URL keyed only on `table_id`, no request body, no
+session-only state — two independently-authorized callers hitting the same URL get the same
+re-derived (never cached) evidence back, and an unauthorized caller gets the same 403 either way.
+That part needed no new backend work.
+
+The real gap was one layer up, in `ui-next`'s `EvidencePane`/`CatalogScreen`. The pane accepted a
+full `CatalogRowRead` object, sourced as `rows.find(r => r.id === selectedId)` against whatever page
+the catalog grid had currently loaded for the current `q`/`type`/`cert` filters. `?asset=<id>` in the
+URL looked like a shareable permalink, but for any table outside the recipient's current
+filter/page — the overwhelmingly common case for a colleague opening a link cold — `selected` resolved
+to `null` and the pane silently rendered "Select an asset" instead of the evidence. The URL was
+shareable in form only; it did not reliably resolve.
+
+Fix (`ui-next/src/components/EvidencePane.tsx`, `ui-next/src/screens/CatalogScreen.tsx`):
+`EvidencePane` now takes `tableId: string | null` as its actual resolution key — fetched straight
+from `fetchAssetEvidence(tableId)` against the gated endpoint, independent of whether `rows` happens
+to contain a matching row. `row` becomes optional, cosmetic-only progressive enhancement (nicer
+datasource/schema/glossary-term chrome when the grid already has it loaded); the header falls back to
+`evidence.table_name` (already on the wire per `AssetEvidenceRead`) when it doesn't, with an explicit
+"Opened from a permalink" note so the two paths are visually distinguishable. This is the same
+`?asset=` query-string convention UX-11 already established for this SPA (which has no client-side
+router — `App.tsx`'s `view` is component state, not a path) rather than a fabricated
+`/catalog/tables/{id}/evidence` path route with nothing to back it; the fix is that the existing
+convention now actually resolves regardless of load state, which is what "durable, server-resolvable
+permalink" requires of the client, not a new URL shape. A second, pre-existing gap this same change
+fixed: the pane's fetch `.catch` unconditionally set `evidence = null` on any non-abort error,
+including a real 403 — silently indistinguishable from "still loading" or "no evidence." It now
+renders an explicit `role="alert"` denial ("You are not authorized to view this evidence.") on a 403,
+fed straight from the same `ApiError` the gated fetch raises — never a locally-cached or embedded
+bypass, and never a silent empty state a viewer could mistake for "nothing here" rather than "you may
+not see this."
+
+### Export: JSON, not PDF
+
+`GET /v1/metadata/tables/{table_id}/evidence/export`, the new route in `asset_evidence_api.py`,
+follows `context_compiler_api.download_context_compilation`'s (EE.9) established attachment idiom
+verbatim: a `Content-Disposition: attachment; filename="table-{id}-evidence.json"` header and an
+`X-Artifact-SHA256` header over the exact response bytes, so a steward or auditor can verify what they
+attached to a ticket or audit record is what the platform actually composed.
+
+Format is JSON, not PDF: `pyproject.toml` pins no PDF-generation library (no reportlab, weasyprint,
+fpdf2, or xhtml2pdf; `grep -in "pdf"` over it returns nothing) and this row's hard constraint is not
+to add a new dependency when a dependency-free format is an honest deliverable. JSON is that format
+here specifically because it is `AssetEvidenceRead.model_dump_json(indent=2)` — the exact same wire
+shape `GET .../evidence` already returns — serialized with zero intermediate formatting step. A
+Markdown or hand-built PDF rendering would need its own claim-to-text mapping that could silently
+drift from `compose_asset_evidence`'s actual output over time; JSON cannot drift because nothing
+stands between the composed object and the response body.
+
+### The export reuses the SAME gate, not a separate or weaker one
+
+Both routes now share one `_authorize_table_read(table_id, context, session, settings)` helper — the
+literal function object, not a re-implementation — which does the 404 table lookup,
+`enforce_organization`, and the identical `gate(action="READ_METADATA", resource_type="datasource",
+resource_id=str(datasource.id), datasource_id=datasource.id)` call UX-12's `list_catalog_rows` and
+UX-13's live evidence route already use. `export_asset_evidence` then calls
+`compose_asset_evidence(session, table)` — the exact same function `get_asset_evidence` calls, not a
+re-derivation — and serializes whatever it returns.
+
+`tests/test_asset_evidence.py` adds two new sections (17 tests total in the file now, up from 11):
+
+- **Export content fidelity** — `test_export_content_matches_the_live_evidence_endpoints_output`
+  seeds a real open incident, calls both `get_asset_evidence` and `export_asset_evidence` against the
+  same session, and asserts the exported JSON equals the live endpoint's `model_dump_json()` output
+  field-for-field (`generated_at` excluded from comparison since neither call takes a frozen `now`,
+  so two real calls compose at two different instants) — including a non-empty `items` list, so the
+  round-trip is proven on real composed data, not just an empty scaffold. A second test covers the
+  no-evidence case. Both also verify `X-Artifact-SHA256` is the real SHA-256 of the response body.
+- **Permission-awareness, proved not asserted** —
+  `test_export_denies_a_foreign_organization_identically_to_the_live_endpoint` runs both routes
+  against a cross-org context and asserts both 403; more directly,
+  `test_export_and_live_endpoint_are_denied_by_the_same_policy_gate_identically` monkeypatches the
+  *one* `aida.asset_evidence_api.gate` reference both routes import, calls both `get_asset_evidence`
+  and `export_asset_evidence`, and asserts both raise 403 with the identical `"policy_denied"` reason
+  code — proving there is exactly one gate reference in play, not two independently-configured ones
+  that happen to agree today. `test_export_missing_table_is_404` and
+  `test_export_allowed_gate_still_returns_a_downloadable_artifact` round out the shape.
+
+`ui-next/src/components/EvidencePane.test.tsx` (new, 4 tests) proves the client-side half of the same
+"deep-links resolve independent of load state, and denial surfaces" story end to end at the component
+level: idle-with-no-`tableId` calls no fetch; a `tableId` with `row=null` (the deep-link case) still
+fetches by id and renders the evidence, with the "Opened from a permalink" chrome and the header
+sourced from `evidence.table_name`; a `403 ApiError` renders the explicit `role="alert"` denial and
+never the idle "Select an asset" state; and changing `tableId` alone (same `row=null`) re-fetches.
+
+### Verification
+
+`ruff check` clean on `src/aida/asset_evidence_api.py` and `tests/test_asset_evidence.py`.
+`AIDA_ENVIRONMENT=development uv run mypy src`: clean on both touched Python files; the same 44
+pre-existing `"object" not callable"` errors elsewhere (`workflows/activities.py`, `batch_ingestion.py`,
+`workflows/scheduler.py`, `main.py`) are unrelated and unchanged, confirmed by `grep -c` against the
+pre-change baseline. `AIDA_ENVIRONMENT=development uv run pytest tests/test_asset_evidence.py -q`:
+17 passed. A new HTTP route was added (`.../evidence/export`), so `Docs/90-reference/
+openapi-baseline.json` was regenerated via `scripts/openapi_diff.py --accept-baseline` — purely
+additive (one new path, no schema change) — and `tests/test_openapi_diff_gate.py` (25 tests) passes
+against it. `scripts/generate_ui_types.py` reported `ui-next/src/lib/types.ts` already matches (no
+new component schema was introduced; the export route returns a raw `Response`, not a
+`response_model`), so no regeneration was needed there. `cd ui-next && npm run typecheck && npm run
+test && npm run build`: all green — `npm run test` is 19/19 (15 pre-existing + the 4 new
+`EvidencePane.test.tsx` cases). `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py
+-q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No new Python or npm dependency added.

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
 from aida.context_compiler import (
+    ResolvedNegativeAssertion,
     ResolvedTableReference,
     compilation_drift_paths,
     compile_context_product,
@@ -27,6 +28,7 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
 )
+from aida.negative_knowledge import query_negatives_for_scope
 from aida.platform_schemas import (
     ContextCompilationDriftRead,
     ContextCompilationDriftRequest,
@@ -49,11 +51,41 @@ COMPILER_ROLES = (
 )
 
 
+async def _load_negative_knowledge(
+    session: AsyncSession,
+    organization_id: UUID,
+    table_ids: list[str],
+) -> list[ResolvedNegativeAssertion]:
+    """Load negative knowledge bounded to this context product version's own
+    table scope (never the whole organization's negative-knowledge surface),
+    pre-serialized so `compile_context_product` stays a pure function.
+    """
+    records = await query_negatives_for_scope(session, organization_id, table_ids)
+    return [
+        ResolvedNegativeAssertion(
+            subject_id=record.subject_id,
+            assertion_type=record.assertion_type,
+            predicate=record.predicate,
+            rejected_by=record.rejected_by,
+            rejected_at=record.rejected_at.isoformat(),
+            suppression_active=record.suppression_active,
+            lift_reason=record.lift_reason,
+        )
+        for record in records
+    ]
+
+
 async def _load_source(
     session: AsyncSession,
     version_id: UUID,
     context: SecurityContext,
-) -> tuple[ContextProduct, ContextProductVersion, list[ResolvedTableReference], dict[str, object]]:
+) -> tuple[
+    ContextProduct,
+    ContextProductVersion,
+    list[ResolvedTableReference],
+    list[ResolvedNegativeAssertion],
+    dict[str, object],
+]:
     version = await session.get(ContextProductVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="context product version not found")
@@ -106,7 +138,10 @@ async def _load_source(
         raise HTTPException(
             status_code=409, detail="context product contains unresolved table references"
         )
-    return product, version, resolved, quality.snapshot()
+    negative_knowledge = await _load_negative_knowledge(
+        session, version.organization_id, version.table_ids
+    )
+    return product, version, resolved, negative_knowledge, quality.snapshot()
 
 
 @router.get("/context-product-versions/{version_id}/compile", response_model=ContextCompilationRead)
@@ -116,8 +151,10 @@ async def compile_context_product_version(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationRead:
-    product, version, tables, quality_snapshot = await _load_source(session, version_id, context)
-    compiled = compile_context_product(product, version, target, tables)
+    product, version, tables, negative_knowledge, quality_snapshot = await _load_source(
+        session, version_id, context
+    )
+    compiled = compile_context_product(product, version, target, tables, negative_knowledge)
     correlation_id = get_correlation_id()
     record_audit(
         session,
@@ -162,10 +199,10 @@ async def download_context_compilation(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    product, version, tables, quality_snapshot = await _load_source(
+    product, version, tables, negative_knowledge, quality_snapshot = await _load_source(
         session, version_id, context
     )
-    compiled = compile_context_product(product, version, target, tables)
+    compiled = compile_context_product(product, version, target, tables, negative_knowledge)
     validation = validate_compiled_artifact(target, compiled.content)
     if not validation.valid:
         raise HTTPException(status_code=409, detail={"findings": validation.findings})
@@ -227,8 +264,12 @@ async def inspect_context_compilation_drift(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationDriftRead:
-    product, version, tables, _ = await _load_source(session, version_id, context)
-    compiled = compile_context_product(product, version, body.target, tables)
+    product, version, tables, negative_knowledge, _ = await _load_source(
+        session, version_id, context
+    )
+    compiled = compile_context_product(
+        product, version, body.target, tables, negative_knowledge
+    )
     deployed_hash = body.deployed_hash
     changed_paths: list[str] = []
     if body.deployed_content is not None:

@@ -15,9 +15,15 @@ Sections:
    table -- not for every refusal in the organization, and not silently
    dropped when one exists;
 3. permission enforcement matches `list_catalog_rows` (UX-12): cross-org
-   denied before the database is touched, and a policy-denied gate 403s.
+   denied before the database is touched, and a policy-denied gate 403s;
+4. UX-7's `.../evidence/export` route: the exported artifact matches the
+   live endpoint's own composed output (no separate/stale derivation), and
+   is denied identically -- through the same `gate` reference, not a
+   separate or weaker check.
 """
 
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -25,7 +31,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from aida.asset_evidence_api import get_asset_evidence
+from aida.asset_evidence_api import export_asset_evidence, get_asset_evidence
 from aida.authorization_gate import AuthorizationDenied, GateOutcome
 from aida.config import Settings
 from aida.db import Base
@@ -148,6 +154,15 @@ def _context(datasource: DataSource, **overrides: object) -> object:
 
 async def _evidence(table: MetadataTable, datasource: DataSource, session: AsyncSession):
     return await get_asset_evidence(
+        table.id,
+        context=_context(datasource),
+        session=session,
+        settings=_SETTINGS,
+    )
+
+
+async def _export(table: MetadataTable, datasource: DataSource, session: AsyncSession):
+    return await export_asset_evidence(
         table.id,
         context=_context(datasource),
         session=session,
@@ -544,3 +559,148 @@ async def test_allowed_gate_still_returns_evidence(
 
     evidence = await _evidence(table, datasource, session)
     assert evidence.table_id == table.id
+
+
+# ---------------------------------------------------------------------------
+# 5. UX-7 -- evidence export (`.../evidence/export`)
+# ---------------------------------------------------------------------------
+
+
+async def test_export_content_matches_the_live_evidence_endpoints_output(session) -> None:
+    """The exported artifact is `compose_asset_evidence`'s own output,
+    serialized verbatim -- not a separate/stale derivation. `generated_at` is
+    excluded from the comparison because each call composes at its own
+    instant (neither endpoint takes a frozen `now`); every other field,
+    including every `items` entry, must match exactly.
+    """
+    datasource = await _seed_datasource(session)
+    table = await _seed_table(session, datasource, name="t_export")
+    session.add(
+        DataQualityIncident(
+            id=uuid4(),
+            organization_id=table.organization_id,
+            datasource_id=datasource.id,
+            table_id=table.id,
+            fingerprint=uuid4().hex,
+            anomaly_type="VOLUME",
+            severity="HIGH",
+            status="OPEN",
+            summary="Volume dropped below baseline.",
+            first_observed_at=_NOW,
+            last_observed_at=_NOW,
+        )
+    )
+    await session.commit()
+
+    live = await _evidence(table, datasource, session)
+    response = await _export(table, datasource, session)
+
+    assert response.media_type == "application/json"
+    assert response.headers["Content-Disposition"] == (
+        f'attachment; filename="table-{table.id}-evidence.json"'
+    )
+    assert response.headers["X-Artifact-SHA256"] == hashlib.sha256(response.body).hexdigest()
+
+    exported = json.loads(response.body)
+    live_dict = json.loads(live.model_dump_json())
+    exported.pop("generated_at")
+    live_dict.pop("generated_at")
+    assert exported == live_dict
+    assert exported["items"]  # not an empty export -- the seeded incident round-tripped
+
+
+async def test_export_of_an_asset_with_no_evidence_is_still_well_formed(session) -> None:
+    datasource = await _seed_datasource(session)
+    table = await _seed_table(session, datasource, name="t_export_empty")
+    await session.commit()
+
+    response = await _export(table, datasource, session)
+    exported = json.loads(response.body)
+
+    assert exported["table_id"] == str(table.id)
+    assert exported["table_name"] == "t_export_empty"
+    assert response.headers["X-Artifact-SHA256"] == hashlib.sha256(response.body).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 6. UX-7 -- export re-runs the SAME gate as the live endpoint, not a
+#    separate or weaker one
+# ---------------------------------------------------------------------------
+
+
+async def test_export_denies_a_foreign_organization_identically_to_the_live_endpoint(
+    session,
+) -> None:
+    datasource = await _seed_datasource(session)
+    table = await _seed_table(session, datasource, name="t_export_secure")
+    await session.commit()
+
+    foreign_context = security_context(organization_id=uuid4())
+
+    with pytest.raises(HTTPException) as live_exc:
+        await get_asset_evidence(
+            table.id, context=foreign_context, session=session, settings=_SETTINGS
+        )
+    with pytest.raises(HTTPException) as export_exc:
+        await export_asset_evidence(
+            table.id, context=foreign_context, session=session, settings=_SETTINGS
+        )
+
+    assert live_exc.value.status_code == export_exc.value.status_code == 403
+
+
+async def test_export_and_live_endpoint_are_denied_by_the_same_policy_gate_identically(
+    session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proves the export path is not a separate, weaker check: patching the
+    one `gate` reference both routes import (`aida.asset_evidence_api.gate`)
+    denies both identically, with the same reason code.
+    """
+    datasource = await _seed_datasource(session)
+    table = await _seed_table(session, datasource, name="t_export_gated")
+    await session.commit()
+
+    async def fake_gate(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise AuthorizationDenied("policy_denied")
+
+    monkeypatch.setattr("aida.asset_evidence_api.gate", fake_gate)
+
+    with pytest.raises(HTTPException) as live_exc:
+        await get_asset_evidence(
+            table.id, context=_context(datasource), session=session, settings=_SETTINGS
+        )
+    with pytest.raises(HTTPException) as export_exc:
+        await export_asset_evidence(
+            table.id, context=_context(datasource), session=session, settings=_SETTINGS
+        )
+
+    assert live_exc.value.status_code == export_exc.value.status_code == 403
+    assert live_exc.value.detail == export_exc.value.detail == "policy_denied"
+
+
+async def test_export_allowed_gate_still_returns_a_downloadable_artifact(
+    session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    datasource = await _seed_datasource(session)
+    table = await _seed_table(session, datasource, name="t_export_allowed")
+    await session.commit()
+
+    async def fake_gate(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return GateOutcome(workspace_id=None, reason_code="ok", decided=True)
+
+    monkeypatch.setattr("aida.asset_evidence_api.gate", fake_gate)
+
+    response = await _export(table, datasource, session)
+    exported = json.loads(response.body)
+    assert exported["table_id"] == str(table.id)
+
+
+async def test_export_missing_table_is_404(session) -> None:
+    datasource = await _seed_datasource(session)
+    await session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await export_asset_evidence(
+            uuid4(), context=_context(datasource), session=session, settings=_SETTINGS
+        )
+    assert exc_info.value.status_code == 404

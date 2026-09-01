@@ -16,6 +16,16 @@ unmatched (free-text) view/procedure table names, BI/report nodes, AI
 decision edges, or export. Those remain tracked as LN-3, LN-4, LN-10, LN-12
 in `Docs/20-modules/09-lineage.md` and EA.9, EC.6+ in
 `Docs/60-delivery/02-epic-backlog.md`.
+
+AT-19: a `VIEW_DEFINITION` edge's `evidence` also carries a bounded, resolvable
+`transformation_reference` (`{tool: "get_transformation_detail", entity_id,
+kind}`) plus `redaction_status`/`availability`, sourced from envelope 1.1's
+`MetadataViewDefinition` (unique per `table_id`, so the lookup is exact, not
+guessed) -- never the DDL text itself, keeping this graph response's size
+bound (ADR-0010) intact. `PROCEDURE_DEFINITION` edges deliberately do NOT get
+one: `ProcedureLineageEdge` carries no identity back to the specific
+`MetadataRoutine` row it was parsed from, so no reference is fabricated for
+it (see `mcp_server.py::_view_definition_transformation_detail`).
 """
 
 from collections import Counter
@@ -31,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
+from aida.envelope_models import MetadataViewDefinition
 from aida.lineage_cache import get_lineage_cache
 from aida.lineage_graph_store import load_projected_lineage_impact
 from aida.models import (
@@ -241,6 +252,7 @@ async def _build_unified_graph(
     def register_definition_edges(
         rows: Sequence[ViewLineageEdge] | Sequence[ProcedureLineageEdge],
         edge_source: Literal["VIEW_DEFINITION", "PROCEDURE_DEFINITION"],
+        view_definitions_by_table_id: dict[UUID, tuple[str, str]] | None = None,
     ) -> None:
         grouped: dict[tuple[UUID, UUID], list[ViewLineageEdge | ProcedureLineageEdge]] = {}
         for row in rows:
@@ -254,6 +266,34 @@ async def _build_unified_graph(
             # base table it selects from (source_table_id) is what it depends
             # on -- same source-depends-on-target convention as FOREIGN_KEY
             # and DBT_DEPENDENCY above.
+            evidence: dict[str, object] = {
+                "source": edge_source,
+                "dialect": edges[0].dialect,
+                "sql_hash": edges[0].sql_hash,
+                "column_edge_count": len(edges),
+            }
+            # AT-19: a VIEW_DEFINITION edge's target_table_id IS the view's own
+            # MetadataTable.id, and MetadataViewDefinition.table_id is unique
+            # per table (envelope 1.1) -- a genuine 1:1 lookup, so the edge can
+            # carry a reference the caller can actually resolve via the
+            # get_transformation_detail MCP tool, plus redaction status
+            # in-line so "does this edge have code, and is it redacted" never
+            # needs a round trip on its own. PROCEDURE_DEFINITION edges get
+            # neither: ProcedureLineageEdge carries no identity back to a
+            # specific MetadataRoutine row (no FK, no specific_name -- see
+            # `mcp_server.py::_view_definition_transformation_detail`'s
+            # docstring), so no reference is fabricated here.
+            if view_definitions_by_table_id is not None:
+                found = view_definitions_by_table_id.get(target_table_id)
+                if found is not None:
+                    redaction_status, availability = found
+                    evidence["transformation_reference"] = {
+                        "tool": "get_transformation_detail",
+                        "entity_id": str(target_table_id),
+                        "kind": "VIEW_DEFINITION",
+                    }
+                    evidence["redaction_status"] = redaction_status
+                    evidence["availability"] = availability
             register_link(
                 UnifiedLink(
                     edge_id=f"{edge_source.lower()}:{edges[0].id}",
@@ -267,12 +307,7 @@ async def _build_unified_graph(
                     ),
                     source_columns=tuple(sorted({edge.target_column for edge in edges})),
                     target_columns=tuple(sorted({edge.source_column for edge in edges})),
-                    evidence={
-                        "source": edge_source,
-                        "dialect": edges[0].dialect,
-                        "sql_hash": edges[0].sql_hash,
-                        "column_edge_count": len(edges),
-                    },
+                    evidence=evidence,
                 )
             )
 
@@ -291,7 +326,34 @@ async def _build_unified_graph(
         ).all()
         if len(view_rows) >= edge_limit:
             truncation_reasons.append("EDGE_LIMIT")
-        register_definition_edges(view_rows, "VIEW_DEFINITION")
+
+        # AT-19: fetch only the three narrow columns needed to build
+        # `transformation_reference`/`redaction_status` above -- never the
+        # `definition_sql_redacted` text itself, so this stays a bounded
+        # reference lookup (ADR-0010) and not a way to smuggle DDL text into
+        # an already-bounded graph payload.
+        view_target_ids = {row.target_table_id for row in view_rows if row.target_table_id}
+        view_definitions_by_table_id: dict[UUID, tuple[str, str]] = {}
+        if view_target_ids:
+            definition_rows = (
+                await session.execute(
+                    select(
+                        MetadataViewDefinition.table_id,
+                        MetadataViewDefinition.redaction_status,
+                        MetadataViewDefinition.availability,
+                    ).where(
+                        MetadataViewDefinition.datasource_id == datasource.id,
+                        MetadataViewDefinition.table_id.in_(view_target_ids),
+                    )
+                )
+            ).all()
+            view_definitions_by_table_id = {
+                table_id: (redaction_status, availability)
+                for table_id, redaction_status, availability in definition_rows
+            }
+        register_definition_edges(
+            view_rows, "VIEW_DEFINITION", view_definitions_by_table_id
+        )
 
         procedure_rows = (
             await session.scalars(

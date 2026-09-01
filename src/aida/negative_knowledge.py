@@ -17,8 +17,9 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from aida.models import NegativeAssertionRecord
 
@@ -185,6 +186,63 @@ async def search_negatives(
         stmt = stmt.where(NegativeAssertionRecord.suppression_active.is_(suppression_active))
 
     stmt = stmt.order_by(NegativeAssertionRecord.rejected_at.desc()).offset(offset).limit(limit)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+def _scope_predicate(asset_ids: list[str]) -> ColumnElement[bool]:
+    """Match `subject_id` values that reference any of the given asset ids.
+
+    A negative-knowledge `subject_id` names its asset either bare (an
+    unprefixed id, matching how e.g. `OwnershipAssignment.subject_id` is
+    stored) or via a colon-delimited "kind:id[:extra]" convention (the shape
+    used by relationship/inference rejections, e.g. "table:<id>" or
+    "col:<table_id>:<column>"). An asset is in scope when its id is the
+    entire `subject_id`, or appears as one of its colon-delimited segments --
+    convention-agnostic so this keeps matching whichever callers eventually
+    settle on for `record_negative`.
+    """
+    clauses: list[ColumnElement[bool]] = []
+    for asset_id in asset_ids:
+        clauses.append(NegativeAssertionRecord.subject_id == asset_id)
+        clauses.append(NegativeAssertionRecord.subject_id.like(f"{asset_id}:%"))
+        clauses.append(NegativeAssertionRecord.subject_id.like(f"%:{asset_id}"))
+        clauses.append(NegativeAssertionRecord.subject_id.like(f"%:{asset_id}:%"))
+    return or_(*clauses)
+
+
+async def query_negatives_for_scope(
+    session: AsyncSession,
+    organization_id: UUID,
+    asset_ids: list[str],
+    *,
+    suppression_active_only: bool = True,
+) -> list[NegativeAssertionRecord]:
+    """Return negative assertions whose subject references any asset in scope.
+
+    Used to surface "what we decided is not true" as a bounded section of a
+    context product (or any other asset-scoped consumer): only rejections
+    touching the declared asset scope are returned, never the full
+    organization's negative-knowledge surface. Results are ordered
+    deterministically (subject_id, then rejected_at descending, then id) so
+    callers building a hashable artifact from them get a stable order.
+    """
+    if not asset_ids:
+        return []
+    stmt = (
+        select(NegativeAssertionRecord)
+        .where(
+            NegativeAssertionRecord.organization_id == organization_id,
+            _scope_predicate(asset_ids),
+        )
+        .order_by(
+            NegativeAssertionRecord.subject_id,
+            NegativeAssertionRecord.rejected_at.desc(),
+            NegativeAssertionRecord.id,
+        )
+    )
+    if suppression_active_only:
+        stmt = stmt.where(NegativeAssertionRecord.suppression_active.is_(True))
     result = await session.execute(stmt)
     return list(result.scalars().all())
 

@@ -19,6 +19,58 @@ class ResolvedTableReference:
     qualified_name: str
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedNegativeAssertion:
+    """A negative-knowledge record, pre-scoped and pre-serialized by the caller.
+
+    `compile_context_product` stays a pure function of its arguments (no DB
+    access, no clock reads) -- the same discipline `tables` already follows --
+    so `rejected_at` arrives as an ISO-8601 string rather than a `datetime`,
+    keeping every field JSON-primitive and the artifact hash reproducible.
+    """
+
+    subject_id: str
+    assertion_type: str
+    predicate: dict[str, Any]
+    rejected_by: str
+    rejected_at: str
+    suppression_active: bool
+    lift_reason: str | None = None
+
+
+# Targets whose payload carries an Atlas-native `context`/`spec` envelope
+# (built from `common`) rather than conforming to an external vendor
+# schema. The negative-knowledge section is Atlas-specific content -- Snowflake
+# Semantic Views, Databricks Metric Views, OSI, and ODCS have no field for
+# "what we decided is not true" and validating those artifacts against their
+# vendor spec would reject an unrecognized extra key -- so only these targets
+# carry it.
+_NEGATIVE_KNOWLEDGE_TARGETS = frozenset({"MCP", "REST", "YAML"})
+
+
+def _negative_knowledge_section(assertions: list[ResolvedNegativeAssertion]) -> dict[str, Any]:
+    items = [
+        {
+            "subject_id": assertion.subject_id,
+            "assertion_type": assertion.assertion_type,
+            "predicate": assertion.predicate,
+            "rejected_by": assertion.rejected_by,
+            "rejected_at": assertion.rejected_at,
+            "suppression_active": assertion.suppression_active,
+            "lift_reason": assertion.lift_reason,
+        }
+        for assertion in assertions
+    ]
+    items.sort(
+        key=lambda item: (
+            str(item["subject_id"]),
+            str(item["assertion_type"]),
+            str(item["rejected_at"]),
+        )
+    )
+    return {"count": len(items), "assertions": items}
+
+
 def _canonical_json(value: Any, *, pretty: bool = True) -> str:
     return json.dumps(
         value,
@@ -34,6 +86,7 @@ def _artifact_payload(
     version: ContextProductVersion,
     target: ContextCompilerTarget,
     tables: list[ResolvedTableReference],
+    negative_knowledge: list[ResolvedNegativeAssertion],
 ) -> dict[str, Any]:
     references = {
         "tables": [
@@ -56,6 +109,13 @@ def _artifact_payload(
         "quality_requirements": version.quality_requirements,
         "policy_summary": version.policy_summary,
     }
+    # Only the Atlas-native envelope carries negative knowledge (see
+    # `_NEGATIVE_KNOWLEDGE_TARGETS`); vendor-standard targets below embed
+    # `common` unchanged.
+    atlas_common = {
+        **common,
+        "negative_knowledge": _negative_knowledge_section(negative_knowledge),
+    }
     if target == "MCP":
         return {
             "kind": "AtlasMcpContext",
@@ -65,7 +125,7 @@ def _artifact_payload(
             ),
             "prompt": f"atlas__context__{product.product_key}__v{version.version}",
             "eligibleToolVersionIds": references["eligible_tool_version_ids"],
-            "context": common,
+            "context": atlas_common,
         }
     if target == "REST":
         return {
@@ -73,7 +133,7 @@ def _artifact_payload(
             "apiVersion": "atlas.aida/v1",
             "resource": f"/v1/context-product-versions/{version.id}",
             "etag": version.fingerprint,
-            "context": common,
+            "context": atlas_common,
         }
     if target == "OSI":
         return {
@@ -144,7 +204,7 @@ def _artifact_payload(
                 "sourceValues": "GATEWAY_ONLY",
             },
         }
-    return {"apiVersion": "atlas.aida/v1", "kind": "ContextProduct", "spec": common}
+    return {"apiVersion": "atlas.aida/v1", "kind": "ContextProduct", "spec": atlas_common}
 
 
 def compile_context_product(
@@ -152,10 +212,24 @@ def compile_context_product(
     version: ContextProductVersion,
     target: ContextCompilerTarget,
     tables: list[ResolvedTableReference],
+    negative_knowledge: list[ResolvedNegativeAssertion] | None = None,
 ) -> ContextCompilationRead:
-    """Compile a version-pinned product without time- or environment-dependent fields."""
+    """Compile a version-pinned product without time- or environment-dependent fields.
+
+    `negative_knowledge` is pre-scoped by the caller (see
+    `aida.negative_knowledge.query_negatives_for_scope`) to assertions
+    touching this version's own bounded table scope -- never the whole
+    organization's negative-knowledge surface -- and is only rendered into
+    targets in `_NEGATIVE_KNOWLEDGE_TARGETS`. Defaults to no negative
+    knowledge so existing callers compiling without it keep producing the
+    same artifact they always did.
+    """
     payload = _artifact_payload(
-        product, version, target, sorted(tables, key=lambda item: item.table_id)
+        product,
+        version,
+        target,
+        sorted(tables, key=lambda item: item.table_id),
+        negative_knowledge or [],
     )
     content = (
         yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)
