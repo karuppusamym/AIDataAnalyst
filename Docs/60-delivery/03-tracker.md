@@ -151,7 +151,7 @@ happens the row names both, rather than being listed twice.
 | KG-4 | Time-aware / version traversal | 10 | E | P2 | TODO | — | "What did this look like last quarter" |
 | KG-5 | Saved perspectives per persona | 10 | C | P2 | DONE | — | Delivered 2026-08-30. Named, reusable Graph Explorer view-state snapshots persisted per owner, shared via a role-based `allowed_viewer_roles` list (owner-editable, shared-viewers-read-only), no maker-checker (a productivity artifact, not a governed object) (`graph_perspectives_api.py`) |
 | KG-6 | Rebuild timing drill + published SLO | 10 | D | P0 | TODO | — | 1M objects < 4 h, measured |
-| KG-7 | Scheduled reconciliation + alerting | 10 | B | P1 | TODO | — | Drift detected and alarmed |
+| KG-7 | Scheduled reconciliation + alerting | 10 | B | P1 | IN PROGRESS | Claude (worktree feature/snowflake-dbt-lineage-mcp, claimed 2026-09-01) | Claimed 2026-09-01: building a scheduler-registered Postgres/Neo4j drift reconciliation pass routed through the DQ-1 incident/alerting path |
 
 ## E. Quality, retrieval, runtime
 
