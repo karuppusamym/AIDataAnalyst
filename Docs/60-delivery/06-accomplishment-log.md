@@ -8063,3 +8063,122 @@ compiled artifact's own content changed), so the OpenAPI schema is unaffected �
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched — `NegativeAssertionRecord` already carried everything this needed.
+
+## 2026-09-01 — AT-13 closed: `get_asset_context` composite MCP call, usage decision computed server-side
+
+### The anti-pattern this row names
+
+Atlan's own MCP transcript has the *model* concluding "safe to use, ensure your pipeline respects
+that policy" after reading a table's certification/quality/lineage separately — the model acting as
+policy oracle, and enforcement handed back to whatever calls it next. A second failure mode sits
+right behind the first one: composing those facts as several separate tool calls means several
+separate policy evaluations and several separate audit records for what is really one read. This
+row fixes both: one call, one policy evaluation, one audit record, and a decision the *server*
+computes, not the model.
+
+### What shipped
+
+`atlas__get_asset_context`, a new native MCP tool (`mcp_server.py`, dispatched from
+`_handle_native_lineage_tool_call` alongside `get_lineage_graph`/`get_lineage_impact`/
+`resolve_entity`/`get_transformation_detail` — same role-eligibility gate, same anti-enumeration
+response shape). For one `table_id` it returns:
+
+- **Certification / quality / owner** — `aida.asset_context.compose_asset_context_signals` calls
+  UX-13's `catalog_read_model.py` typed helpers directly (`_earliest_active_owners`,
+  `_latest_approved_documentation`, `_latest_certifications`, `_certification_state`,
+  `_open_incident_table_ids`, `_latest_observation_at`, `_quality_state`) — the exact precedence
+  `asset_evidence.py`'s own OWNERSHIP/CERTIFICATION/DATA_QUALITY sections use, not re-derived.
+  `compose_asset_evidence` itself is deliberately *not* called: it also composes business-meaning,
+  consumption (CX-4) and AI-decision (LN-3) evidence outside this row's five-fact scope, and returns
+  human-readable prose claims rather than typed state — reusing the lower typed layer avoids both
+  the extra unrelated reads and re-parsing prose back into state.
+- **Classification** — honestly new. No table-level classification field or function exists
+  anywhere on this platform today (AT-11, "classification propagation along lineage", is still
+  TODO). What does exist is column-level `metadata_column.classification` — already the ABAC input
+  `query_gateway.py` masks reads against. `asset_context._classification_summary` rolls that
+  existing per-column data up to the table (`total_columns`, `classified_columns`,
+  `distinct_classifications`, `has_sensitive_classification` via `aida.classification.
+  SENSITIVE_CLASSES`) and the response says explicitly that this is a rollup of existing per-column
+  facts, not a stored table-level classification the way GL-5 certification is.
+- **Lineage depth** — EA.14's `unified_lineage_api.build_unified_lineage_impact_payload` called
+  verbatim at the table's own node id (the same traversal `atlas__get_lineage_impact` calls),
+  summarized as upstream/downstream node counts and max depth reached. A table the unified graph
+  never registered as a node (deprecated, or beyond the graph builder's node cap) degrades to
+  `lineage.available=false` with a named reason — the composite call still answers with everything
+  else it has, rather than failing outright on `LineageNodeNotFoundError`.
+- **`usage_decision`** — `aida.asset_usage_decision.compute_usage_decision`, a pure, DB-free
+  function taking only already-composed scalars (`certification_state`, `quality_state`,
+  `has_open_critical_incident`, `has_owner`, `has_sensitive_classification`) and returning
+  `ALLOWED` / `ALLOWED_WITH_CAUTION` / `BLOCKED` plus **every** contributing factor, each with its
+  own `OK`/`CAUTION`/`BLOCKED` flag — never a bare label. Decision table: `REVOKED` certification or
+  an open `CRITICAL`-severity incident (the same `severity == "CRITICAL"` +
+  `status.in_(("OPEN","ACKNOWLEDGED"))` filter `quality_coupling.py`/`context_product_policy.py`/
+  `quality_api.py` already use) → `BLOCKED`; a non-critical open incident, stale/unknown quality, an
+  uncertified/expired certification, no assigned owner, or any sensitive-classified column →
+  `CAUTION`; everything healthy → `ALLOWED`. The overall decision is simply the worst individual
+  factor's flag (`BLOCKED` > `CAUTION` > `OK`) — not a separate, potentially-inconsistent judgement.
+
+### One policy evaluation, one audit record — proved, not just claimed
+
+`_handle_get_asset_context` calls `gate()` exactly once, with the identical shape
+`asset_evidence_api.py`'s `GET /v1/metadata/tables/{id}/evidence` route already uses
+(`action="READ_METADATA"`, `resource_type="datasource"`, `resource_id=str(datasource.id)`,
+`datasource_id=datasource.id`) — reused verbatim, not a second/different evaluation, and none of the
+five composed facts triggers its own gate call. Exactly one `AuditEvent`
+(`action="mcp.asset_context.read"`) and one `OutboxEvent` (`event_type="asset_context.consumed.v1"`)
+are recorded once, after every fact above has been composed — never once per fact.
+`tests/test_mcp_server.py::test_get_asset_context_makes_exactly_one_policy_evaluation_and_one_audit_record`
+monkeypatches `gate`/`compose_asset_context_signals`/`build_unified_lineage_impact_payload` to
+counting fakes and asserts `len(gate_calls) == 1`, `signals_calls == 1`, and `len(session.added) == 2`
+(one `AuditEvent` + one `OutboxEvent`, checked by `isinstance`) — the composite call's whole point,
+proved rather than asserted by comment.
+
+### Authorization and anti-enumeration shape
+
+Role eligibility (`UNIFIED_LINEAGE_READER_ROLES`, the same set `get_lineage_graph`/`get_lineage_impact`
+already use) is checked before any table lookup — a leak test
+(`test_leak_get_asset_context_denied_caller_cannot_distinguish_existing_from_missing_table`) proves a
+denied caller's session `.get()` is never called and a "real" vs. "missing" table id produce
+byte-identical responses, mirroring EE.10's own leak-test convention for `resolve_entity`/
+`get_transformation_detail`. A nonexistent table id, a table in another organization, and a `gate()`
+`AuthorizationDenied` all return the identical `"Asset not found or not accessible."` — a policy
+denial is never distinguishable from "does not exist," matching the sibling native lineage tools'
+"Datasource not accessible." idiom at table granularity.
+
+### Tests
+
+- `tests/test_asset_usage_decision.py` (21 tests, pure/DB-free, no session or mocking anywhere) —
+  each of the tracker row's own named examples ("certified + healthy quality + no open incidents →
+  ALLOWED", "an open critical quality incident → BLOCKED", "uncertified + no owner → caution") plus
+  every individual factor in isolation, an unknown-state `ValueError` guard, and
+  `test_every_combination_of_states_produces_a_decision_without_raising` — an exhaustive 256-case
+  sweep (4 certification states × 4 quality states × 2×2×2 booleans) proving the worst-flag-wins
+  invariant and determinism hold everywhere in the input space, not just the hand-picked scenarios.
+- `tests/test_mcp_server.py` (10 new tests) — role-ineligibility denial (identical to an unknown
+  tool), the leak/anti-enumeration proof above, non-UUID `table_id` rejection, identical not-found
+  for a missing table and a cross-org table, identical not-found for a `gate()` denial (with
+  `compose_asset_context_signals` monkeypatched to raise if reached, proving the gate check runs
+  first), the exactly-one-gate/exactly-one-audit proof, and lineage-unavailable degrading the
+  `lineage` field without failing the whole call.
+
+### Verification
+
+`ruff check` clean on every touched file (`mcp_server.py`, `asset_context.py`,
+`asset_usage_decision.py`, `tests/test_mcp_server.py`, `tests/test_asset_usage_decision.py`) — one
+pre-existing `E501` on an unrelated line in `test_mcp_server.py` (`test_leak_get_transformation_
+detail_denied_caller_cannot_distinguish_existing_from_missing_entity`'s def line) confirmed present
+on `origin/feature/snowflake-dbt-lineage-mcp` before this change, left alone. `AIDA_ENVIRONMENT=
+development uv run mypy src`: clean on every file this row touched; the 44 pre-existing `"object"
+not callable"` errors elsewhere (`workflows/activities.py`, `task_tracking.py`, `main.py`, …) are
+unrelated and unchanged, confirmed present on `origin/feature/snowflake-dbt-lineage-mcp` before this
+change. `lint-imports`: 8 contracts kept, 0 broken (`asset_context.py`/`asset_usage_decision.py`
+import only `catalog_read_model`, `classification` and `models` — no query-gateway/authorization
+dependency the lineage/intelligence import-linter contract would flag). `AIDA_ENVIRONMENT=development
+uv run pytest tests/test_mcp_server.py tests/test_asset_usage_decision.py tests/test_asset_evidence.py
+tests/test_doc_claims.py -q`: all pass, nothing broken. No HTTP route was added (MCP-tool-only), so
+no OpenAPI baseline regeneration was needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — every composed field reads existing columns (`metadata_column.classification`,
+`data_quality_incident.severity`, `asset_certification`, `ownership_assignment`,
+`asset_documentation_version`) through existing or newly-added read-only query helpers.
