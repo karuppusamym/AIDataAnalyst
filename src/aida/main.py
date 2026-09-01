@@ -36,6 +36,7 @@ from aida.glossary_api import router as glossary_router
 from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
+from aida.lineage_evidence_export_api import router as lineage_evidence_export_router
 from aida.logging import configure_logging
 from aida.mcp_server import router as mcp_router
 from aida.metric_suggestion_api import router as metric_suggestion_router
@@ -306,6 +307,7 @@ app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
 app.include_router(unified_lineage_router)
+app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
