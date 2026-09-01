@@ -9612,3 +9612,73 @@ live source) prove the ingestion/profiling pipelines' traces are value-free end-
 narrower-than-the-specced-fixture scope `test_no_source_values_in_control_plane`'s own docstring already
 states for the query path, extended here to traces for the same reason: no PostgreSQL, no source
 database, in this sandbox.
+
+---
+
+## 2026-09-01 — SM-1 (governed dimension authoring) investigated, BLOCKED: no dimension-shaped persisted model exists
+
+Claimed this row expecting to mirror module 07's existing governed-metric authoring/versioning/
+maker-checker pattern (`SemanticMetric` / `SemanticMetricVersion` / `SemanticMetricProposal` in
+`models.py`, `metric_suggestion_service.py`, and the metric-version endpoints in `semantic_api.py`) for
+dimensions instead. Read that pattern in full before writing anything, per this row's own brief.
+
+### What was checked
+
+`grep -n "class Semantic" src/aida/models.py` returns exactly five classes: `SemanticModelVersion`,
+`SemanticMetric`, `SemanticMetricVersion`, `SemanticInferenceRun`, `SemanticMetricProposal`. No
+`SemanticDimension`. A second, case-insensitive sweep (`grep -ni dimension src/aida/models.py`) finds
+only: `IndexConfig.dimensions` (embedding vector width, an unrelated module 06 concept),
+`SemanticMetricVersion.allowed_dimension_column_ids` (a plain `JSON` list of raw `metadata_column`
+UUIDs a published metric may be grouped/filtered by -- an allowlist of *columns*, not a governed
+business object with its own identity), an unrelated `dimension: int` on a vector/embedding row, and
+one doc comment. Same sweep across `src/aida/schemas.py` and `src/aida/platform_schemas.py`: nothing
+dimension-shaped there either (`schemas.py`'s only hits are the same `allowed_dimension_column_ids`
+field plus an unrelated `CoverageDimensionRead` used by a data-quality coverage report, not semantics).
+`grep -rn "class.*Dimension" src/atlas/` (all module-07-adjacent packages under the new per-module
+split): zero hits.
+
+Most decisive: `TermSemanticBinding`'s own docstring in `models.py` (~L4197, written for SM-2) says so
+in as many words -- "a future governed-dimension type from SM-1 binds the same way without a schema
+change" -- confirming that as of today's trunk, a governed-dimension type has never been built. Endpoint
+side is equally empty: `semantic_api.py` has `create_metric_version` / `list_metric_versions` /
+`get_semantic_metric_version_consumers` / metric-glossary-binding routes, and nothing dimension-shaped.
+
+### Why this is a schema gap, not a build gap
+
+The metric pattern this row must mirror is a three-table shape: `SemanticMetric` (identity: id, org,
+project, slug) + `SemanticMetricVersion` (immutable versioned content: name, description, aggregation,
+source binding, `semantic_model_version_id` FK, status DRAFT/PUBLISHED, fingerprint) +
+`SemanticMetricProposal` (evidence-driven maker-checker draft feeding the shared `governance_review`
+queue via `metric_suggestion_service.apply_metric_suggestion_proposal` /
+`semantic_api.decide_governance_review`). None of the three has a dimension counterpart. Building the
+authoring/versioning/maker-checker service and API layer this row asks for needs somewhere to persist a
+dimension's identity, its version history, and its own proposal/review record -- none of which exists,
+and inventing it needs a `models.py` + `schemas.py` change plus an Alembic migration, both explicitly
+out of bounds for this worktree.
+
+Declined the workaround this row's own brief warns against by name: storing a dimension definition
+inside an existing generic JSON field on an unrelated table (`SemanticMetricVersion.
+allowed_dimension_column_ids`, or `CatalogBulkActionRun.parameters`) would not give a dimension its own
+identity, independent version history, or its own maker-checker review record -- it would satisfy this
+row's exit criterion in appearance only, the exact category-error AT-15/AT-13's "never present a
+fabricated signal as an established fact" convention exists to prevent. No code changed; nothing wired
+to a non-existent table.
+
+### What a future session needs, precisely
+
+Three new tables mirroring the metric shape 1:1 (`SemanticDimension`: id/org/project/slug;
+`SemanticDimensionVersion`: semantic_model_version_id FK, dimension_id FK, version, status, name,
+description, source_table_id, source_column_id, fingerprint, created_by;
+`SemanticDimensionProposal`/equivalent evidence row entering `governance_review` the same way
+`SemanticMetricProposal` does) plus the matching Alembic migration. Once those three tables exist, the
+authoring/versioning/review service and API layer is a near-verbatim port of
+`metric_suggestion_service.py` + `semantic_api.py`'s metric-version routes -- the hard part of this row
+is the schema, not the workflow logic, and the schema is exactly what this worktree cannot touch.
+
+### Verification
+
+No implementation files touched, so no `ruff`/`mypy` delta to report. `AIDA_ENVIRONMENT=development uv
+run --extra dev pytest tests/test_doc_claims.py -q` run before the closing push (see commit). No HTTP
+route added/changed -> no OpenAPI/`ui-next` regen needed. No new `record_outbox` event type -> no
+`04-event-catalog.md` change needed. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict
+markers run immediately before the closing push: none found.
