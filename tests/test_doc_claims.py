@@ -97,12 +97,14 @@ EXEMPT_BARE_FILENAMES = {
 
 # Extra roots a bare `*.py` filename citation may legitimately live under besides
 # `src/aida/` — this repo also cites test files, test support fixtures, Alembic
-# migration files, and standalone operational/CI scripts (`openapi_diff.py`,
-# `perf_baseline.py`, `generate_ui_types.py`) by bare filename.
+# migration files, standalone operational/CI scripts (`openapi_diff.py`,
+# `perf_baseline.py`, `generate_ui_types.py`), and the public tool SDK package
+# (TL-5, `sdk/aida_tool_sdk/`) by bare filename.
 EXTRA_BARE_FILENAME_ROOTS = (
     REPO_ROOT / "tests",
     REPO_ROOT / "migrations" / "versions",
     REPO_ROOT / "scripts",
+    REPO_ROOT / "sdk",
 )
 
 # `src/...` path prefixes that name the pre-rename target package (`atlas`) used in
