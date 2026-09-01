@@ -16,6 +16,7 @@ from aida.connectors.base import QueryEstimate
 from aida.connectors.execution_access import open_execution_session
 from aida.connectors.sql_execution import SqlExecutor
 from aida.events import record_audit, record_outbox
+from aida.lob_concurrency import LobConcurrencyDenied, resolve_lob_concurrency_controller
 from aida.models import (
     ColumnTokenizationPolicy,
     DataSource,
@@ -80,6 +81,23 @@ class AuthorizationRejected(QueryRejected):
         super().__init__(f"AUTHORIZATION_DENIED:{reason_code}")
         self.reason_code = reason_code
         self.workspace_id = workspace_id
+
+
+class LobConcurrencyRejected(QueryRejected):
+    """QG-3: the requesting LOB was at its concurrency limit past the wait bound.
+
+    Same shape as `AuthorizationRejected` wrapping `AuthorizationDenied`
+    (above): a subclass of `QueryRejected` so every existing caller's
+    handling -- execution-id bookkeeping, REJECTED status, DENIED audit entry
+    -- applies unchanged, while `type(exc).__name__` still distinguishes this
+    from an authorization refusal or any other rejection reason.
+    """
+
+    def __init__(self, denied: LobConcurrencyDenied) -> None:
+        super().__init__(f"LOB_CONCURRENCY_LIMIT_EXCEEDED:{denied.lob_key}")
+        self.lob_key = denied.lob_key
+        self.limit = denied.limit
+        self.waited_seconds = denied.waited_seconds
 
 
 def sensitive_projection_names(
@@ -225,6 +243,12 @@ class QueryExecutionGateway:
             default_row_limit=settings.default_query_row_limit,
             hard_row_limit=settings.hard_query_row_limit,
         )
+        # QG-3: resolved through the process-wide cache, not stored as a
+        # request-scoped registry -- this gateway is constructed fresh per
+        # call site (tool_api.py, mcp_server.py, api.py, agent_orchestrator.py,
+        # sql_validation_api.py), so an instance-owned registry would never
+        # see more than one execution at a time and would enforce nothing.
+        self._lob_concurrency = resolve_lob_concurrency_controller(settings)
 
     async def _sign_sql(self, sql: str) -> str:
         """Produce the audit HMAC evidence for `sql` (QG-5).
@@ -710,10 +734,25 @@ class QueryExecutionGateway:
             estimate_kind = report.estimate_kind
             plan_cost = report.plan_cost
             connector = outcome.executor
-            source_result = await connector.execute_read_query(
-                outcome.executable_sql,
-                timeout_seconds=self.settings.query_timeout_seconds,
-            )
+            # QG-3: fairness under contention. Held only around the real
+            # dispatch to the source -- not around validation/estimate above,
+            # which is a cheap EXPLAIN-only call, and not around masking/audit
+            # below, which touch nothing external -- so the slot's held
+            # duration tracks the actual contended resource (the source
+            # connection/compute this statement runs against), not
+            # bookkeeping this gateway does either side of it. Keyed by the
+            # datasource's LOB (see `aida.lob_concurrency`'s module
+            # docstring for why that, not the caller, is this platform's
+            # real per-LOB dimension for a query execution).
+            lob_key = str(datasource.line_of_business_id)
+            try:
+                async with self._lob_concurrency.slot(lob_key):
+                    source_result = await connector.execute_read_query(
+                        outcome.executable_sql,
+                        timeout_seconds=self.settings.query_timeout_seconds,
+                    )
+            except LobConcurrencyDenied as exc:
+                raise LobConcurrencyRejected(exc) from exc
             sensitive_names = await self._sensitive_output_names(
                 session,
                 datasource,

@@ -7644,3 +7644,123 @@ mirrors -- is not currently reachable with a `Settings` object from every one of
 `_handle_tools_list`/`_handle_tools_call`); threading `settings` through that whole call graph
 correctly, without a rushed mistake in a security-sensitive file this size, needs its own row rather
 than a same-session addendum here.
+
+---
+
+## 2026-09-01 — QG-3 closed: per-LOB quotas + concurrency controller, fair under contention
+
+### Which "LOB" a query execution even has
+
+`SecurityContext` (`aida.security_types`), and every header
+`aida.security.get_security_context` reads, carry no line-of-business dimension at all --
+checked directly, confirmed absent. The dimension this platform already carries end-to-end
+for a query *execution* is the datasource's: `DataSource.line_of_business_id` is a mandatory
+(non-nullable) column (ADR-0018), and `aida.cost_showback` already treats it as the
+authoritative per-LOB grouping key for the very same `QueryExecution` rows this controller
+throttles the creation of (`cost_showback.py:19-24`'s own docstring states this). The new
+controller (`src/aida/lob_concurrency.py`) is keyed the same way, so "fair under contention"
+and "who consumed what" agree on what a LOB's share of the gateway even means, instead of
+inventing a second, disagreeing notion of tenancy.
+
+### What shipped
+
+`aida.lob_concurrency.LobConcurrencyController`: one `asyncio.Semaphore(default_max_concurrent)`
+per LOB key, created lazily and held for the controller's life. A request past its LOB's limit
+waits, bounded by a configurable timeout, for a same-LOB in-flight execution to free a slot
+(ordinary head-of-line contention resolves itself silently); only a wait that outlives the
+bound raises `LobConcurrencyDenied` -- a clear, distinguishable refusal, never a queue that
+grows forever. `resolve_lob_concurrency_controller` caches one controller per distinct
+(`max_concurrent`, `queue_timeout_seconds`) settings pair -- the same cache-by-config-tuple
+shape `aida.security._oidc_verifiers` already uses -- which is what makes the bound real
+across requests: `QueryExecutionGateway` is constructed fresh per call site (`tool_api.py`,
+`mcp_server.py`, `api.py`, `agent_orchestrator.py`, `sql_validation_api.py` each build their
+own), so an instance-owned registry would give every request its own always-empty registry and
+enforce nothing.
+
+Two new `Settings` fields (`atlas/platform/config.py`, no new table, no migration):
+`query_gateway_lob_max_concurrent` (default 8) and `query_gateway_lob_queue_timeout_seconds`
+(default 5.0) -- a single default applied uniformly to every LOB. Per-LOB custom override
+values are explicitly **not** built: that would need a persisted table (an override keyed by
+organization + LOB, no natural home in an existing row) this item is deliberately not adding
+under the no-schema-change constraint; documented here as an open follow-up rather than
+silently out of scope.
+
+Wired into `QueryExecutionGateway.execute` (`src/aida/query_gateway.py`): the slot is held only
+around the real dispatch to the source (`connector.execute_read_query`) -- not around the
+validation/estimate pass ahead of it (a cheap EXPLAIN-only call), and not around masking/audit
+bookkeeping after it (touches nothing external) -- so the held duration tracks the actual
+contended resource, not this gateway's own overhead either side of it. `LobConcurrencyDenied` is
+wrapped into a new `LobConcurrencyRejected(QueryRejected)`, the same shape
+`AuthorizationRejected` already uses for `AuthorizationDenied`: every existing caller's
+handling -- execution-id bookkeeping, REJECTED status, DENIED audit entry -- applies unchanged,
+while `type(exc).__name__` still distinguishes a concurrency refusal from an authorization
+refusal or any other rejection reason.
+
+### Scope: in-process, not cross-replica -- stated honestly, not glossed over
+
+`Docs/10-architecture/09-deployment-topology.md` names `atlas-api` as "N replicas behind a load
+balancer" -- multi-replica *is* this platform's stated production target. A purely in-process
+bound only holds per replica, so the platform-wide concurrent-per-LOB total in production can
+reach (replica count x this limit), not this limit alone. `redis` is already a real, configured
+dependency (`pyproject.toml`, `Settings.redis_url`) and is already used for the close-cousin
+problem of per-consumer rate limiting (`aida.mcp_budget`, wired into `mcp_server.py`'s live
+tool-call path, atomic Lua-script INCR-with-expiry, fail-closed in staging/production on a
+Redis error) -- a Redis-backed version of this controller would be the natural, idiomatic next
+step for a cross-replica-correct bound, and is deliberately not built here: this row's fairness
+had to be provable by a test running with no external services (this repository's entire test
+suite runs with no live Redis/Postgres/Neo4j -- `tests/test_mcp_policy.py` itself only exercises
+`mcp_budget`'s pure helpers for the identical reason, never `consume_mcp_budget`'s real Redis
+call), and a distributed limiter's correctness -- especially crash-safety when a replica dies
+mid-execution while holding a slot -- is not something an in-process test can prove. Shipping an
+unverified distributed version would be a worse deliverable than an honestly-scoped, fully-tested
+in-process one. Left as a named, concrete follow-up (build `aida.lob_concurrency`'s Redis-backed
+sibling, reusing `mcp_budget.py`'s exact idiom) rather than an implicit gap.
+
+### Tests (`tests/test_lob_concurrency.py`, 3 tests)
+
+The fairness proof the tracker row asked for, at two levels:
+
+- `test_controller_keeps_lob_b_unaffected_by_lob_a_flood`: LOB A submits 8 concurrent requests
+  against a quota of 2 (4x over), each holding a slot 0.3s; LOB B submits 2 concurrent requests
+  (exactly its own quota, unrelated LOB key) holding a slot 0.05s, at the same moment. Asserts
+  LOB B's two requests both complete, in under 0.25s each -- never queuing behind LOB A's 8-deep
+  flood -- while asserting LOB A really was over quota: some requests ran (2, in the first wave),
+  the rest (>0) were rejected with `LobConcurrencyDenied` naming the right LOB key and limit, not
+  silently queued forever.
+- `test_controller_rejects_with_a_distinguishable_error_not_a_silent_queue`: a second acquire
+  against an already-held single-slot LOB times out into `LobConcurrencyDenied`, not a hang.
+- `test_query_gateway_wiring_keeps_lob_b_unaffected_by_lob_a_flood`: the same fairness proof one
+  level up, through the real `QueryExecutionGateway.execute()` call (not just the controller) --
+  8 concurrent `execute()` calls against LOB A's datasource (quota 2, 0.3s dispatch each) racing
+  2 concurrent `execute()` calls against LOB B's datasource (0.05s dispatch each), using the same
+  `FakeSqlExecutor`/`CatalogSession`/`security_context` doubles `tests/test_query_tokenization.py`
+  already established for this gateway (no database, no live connector). LOB B's calls complete
+  untouched by LOB A's flood; LOB A's excess calls raise the real `LobConcurrencyRejected` the
+  gateway raises in production, recorded as REJECTED `QueryExecution` rows with
+  `error_class == "LobConcurrencyRejected"`, not left hanging.
+
+All 3 pass, repeatably (`for i in 1 2 3; do pytest tests/test_lob_concurrency.py; done`), and
+without a shared mutable test fixture racing across concurrently-running tasks -- the gateway
+test resolves each concurrent call's fake connector by its (per-datasource) resolved DSN, not by
+a variable set from inside a task that could interleave with a sibling task's own set.
+
+### Verification
+
+`ruff check src/aida/lob_concurrency.py src/aida/query_gateway.py src/atlas/platform/config.py
+tests/test_lob_concurrency.py` and `uv run mypy src` (263 files) both clean. `uv run
+lint-imports`: 8/8 contracts kept (this row's new module imports nothing from a
+protected/leaf-ratcheted module). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py` clean. Targeted regression subset green: `tests/test_lob_concurrency.py
+tests/test_query_tokenization.py tests/test_inv4_authorization_wiring.py tests/test_hmac_signing.py
+tests/test_cost_showback.py tests/test_reachability_gate.py tests/test_sql_validation.py`. No HTTP
+route added or changed, so `tests/test_openapi_diff_gate.py`/the OpenAPI baseline/`ui-next` types
+are untouched by this row. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file
+and no Alembic migration touched.
+
+Honest gaps: per-LOB custom quota overrides (a single organization-wide default is what shipped,
+per this item's own no-new-table constraint) and the Redis-backed cross-replica version (see
+above) are both real, named follow-ups, not silently assumed done. The full unscoped `pytest
+tests/` run was still in progress in this sandbox when this entry was written (a large, slow
+suite); the targeted subset directly exercising every file this row touched, plus doc-claims and
+lint-imports, is green, matching the standing pattern earlier same-day entries in this log already
+record for the same reason.

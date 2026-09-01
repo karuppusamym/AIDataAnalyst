@@ -119,6 +119,21 @@ class Settings(BaseSettings):
     default_query_row_limit: int = Field(default=5000, ge=1, le=100_000)
     hard_query_row_limit: int = Field(default=100_000, ge=1, le=1_000_000)
     query_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    # QG-3: fairness under contention. Each line of business (DataSource.line_of_
+    # business_id, the same per-LOB dimension aida.cost_showback already groups
+    # QueryExecution rows by) may hold at most this many concurrently in-flight
+    # executions against the gateway's real source-execution path
+    # (aida.lob_concurrency.LobConcurrencyController, checked in
+    # QueryExecutionGateway.execute). A single default applied to every LOB, not a
+    # per-LOB override table -- a persisted override would need a new schema this
+    # item is deliberately not adding.
+    query_gateway_lob_max_concurrent: int = Field(default=8, ge=1, le=1_000)
+    # A request past its LOB's limit waits, bounded, for another in-flight
+    # execution from the same LOB to free a slot, rather than either queuing
+    # forever or rejecting on the first collision -- see aida.lob_concurrency's
+    # module docstring. A wait that outlives this bound is rejected with a clear,
+    # distinguishable error (LobConcurrencyRejected) instead of growing the queue.
+    query_gateway_lob_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     max_postgres_plan_cost: float = Field(default=1_000_000.0, gt=0)
     # BigQuery bills by bytes scanned rather than exposing a comparable cost plan,
     # so the gateway gates dry-run byte estimates against this separate budget
