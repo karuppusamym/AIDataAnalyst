@@ -1148,6 +1148,23 @@ export interface ContextCompilationValidationRead {
   findings: string[];
 }
 
+/** AT-7(b): pin `consumer_principal_id` (the path parameter) to this */
+export interface ContextProductConsumerBindingCreate {
+  bound_version_id: string;
+}
+
+export interface ContextProductConsumerBindingRead {
+  id: string;
+  organization_id: string;
+  product_id: string;
+  consumer_principal_id: string;
+  bound_version_id: string;
+  bound_version_number: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ContextProductCreate {
   name: string;
   description: string;
@@ -4117,8 +4134,6 @@ export interface ValidationError {
   loc: (string | number)[];
   msg: string;
   type: string;
-  input?: unknown;
-  ctx?: Record<string, unknown>;
 }
 
 export interface ValidationIssueRead {

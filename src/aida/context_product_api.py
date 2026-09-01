@@ -25,6 +25,7 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     BusinessDomain,
     ContextProduct,
+    ContextProductConsumerBinding,
     ContextProductConsumptionEdge,
     ContextProductRoleBinding,
     ContextProductVersion,
@@ -39,6 +40,8 @@ from aida.models import (
     SemanticModelVersion,
 )
 from aida.schemas import (
+    ContextProductConsumerBindingCreate,
+    ContextProductConsumerBindingRead,
     ContextProductCreate,
     ContextProductDefinition,
     ContextProductRead,
@@ -931,3 +934,187 @@ async def request_context_product_deprecation(
     )
     await session.commit()
     return review
+
+
+# --- AT-7(b): consumer-binding registry (staged rollout) --------------------
+
+
+def _binding_read(
+    binding: ContextProductConsumerBinding, bound_version: ContextProductVersion
+) -> ContextProductConsumerBindingRead:
+    return ContextProductConsumerBindingRead(
+        id=binding.id,
+        organization_id=binding.organization_id,
+        product_id=binding.product_id,
+        consumer_principal_id=binding.consumer_principal_id,
+        bound_version_id=binding.bound_version_id,
+        bound_version_number=bound_version.version,
+        created_by=binding.created_by,
+        created_at=binding.created_at,
+        updated_at=binding.updated_at,
+    )
+
+
+@router.put(
+    "/context-products/{product_id}/bindings/{consumer_principal_id}",
+    response_model=ContextProductConsumerBindingRead,
+)
+async def set_context_product_consumer_binding(
+    product_id: UUID,
+    consumer_principal_id: str,
+    body: ContextProductConsumerBindingCreate,
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> ContextProductConsumerBindingRead:
+    """Pin (or move) one named consumer onto one specific version -- staged
+    rollout under explicit operator control, not a percentage/weight split.
+
+    Idempotent by (product, consumer): calling this again for an
+    already-bound consumer moves the existing binding rather than creating a
+    second one, matching `PUT`'s replace-in-place semantics.
+    """
+    product = await _product_scope(session, product_id, context)
+    bound_version = await session.get(ContextProductVersion, body.bound_version_id)
+    if bound_version is None or bound_version.product_id != product.id:
+        raise HTTPException(
+            status_code=422, detail="bound_version_id is not a version of this context product"
+        )
+    binding = await session.scalar(
+        select(ContextProductConsumerBinding).where(
+            ContextProductConsumerBinding.product_id == product.id,
+            ContextProductConsumerBinding.consumer_principal_id == consumer_principal_id,
+        )
+    )
+    is_new = binding is None
+    if binding is None:
+        binding = ContextProductConsumerBinding(
+            organization_id=product.organization_id,
+            product_id=product.id,
+            consumer_principal_id=consumer_principal_id,
+            bound_version_id=bound_version.id,
+            created_by=context.principal_id,
+        )
+        session.add(binding)
+    else:
+        binding.bound_version_id = bound_version.id
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=product.organization_id),
+        action="context_product.consumer_binding.set",
+        resource_type="context_product_consumer_binding",
+        resource_id=str(binding.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "product_key": product.product_key,
+            "consumer_principal_id": consumer_principal_id,
+            "bound_version": bound_version.version,
+            "created": is_new,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=product.organization_id,
+        aggregate_type="context_product_consumer_binding",
+        aggregate_id=str(binding.id),
+        event_type="context.product_consumer_binding_set.v1",
+        payload={
+            "product_key": product.product_key,
+            "consumer_principal_id": consumer_principal_id,
+            "bound_version": bound_version.version,
+        },
+    )
+    await session.commit()
+    return _binding_read(binding, bound_version)
+
+
+@router.get(
+    "/context-products/{product_id}/bindings",
+    response_model=Page,
+)
+async def list_context_product_consumer_bindings(
+    product_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_LIFECYCLE_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    product = await _product_scope(session, product_id, context)
+    statement = (
+        select(ContextProductConsumerBinding, ContextProductVersion)
+        .join(
+            ContextProductVersion,
+            ContextProductVersion.id == ContextProductConsumerBinding.bound_version_id,
+        )
+        .where(ContextProductConsumerBinding.product_id == product.id)
+    )
+    count = await session.scalar(
+        select(func.count()).select_from(
+            select(ContextProductConsumerBinding.id)
+            .where(ContextProductConsumerBinding.product_id == product.id)
+            .subquery()
+        )
+    )
+    rows = (
+        await session.execute(
+            statement.order_by(ContextProductConsumerBinding.consumer_principal_id)
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[_binding_read(binding, version) for binding, version in rows],
+        limit=limit,
+        offset=offset,
+        total=count or 0,
+    )
+
+
+@router.delete(
+    "/context-products/{product_id}/bindings/{consumer_principal_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_context_product_consumer_binding(
+    product_id: UUID,
+    consumer_principal_id: str,
+    context: SecurityContext = Depends(require_roles(*CONTEXT_PRODUCT_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Unpin a consumer -- their next unversioned read falls back to whatever
+    is currently PUBLISHED, exactly as if they had never been bound."""
+    product = await _product_scope(session, product_id, context)
+    binding = await session.scalar(
+        select(ContextProductConsumerBinding).where(
+            ContextProductConsumerBinding.product_id == product.id,
+            ContextProductConsumerBinding.consumer_principal_id == consumer_principal_id,
+        )
+    )
+    if binding is None:
+        raise HTTPException(status_code=404, detail="context product consumer binding not found")
+    record_audit(
+        session,
+        replace(context, organization_id=product.organization_id),
+        action="context_product.consumer_binding.delete",
+        resource_type="context_product_consumer_binding",
+        resource_id=str(binding.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "product_key": product.product_key,
+            "consumer_principal_id": consumer_principal_id,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=product.organization_id,
+        aggregate_type="context_product_consumer_binding",
+        aggregate_id=str(binding.id),
+        event_type="context.product_consumer_binding_removed.v1",
+        payload={
+            "product_key": product.product_key,
+            "consumer_principal_id": consumer_principal_id,
+        },
+    )
+    await session.delete(binding)
+    await session.commit()

@@ -2534,6 +2534,13 @@ class ContextProductVersion(Base, TimestampMixin):
             "product_id",
             unique=True,
             postgresql_where=text("status = 'PUBLISHED'"),
+            # Without a dialect-specific partial-index clause, SQLAlchemy only
+            # applies `postgresql_where` when compiling for Postgres -- SQLite's
+            # `Base.metadata.create_all()` (every in-memory test fixture in this
+            # codebase) would otherwise compile this as a bare `UNIQUE(product_id)`,
+            # wrongly forbidding a second, non-PUBLISHED version of the same
+            # product from ever coexisting with a PUBLISHED one in a test.
+            sqlite_where=text("status = 'PUBLISHED'"),
         ),
         CheckConstraint("version > 0", name="ck_context_product_version_positive"),
         CheckConstraint(
@@ -2668,6 +2675,48 @@ class ContextProductConsumptionEdge(Base):
     consumed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class ContextProductConsumerBinding(Base, TimestampMixin):
+    """AT-7(b): pins one named consumer to one specific Context Product version.
+
+    A staged rollout mechanism, not a blind percentage/weight A/B split (the
+    tracker explicitly declines those): an operator moves individually-named
+    consumers onto a new version one at a time, so some consumers stay on the
+    prior version deliberately while others move, under explicit control
+    rather than a random split. One binding per (product, consumer) --
+    creating a new one for an already-bound consumer moves it, it does not
+    duplicate it (`PUT`-shaped upsert, not append-only history).
+    """
+
+    __tablename__ = "context_product_consumer_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "consumer_principal_id",
+            name="uq_context_product_consumer_binding_product_consumer",
+        ),
+        Index(
+            "ix_context_product_consumer_binding_org_product",
+            "organization_id",
+            "product_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    consumer_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    bound_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class McpConsumptionEvidence(Base):

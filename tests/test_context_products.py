@@ -1,18 +1,26 @@
 """Contract and lifecycle coverage for governed Context Products."""
 
 import json
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
+import pytest_asyncio
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from aida.context_product_api import (
     _can_read_context_product_version,
     context_product_fingerprint,
     create_context_product_version,
+    delete_context_product_consumer_binding,
     get_context_product_version,
+    list_context_product_consumer_bindings,
+    set_context_product_consumer_binding,
     update_context_product_version,
 )
 from aida.context_product_policy import (
@@ -21,20 +29,25 @@ from aida.context_product_policy import (
     evaluate_context_product_quality,
     is_version_retired,
     is_within_support_window,
+    resolve_bound_version,
     was_previously_authorized_consumer,
 )
+from aida.db import Base
 from aida.main import app
 from aida.mcp_server import _context_product_role_eligible, _read_context_product_resource
 from aida.models import (
     AuditEvent,
     ContextProduct,
+    ContextProductConsumerBinding,
     ContextProductConsumptionEdge,
     ContextProductVersion,
     GovernanceReview,
+    Organization,
     OutboxEvent,
     Project,
 )
 from aida.schemas import (
+    ContextProductConsumerBindingCreate,
     ContextProductDefinition,
     ContextProductVersionCreate,
     GovernanceDecisionRequest,
@@ -1102,3 +1115,244 @@ async def test_mcp_resource_query_never_matches_an_unpublished_version() -> None
     assert "PUBLISHED" in compiled
     assert "SUPPORTED" in compiled
     assert "context_product_version.status" in compiled
+
+
+# ---------------------------------------------------------------------------
+# AT-7(b): consumer-binding registry (staged rollout)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def binding_session() -> AsyncIterator[AsyncSession]:
+    """Real in-memory sqlite -- the binding registry does real INSERT/SELECT
+    against a unique constraint and two foreign keys, which a hand-rolled
+    fake session cannot faithfully exercise the way the rest of this file's
+    tests do for simpler single-statement policy functions."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as active:
+        yield active
+    await engine.dispose()
+
+
+async def _seeded_product(
+    session: AsyncSession, *, published_version: int = 1
+) -> tuple[ContextProduct, ContextProductVersion]:
+    organization_id = uuid4()
+    org = Organization(id=organization_id, name="Bank", slug=f"bank-{organization_id.hex[:8]}")
+    project = Project(
+        id=uuid4(),
+        organization_id=organization_id,
+        line_of_business_id=uuid4(),
+        data_domain_id=uuid4(),
+        name="Analytics",
+        slug="analytics",
+    )
+    product = ContextProduct(
+        id=uuid4(),
+        organization_id=organization_id,
+        project_id=project.id,
+        product_key="revenue_context",
+        lifecycle_status="ACTIVE",
+        created_by="product-author",
+    )
+    version = _candidate(organization_id=organization_id, product_id=product.id)
+    version.status = "PUBLISHED"
+    version.version = published_version
+    session.add_all([org, project, product, version])
+    await session.flush()
+    return product, version
+
+
+def _author_context(*, organization_id: UUID) -> SecurityContext:
+    return SecurityContext(
+        principal_id="steward",
+        principal_type="USER",
+        organization_id=organization_id,
+        roles=frozenset({"DataSteward"}),
+    )
+
+
+async def test_set_binding_creates_then_moves_it(binding_session: AsyncSession) -> None:
+    """A second `PUT` for the same consumer moves the existing binding rather
+    than creating a duplicate row -- the unique constraint on
+    (product_id, consumer_principal_id) would reject a real duplicate insert,
+    so a passing second call already proves the upsert path, not just the
+    returned response."""
+    product, v1 = await _seeded_product(binding_session)
+    v2 = _candidate(organization_id=product.organization_id, product_id=product.id)
+    v2.version = 2
+    v2.status = "DRAFT"
+    binding_session.add(v2)
+    await binding_session.flush()
+    context = _author_context(organization_id=product.organization_id)
+
+    created = await set_context_product_consumer_binding(
+        product.id,
+        "analyst-agent",
+        ContextProductConsumerBindingCreate(bound_version_id=v1.id),
+        context=context,
+        session=binding_session,
+    )
+    assert created.bound_version_number == 1
+
+    moved = await set_context_product_consumer_binding(
+        product.id,
+        "analyst-agent",
+        ContextProductConsumerBindingCreate(bound_version_id=v2.id),
+        context=context,
+        session=binding_session,
+    )
+    assert moved.id == created.id
+    assert moved.bound_version_number == 2
+
+    count = await binding_session.scalar(
+        select(func.count()).select_from(ContextProductConsumerBinding)
+    )
+    assert count == 1
+
+
+async def test_set_binding_rejects_a_version_from_a_different_product(
+    binding_session: AsyncSession,
+) -> None:
+    product, _v1 = await _seeded_product(binding_session)
+    other_product, other_version = await _seeded_product(binding_session)
+    context = _author_context(organization_id=product.organization_id)
+
+    with pytest.raises(HTTPException) as excinfo:
+        await set_context_product_consumer_binding(
+            product.id,
+            "analyst-agent",
+            ContextProductConsumerBindingCreate(bound_version_id=other_version.id),
+            context=context,
+            session=binding_session,
+        )
+    assert excinfo.value.status_code == 422
+    assert other_product.id != product.id
+
+
+async def test_list_bindings_reports_bound_version_numbers(
+    binding_session: AsyncSession,
+) -> None:
+    product, v1 = await _seeded_product(binding_session)
+    context = _author_context(organization_id=product.organization_id)
+    for consumer in ("analyst-agent", "reporting-agent"):
+        await set_context_product_consumer_binding(
+            product.id,
+            consumer,
+            ContextProductConsumerBindingCreate(bound_version_id=v1.id),
+            context=context,
+            session=binding_session,
+        )
+
+    page = await list_context_product_consumer_bindings(
+        product.id, limit=100, offset=0, context=context, session=binding_session
+    )
+    assert page.total == 2
+    assert {item.consumer_principal_id for item in page.items} == {
+        "analyst-agent",
+        "reporting-agent",
+    }
+    assert all(item.bound_version_number == 1 for item in page.items)
+
+
+async def test_delete_binding_removes_it_and_404s_when_absent(
+    binding_session: AsyncSession,
+) -> None:
+    product, v1 = await _seeded_product(binding_session)
+    context = _author_context(organization_id=product.organization_id)
+    await set_context_product_consumer_binding(
+        product.id,
+        "analyst-agent",
+        ContextProductConsumerBindingCreate(bound_version_id=v1.id),
+        context=context,
+        session=binding_session,
+    )
+
+    await delete_context_product_consumer_binding(
+        product.id, "analyst-agent", context=context, session=binding_session
+    )
+
+    remaining = await binding_session.scalar(
+        select(func.count()).select_from(ContextProductConsumerBinding)
+    )
+    assert remaining == 0
+
+    with pytest.raises(HTTPException) as excinfo:
+        await delete_context_product_consumer_binding(
+            product.id, "analyst-agent", context=context, session=binding_session
+        )
+    assert excinfo.value.status_code == 404
+
+
+async def test_resolve_bound_version_prefers_a_servable_binding_over_a_newer_published_version(
+    binding_session: AsyncSession,
+) -> None:
+    """The staged-rollout point: a bound consumer stays on their pinned
+    version even after a newer one publishes, as long as theirs can still be
+    served (SUPPORTED within its window counts, same as PUBLISHED)."""
+    product, v1 = await _seeded_product(binding_session)
+    v1.status = "SUPPORTED"
+    v1.support_window_ends_at = datetime.now(UTC) + timedelta(days=10)
+    v2 = _candidate(organization_id=product.organization_id, product_id=product.id)
+    v2.version = 2
+    v2.status = "PUBLISHED"
+    binding_session.add(v2)
+    await binding_session.flush()
+    context = _author_context(organization_id=product.organization_id)
+    await set_context_product_consumer_binding(
+        product.id,
+        "analyst-agent",
+        ContextProductConsumerBindingCreate(bound_version_id=v1.id),
+        context=context,
+        session=binding_session,
+    )
+
+    resolved = await resolve_bound_version(
+        binding_session, product_id=product.id, principal_id="analyst-agent"
+    )
+
+    assert resolved is not None
+    assert resolved.id == v1.id
+
+
+async def test_resolve_bound_version_falls_back_once_the_binding_is_fully_retired(
+    binding_session: AsyncSession,
+) -> None:
+    product, v1 = await _seeded_product(binding_session)
+    v1.status = "SUPERSEDED"
+    v2 = _candidate(organization_id=product.organization_id, product_id=product.id)
+    v2.version = 2
+    v2.status = "PUBLISHED"
+    binding_session.add(v2)
+    await binding_session.flush()
+    context = _author_context(organization_id=product.organization_id)
+    await set_context_product_consumer_binding(
+        product.id,
+        "analyst-agent",
+        ContextProductConsumerBindingCreate(bound_version_id=v1.id),
+        context=context,
+        session=binding_session,
+    )
+
+    resolved = await resolve_bound_version(
+        binding_session, product_id=product.id, principal_id="analyst-agent"
+    )
+
+    assert resolved is not None
+    assert resolved.id == v2.id
+
+
+async def test_resolve_bound_version_returns_the_current_published_version_when_unbound(
+    binding_session: AsyncSession,
+) -> None:
+    product, v1 = await _seeded_product(binding_session)
+
+    resolved = await resolve_bound_version(
+        binding_session, product_id=product.id, principal_id="never-bound-agent"
+    )
+
+    assert resolved is not None
+    assert resolved.id == v1.id

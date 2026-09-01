@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
+    ContextProductConsumerBinding,
     ContextProductConsumptionEdge,
     ContextProductVersion,
     DataQualityIncident,
@@ -286,3 +287,48 @@ async def current_published_version_number(
         )
     )
     return current_version
+
+
+# --- AT-7(b): consumer-binding registry (staged rollout) --------------------
+
+
+async def resolve_bound_version(
+    session: AsyncSession, *, product_id: UUID, principal_id: str, now: datetime | None = None
+) -> ContextProductVersion | None:
+    """The version an *unversioned* read should serve this specific consumer.
+
+    A consumer with a live binding (`ContextProductConsumerBinding`) whose
+    bound version can still be served (`can_serve_pinned_version` -- PUBLISHED,
+    or SUPPORTED within its window) is deliberately kept on that version, even
+    after a newer one has since published: this is the staged-rollout point --
+    an operator pins named consumers onto a specific version one at a time
+    rather than moving everyone the instant a new version is approved.
+
+    Falls back to the product's current PUBLISHED version when the consumer
+    has no binding, or when their bound version has since become fully
+    retired (past its own support window, or superseded/deprecated) -- a
+    binding pins a consumer to a version while it lasts, it does not exempt
+    them from that version's own retirement.
+
+    Returns `None` only if there is neither a servable binding nor any
+    current PUBLISHED version at all (e.g. the product is mid-review).
+    """
+    bound_version_id = await session.scalar(
+        select(ContextProductConsumerBinding.bound_version_id).where(
+            ContextProductConsumerBinding.product_id == product_id,
+            ContextProductConsumerBinding.consumer_principal_id == principal_id,
+        )
+    )
+    if bound_version_id is not None:
+        bound_version = await session.scalar(
+            select(ContextProductVersion).where(ContextProductVersion.id == bound_version_id)
+        )
+        if bound_version is not None and can_serve_pinned_version(bound_version, now=now):
+            return bound_version
+    published_version: ContextProductVersion | None = await session.scalar(
+        select(ContextProductVersion).where(
+            ContextProductVersion.product_id == product_id,
+            ContextProductVersion.status == "PUBLISHED",
+        )
+    )
+    return published_version

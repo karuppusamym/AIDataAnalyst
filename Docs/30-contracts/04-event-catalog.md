@@ -236,6 +236,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.product_draft_created.v1` | New context product version drafted | context_product_id, context_product_version_id, version |
 | `context.product_compiled.v1` | Context product compiled for a target consumer surface | context_product_version_id, target, artifact_hash |
 | `context.product_tool_consumed.v1` | Governed tool invoked while scoped to a published context product | product_key, version, tool_version_id, principal_id |
+| `context.product_consumer_binding_set.v1` | Consumer pinned (or moved) to a specific version for staged rollout (AT-7b) | product_key, consumer_principal_id, bound_version |
+| `context.product_consumer_binding_removed.v1` | Consumer unpinned; falls back to the current published version (AT-7b) | product_key, consumer_principal_id |
 
 ### AI registry — topic `atlas.governance.v1`
 

@@ -2465,6 +2465,26 @@ class ContextProductScopeRead(ApiModel):
     unresolved_table_ids: list[UUID]
 
 
+class ContextProductConsumerBindingCreate(ApiModel):
+    """AT-7(b): pin `consumer_principal_id` (the path parameter) to this
+    version. Deliberately a single explicit version reference, not a
+    percentage/weight -- the tracker declines blind A/B splits."""
+
+    bound_version_id: UUID
+
+
+class ContextProductConsumerBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    product_id: UUID
+    consumer_principal_id: str
+    bound_version_id: UUID
+    bound_version_number: int
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class LineageEdgeRead(ApiModel):
     """One column-level lineage edge extracted from SQL."""
 

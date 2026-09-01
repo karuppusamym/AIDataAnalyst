@@ -9211,6 +9211,8 @@ baseline regen and no `ui-next` type regen; no new `event_type=` emitted via `re
 and no Alembic migration -- eval cases are plain versioned Python files, which is also why no DB
 table was needed or considered further once that was clear.
 
+---
+
 ## 2026-09-01 — AT-10 investigated, BLOCKED: two of the three "orphaned" producers were already joined, and the remaining four are genuinely schema-blocked, not deferred
 
 `Docs/60-delivery/03-tracker.md` row AT-10 ("One canonical lineage graph — join the orphaned edge
@@ -9351,3 +9353,99 @@ is reported as `BLOCKED`, not `DONE` or a silently-abandoned `TODO` — the row'
 ("every edge producer writes to the canonical edge table and impact analysis traverses all of
 them") is not met, and AT-21 (impact-as-PR-gate), which names itself "blocked on AT-10," should
 still be read that way.
+
+---
+
+## 2026-09-01 — AT-7(b) closed: consumer-binding registry for staged rollout
+
+AT-7(a)'s own log entry (earlier today) sketched exactly what part (b) needed but explicitly left it
+undone, prioritizing the live correctness bug first: "a `context_product_consumer_binding` table
+..., a REST surface to create/list/move a binding ..., and a read-path hook." This entry builds the
+first two pieces in full and the third as a standalone, tested function -- honestly not wired into a
+live read path, because that path does not exist yet (see Scope note below).
+
+### The registry
+
+New `ContextProductConsumerBinding` (`models.py`, migration `eaf120430212`): one row per
+`(product_id, consumer_principal_id)`, enforced by a real unique constraint -- a `PUT` to
+`/v1/context-products/{product_id}/bindings/{consumer_principal_id}` therefore either creates the
+first binding for that consumer or moves their existing one, never appends a duplicate. `bound_version_id`
+is validated against the path's own `product_id` (422 if the version belongs to a different product,
+whether by typo or by pointing at the wrong product's version by mistake). `GET .../bindings` lists
+every binding for a product with the bound version's number joined in (`bound_version_number`) so a
+caller does not need a second round-trip to know what a binding actually points at. `DELETE
+.../bindings/{consumer_principal_id}` unpins a consumer (404 if there was nothing to unpin). All three
+follow this file's established audit-then-outbox pattern
+(`context.product_consumer_binding_set.v1` / `.removed.v1`, added to `04-event-catalog.md` before
+either could be flagged as an undocumented event by TS-11's gate) and are gated the same way
+version-authoring already is (`CONTEXT_PRODUCT_AUTHORS` for the two mutations, the broader
+`CONTEXT_PRODUCT_LIFECYCLE_READERS` for the list -- an operational rollout control, not something
+every `Analyst`/`Viewer` needs visibility into).
+
+Deliberately not a percentage/weight split: the tracker's own exit text says "Blind A/B splits are
+declined." `ContextProductConsumerBindingCreate` takes exactly one field, `bound_version_id` -- there
+is no dial, no rollout percentage, no random assignment. Staged rollout here means an operator moves
+named, specific consumers one at a time under their own judgment, which is what "explicit operator
+control" concretely means once it has to be implemented rather than described.
+
+### The resolution function
+
+`context_product_policy.resolve_bound_version(session, *, product_id, principal_id, now=None) ->
+ContextProductVersion | None`: the pure logic a future unversioned read path will need. A consumer
+with a binding whose version `can_serve_pinned_version` (PUBLISHED, or SUPPORTED within its own
+window -- the exact same predicate AT-7(a) already uses for version-pinned reads) stays on that
+version even after a newer one publishes; this is the actual staged-rollout mechanic -- an operator
+who pinned someone to v2 does not want them silently bumped to v3 the moment it is approved. A binding
+whose version has since become fully retired (superseded/deprecated, or a support window that has
+elapsed) does not exempt its consumer from that retirement -- resolution falls back to whatever is
+currently PUBLISHED, the same as an unbound consumer gets.
+
+### Found and fixed in passing: a SQLite-only false negative
+
+Writing tests against a real in-memory sqlite DB (necessary here -- the registry's own unique
+constraint has to be exercised for real to prove "second `PUT` moves rather than duplicates" actually
+holds) hit `sqlalchemy.exc.IntegrityError: UNIQUE constraint failed: context_product_version.product_id`
+the instant a test tried to create two versions of one product, even with only one of them PUBLISHED.
+`ContextProductVersion`'s `uq_context_product_version_one_published` index declares
+`postgresql_where=text("status = 'PUBLISHED'")` -- SQLAlchemy only applies a `postgresql_where` clause
+when compiling DDL for the Postgres dialect specifically; with no `sqlite_where` counterpart, SQLite's
+`Base.metadata.create_all()` (every in-memory test fixture in this codebase, this file included)
+compiled it as an unconditional `UNIQUE(product_id)` -- one version per product, full stop, in test
+only. Fixed by adding the matching `sqlite_where=text("status = 'PUBLISHED'")`. Zero effect on
+Postgres (its migration already had the correct partial index) and zero effect on Alembic (SQLite is
+never migrated in this codebase, only used via `create_all()` for fast in-process tests) -- purely a
+test-fixture-fidelity fix, but a real one: before this, no SQLite-backed test in this codebase could
+ever have exercised "two versions of one product coexist, only one PUBLISHED" at all, silently.
+
+### Tests (`tests/test_context_products.py`, 6 new, real in-memory sqlite)
+
+`test_set_binding_creates_then_moves_it` (a second `PUT` for the same consumer changes which version
+is bound rather than creating a second row -- checked by counting rows, not just the response),
+`test_set_binding_rejects_a_version_from_a_different_product` (422), `test_list_bindings_reports_bound_version_numbers`,
+`test_delete_binding_removes_it_and_404s_when_absent`,
+`test_resolve_bound_version_prefers_a_servable_binding_over_a_newer_published_version`,
+`test_resolve_bound_version_falls_back_once_the_binding_is_fully_retired`,
+`test_resolve_bound_version_returns_the_current_published_version_when_unbound`.
+
+### Verification
+
+`pytest tests/test_context_products.py tests/test_context_product_negative_knowledge.py
+tests/test_openapi_diff_gate.py`: 70 passed. `ruff check` clean. `mypy --strict` clean (one
+`no-any-return` on `resolve_bound_version`'s final `session.scalar()` fixed with an explicit local
+type, not suppressed, matching this file's own existing `current_published_version_number` pattern).
+`scripts/openapi_diff.py` (no `--accept-baseline`) reported the new paths as purely additive with no
+breaking changes before the baseline and `ui-next/src/lib/types.ts` were regenerated and accepted.
+
+### Scope note: the read-path hook is a function, not a wired endpoint
+
+`resolve_bound_version` is tested directly and correct, but nothing in a live REST/MCP read path calls
+it yet, because the read path it belongs to does not exist: today's version-pinned reads
+(`get_context_product_version`, `_read_context_product_resource`) all require an explicit version
+number in the path/URI. An *unversioned* "give me the current one for me" endpoint or MCP resource
+type (`atlas://context-products/{key}/latest`, named but explicitly not built in AT-7(a)'s own sketch)
+is a second read surface with its own quality/purpose/consumption-lineage/audit requirements --
+replicating all of `get_context_product_version`'s ~150 lines for a second entry point is real,
+separate scope, not a small addition to bolt on here. Building the registry and the resolution
+function this pass, leaving the wiring for whoever builds that endpoint, matches the tracker's own
+framing of AT-7(b) as "a registry with staged rollout" -- the registry is real and complete; the
+endpoint that would consult it during an ordinary read is the next, separate piece.
