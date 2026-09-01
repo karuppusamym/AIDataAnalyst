@@ -5223,3 +5223,37 @@ whichever concurrent session is already mid-migration.
 `02 connectivity`, `03 ingestion`, `04 catalog`, and `20 observability_audit` (the last needs
 `python scripts/generate_module.py observability_audit` to scaffold first) are still TODO, per the
 Phase 3 sequencing in the refactor plan §6.
+
+## 2026-09-01 — EE.10's last open acceptance line closed: leak test proving policy filtering precedes traversal
+
+The epic backlog's EE.10 row had one line still marked **not met** since the 2026-08-29 code
+review: a leak test proving `resolve_entity` and `get_transformation_detail` deny unauthorized
+callers *before* any traversal/lookup work runs, not just that the tool-slug set is asserted.
+Deliberately scoped to stay off `aida.models`/`aida.schemas` and every module's `models.py`/
+`schemas.py`/`contracts.py` while ST-05/ST-06 Phase 3 is mid-flight on this same branch.
+
+Read `mcp_server.py::_handle_native_lineage_tool_call`: the role-eligibility check
+(`context.roles & UNIFIED_LINEAGE_READER_ROLES`) already runs first — before `datasource_id` is
+parsed, before `session.get(DataSource, ...)`, before `_resolve_governed_entities`/
+`_transformation_detail`. No production bug; the ordering was already correct, so `mcp_server.py`
+itself is untouched — only test coverage was missing.
+
+Added two tests to `tests/test_mcp_server.py`:
+`test_leak_resolve_entity_denied_caller_cannot_distinguish_existing_from_missing_entity` and
+`test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity`.
+Both call the tool twice with a denied caller — once with args for an entity that exists, once for
+one that doesn't — and assert byte-identical anti-enumeration responses, using a spy session whose
+`get`/`add`/`commit` raise `AssertionError` if invoked at all, plus a monkeypatched
+`_resolve_governed_entities`/`_transformation_detail` that raises if called, so the assertion is
+"no traversal collaborator ever ran," not just "the response looked the same." Mirrors the existing
+`test_tools_call_reports_identical_response_for_unknown_and_denied_tool_names` pattern already used
+for governed SQL tools in the same file.
+
+### Verification
+
+`uv run pytest tests/test_mcp_server.py -q` — 35 passed (33 pre-existing + 2 new), rebased twice
+onto a fast-moving tip (`884dfe9`, then re-verified clean at push time) with no conflicts, since the
+change only appends new test functions.
+
+Epic backlog EE.10's last **not met** line flipped to **met**; no other acceptance line in that row
+changed.

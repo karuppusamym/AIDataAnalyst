@@ -486,8 +486,15 @@ Collibra's MCP Server page (25+ tools, read + write, fuzzy resolution).
   match quality not separately benchmarked — tracked as `MCP-3`
 - Dedicated unit tests for `resolve_entity` and `get_transformation_detail` request/response
   shape, and a leak test proving policy filtering happens before traversal for these two
-  tools specifically. — **not met** (2026-08-29 code review); only the tool-slug set is
-  currently asserted
+  tools specifically. — **met**, 2026-09-01: verified the role-eligibility check in
+  `mcp_server.py::_handle_native_lineage_tool_call` runs before `datasource_id` parsing,
+  before any `session.get`/traversal call. Two new tests in `tests/test_mcp_server.py`
+  (`test_leak_resolve_entity_denied_caller_cannot_distinguish_existing_from_missing_entity`,
+  `test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity`)
+  drive each tool twice with a denied caller — once against an existing entity, once against a
+  nonexistent one — asserting byte-identical anti-enumeration responses, with a spy session and
+  monkeypatched traversal collaborators that raise if touched, proving no DB/traversal work runs
+  for the denied path
 - Consumption recorded as lineage: every successful native lineage tool call now writes
   `record_audit(action="mcp.lineage.read", ...)` and `record_outbox(event_type=
   "lineage.consumed.v1", ...)`. — **met**, closes the gap this file previously tracked as open
