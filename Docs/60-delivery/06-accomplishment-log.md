@@ -7551,3 +7551,96 @@ part of the unified review queue this endpoint reads from `GovernanceReview`; a 
 confidence still uses RL-3's own endpoints. No live-Postgres verification of the new batched
 proposal-type lookups (the same standing sandbox limitation several earlier rows this session
 already carry).
+
+## 2026-09-01 — PG-5 closed: edition entitlement evaluation, wired into two ungated Enterprise-tier endpoints
+
+`Docs/00-product/07-packaging-and-editions.md` §3 defines a Foundation/Enterprise/Regulated
+capability matrix and `Docs/90-reference/01-glossary.md` already defines "Entitlement" as edition/
+licence gating -- but `src/aida/entitlements.py` (read in full first, per the row's instructions)
+turned out to be a same-named, unrelated concept: idempotent external *data-product access*
+provisioning through a webhook (`apply_entitlement`, `EntitlementResult`), with nothing in it about
+editions or capabilities. Edition gating itself did not exist anywhere in `src/` (confirmed by
+grepping the whole tree for "edition" before writing anything: zero hits outside `Docs/`), so this
+was a green-field build, not a completion of partial scaffolding.
+
+**Pure evaluator.** New `src/aida/edition_entitlements.py` -- deliberately not named
+`entitlements.py` or added to it, to keep the two concepts from being confused at an import site.
+`evaluate_entitlement(*, organization_edition, capability) -> EntitlementDecision` is pure and
+DB-free: no session, no settings object, no I/O. `CAPABILITY_MIN_EDITION` transcribes the packaging
+doc's matrix as data (24 capabilities), each mapped to the lowest edition at which the doc shows it
+available at all ("full" ● or "bounded/partial" ◐ both count as ALLOW; "not offered" ○ is DENY at
+and below that edition). An unregistered capability id fails closed (`ENTITLEMENT_CAPABILITY_
+UNREGISTERED`) rather than silently passing -- the same default-deny posture `policy_engine.py`
+documents for ABAC. `EntitlementDecision.snapshot()` carries only the capability id and the two
+edition names -- both closed vocabulary, nothing resource- or request-derived (INV-6 discipline,
+matching `AuthorizationDenied` in `authorization_gate.py`).
+
+**Where the organization's edition comes from -- and the stop condition that shaped it.**
+`Organization.edition` does not exist (`atlas/modules/identity_tenancy/models.py`'s `Organization`
+has only `name`/`slug`/`status`), and this row's instructions are explicit that adding a persisted
+field means stopping, not editing `models.py`. Rather than stop outright, the edition is read from a
+new deployment-wide `Settings.edition` (`atlas/platform/config.py`, not a models/schemas/contracts
+file, so in scope) -- this is not a workaround but the accurate description of where edition lives
+in *this* architecture: `07-packaging-and-editions.md` §2 names self-hosted/BYOK, one customer per
+running deployment, as the only "target for v1" model and multi-tenant SaaS as explicitly "not
+planned", so a per-deployment license setting is the real shape of the thing, not a per-`Organization`
+DB row standing in for a SaaS model this platform does not have. Defaults to `REGULATED` (the
+ceiling), so the setting's mere existence changes no deployment's current behaviour -- mirroring the
+"turning the gate on is a non-event" property `authorization_gate.py` documents for its own rollout,
+and consistent with PK-2 (`07-packaging-and-editions.md` §6) still being an open product decision on
+whether a `FOUNDATION` edition is offered at all.
+
+**Wiring.** A chain-wide integration into `authorization_gate.py`'s `gate()` was read in full and
+considered, then rejected: `gate()` is genuinely one function precisely because it is the query
+path's workspace/ABAC choke point (INV-2), and none of the capabilities actually found ungated in
+scope -- multi-step tool plans, MCP context products, Studio tool authoring -- route through a
+resolvable workspace at all, so forcing them through `gate()` would mean fabricating workspace
+semantics for surfaces that have none of their own. Went with the row's own documented fallback
+instead: a specific set of currently-ungated Enterprise-tier endpoints, found by checking every
+`gate()` caller (`api.py`, `asset_evidence_api.py`, `intelligence_api.py`, `query_gateway.py` --
+none of the named capabilities were among them) and then confirming by direct inspection that
+`tool_api.py`/`tool_plans_api.py` only ever called `require_roles`, never any entitlement check:
+
+- `aida.tool_api.create_multi_table_tool_blueprint` (SM-5, landed the same day as this row -- maps
+  to "Studio (semantic + tool authoring)", Enterprise floor), checked before any DB work, right
+  after the existing `require_roles` gate.
+- `aida.tool_plans_api.create_tool_plan` and `execute_tool_plan` (maps to "Multi-step tool plans",
+  Enterprise floor) via a shared `_deny_unless_entitled` helper, checked at **both** create and
+  execute -- proven by a dedicated test that a plan created under Enterprise cannot still be executed
+  after the deployment is reconfigured down to Foundation, not only that new plans are refused.
+
+Both paths record an audit event (`record_audit`, `outcome="DENIED"`, `details=` the decision's
+INV-6-clean snapshot) and commit before raising `HTTPException(403, detail=reason_code)` --
+mirroring `query_gateway.py`'s `try`/`except AuthorizationDenied`/`record_audit`/`commit`/`raise`
+shape at its own `gate()` call sites, so an entitlement denial is audited by the same discipline
+every other denial in this codebase already is.
+
+### Verification
+
+`tests/test_edition_entitlements.py`, 13 tests: 8 pure (`evaluate_entitlement` ALLOW/DENY boundary
+at every edition; monotonicity -- a capability ALLOWed at one edition stays ALLOWed at every edition
+ranked at or above it, checked across all 24 registered capabilities; the ceiling edition can use
+every registered capability; unregistered-capability fail-closed; the INV-6 snapshot shape; default
+`Settings()` changes no capability's outcome) + 5 real in-memory-sqlite integration tests against the
+three wired endpoints (multi-table blueprint denied on `FOUNDATION` with the exact reason code,
+allowed through to real business logic on `ENTERPRISE` -- proven by the request then failing for an
+*unrelated* 422, not a 403; `create_tool_plan` denied/allowed the same way; `execute_tool_plan`
+denied on `FOUNDATION` for a plan created under `ENTERPRISE`). `ruff check src` and `uv run mypy src`
+(263 files, `strict = true`) clean. `AIDA_ENVIRONMENT=test uv run pytest -q -x`: full suite green,
+no regression in `tests/test_multi_table_blueprint.py` or `tests/test_tool_plans.py`.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean.
+`tests/test_openapi_diff_gate.py` clean -- no route or request/response schema changed (the new
+`settings: Settings = Depends(get_settings)` parameter added to `tool_plans_api.py`'s two endpoints
+is an internal dependency, invisible to the OpenAPI schema, the same pattern `tool_api.py` already
+used), so no `openapi-baseline.json`/`ui-next/src/lib/types.ts` regeneration was needed. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
+Honest gap, not closed by this row: MCP context products are also Enterprise-only per the packaging
+doc and are not wired. `aida/mcp_server.py` is a ~2,000-line JSON-RPC-style dispatcher whose actual
+content-serving function, `_read_context_product_resource` -- the natural integration point, since it
+already runs the identical purpose/quality-decision-then-audit-then-deny pattern this row's gate
+mirrors -- is not currently reachable with a `Settings` object from every one of its callers
+(`_handle_resources_read`, `_handle_prompts_get`, and the `context_uri` branches of
+`_handle_tools_list`/`_handle_tools_call`); threading `settings` through that whole call graph
+correctly, without a rushed mistake in a security-sensitive file this size, needs its own row rather
+than a same-session addendum here.
