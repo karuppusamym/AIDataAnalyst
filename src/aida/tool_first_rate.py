@@ -10,12 +10,19 @@ and that `product_marketplace_api.py`'s own portfolio-trend endpoint already
 groups by for its dashboard tiles (`_build_trend_points`,
 `get_portfolio_overview`).
 
-`generation_source` takes one of five values:
+`generation_source` takes one of six values:
 
 * ``GOVERNED_TOOL`` -- the run resolved to a published, parameter-validated
   governed tool and rendered its SQL template. This is "tool-first".
 * ``MODEL_GATEWAY`` -- no governed tool matched (or none was eligible); SQL
   was generated ad hoc by the model gateway. This is "freeform".
+* ``QUERY_MEMORY_ADAPTATION`` -- AG-7: same as ``MODEL_GATEWAY`` (the model
+  gateway still generates and `sql_guard` still validates the result; see
+  `query_memory.py` and `agent_orchestrator.py`), except the prompt was also
+  grounded in a version-checked, structurally similar prior successful
+  query. It never touched the tool catalog either, so it counts as
+  "freeform" for the same reason ``DEVELOPMENT_OVERRIDE`` does below --
+  crediting it as tool-first would misstate governance maturity.
 * ``DEVELOPMENT_OVERRIDE`` -- a raw SQL string supplied directly, gated by
   `Settings.allow_development_sql_override` (disabled on a real tenant
   route). Still ad-hoc, non-governed SQL, so it counts as "freeform" too --
@@ -55,9 +62,13 @@ from uuid import UUID
 TOOL_FIRST_SOURCE = "GOVERNED_TOOL"
 
 #: `generation_source` values that represent SQL that ran without ever
-#: invoking a governed tool -- ad hoc, whether model-generated or a raw
-#: development override.
-FREEFORM_SOURCES = frozenset({"MODEL_GATEWAY", "DEVELOPMENT_OVERRIDE"})
+#: invoking a governed tool -- ad hoc, whether model-generated, memory-
+#: adapted (AG-7 -- still model-generated, still `sql_guard`-validated,
+#: just grounded in a prior query's structural shape), or a raw development
+#: override.
+FREEFORM_SOURCES = frozenset(
+    {"MODEL_GATEWAY", "QUERY_MEMORY_ADAPTATION", "DEVELOPMENT_OVERRIDE"}
+)
 
 #: `generation_source` values that never appear on a `COMPLETED` `AgentRun`
 #: (see module docstring) and so are excluded from both the numerator and

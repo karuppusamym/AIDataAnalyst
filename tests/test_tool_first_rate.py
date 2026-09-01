@@ -88,7 +88,27 @@ def test_both_freeform_sources_combine_in_the_denominator() -> None:
     )
     assert result.freeform_executions == 5
     assert result.total_executions == 10
-    assert set(FREEFORM_SOURCES) == {"MODEL_GATEWAY", "DEVELOPMENT_OVERRIDE"}
+    assert set(FREEFORM_SOURCES) == {
+        "MODEL_GATEWAY",
+        "QUERY_MEMORY_ADAPTATION",
+        "DEVELOPMENT_OVERRIDE",
+    }
+
+
+def test_query_memory_adaptation_counts_as_freeform_not_tool_first() -> None:
+    """AG-7: memory-adapted SQL still went through the model gateway and
+    `sql_guard`, never a certified governed tool, so it must not inflate the
+    tool-first rate -- same reasoning `DEVELOPMENT_OVERRIDE` already gets."""
+    result = compute_tool_first_rate(
+        organization_id=uuid4(),
+        window_days=30,
+        generation_source_counts={"GOVERNED_TOOL": 3, "QUERY_MEMORY_ADAPTATION": 7},
+        now=NOW,
+    )
+    assert result.tool_first_executions == 3
+    assert result.freeform_executions == 7
+    assert result.total_executions == 10
+    assert result.rate == 0.30
 
 
 def test_no_executions_returns_none_rate_not_zero() -> None:

@@ -262,6 +262,15 @@ class Settings(BaseSettings):
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    # AG-7: query-memory similarity/adaptation. Off by default so a tenant that has
+    # not reviewed the feature keeps today's MODEL_GATEWAY-only behaviour; flipping
+    # it on only changes what grounding a MODEL_GENERATION-strategy run's prompt
+    # carries (a matched-and-version-checked prior query's redacted SQL shape) --
+    # the generated SQL still reaches the identical `query_gateway.execute` guard
+    # call every other path uses (see `query_memory.py`, `agent_orchestrator.py`).
+    agent_query_memory_enabled: bool = False
+    agent_query_memory_min_similarity: float = Field(default=0.6, ge=0.0, le=1.0)
+    agent_query_memory_scan_limit: int = Field(default=200, ge=1, le=5_000)
     model_generation_enabled: bool = False
     model_route: str | None = Field(default=None, min_length=3, max_length=255)
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)

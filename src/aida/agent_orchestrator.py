@@ -51,6 +51,7 @@ from aida.quality_coupling import (
     resolve_table_ids,
 )
 from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
+from aida.query_memory import MemoryMatch, find_query_memory_match, retrieved_table_ids_from_hits
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
 from aida.tool_rendering import ToolParameterError, render_tool_sql
@@ -614,6 +615,25 @@ class GovernedAgentOrchestrator:
             generated_sql = candidate_sql
             generation_source = "DEVELOPMENT_OVERRIDE"
         else:
+            # AG-7: look for a version-checked, structurally similar prior
+            # successful query *before* asking the model to generate anything.
+            # This never bypasses generation or validation -- it only changes
+            # what grounding the same `structured_completion` call below
+            # receives, and the SQL it returns still reaches the identical
+            # `self.query_gateway.execute(...)` guard call every other
+            # strategy uses (see query_memory.py's module docstring for why
+            # the match is offered as a redacted structural shape, never as
+            # literal-bearing SQL to replay directly).
+            memory_match: MemoryMatch | None = None
+            if self.settings.agent_query_memory_enabled:
+                memory_match = await find_query_memory_match(
+                    session,
+                    datasource=datasource,
+                    current_semantic_version=semantic_version,
+                    retrieved_table_ids=retrieved_table_ids_from_hits(retrieval_hits),
+                    min_similarity=self.settings.agent_query_memory_min_similarity,
+                    scan_limit=self.settings.agent_query_memory_scan_limit,
+                )
             try:
                 approved_route = await self._approved_model_route(
                     session, datasource.organization_id
@@ -623,27 +643,39 @@ class GovernedAgentOrchestrator:
                     datasource=datasource,
                     retrieval_hits=retrieval_hits,
                 )
+                system_instruction = (
+                    "Return exactly one read-only SQL SELECT statement for the supplied "
+                    "dialect. "
+                    "Use only qualified tables, columns, and joins present in the supplied "
+                    "metadata context. Never invent an identifier or include source values."
+                )
+                payload: dict[str, Any] = {
+                    "question": question,
+                    "datasource_id": str(datasource.id),
+                    "semantic_version": semantic_version,
+                    "retrieval_evidence": retrieval_evidence,
+                    "metadata_context": model_context,
+                }
+                if memory_match is not None:
+                    system_instruction += (
+                        " A structurally similar prior successful query is supplied as "
+                        "query_memory_template, with its literal values already redacted. "
+                        "Adapt its shape to this question where it genuinely fits; "
+                        "otherwise generate fresh SQL from the metadata context alone."
+                    )
+                    payload["query_memory_template"] = memory_match.normalized_sql
                 output, model_evidence = await self.model_gateway.structured_completion(
                     session=session,
                     organization_id=datasource.organization_id,
                     route=approved_route,
-                    system_instruction=(
-                        "Return exactly one read-only SQL SELECT statement for the supplied "
-                        "dialect. "
-                        "Use only qualified tables, columns, and joins present in the supplied "
-                        "metadata context. Never invent an identifier or include source values."
-                    ),
-                    payload={
-                        "question": question,
-                        "datasource_id": str(datasource.id),
-                        "semantic_version": semantic_version,
-                        "retrieval_evidence": retrieval_evidence,
-                        "metadata_context": model_context,
-                    },
+                    system_instruction=system_instruction,
+                    payload=payload,
                     output_schema=SqlGenerationOutput,
                 )
                 generated_sql = output.sql
-                generation_source = "MODEL_GATEWAY"
+                generation_source = (
+                    "QUERY_MEMORY_ADAPTATION" if memory_match is not None else "MODEL_GATEWAY"
+                )
                 agent_run.model_route = model_evidence.route
                 plan_evidence["model_call_evidence"] = {
                     "route": model_evidence.route,
@@ -654,6 +686,8 @@ class GovernedAgentOrchestrator:
                     "output_fingerprint": model_evidence.output_fingerprint,
                     "schema_name": model_evidence.schema_name,
                 }
+                if memory_match is not None:
+                    plan_evidence["query_memory_match"] = memory_match.evidence()
                 agent_run.plan_evidence = plan_evidence
             except ModelGatewayError as exc:
                 await self._persist_rejection(
