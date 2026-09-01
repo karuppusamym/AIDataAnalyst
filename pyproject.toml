@@ -229,6 +229,34 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), observability_audit's
+# turn -- the fifth and last of the five Phase 3 leaf modules. Same shape and rationale as
+# the module-privacy contracts above.
+name = "observability_audit module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.observability_audit.service",
+  "atlas.modules.observability_audit.repository",
+  "atlas.modules.observability_audit.models",
+  "atlas.modules.observability_audit.schemas",
+  "atlas.modules.observability_audit.router",
+  "atlas.modules.observability_audit.workers",
+]
+allowed_importers = [
+  "atlas.modules.observability_audit.api",
+  "atlas.modules.observability_audit.contracts",
+  "atlas.modules.observability_audit.service",
+  "atlas.modules.observability_audit.repository",
+  "atlas.modules.observability_audit.models",
+  "atlas.modules.observability_audit.schemas",
+  "atlas.modules.observability_audit.router",
+  "atlas.modules.observability_audit.workers",
+  "atlas.modules.observability_audit.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
 # INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
 # ADR-0004 both name as the enforcement mechanism for the execution choke point.
 # Until now it did not exist, so the platform's most-marketed property was a

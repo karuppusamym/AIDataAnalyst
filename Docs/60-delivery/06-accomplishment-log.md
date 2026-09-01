@@ -5723,6 +5723,8 @@ this row. `alembic heads` still the same pre-existing two heads, confirmed unrel
 `python scripts/generate_module.py observability_audit` to scaffold first, same as this row and the
 two before it did for their own modules.
 
+---
+
 ## 2026-09-01 — TL-6 closed: tool-first execution rate metric
 
 A governance-maturity signal the tracker asked for: what share of an organization's completed
@@ -5768,3 +5770,99 @@ regenerating `Docs/90-reference/openapi-baseline.json` for the one new additive 
 or Alembic migration touched — this session finished the close-out after the implementing agent
 paused mid-task waiting on a long-running local test; the diff it left in the worktree was
 reviewed, tested fresh, and found sound before pushing.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `20 observability_audit` scaffolded and populated -- all five Phase 3 leaf modules now done
+
+Fifth and last of the five leaf modules `06-refactor-plan.md` §6 names, in the order it names them
+(identity, connectivity, ingestion, catalog, observability). Same shape as the `connectivity` and
+`ingestion` rows: no scaffold existed, so `scripts/generate_module.py observability_audit` ran
+first, then populated in the same pass.
+
+### What moved
+
+Seven model classes from `aida.models` to `atlas.modules.observability_audit.models`: `OutboxEvent`
+(the transactional outbox -- "dead letters" from the register's owned-data list is not a separate
+table, just `status == "DEAD_LETTER"` on this row), `SloDefinition`/`SloMeasurement` (SLO state),
+`AuditArchiveRecord`/`AuditEvent` (the audit ledger and its WORM archive batches),
+`CompliancePackRecord` (EE.4/OB-5), `AccessReviewReportRecord` (OB-7). Six schema classes from
+`aida.schemas` to `atlas.modules.observability_audit.schemas`: `AuditEventRead`, `OutboxEventRead`,
+`SloDefinitionCreate`, `SloDefinitionRead`, `SloBudgetRead`, `ArchiveStatusRead`.
+
+### The `AccessReviewReportRecord` / `EntitlementReportRead` split, decided carefully
+
+The one genuinely interesting ownership call in this row. `EntitlementReportRead` (OB-7's public
+read DTO) already moved to `atlas.modules.identity_tenancy.schemas` in the very first row of this
+series, following the prior killed session's draft, which grouped it with identity's own
+workspace/entitlement schemas. Working through this row, it became clear `EntitlementReportRead`'s
+*backing table*, `AccessReviewReportRecord`, is not identity's at all: its own docstring in the old
+`aida.models` names `CompliancePackRecord` -- squarely this module's -- as "the reproducibility bar
+this module sets," it sits in a "Access Review / Self-Service Entitlement Reporting (OB-7)" section
+immediately after "Compliance Pack Generation (Phase E - EE.4 / OB-5)," and it is WORM-archived,
+checksummed, generated evidence -- the exact same shape as every other table in this module, not
+identity's.
+
+Decided **not** to re-open the already-pushed identity_tenancy commit to move the schema. A public
+DTO living in a different module from the table it is mapped from is not a violation of anything --
+it is exactly the kind of cross-module composition MD-3 (`04-module-decomposition.md` §2) describes,
+and `aida.access_review_api._to_read(record: AccessReviewReportRecord) -> EntitlementReportRead`
+already is that hand-written mapper today, unmoved and unbroken by either commit's shim (both
+`aida.models` and `aida.schemas` keep resolving the same as before, from either side). Moved the
+*model* into this module, left the *schema* where it already was, and documented the split
+explicitly in `atlas.modules.observability_audit.models`'s `AccessReviewReportRecord` docstring so a
+future reader finds the reasoning at the point of the surprise, not just here.
+
+Deliberately **not** moved: `NotificationRuleRecord`/`NotificationEventRecord` ("routing rule for
+quality incidents" -- module 11 data-quality's own words), `FreshnessWatermarkConfig`/
+`FreshnessObservation` (module 11's "freshness contracts, SLAs"), and `ContractViolationRecord`/
+`ContractSlaRecord`/`DataContractVersion` (data-product contracts keyed off `product_id`, not this
+module's audit ledger). `FleetSummaryRead` and `LobCostRowRead`/`CostShowbackTotalsRead` (OB-6) also
+considered and left in `aida.schemas` -- genuinely cross-module composed reads (datasource, analysis
+run, query execution, and line-of-business state, none of it this module's own tables), same
+discipline the `03 ingestion` row already applied to `FleetSummaryRead` and earlier rows applied to
+`CatalogRowRead`/`AssetEvidenceRead`.
+
+**A mistake caught before it shipped:** the bulk `sed` deletion for the `aida.models` SLO/audit block
+also swept up `ContractViolationRecord`, which sits contiguously between `AuditEvent` and
+`ContractSlaRecord` in the old file and was never meant to move. `mypy src` caught it immediately
+(three `attr-defined` errors in `runtime_contracts.py`/`compliance_packs.py`/
+`runtime_contracts_api.py` -- real callers of a class that had silently vanished), restored verbatim
+in its original position before the next verification pass, then every check re-run clean. Recorded
+here because it is exactly the kind of regression the strict-mypy-after-every-module discipline this
+whole series follows exists to catch, and it worked.
+
+Same scope, same shim pattern, same new-contract treatment as the four rows before it.
+
+### Verification
+
+`ruff check .` clean (post-`mypy`-catch and restoration). `mypy src` clean (strict, 252 files,
+including the restored `ContractViolationRecord`). `lint-imports` 8 kept, 0 broken (the new
+`observability_audit module privacy` contract plus the seven before it). Route count identical
+before/after (52/52). Full `pytest` suite: **zero failures** -- including `test_doc_claims.py`,
+whose 10 pre-existing failures the entries above already traced to concurrent UX-14 work and which a
+different concurrent commit (`fd6149c`) fixed upstream before this row's own rebase; confirmed clean
+end-to-end rather than assumed. `alembic heads` still the same pre-existing two heads, confirmed
+unrelated and untouched by every row in this series.
+
+### ST-05/ST-06 Phase 3 is done
+
+All five leaf modules the refactor plan names for Phase 3 -- `01 identity_tenancy`, `02
+connectivity`, `03 ingestion`, `04 catalog`, `20 observability_audit` -- now have their real ORM and
+pydantic classes physically relocated out of `aida.models`/`aida.schemas` into
+`atlas.modules.<name>.{models,schemas}`, each with a backward-compatible re-export shim at the old
+import path and its own `<name> module privacy` import-linter contract. `aida.models`/`aida.schemas`
+still hold roughly 130 classes belonging to the sixteen modules Phase 3 does not cover (05 profiling
+through 21 experience-shell) -- their extraction is Phase 4 (runtime modules) and beyond, per the
+refactor plan's own sequencing, and needs its own tracker rows when that phase starts. ST-05/ST-06
+are left `IN PROGRESS` rather than `DONE` for that reason: their exit criteria ("no cross-schema FKs
+except `identity`," "`module-privacy` passes") are whole-codebase properties this pass does not yet
+claim for the other sixteen modules.
+
+**Explicitly not attempted, per this task's own stop condition:** the database schema migration
+(`ALTER TABLE ... SET SCHEMA`, refactor plan §5 step 2.3) and the cross-module
+foreign-key-to-plain-ID-column conversion (step 2.4). Every class moved in this five-row series still
+declares no `schema=` in its `__table_args__` and still lives in the single shared PostgreSQL schema
+-- this was a Python-source-location move only, at every step. Steps 2.3/2.4 are deliberately
+separate, later work needing their own orphan-detection reconciliation job, identical-count
+assertion, and dedicated PR, exactly as the plan itself specifies.

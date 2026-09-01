@@ -110,6 +110,21 @@ from atlas.modules.catalog.schemas import (  # noqa: E402, I001
     MetadataTableRead as MetadataTableRead,
 )
 
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.observability_audit.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import AuditEventRead` (etc.) caller keeps working
+# unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
+    ArchiveStatusRead as ArchiveStatusRead,
+    AuditEventRead as AuditEventRead,
+    OutboxEventRead as OutboxEventRead,
+    SloBudgetRead as SloBudgetRead,
+    SloDefinitionCreate as SloDefinitionCreate,
+    SloDefinitionRead as SloDefinitionRead,
+)
+
 
 class AnalysisRunCreate(ApiModel):
     mode: str = Field(default="INCREMENTAL", pattern=r"^(FULL|INCREMENTAL)$")
@@ -204,20 +219,6 @@ class AnalysisTaskRead(ApiModel):
     updated_at: datetime
 
 
-class AuditEventRead(ApiModel):
-    id: int
-    organization_id: UUID | None
-    principal_id: str
-    principal_type: str
-    action: str
-    resource_type: str
-    resource_id: str | None
-    outcome: str
-    correlation_id: str
-    source_ip: str | None
-    details: dict[str, Any]
-    occurred_at: datetime
-
 
 class FleetSummaryRead(ApiModel):
     organization_id: UUID
@@ -228,20 +229,6 @@ class FleetSummaryRead(ApiModel):
     pending_outbox_events: int
     dead_letter_outbox_events: int
     generated_at: datetime
-
-
-class OutboxEventRead(ApiModel):
-    id: UUID
-    organization_id: UUID | None
-    aggregate_type: str
-    aggregate_id: str
-    event_type: str
-    status: str
-    attempt_count: int
-    next_attempt_at: datetime
-    last_error: str | None
-    occurred_at: datetime
-    published_at: datetime | None
 
 
 class ClassificationEvidenceRead(ApiModel):
@@ -3014,51 +3001,6 @@ class TrustScoreRead(ApiModel):
     overall_score: int
     grade: str
     factors: list[TrustFactorRead]
-
-
-# --- OB-1 through OB-4: Observability ----------------------------------------
-
-
-class SloDefinitionCreate(ApiModel):
-    slo_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
-    name: str = Field(min_length=3, max_length=200)
-    target: float = Field(ge=0.0, le=100.0)
-    window_days: int = Field(ge=1, le=365)
-    threshold: float = Field(ge=0.0, le=100.0)
-
-
-class SloDefinitionRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    window_days: int
-    threshold: float
-    status: str
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class SloBudgetRead(ApiModel):
-    slo_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    current_value: float | None
-    budget_remaining: float | None
-    window_days: int
-    status: str
-
-
-class ArchiveStatusRead(ApiModel):
-    total_archives: int
-    total_events_archived: int
-    latest_archive_id: str | None
-    latest_checksum: str | None
-    legal_hold_count: int
-    status: str
 
 
 # --- OB-6: cost / showback aggregation, per line of business -----------------

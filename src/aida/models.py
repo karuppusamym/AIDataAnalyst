@@ -85,6 +85,21 @@ from atlas.modules.ingestion.models import (
     MetadataIngestionChunk as MetadataIngestionChunk,
     MetadataIngestionJob as MetadataIngestionJob,
 )
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.observability_audit.models` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.models import AuditEvent` (etc.) caller keeps working
+# unchanged.
+from atlas.modules.observability_audit.models import (
+    AccessReviewReportRecord as AccessReviewReportRecord,
+    AuditArchiveRecord as AuditArchiveRecord,
+    AuditEvent as AuditEvent,
+    CompliancePackRecord as CompliancePackRecord,
+    OutboxEvent as OutboxEvent,
+    SloDefinition as SloDefinition,
+    SloMeasurement as SloMeasurement,
+)
 from atlas.platform.db import TimestampMixin as TimestampMixin, utc_now as utc_now
 
 
@@ -3080,33 +3095,6 @@ class AiRemediation(Base, TimestampMixin):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
-class OutboxEvent(Base):
-    __tablename__ = "outbox_event"
-    __table_args__ = (
-        Index("ix_outbox_pending", "status", "occurred_at"),
-        Index("ix_outbox_due", "status", "next_attempt_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), index=True
-    )
-    aggregate_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    aggregate_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    event_type: Mapped[str] = mapped_column(String(150), nullable=False)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
-    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    next_attempt_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-    last_error: Mapped[str | None] = mapped_column(String(1000))
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
 class SearchIndex(Base, TimestampMixin):
     """Full-text search index configuration for catalog metadata."""
 
@@ -3651,111 +3639,6 @@ class FreshnessObservation(Base):
     )
 
 
-class SloDefinition(Base, TimestampMixin):
-    """Service-level objective definition, org-scoped."""
-
-    __tablename__ = "slo_definition"
-    __table_args__ = (
-        UniqueConstraint("organization_id", "slo_key"),
-        Index("ix_slo_definition_org_status", "organization_id", "status"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    slo_key: Mapped[str] = mapped_column(String(100), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    target: Mapped[float] = mapped_column(Float, nullable=False)
-    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
-    threshold: Mapped[float] = mapped_column(Float, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class SloMeasurement(Base):
-    """Point-in-time SLO measurement."""
-
-    __tablename__ = "slo_measurement"
-    __table_args__ = (
-        Index("ix_slo_measurement_slo_time", "slo_id", "measured_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    slo_id: Mapped[UUID] = mapped_column(
-        ForeignKey("slo_definition.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    value: Mapped[float] = mapped_column(Float, nullable=False)
-    budget_remaining: Mapped[float] = mapped_column(Float, nullable=False)
-    measured_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
-class AuditArchiveRecord(Base, TimestampMixin):
-    """Immutable record of an audit archive batch."""
-
-    __tablename__ = "audit_archive_record"
-    __table_args__ = (
-        Index("ix_audit_archive_org_created", "organization_id", "created_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    archive_id: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
-    event_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    event_range_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    event_range_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    storage_backend: Mapped[str] = mapped_column(String(30), nullable=False)
-    retention_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    legal_hold: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
-
-
-class AuditEvent(Base):
-    __tablename__ = "audit_event"
-    __table_args__ = (
-        Index("ix_audit_org_occurred", "organization_id", "occurred_at"),
-        Index("ix_audit_correlation", "correlation_id"),
-    )
-
-    # `.with_variant(Integer, "sqlite")`: SQLite only rowid-aliases a primary key
-    # column declared literally `INTEGER PRIMARY KEY`, so a bare `BigInteger` compiles
-    # to `BIGINT` there and SQLAlchemy stops treating the column as autoincrementing
-    # (every insert then supplies a NULL `id` and SQLite's NOT NULL constraint fires).
-    # PostgreSQL is unaffected -- the variant only changes what SQLite's DDL compiler
-    # emits, not the production `BIGINT`/`BIGSERIAL` column.
-    id: Mapped[int] = mapped_column(
-        BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True
-    )
-    organization_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), index=True
-    )
-    principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    action: Mapped[str] = mapped_column(String(150), nullable=False)
-    resource_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    resource_id: Mapped[str | None] = mapped_column(String(255))
-    outcome: Mapped[str] = mapped_column(String(30), nullable=False)
-    correlation_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    source_ip: Mapped[str | None] = mapped_column(String(100))
-    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
-    occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
-# ---------------------------------------------------------------------------
-# Token revocation (ID-4, module 01 identity-and-tenancy)
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # Runtime Data Contract Enforcement (Phase E - EE.1)
 # ---------------------------------------------------------------------------
@@ -3809,82 +3692,6 @@ class ContractSlaRecord(Base, TimestampMixin):
     uptime_percent: Mapped[float] = mapped_column(Float, nullable=False)
     violations_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     breach_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-
-
-# ---------------------------------------------------------------------------
-# Compliance Pack Generation (Phase E - EE.4 / OB-5)
-# ---------------------------------------------------------------------------
-
-
-class CompliancePackRecord(Base, TimestampMixin):
-    """WORM-archived compliance pack generated from runtime evidence."""
-
-    __tablename__ = "compliance_pack"
-    __table_args__ = (
-        Index("ix_compliance_pack_org_framework", "organization_id", "framework"),
-        Index("ix_compliance_pack_org_created", "organization_id", "created_at"),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    framework: Mapped[str] = mapped_column(String(50), nullable=False)
-    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    sections: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
-    status: Mapped[str] = mapped_column(String(30), default="GENERATED", nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    generated_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    generated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
-
-
-# ---------------------------------------------------------------------------
-# Access Review / Self-Service Entitlement Reporting (OB-7)
-# ---------------------------------------------------------------------------
-
-
-class AccessReviewReportRecord(Base, TimestampMixin):
-    """WORM-archived self-service entitlement report (OB-7).
-
-    Snapshots what one principal (`subject_principal_id`) was entitled to see at
-    `generated_at`, built from real persisted `WorkspaceMembership` and
-    `SourceBinding` rows plus an ABAC policy overlay -- never authored by hand,
-    matching the reproducibility bar OB-5's `CompliancePackRecord` sets for this
-    module. Append-only: nothing here is ever updated or deleted, which is what
-    lets a bank's access-review process point at a specific report as the record
-    of what was disclosed, to whom, and when.
-    """
-
-    __tablename__ = "access_review_report"
-    __table_args__ = (
-        Index(
-            "ix_access_review_report_org_subject",
-            "organization_id",
-            "subject_principal_id",
-            "created_at",
-        ),
-    )
-
-    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    organization_id: Mapped[UUID] = mapped_column(
-        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
-    )
-    subject_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    subject_principal_type: Mapped[str] = mapped_column(String(30), nullable=False)
-    # True when the subject generated their own report; False when an elevated
-    # role (PlatformAdmin/DataAdmin/ComplianceOfficer) pulled it on their behalf --
-    # always audited via `requested_by` either way.
-    is_self_service: Mapped[bool] = mapped_column(Boolean, nullable=False)
-    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
-    entitlements: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
-    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
-    generated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utc_now, nullable=False
-    )
 
 
 # ---------------------------------------------------------------------------
