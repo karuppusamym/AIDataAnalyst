@@ -9835,3 +9835,121 @@ the regenerated baseline rather than bake in an unrelated change.
 
 Honest gap: no live Postgres in this sandbox to run the migration for real, same standing limitation as
 every other migration landed on this branch today.
+
+---
+
+## 2026-09-01 — N11 closed: view-to-tool generator ("tool generator B")
+
+### What it is
+
+A database VIEW is already a human-authored, pre-curated query — someone deliberately wrote and
+named it to answer a real question — which makes it the highest-quality-per-unit-of-effort source
+for auto-generating a governed tool: unlike an LLM guessing at a useful query, or even SM-5's
+`multi_table_blueprint.py` (a mechanical FK-join, not a curated one), a view's own SELECT list
+represents real analytical intent someone already had. This row composes SM-5's blueprint/persist-
+draft pattern with AT-19's redaction gating rather than inventing new plumbing:
+
+* `src/aida/view_tool_blueprint.py::build_view_tool_blueprint` — pure, DB-free. Given a view's own
+  output columns (`ViewToolColumn`: name, physical type, ordinal position), deterministically
+  renders `SELECT <view's own column list> FROM <view> WHERE <optional equality filters>` plus a
+  `list[aida.schemas.ToolParameterDefinition]`. The view's internal SELECT/JOIN/aggregation logic
+  is never re-derived or inlined — the view stays the single source of truth for its own logic; this
+  only adds a governed, parameterized *read surface* on top of it. Columns are canonicalized by
+  `(ordinal_position, name)`, so the same view columns always render byte-identical SQL and an
+  identically-ordered parameter list regardless of caller-supplied order (same determinism
+  discipline as `multi_table_blueprint.py`).
+* `resolve_view_tool_source` — the module's one DB-touching function, and the only thing a caller
+  needs to fake to unit-test the builder without a database. Loads the view's active
+  `MetadataColumn` rows *and* enforces the eligibility gate below before the pure builder ever sees
+  the view.
+* `tool_api.py` — new `POST /v1/projects/{project_id}/tool-blueprints/from-view`
+  (`create_view_tool_blueprint`, request model `ViewToolBlueprintRequest`: same
+  slug/name/description/allowed_roles shape as `GovernedToolVersionCreate` and SM-5's
+  `MultiTableToolBlueprintRequest`, a single `table_id` naming the view instead of `table_ids`/a
+  hand-written `sql_template`). Same PG-5 Enterprise-edition entitlement gate
+  (`studio_semantic_and_tool_authoring`) SM-5's sibling endpoint applies, then persists through the
+  *exact* draft-creation/validation tail `create_tool_version` and `create_multi_table_tool_blueprint`
+  already share (`_persist_tool_version_draft` — real `SqlGuard.validate`, the placeholder-vs-
+  parameter check, the datasource-table allowlist check, all unmodified). `submit_tool_for_review`
+  and independent maker-checker approval are completely unchanged — this path only ever produces a
+  `DRAFT`.
+
+### What column/type data was actually available, and why parameterization is FULL
+
+Investigated directly against `envelope_models.py`, `catalog/models.py` and `ingestion.py` before
+writing a line of the generator, per the row's own instruction not to fabricate typed parameters
+if the data isn't really there. Finding: it *is* there, and more completely than the row's own
+framing assumed. `MetadataViewDefinition` (`envelope_models.py`) stores only the view's redacted
+DDL *text* plus its screening/redaction status — no output-column list and no column-to-source
+mapping live on it at all. But a view also gets its own `MetadataTable` row (envelope 1.1) and its
+own `MetadataColumn` rows, populated by the *tier-1* base-envelope ingestion pass
+(`ingestion.py`'s table/column upsert, which runs before the tier-2 `_upsert_view_definition`
+extension and does not care whether `object_type` is `TABLE` or `VIEW`) — because
+`information_schema.columns` (and each connector's equivalent) exposes a view's *result* columns,
+with their real physical types, identically to a table's. That data is independent of whether the
+view's DDL text itself ever parsed, redacted, or screened cleanly. So the honest answer to "does
+the parser capture a column-to-source-table mapping" turned out not to gate parameter typing at
+all — `ViewLineageEdge`'s column-level lineage (N2/LN-2) was never needed for this. Every
+eligible output column's own declared `physical_type` types its parameter, via the exact same
+`relationship_naming.physical_type_family` bucketing `multi_table_blueprint.py` already reuses (no
+new type-validation logic invented). A column whose type does not resolve to a known, filterable
+family (array/JSON/geometry/other) is still selected into the tool's output — never omitted — but
+is never turned into a WHERE parameter, since this generator does not invent a filter type it
+cannot honestly validate. **Scope: FULL**, not partial and not row-limit-only.
+
+### Redaction gating
+
+What *does* gate generation entirely is the view's own `MetadataViewDefinition` — mirroring AT-19's
+`_view_definition_transformation_detail` gate in `mcp_server.py` exactly: `resolve_view_tool_source`
+raises `ViewNotEligibleError` (-> HTTP 422 naming the exact reason) when the table has no captured
+`MetadataViewDefinition` row at all, or when one exists but `status != "ACTIVE"`,
+`availability != "AVAILABLE"`, `redaction_status != "PARSED"`, or
+`screening_status` fails `ingest_screening.is_eligible_for_model_context` (i.e. `QUARANTINED`). A
+tool whose underlying logic cannot be shown to a reviewer cannot responsibly be published, even as
+a draft — so this generator refuses rather than guesses.
+
+### Verification
+
+11 tests in `tests/test_view_tool_blueprint.py`. Pure, no database: `same_input_twice` and
+`determinism_is_independent_of_caller_supplied_column_order` prove byte-identical `sql_template` and
+identically-ordered parameters; `every_recognized_typed_column_becomes_an_optional_parameter` checks
+NUMBER/STRING/BOOLEAN typing end to end; `a_column_with_an_unrecognized_type_is_selected_but_never_
+parameterized` proves a `GEOMETRY` column stays in the output but is never offered as a filter;
+`a_view_with_no_active_columns_is_a_structural_error` covers the one structural-error path;
+`rendered_sql_passes_the_real_sql_guard_and_renders_at_execution_time` runs the generated template
+through the real `aida.sql_guard.SqlGuard.validate` and `aida.tool_rendering.render_tool_sql` (no
+filter -> `IS NULL` keeps every row; a supplied filter value -> a real equality predicate). Real-
+database (in-memory SQLite, `StaticPool`, mirrors `tests/test_multi_table_blueprint.py`'s harness):
+`test_endpoint_creates_a_draft_and_its_rendered_sql_executes_against_the_real_view` seeds a genuine,
+*executable* SQLite `CREATE VIEW "main"."active_customers" AS SELECT id, name FROM "main"."customers"
+WHERE is_active = 1` (SQLite's own default database is literally named `main`, so the governance-
+catalog qualified name is also valid SQLite syntax) alongside the governance-metadata description of
+it, calls the real endpoint, and then takes the *persisted draft's own* `sql_template`/`parameters`
+straight from the `GovernedToolVersionRead` response, renders them via the real `render_tool_sql`,
+and executes the result against the real view — unfiltered returns exactly the two active rows
+(Alice, Carol), a `name` filter returns exactly the one matching row (Alice) — proving round-trip
+correctness through the actual persisted artifact, not a reconstruction of it. Redaction gating:
+`test_resolver_refuses_a_view_with_no_captured_definition`,
+`test_resolver_refuses_a_quarantined_view_definition` (asserts the clear, reason-naming error text,
+not a generic denial), and `test_endpoint_rejects_a_quarantined_view_with_a_clear_422` prove the
+refusal at both the pure-resolver layer and through the real endpoint (HTTP 422).
+`test_resolver_rejects_a_table_id_outside_the_datasource` covers the datasource-scoping structural
+check.
+
+`ruff check` and `mypy src` clean on every touched/new file (`src/aida/view_tool_blueprint.py`,
+`src/aida/tool_api.py`) — no suppressions.
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py -q` clean.
+`tests/test_openapi_diff_gate.py` clean after `scripts/openapi_diff.py --accept-baseline`
+(`Docs/90-reference/openapi-baseline.json`, one path added, non-breaking) and
+`scripts/generate_ui_types.py --accept-baseline` (`ui-next/src/lib/types.ts`).
+`tests/test_event_catalog_gate.py` clean — no new `event_type=` literal introduced; the shared
+`_persist_tool_version_draft` helper's existing `tool.version.draft_created.v1` `record_outbox` call
+is reused verbatim, so no `04-event-catalog.md` change was needed.
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest -q` (full suite, `AIDA_ENVIRONMENT` deselected
+from `test_config.py::test_environment_must_be_explicit_outside_tests`, the same pre-existing
+ambient-env sensitivity documented against that exact test in the AG-7/TL-5/SM-5/AU-14 entries above):
+clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately
+before the closing push: none found.

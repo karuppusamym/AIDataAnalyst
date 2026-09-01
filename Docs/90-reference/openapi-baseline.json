@@ -25032,6 +25032,70 @@
         "title": "ViewLineageParseResponse",
         "type": "object"
       },
+      "ViewToolBlueprintRequest": {
+        "additionalProperties": false,
+        "description": "N11: request a deterministically-rendered single-view tool draft\ninstead of hand-authoring `sql_template`. A database VIEW is already a\nhuman-authored, pre-curated query, which makes it the highest-quality-\nper-unit-of-effort source for auto-generating a governed tool -- unlike\nSM-5's `MultiTableToolBlueprintRequest` (a mechanical FK-join, not a\ncurated one), this path never re-derives the view's own SELECT/JOIN/\naggregation logic; it only adds a governed, parameterized read surface\non top of it (`SELECT <view's own column list> FROM <view> WHERE\n<optional equality filters>` -- see `view_tool_blueprint.py`). Mirrors\n`MultiTableToolBlueprintRequest`'s fields exactly, replacing\n`table_ids`/generated-join with a single `table_id` naming the view.",
+        "properties": {
+          "allowed_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Allowed Roles",
+            "type": "array"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 3,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Name",
+            "type": "string"
+          },
+          "semantic_model_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Model Version Id"
+          },
+          "slug": {
+            "pattern": "^[a-z][a-z0-9_]{1,99}$",
+            "title": "Slug",
+            "type": "string"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "datasource_id",
+          "table_id",
+          "allowed_roles"
+        ],
+        "title": "ViewToolBlueprintRequest",
+        "type": "object"
+      },
       "WorkspaceCreate": {
         "additionalProperties": false,
         "properties": {
@@ -67790,6 +67854,145 @@
         "summary": "Create Semantic Model Version",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/tool-blueprints/from-view": {
+      "post": {
+        "description": "N11: view -> tool (\"tool generator B\"). Resolves `table_id` as a\nview -- refusing outright (422) unless it carries a captured, `PARSED`,\nnon-quarantined `MetadataViewDefinition`, mirroring `mcp_server.py`'s\nAT-19 `_view_definition_transformation_detail` gate exactly: a tool\nwhose underlying logic cannot be shown to a reviewer cannot responsibly\nbe published, even in draft. Then builds the candidate SQL template\ndeterministically from the view's own output columns\n(`view_tool_blueprint.build_view_tool_blueprint`) and persists it as an\nordinary ``DRAFT`` `GovernedToolVersion` through the exact same\nvalidation and persistence path `create_tool_version` and SM-5's\n`create_multi_table_tool_blueprint` use. Publication still requires\n`submit_tool_for_review` and independent approval, unchanged.",
+        "operationId": "create_view_tool_blueprint_v1_projects__project_id__tool_blueprints_from_view_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ViewToolBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernedToolVersionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create View Tool Blueprint",
+        "tags": [
+          "governed-tools"
         ]
       }
     },

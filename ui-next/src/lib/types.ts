@@ -4183,6 +4183,17 @@ export interface ViewLineageParseResponse {
   persisted_edge_count?: number;
 }
 
+/** N11: request a deterministically-rendered single-view tool draft */
+export interface ViewToolBlueprintRequest {
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: string;
+  semantic_model_version_id?: string | null;
+  table_id: string;
+  allowed_roles: string[];
+}
+
 export interface WorkspaceCreate {
   name: string;
   slug: string;
