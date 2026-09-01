@@ -42,6 +42,13 @@ from aida.notification_routing import (
 # notification rule specifies its own `escalation_after_minutes`.
 DEFAULT_ROUTE_AFTER = timedelta(days=7)
 DEFAULT_ESCALATE_AFTER = timedelta(days=14)
+# GL-6 tier 2: an entry still unresolved this long *after its tier-1
+# escalation* (not from first-detected) escalates again, unconditionally
+# through ITSM regardless of what channel tier 1 used -- the single-tier
+# engine has no further tier of its own to fall back to, so tier 2 is a fixed
+# "make sure this becomes an operational ticket" backstop rather than a
+# second configurable notification rule.
+DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=7)
 
 
 @dataclass(frozen=True, slots=True)

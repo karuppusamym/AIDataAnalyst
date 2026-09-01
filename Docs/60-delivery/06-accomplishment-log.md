@@ -9511,3 +9511,34 @@ Not fixed here, flagged for whoever owns it: `cc41a13` itself remains in this br
 as committed, markers and all, until this fix's own commit lands on top of it -- the broken intermediate
 state is still visible via `git show cc41a13`, which is correct (history is not rewritten), but anyone
 bisecting through that exact commit would find a file that fails to import.
+
+### Update: a second, independent fix for the same corruption landed upstream mid-session, and over-corrected
+
+Before this fix's own commit could be pushed, `origin/feature/snowflake-dbt-lineage-mcp` advanced
+again with commit `4f6cdd2` ("fix(glossary): resolve unresolved stash-conflict markers from cc41a13")
+-- another session had found and fixed the identical corruption independently, converging on the exact
+same judgment call documented above (keep the `escalated_tier2_at` design, keep the one genuinely new
+test, remove the duplicate constant and duplicate code block). Rebasing onto it absorbed that fix
+cleanly with no conflict, which is the reassuring half of this update.
+
+The less reassuring half: `4f6cdd2`'s own removal of the *duplicate* `DEFAULT_ESCALATE_TIER2_AFTER`
+definition removed *both* copies, not one -- leaving `sync_unowned_asset_backlog`'s own keyword default
+(`escalate_tier2_after: timedelta = DEFAULT_ESCALATE_TIER2_AFTER`) referencing a name that no longer
+existed anywhere in the module. This was not a subtle bug: `NameError: name 'DEFAULT_ESCALATE_TIER2_AFTER'
+is not defined` at import time, which meant every test file importing anything from
+`glossary_owner_routing` (or transitively from `stewardship_api`, or the whole `aida.main` app) failed
+collection outright -- five test files errored in this session's own post-rebase regression run before
+this was caught. Fixed by restoring exactly one definition, `DEFAULT_ESCALATE_TIER2_AFTER =
+timedelta(days=7)`, with its original explanatory comment.
+
+Verification after this second fix: `ruff check` clean; `AIDA_ENVIRONMENT=development python -c "from
+aida.main import app"` succeeds (379 routes) -- the same import-time smoke check that would have caught
+`4f6cdd2`'s own regression before it ever reached a rebase; full session regression re-run, 314 passed,
+zero errors.
+
+The pattern worth naming here, not just the individual bug: two independent sessions fixing the *same*
+literal-conflict-marker corruption, minutes apart, on a branch under this much concurrent load, is
+itself a symptom -- the underlying problem (a session running `git stash pop`, hitting a conflict, and
+committing anyway without finishing it) is a process gap, not a one-off mistake, and is likely to recur
+on this branch until whatever is driving concurrent sessions to stash/pop against a moving trunk instead
+of committing or rebasing cleanly is addressed at the workflow level.
