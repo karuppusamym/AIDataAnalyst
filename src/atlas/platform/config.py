@@ -205,6 +205,24 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # --- Data quality (DQ-6) -------------------------------------------------
+    #
+    # Off by default so a tenant that has not reviewed the feature keeps today's
+    # rolling-previous-profile comparison in `quality_service.evaluate_analysis_run`
+    # (VOLUME_CHANGE compares the current row count only to the single most recent
+    # prior `TableProfile`). Flipping it on makes `evaluate_analysis_run` also fetch
+    # each table's own bounded history of past `TableProfile` row counts and hand it
+    # to `data_quality.day_of_week_baseline`, which -- purely, with no DB access of
+    # its own -- groups those already-persisted points by weekday and judges the
+    # current value against its own day-of-week mean/stdev instead of whatever day
+    # happened to run last (see `data_quality.evaluate_quality`'s `seasonality_*`
+    # parameters). It falls back to the unchanged rolling-previous comparison,
+    # automatically and per-table, whenever fewer than `quality_seasonal_min_samples`
+    # same-weekday points exist yet -- so enabling this can only change a VOLUME_CHANGE
+    # verdict where there is already enough real history to trust one.
+    quality_seasonal_thresholds_enabled: bool = False
+    quality_seasonal_min_samples: int = Field(default=3, ge=2, le=52)
+    quality_seasonal_zscore_threshold: float = Field(default=3.0, ge=1.0, le=10.0)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids

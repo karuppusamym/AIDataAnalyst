@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from aida.config import get_settings
 from aida.data_quality import QualityProfile, evaluate_quality, normalized_policy
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -18,6 +19,14 @@ from aida.models import (
     TableProfile,
 )
 from aida.security import SecurityContext
+
+# DQ-6: bounded per-table lookback for the day-of-week seasonal baseline query, only
+# ever issued when `quality_seasonal_thresholds_enabled` is on (see `config.py`). At
+# most this many of a table's most recent prior `TableProfile` rows are read to build
+# its seasonal history, so the extra query stays cheap regardless of how long a table
+# has been profiled -- roughly 17 weeks of daily scans, comfortably enough same-weekday
+# points for `day_of_week_baseline`'s default `min_samples=3` well within a month.
+_SEASONALITY_HISTORY_LOOKBACK = 120
 
 
 def _row_count(profile: TableProfile) -> int | None:
@@ -122,6 +131,29 @@ async def evaluate_analysis_run(
         await session.scalars(select(baseline_alias).where(baseline_rank.c.baseline_rank == 1))
     ).all()
     baseline_by_table = {profile.table_id: profile for profile in baselines}
+
+    # DQ-6: only read the extra day-of-week history when the flag is on, so a tenant
+    # that has not opted in pays no additional query cost at all.
+    settings = get_settings()
+    seasonality_enabled = bool(settings.quality_seasonal_thresholds_enabled)
+    row_count_history_by_table: dict[UUID, list[tuple[datetime, int]]] = {}
+    if seasonality_enabled:
+        history_alias = aliased(TableProfile, baseline_rank)
+        history_rows = (
+            await session.scalars(
+                select(history_alias).where(
+                    baseline_rank.c.baseline_rank <= _SEASONALITY_HISTORY_LOOKBACK
+                )
+            )
+        ).all()
+        for history_profile in history_rows:
+            row_count = _row_count(history_profile)
+            if row_count is None:
+                continue
+            row_count_history_by_table.setdefault(history_profile.table_id, []).append(
+                (history_profile.created_at, row_count)
+            )
+
     all_profile_ids = [profile.id for profile in profiles] + [profile.id for profile in baselines]
     column_rows = (
         await session.scalars(
@@ -165,6 +197,11 @@ async def evaluate_analysis_run(
             _snapshot(profile, columns_by_profile.get(profile.id, [])),
             _snapshot(baseline, columns_by_profile.get(baseline.id, [])) if baseline else None,
             snapshot,
+            row_count_history=row_count_history_by_table.get(profile.table_id),
+            current_observed_at=profile.created_at,
+            seasonality_enabled=seasonality_enabled,
+            seasonality_min_samples=settings.quality_seasonal_min_samples,
+            seasonality_zscore_threshold=settings.quality_seasonal_zscore_threshold,
         )
         observation = DataQualityObservation(
             id=uuid4(),
