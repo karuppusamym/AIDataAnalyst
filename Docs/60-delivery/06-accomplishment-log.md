@@ -6203,3 +6203,107 @@ reverted — confirmed the same way, untouched by and out of scope for AG-7.
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+## 2026-09-01 — SM-5 closed: deterministic multi-table tool blueprints
+
+### What it is
+
+Today's governed tools (module 14, `GovernedToolVersion`) are hand-authored SQL templates — an
+author writes any JOIN by hand and submits it through `tool_api.create_tool_version`. This row
+adds a second, generative path for the common "join these tables together" case: given a set of
+table ids, deterministically render a candidate multi-table JOIN tool as an ordinary `DRAFT`,
+using only relationships already declared/approved elsewhere in the platform — never a guessed
+join key.
+
+* `src/aida/multi_table_blueprint.py::build_multi_table_blueprint` — pure, DB-free. Takes plain
+  dataclasses (`BlueprintTable`, `BlueprintJoinEdge`) describing the selected tables and the join
+  edges between them, and returns a `MultiTableBlueprint` (SQL template +
+  `list[aida.schemas.ToolParameterDefinition]`) ready to drop straight into
+  `GovernedToolVersionCreate`. Tables are canonicalized by `(qualified_name, table_id)`; a
+  deterministic BFS/Prim-style spanning tree picks, at every step, the lexicographically-smallest
+  available edge to the smallest new table (a declared `MetadataConstraint` FK always outranks an
+  approved `RelationshipCandidate` on a tie) — so the same table ids plus the same relationship
+  data always render byte-identical SQL, independent of the order table ids were requested in or
+  the order the database happened to return rows in (`context_compiler.py`'s `artifact_hash`
+  determinism convention, applied here without a hash — the SQL text itself is the deterministic
+  artifact). SQL is built via `sqlglot`'s expression API (not hand-formatted strings) so
+  identifier quoting is correct per-dialect; a `LEFT`/`CROSS` join is never emitted, only `INNER
+  JOIN ... ON` on the declared key columns, composite keys included. Every joined-in ("child")
+  table gets one `NULL`-safe optional equality filter parameter per join-key column
+  (`(:t2_customer_id IS NULL OR "t2"."customer_id" = :t2_customer_id)`), so a fresh draft is
+  runnable with zero arguments and a reviewer can see real, unfiltered results before approving.
+  A table with no path to the rest of the selected set raises `UnjoinableTablesError` naming the
+  unreachable table(s) — the refusal path, not a fallback.
+* `resolve_blueprint_tables_and_edges` — the module's one DB-touching function, and the only
+  thing a caller needs to fake to unit-test the builder without a database. Reads exactly two
+  already-declared/approved relationship sources: `MetadataConstraint` rows with
+  `constraint_type == "FOREIGN_KEY"` and `status == "ACTIVE"` (the same rows
+  `intelligence_api.get_knowledge_graph` renders as `DECLARED_FOREIGN_KEY` edges), and
+  `RelationshipCandidate` rows with `status == "APPROVED"` (accepted through the existing
+  maker-checker relationship review flow already live in `intelligence_api.py`). Creates no new
+  persisted relationship state.
+* `tool_api.py` — new `POST /v1/projects/{project_id}/tool-blueprints/multi-table`
+  (`create_multi_table_tool_blueprint`, request model `MultiTableToolBlueprintRequest`: same
+  slug/name/description/allowed_roles shape as `GovernedToolVersionCreate`, `table_ids` instead
+  of `sql_template`/`parameters`). It builds a real `GovernedToolVersionCreate` from the rendered
+  blueprint and persists it through the *exact* draft-creation/validation tail
+  `create_tool_version` uses — the placeholder-vs-parameter check, the real `SqlGuard.validate`,
+  and the datasource-table allowlist check all run again on the generated SQL, not bypassed —
+  factored out of `create_tool_version` into a shared `_persist_tool_version_draft` so the two
+  paths cannot drift. `submit_tool_for_review` and independent approval are completely unchanged:
+  a generated blueprint is exactly as reviewable, and exactly as unable to self-publish, as a
+  hand-written one.
+
+### Why not more relationship sources
+
+Documented honestly in the module docstring rather than silently narrowed: composite
+`RelationshipCandidateGroup`/`RelationshipCandidateGroupMember` candidates are not read (only
+single-column `RelationshipCandidate` rows), and no semantic-model join declaration is read either
+— checked directly against `models.py`, `SemanticModelVersion`/`SemanticMetricVersion` declare a
+metric against one `source_table_id` and do not themselves declare a cross-table join, so there is
+no such declaration to read yet. Both are real gaps, not silently worked around: a composite
+`RelationshipCandidateGroup` approval today simply does not make its two tables joinable through
+this endpoint (declared FKs and single-column approved candidates still do).
+
+### Verification
+
+14 tests in `tests/test_multi_table_blueprint.py`. Pure, no database: `same_input_twice` and
+`determinism_is_independent_of_caller_supplied_table_and_edge_order` prove byte-identical
+`sql_template` and identically-ordered parameters for `[customers, orders]` vs. `[orders,
+customers]`; `determinism_holds_for_a_three_table_chain_regardless_of_order` checks three
+independent table/edge orderings of an a→b→c FK chain collapse to one `sql_template`, one
+`table_order`, one parameter-name sequence; `declared_foreign_key_wins_over_approved_candidate`
+proves the FK-over-candidate tie-break is order-independent; `unjoinable_table_is_rejected` and
+`no_edges_at_all_is_rejected` assert `UnjoinableTablesError` naming the unreachable table, never a
+guessed join; two structural-error tests (`fewer_than_two_tables`, `duplicate_table_ids`);
+`rendered_sql_passes_the_real_sql_guard_and_renders_at_execution_time` runs the generated template
+through the real `aida.sql_guard.SqlGuard.validate` and `aida.tool_rendering.render_tool_sql` (no
+filter → `IS NULL` keeps every row; a supplied filter value → a real equality predicate);
+`composite_foreign_key_joins_on_every_column_pair` checks a two-column composite FK. Real-database
+(in-memory SQLite, mirrors `tests/test_aida_tool_sdk.py`'s harness): a real `MetadataConstraint` FK
+between seeded `retail.customers`/`retail.orders` produces a `DRAFT` `GovernedToolVersion` with
+both tables in `referenced_tables`, a real `JOIN` in `sql_template`, one parameter, and
+`approved_by`/`approved_at` both `None`; a third, unrelated `retail.warehouses` table requested
+alongside `customers` is rejected with HTTP 422 naming `retail.warehouses`; a real `APPROVED`
+`RelationshipCandidate` (no FK) between `orders`/`warehouses` produces a `DRAFT` the same way,
+proving the second relationship source really is read end-to-end; a table id outside the
+datasource is rejected by the resolver directly.
+
+`ruff check` and `mypy src` clean on every touched/new file (`src/aida/multi_table_blueprint.py`,
+`src/aida/tool_api.py`) — two real mypy findings along the way, both fixed rather than suppressed:
+sqlglot's `Condition`/`EQ` inherit its `Expr` base, not its `Expression` base (two separate root
+classes in that library), so the running `on_condition`/`where_condition` accumulators are typed
+`exp.Expr | None`; and a bare `tuple[tuple, ...]` frontier-sort-key annotation needed its type
+parameters spelled out (`_EdgeSortKey`/`_FrontierSortKey` aliases).
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+`tests/test_openapi_diff_gate.py` clean after `scripts/openapi_diff.py --accept-baseline`
+(`Docs/90-reference/openapi-baseline.json`, one path added, non-breaking) and
+`scripts/generate_ui_types.py --accept-baseline` (`ui-next/src/lib/types.ts`). Full-repo
+`AIDA_ENVIRONMENT=development uv run pytest -q`: one failure,
+`test_config.py::test_environment_must_be_explicit_outside_tests` — the same pre-existing
+sensitivity to `AIDA_ENVIRONMENT` being set for the *entire* suite (rather than scoped to the
+doc-claims run alone) already documented against this exact test in the AG-7 and TL-5 entries
+above, not anything this row touched.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
