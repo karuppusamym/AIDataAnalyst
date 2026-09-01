@@ -204,14 +204,29 @@ def traced[F: Callable[..., Any]](func: F) -> F:
             # times the thing it observes runs.
             try:
                 from opentelemetry import trace
+                from opentelemetry.trace import Status, StatusCode
 
                 tracer = trace.get_tracer(__name__)
             except Exception:  # pragma: no cover - SDK absent or misconfigured
                 logger.warning("tracing_unavailable", span_name=span_name)
             else:
-                with tracer.start_as_current_span(span_name) as span:
+                # TS-3/INV-6: `record_exception=False` -- the SDK default (True) would
+                # otherwise attach the exception's full message and stack trace to the
+                # span automatically, and a wrapped function's exception can legitimately
+                # carry a source value (e.g. a database constraint violation naming the
+                # offending value). Only the exception's class name is recorded, matching
+                # the `error_class` pattern `query_gateway.py` already uses for exactly
+                # this reason -- never `str(exc)`.
+                with tracer.start_as_current_span(
+                    span_name, record_exception=False
+                ) as span:
                     _set_span_attributes(span, kwargs)
-                    result = await func(*args, **kwargs)
+                    try:
+                        result = await func(*args, **kwargs)
+                    except Exception as exc:
+                        span.set_attribute("error_class", type(exc).__name__)
+                        span.set_status(Status(StatusCode.ERROR))
+                        raise
                     elapsed = time.perf_counter() - start
                     span.set_attribute("duration_ms", round(elapsed * 1000, 2))
                     return result
@@ -239,14 +254,24 @@ def traced[F: Callable[..., Any]](func: F) -> F:
             # times the thing it observes runs.
             try:
                 from opentelemetry import trace
+                from opentelemetry.trace import Status, StatusCode
 
                 tracer = trace.get_tracer(__name__)
             except Exception:  # pragma: no cover - SDK absent or misconfigured
                 logger.warning("tracing_unavailable", span_name=span_name)
             else:
-                with tracer.start_as_current_span(span_name) as span:
+                # See the async wrapper above for why `record_exception=False` and only
+                # `error_class` (never the exception message) is recorded.
+                with tracer.start_as_current_span(
+                    span_name, record_exception=False
+                ) as span:
                     _set_span_attributes(span, kwargs)
-                    result = func(*args, **kwargs)
+                    try:
+                        result = func(*args, **kwargs)
+                    except Exception as exc:
+                        span.set_attribute("error_class", type(exc).__name__)
+                        span.set_status(Status(StatusCode.ERROR))
+                        raise
                     elapsed = time.perf_counter() - start
                     span.set_attribute("duration_ms", round(elapsed * 1000, 2))
                     return result

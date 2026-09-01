@@ -9542,3 +9542,73 @@ itself a symptom -- the underlying problem (a session running `git stash pop`, h
 committing anyway without finishing it) is a process gap, not a one-off mistake, and is likely to recur
 on this branch until whatever is driving concurrent sessions to stash/pop against a moving trunk instead
 of committing or rebasing cleanly is addressed at the workflow level.
+
+---
+
+## 2026-09-01 — TS-3 closed: sentinel scan over exported trace spans finds and fixes a real INV-6 gap
+
+Logs, tables, events, and persisted SQL were already covered by sentinel scans (OB-8, and
+`tests/test_inv6_value_freedom.py`'s existing tests). Traces were the one axis with no scan at all.
+Before writing one, an exhaustive `grep -rn "set_attribute\|start_as_current_span\|add_event"
+src/aida/` confirmed `observability.py`'s `@traced` decorator is the *only* place in the entire
+`src/aida` tree that ever touches a span -- and it only ever sets three known-safe keys
+(`organization_id`, `principal_id`, `correlation_id`) plus `duration_ms`. By that reasoning, trace
+value-freedom looked structurally guaranteed already, with nothing to find. It wasn't.
+
+### The gap the scan found
+
+`tracer.start_as_current_span(span_name)` was called with OpenTelemetry SDK's own default,
+`record_exception=True`. Reproduced directly before touching any source:
+
+```python
+@traced
+async def traced_call(organization_id=None):
+    raise ValueError(f"duplicate key violates unique constraint: value={SENTINEL!r} already exists")
+```
+
+produced an exported span whose `exception` event carried `exception.message` and
+`exception.stacktrace` containing the sentinel verbatim. Any `@traced` function that lets a source
+system's exception propagate -- a database constraint violation naming the offending row value being
+the obvious real-world case -- would export that value to whatever trace backend is configured, entirely
+bypassing the three-key allowlist `_set_span_attributes` was written to enforce. The allowlist was never
+wrong; automatic exception recording is a separate code path the original implementation did not
+account for.
+
+### The fix
+
+`observability.py`: both `async_wrapper` and `sync_wrapper` now call `start_as_current_span(span_name,
+record_exception=False)`, and wrap the `await func(...)` / `func(...)` call in its own `try/except` that
+records only `span.set_attribute("error_class", type(exc).__name__)` plus a generic `Status(StatusCode.ERROR)`
+before re-raising -- never touching `str(exc)`. This is the exact `error_class`-not-message convention
+`query_gateway.py` already established for the same reason (`execution.error_class = type(exc).__name__`,
+never the exception text). Exception propagation itself is unchanged -- the wrapped function's exception
+still reaches the caller identically; only what gets attached to the span changed.
+
+### Tests (`tests/test_inv6_value_freedom.py`, 2 new)
+
+`test_no_source_values_reach_exported_trace_spans`: drives one real `@traced` call whose return value
+carries a sentinel (proving `@traced` never inspects a wrapped function's return value -- it flowed
+through untouched, checked via a sanity assertion) and one that raises with a sentinel embedded in the
+exception message (the actual gap), against a real `TracerProvider` + `InMemorySpanExporter` attached
+the same way `test_observability.py`'s existing `test_lifespan_wires_tracing_and_metrics_and_a_real_request_produces_a_real_span`
+already does. Scans every exported span's name, attribute values, and event names/attribute values for
+three sentinel strings. `test_the_trace_span_scan_would_notice_a_leak`: the negative control -- opens a
+span with `record_exception` left at the SDK's own default (reproducing exactly what `observability.py`
+now avoids) and requires the scan to find it, so a scan that silently stopped looking at exception
+events would not pass by accident.
+
+### Verification
+
+`pytest tests/test_inv6_value_freedom.py tests/test_observability.py`: 65 passed (including the
+existing `test_lifespan_wires_tracing_and_metrics_and_a_real_request_produces_a_real_span`, confirming
+the real request-dispatch `@traced` call site in `main.py` is unaffected). `ruff check` and `mypy
+--strict` clean on `observability.py`. `AIDA_ENVIRONMENT=development python -c "from aida.main import
+app"` succeeds (379 routes) -- the app's one real `@traced` call site, `_traced_dispatch`, still wires
+cleanly through `lifespan`.
+
+Honest gap: this proves value-freedom for *exceptions raised inside a `@traced`-wrapped function's own
+call*, which is the concrete mechanism this scan found. It does not (and structurally cannot, without a
+live source) prove the ingestion/profiling pipelines' traces are value-free end-to-end -- the same
+narrower-than-the-specced-fixture scope `test_no_source_values_in_control_plane`'s own docstring already
+states for the query path, extended here to traces for the same reason: no PostgreSQL, no source
+database, in this sandbox.
