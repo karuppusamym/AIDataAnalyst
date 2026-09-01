@@ -6,564 +6,124 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from aida.catalog_bulk_actions import ALLOWED_CLASSIFICATIONS, CATALOG_BULK_ACTION_MAX_ITEMS
-from aida.integration_catalog import normalized_transformation_metadata_integrations
 
 
 class ApiModel(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
 
 
-class OrganizationCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
-
-
-class OrganizationRead(OrganizationCreate):
-    id: UUID
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class OrganizationIntegrationPolicyWrite(ApiModel):
-    transformation_metadata_integrations: dict[str, bool] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def normalize_integrations(self) -> "OrganizationIntegrationPolicyWrite":
-        self.transformation_metadata_integrations = normalized_transformation_metadata_integrations(
-            self.transformation_metadata_integrations
-        )
-        return self
-
-
-class OrganizationIntegrationPolicyRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    transformation_metadata_integrations: dict[str, bool]
-    created_at: datetime
-    updated_at: datetime
-
-
-class LineOfBusinessCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    code: str = Field(pattern=r"^[A-Z0-9][A-Z0-9_-]{1,49}$")
-
-
-class LineOfBusinessRead(LineOfBusinessCreate):
-    id: UUID
-    organization_id: UUID
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class DataDomainCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    code: str = Field(pattern=r"^[A-Z0-9][A-Z0-9_-]{1,49}$")
-    parent_domain_id: UUID | None = None
-
-
-class DataDomainRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    line_of_business_id: UUID
-    parent_domain_id: UUID | None
-    name: str
-    code: str
-    is_default: bool
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class CrossBoundaryGrantCreate(ApiModel):
-    target_data_domain_id: UUID
-    edge_kinds: list[str] = Field(default_factory=list, max_length=50)
-    reason: str = Field(min_length=3, max_length=500)
-    expires_at: datetime | None = None
-
-
-class CrossBoundaryGrantRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    source_data_domain_id: UUID
-    target_data_domain_id: UUID
-    edge_kinds: list[str]
-    reason: str
-    status: str
-    requested_by: str
-    approved_by: str | None
-    approved_at: datetime | None
-    expires_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class ProjectCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
-    data_domain_id: UUID | None = Field(
-        default=None,
-        description=(
-            "Governance domain this project belongs to. Omit to fall back to the line of "
-            "business's default (Ungoverned) domain — a project is never blocked on a "
-            "taxonomy existing yet; see ADR-0017."
-        ),
-    )
-
-
-class ProjectRead(ProjectCreate):
-    id: UUID
-    organization_id: UUID
-    line_of_business_id: UUID
-    data_domain_id: UUID
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class DataSourceCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    connector_type: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,49}$")
-    dialect: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,49}$")
-    environment: str = Field(pattern=r"^[A-Z][A-Z0-9_-]{1,29}$")
-    network_zone: str = Field(default="default", min_length=1, max_length=100)
-    credential_reference: str = Field(min_length=6, max_length=500)
-    max_concurrency: int = Field(default=4, ge=1, le=100)
-
-
-class DataSourceRead(DataSourceCreate):
-    id: UUID
-    organization_id: UUID
-    line_of_business_id: UUID
-    data_domain_id: UUID
-    project_id: UUID
-    status: str
-    capabilities: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-
-
-class DataSourceSummaryRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    line_of_business_id: UUID
-    data_domain_id: UUID
-    project_id: UUID
-    name: str
-    connector_type: str
-    dialect: str
-    environment: str
-    network_zone: str
-    status: str
-    max_concurrency: int
-    capabilities: dict[str, Any]
-    created_at: datetime
-    updated_at: datetime
-
-
-class DataSourceUpdate(ApiModel):
-    enabled: bool | None = None
-    max_concurrency: int | None = Field(default=None, ge=1, le=100)
-    network_zone: str | None = Field(default=None, min_length=1, max_length=100)
-
-    @model_validator(mode="after")
-    def require_change(self) -> "DataSourceUpdate":
-        if not self.model_fields_set:
-            raise ValueError("at least one datasource field must be provided")
-        return self
-
-
-# IN-1: a single bulk-onboarding request may register at most this many
-# datasources in one operation -- the tracker's own exit condition ("200
-# sources onboarded in one operation") names the number; the cap is set to
-# exactly that round number rather than pulled from CATALOG_BULK_ACTION_MAX_ITEMS
-# or RELATIONSHIP_CANDIDATE_BULK_DECISION_MAX_ITEMS (both 500), since a batch of
-# 200 *datasource registrations* -- each its own credential-reference,
-# connector-type and per-project-uniqueness check, and its own audit/outbox
-# event -- is deliberately smaller than a batch of catalog tag/decision
-# mutations on existing rows. A request above the cap is rejected outright
-# (422, same as CatalogBulk*Request's `max_length` precedent), never silently
-# truncated to the first 200.
-DATASOURCE_BULK_ONBOARD_MAX_ITEMS = 200
-
-
-class DataSourceBulkOnboardRequest(ApiModel):
-    datasources: list[DataSourceCreate] = Field(
-        min_length=1, max_length=DATASOURCE_BULK_ONBOARD_MAX_ITEMS
-    )
-
-
-class DataSourceBulkOnboardItemRead(ApiModel):
-    index: int
-    name: str
-    status: Literal["SUCCEEDED", "FAILED"]
-    datasource_id: UUID | None = None
-    reason: str | None = None
-
-
-class DataSourceBulkOnboardResultRead(ApiModel):
-    requested_count: int
-    succeeded_count: int
-    failed_count: int
-    results: list[DataSourceBulkOnboardItemRead]
-
-
-class ConnectorCapabilityRead(ApiModel):
-    connector_type: str
-    display_name: str
-    dialect: str
-    implementation_status: str
-    transports: list[str]
-    maturity: str
-    version: str
-    notes: str
-    capabilities: dict[str, bool]
-
-
-class ConnectorCertificationRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    connector_type: str
-    connector_version: str
-    suite_version: str
-    status: str
-    score: int
-    checks: list[dict[str, Any]]
-    initiated_by: str
-    completed_at: datetime
-    created_at: datetime
-    updated_at: datetime
-
-
-MetadataAttribute = str | int | float | bool | None
-
-
-class MetadataColumnEnvelope(ApiModel):
-    name: str = Field(min_length=1, max_length=255)
-    ordinal_position: int = Field(ge=1, le=100_000)
-    physical_type: str = Field(min_length=1, max_length=255)
-    nullable: bool
-    default_expression: str | None = Field(default=None, max_length=4000)
-    source_description: str | None = Field(default=None, max_length=10_000)
-    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
-
-
-class MetadataConstraintEnvelope(ApiModel):
-    name: str = Field(min_length=1, max_length=255)
-    constraint_type: Literal["PRIMARY_KEY", "UNIQUE", "FOREIGN_KEY"]
-    columns: list[str] = Field(min_length=1, max_length=1000)
-    referenced_schema: str | None = Field(default=None, max_length=255)
-    referenced_table: str | None = Field(default=None, max_length=255)
-    referenced_columns: list[str] = Field(default_factory=list, max_length=1000)
-
-
-# --- envelope 1.1 (gap/02 N1) -----------------------------------------------
-#
-# 1.1 is additive: every field below is optional, so a 1.0 payload validates
-# unchanged and a 1.0 producer keeps working forever. What 1.1 buys is that the
-# platform can tell "the producer sent no view definitions" apart from "the
-# producer sent them and we dropped them" -- `ingestion.validate_envelope_version`
-# rejects the second case rather than answering 201 to it.
-
-
-class MetadataViewDefinitionEnvelope(ApiModel):
-    """The text a view is defined by, and how much of it the source would give.
-
-    `definition_sql is None` is a first-class state meaning *unavailable*, not
-    *empty*, and it must be explained: the model refuses a null definition with
-    no reason, and refuses a reason alongside a definition. That is deliberately
-    stricter than a nullable string, because an unexplained NULL here becomes a
-    permanently unexplainable gap in lineage coverage (gap/02 N2).
-    """
-
-    definition_sql: str | None = Field(default=None, max_length=1_000_000)
-    is_materialized: bool = False
-    is_updatable: bool | None = None
-    check_option: str | None = Field(default=None, max_length=30)
-    truncated: bool = False
-    unavailable_reason: str | None = Field(default=None, max_length=500)
-
-    @model_validator(mode="after")
-    def validate_availability(self) -> "MetadataViewDefinitionEnvelope":
-        if self.definition_sql is None and not self.unavailable_reason:
-            raise ValueError(
-                "a view definition without definition_sql must carry an "
-                "unavailable_reason; an unexplained null is indistinguishable "
-                "from an empty definition"
-            )
-        if self.definition_sql is not None and self.unavailable_reason:
-            raise ValueError("unavailable_reason is only meaningful when definition_sql is null")
-        if self.definition_sql is None and self.truncated:
-            raise ValueError("a definition that was never returned cannot be truncated")
-        return self
-
-
-class MetadataRoutineParameterEnvelope(ApiModel):
-    name: str | None = Field(default=None, max_length=255)
-    ordinal_position: int = Field(ge=1, le=10_000)
-    mode: Literal["IN", "OUT", "INOUT", "VARIADIC", "TABLE"] = "IN"
-    physical_type: str = Field(min_length=1, max_length=255)
-    default_expression: str | None = Field(default=None, max_length=4000)
-
-
-class MetadataRoutineEnvelope(ApiModel):
-    """A stored procedure or function, with its body when the source exposes it.
-
-    Same availability rule as a view definition, for the same reason: procedure
-    parsing and procedure-to-tool generation (gap/02 N3, N12) must never mistake
-    "not allowed to read it" for "there is nothing to read".
-    """
-
-    name: str = Field(min_length=1, max_length=255)
-    routine_type: Literal["FUNCTION", "PROCEDURE"]
-    language: str | None = Field(default=None, max_length=50)
-    body_sql: str | None = Field(default=None, max_length=1_000_000)
-    parameters: list[MetadataRoutineParameterEnvelope] = Field(
-        default_factory=list, max_length=1000
-    )
-    return_type: str | None = Field(default=None, max_length=255)
-    is_deterministic: bool | None = None
-    security_mode: Literal["DEFINER", "INVOKER"] | None = None
-    source_description: str | None = Field(default=None, max_length=10_000)
-    truncated: bool = False
-    unavailable_reason: str | None = Field(default=None, max_length=500)
-    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_routine(self) -> "MetadataRoutineEnvelope":
-        ordinals = [parameter.ordinal_position for parameter in self.parameters]
-        if len(ordinals) != len(set(ordinals)):
-            raise ValueError("routine parameter ordinals must be unique within a routine")
-        if self.body_sql is None and not self.unavailable_reason:
-            raise ValueError(
-                "a routine without body_sql must carry an unavailable_reason; an "
-                "unexplained null is indistinguishable from an empty body"
-            )
-        if self.body_sql is not None and self.unavailable_reason:
-            raise ValueError("unavailable_reason is only meaningful when body_sql is null")
-        if self.body_sql is None and self.truncated:
-            raise ValueError("a body that was never returned cannot be truncated")
-        return self
-
-
-class MetadataGrantEnvelope(ApiModel):
-    """One privilege held by one grantee on one source object.
-
-    Evidence about the estate, never authority in this platform: nothing here
-    grants anything and the policy engine does not read it.
-    """
-
-    grantee: str = Field(min_length=1, max_length=255)
-    grantee_type: Literal["USER", "ROLE", "GROUP", "PUBLIC"] = "ROLE"
-    privilege: str = Field(pattern=r"^[A-Z][A-Z0-9_ ]{0,49}$")
-    object_type: Literal["TABLE", "VIEW", "PROCEDURE", "FUNCTION", "SCHEMA", "SEQUENCE"] = "TABLE"
-    object_name: str = Field(min_length=1, max_length=255)
-    schema_name: str | None = Field(default=None, max_length=255)
-    is_grantable: bool = False
-
-
-class MetadataTableEnvelope(ApiModel):
-    name: str = Field(min_length=1, max_length=255)
-    object_type: str = Field(pattern=r"^[A-Z][A-Z0-9_]{1,29}$")
-    source_description: str | None = Field(default=None, max_length=10_000)
-    view_definition: MetadataViewDefinitionEnvelope | None = None
-    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
-    columns: list[MetadataColumnEnvelope] = Field(max_length=10_000)
-    constraints: list[MetadataConstraintEnvelope] = Field(default_factory=list, max_length=10_000)
-
-    @model_validator(mode="after")
-    def validate_table_members(self) -> "MetadataTableEnvelope":
-        column_names = [column.name for column in self.columns]
-        if len(column_names) != len(set(column_names)):
-            raise ValueError("column names must be unique within a table")
-        ordinals = [column.ordinal_position for column in self.columns]
-        if len(ordinals) != len(set(ordinals)):
-            raise ValueError("column ordinals must be unique within a table")
-        available = set(column_names)
-        for constraint in self.constraints:
-            if not set(constraint.columns).issubset(available):
-                raise ValueError(f"constraint {constraint.name} refers to an unknown local column")
-            has_reference = bool(constraint.referenced_schema and constraint.referenced_table)
-            if constraint.constraint_type == "FOREIGN_KEY" and not has_reference:
-                raise ValueError("foreign keys require referenced_schema and referenced_table")
-            if constraint.constraint_type == "FOREIGN_KEY" and (
-                len(constraint.columns) != len(constraint.referenced_columns)
-            ):
-                raise ValueError("foreign-key local and referenced column counts must match")
-        return self
-
-
-class MetadataSchemaEnvelope(ApiModel):
-    name: str = Field(min_length=1, max_length=255)
-    source_description: str | None = Field(default=None, max_length=10_000)
-    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
-    tables: list[MetadataTableEnvelope] = Field(max_length=10_000)
-    routines: list[MetadataRoutineEnvelope] = Field(default_factory=list, max_length=10_000)
-    grants: list[MetadataGrantEnvelope] = Field(default_factory=list, max_length=100_000)
-
-
-class MetadataCatalogEnvelope(ApiModel):
-    name: str = Field(min_length=1, max_length=255)
-    source_description: str | None = Field(default=None, max_length=10_000)
-    attributes: dict[str, MetadataAttribute] = Field(default_factory=dict)
-    schemas: list[MetadataSchemaEnvelope] = Field(max_length=5000)
-
-
-class MetadataIngestionCreate(ApiModel):
-    # 1.1 is the current version; 1.0 stays accepted forever (contract §2.1) and
-    # remains the *default*, so a producer that never sent the field keeps the
-    # behaviour it has today. Opting in to 1.1 is explicit, because 1.1 also
-    # opts a FULL snapshot in to reconciling the new axes -- and a producer that
-    # was silently promoted would retire the estate's view definitions on its
-    # next full scan. Declaring 1.0 while sending 1.1 content is rejected by
-    # `ingestion.validate_envelope_version`, not silently stripped.
-    envelope_version: Literal["1.0", "1.1"] = "1.0"
-    idempotency_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
-    producer: str = Field(min_length=2, max_length=200)
-    transport: Literal["PUSH", "STREAM"] = "PUSH"
-    snapshot_type: Literal["FULL", "INCREMENTAL"] = "FULL"
-    emitted_at: datetime
-    catalogs: list[MetadataCatalogEnvelope] = Field(min_length=1, max_length=100)
-
-    @model_validator(mode="after")
-    def validate_envelope(self) -> "MetadataIngestionCreate":
-        forbidden_fragments = ("sample", "row_value", "password", "secret", "token", "credential")
-        total_tables = 0
-        total_columns = 0
-        total_routines = 0
-        for catalog in self.catalogs:
-            if len({schema.name for schema in catalog.schemas}) != len(catalog.schemas):
-                raise ValueError("schema names must be unique within a catalog")
-            self._validate_attributes(catalog.attributes, forbidden_fragments)
-            for schema in catalog.schemas:
-                if len({table.name for table in schema.tables}) != len(schema.tables):
-                    raise ValueError("table names must be unique within a schema")
-                self._validate_attributes(schema.attributes, forbidden_fragments)
-                total_tables += len(schema.tables)
-                # Envelope 1.1: a routine carries its own attribute bag, so it is
-                # screened like every other object. An unscreened bag would be a
-                # hole in INV-6 the moment 1.1 producers appear.
-                total_routines += len(schema.routines)
-                for routine in schema.routines:
-                    self._validate_attributes(routine.attributes, forbidden_fragments)
-                for table in schema.tables:
-                    self._validate_attributes(table.attributes, forbidden_fragments)
-                    for column in table.columns:
-                        self._validate_attributes(column.attributes, forbidden_fragments)
-                    total_columns += len(table.columns)
-        if total_tables > 50_000 or total_columns > 250_000 or total_routines > 50_000:
-            raise ValueError("envelope exceeds the synchronous ingestion safety boundary")
-        return self
-
-    @staticmethod
-    def _validate_attributes(
-        attributes: dict[str, MetadataAttribute], forbidden_fragments: tuple[str, ...]
-    ) -> None:
-        if len(attributes) > 50:
-            raise ValueError("metadata attributes are limited to 50 entries per object")
-        for key, value in attributes.items():
-            normalized = key.lower()
-            if any(fragment in normalized for fragment in forbidden_fragments):
-                raise ValueError(
-                    f"attribute key is not permitted by the value-free contract: {key}"
-                )
-            if len(key) > 100 or (isinstance(value, str) and len(value) > 2000):
-                raise ValueError("metadata attribute key or value exceeds its size boundary")
-
-
-class MetadataIngestionRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    analysis_run_id: UUID | None
-    idempotency_key: str
-    envelope_version: str
-    producer: str
-    transport: str
-    snapshot_type: str
-    payload_fingerprint: str
-    status: str
-    object_counts: dict[str, Any]
-    change_counts: dict[str, Any]
-    submitted_by: str
-    error_class: str | None
-    error_message: str | None
-    completed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class MetadataIngestionBatchCreate(ApiModel):
-    envelope_version: Literal["1.0", "1.1"] = "1.0"
-    batch_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
-    producer: str = Field(min_length=2, max_length=200)
-    snapshot_type: Literal["FULL", "INCREMENTAL"] = "INCREMENTAL"
-    expected_chunks: int = Field(ge=1, le=1000)
-
-
-class MetadataIngestionChunkCreate(ApiModel):
-    chunk_number: int = Field(ge=1, le=1000)
-    chunk_key: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
-    emitted_at: datetime
-    catalogs: list[MetadataCatalogEnvelope] = Field(min_length=1, max_length=100)
-
-    @model_validator(mode="after")
-    def validate_chunk_contract(self) -> "MetadataIngestionChunkCreate":
-        if self.emitted_at.tzinfo is None:
-            raise ValueError("emitted_at must include a timezone")
-        MetadataIngestionCreate(
-            idempotency_key=self.chunk_key,
-            producer="batch-chunk-validator",
-            transport="PUSH",
-            snapshot_type="INCREMENTAL",
-            emitted_at=self.emitted_at,
-            catalogs=self.catalogs,
-        )
-        return self
-
-
-class MetadataIngestionBatchRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    analysis_run_id: UUID | None
-    batch_key: str
-    envelope_version: str
-    producer: str
-    snapshot_type: str
-    expected_chunks: int
-    received_chunks: int
-    processed_chunks: int
-    status: str
-    temporal_workflow_id: str | None
-    object_counts: dict[str, Any]
-    change_counts: dict[str, Any]
-    submitted_by: str
-    finalized_at: datetime | None
-    completed_at: datetime | None
-    error_class: str | None
-    error_message: str | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class MetadataIngestionChunkRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    datasource_id: UUID
-    batch_id: UUID
-    chunk_number: int
-    chunk_key: str
-    emitted_at: datetime
-    payload_fingerprint: str
-    object_counts: dict[str, Any]
-    change_counts: dict[str, Any]
-    status: str
-    processed_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.identity_tenancy.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import OrganizationCreate` (etc.) caller keeps working
+# unchanged. This import must come after `ApiModel` is defined above: the
+# moved module imports `ApiModel` back from this file, so `aida.schemas`
+# must already have it bound in its namespace before that circular import
+# resolves -- see the docstring in `atlas.modules.identity_tenancy.schemas`.
+from atlas.modules.identity_tenancy.schemas import (  # noqa: E402, I001
+    BusinessAssignmentCreate as BusinessAssignmentCreate,
+    BusinessAssignmentRead as BusinessAssignmentRead,
+    BusinessNodeCreate as BusinessNodeCreate,
+    BusinessNodeRead as BusinessNodeRead,
+    BusinessNodeRollupRead as BusinessNodeRollupRead,
+    ClassificationDecisionRead as ClassificationDecisionRead,
+    CrossBoundaryGrantCreate as CrossBoundaryGrantCreate,
+    CrossBoundaryGrantRead as CrossBoundaryGrantRead,
+    DataDomainCreate as DataDomainCreate,
+    DataDomainRead as DataDomainRead,
+    EntitlementReportRead as EntitlementReportRead,
+    GenerateEntitlementReportRequest as GenerateEntitlementReportRequest,
+    LineOfBusinessCreate as LineOfBusinessCreate,
+    LineOfBusinessRead as LineOfBusinessRead,
+    OrganizationCreate as OrganizationCreate,
+    OrganizationIntegrationPolicyRead as OrganizationIntegrationPolicyRead,
+    OrganizationIntegrationPolicyWrite as OrganizationIntegrationPolicyWrite,
+    OrganizationRead as OrganizationRead,
+    ProjectCreate as ProjectCreate,
+    ProjectRead as ProjectRead,
+    SourceBindingCreate as SourceBindingCreate,
+    SourceBindingDecision as SourceBindingDecision,
+    SourceBindingRead as SourceBindingRead,
+    SourceEntitlementRead as SourceEntitlementRead,
+    WorkspaceCreate as WorkspaceCreate,
+    WorkspaceEntitlementRead as WorkspaceEntitlementRead,
+    WorkspaceMembershipCreate as WorkspaceMembershipCreate,
+    WorkspaceMembershipRead as WorkspaceMembershipRead,
+    WorkspaceRead as WorkspaceRead,
+)
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.connectivity.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import DataSourceCreate` (etc.) caller keeps working
+# unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.connectivity.schemas import (  # noqa: E402, I001
+    DATASOURCE_BULK_ONBOARD_MAX_ITEMS as DATASOURCE_BULK_ONBOARD_MAX_ITEMS,
+    ConnectorCapabilityRead as ConnectorCapabilityRead,
+    ConnectorCertificationRead as ConnectorCertificationRead,
+    DataSourceBulkOnboardItemRead as DataSourceBulkOnboardItemRead,
+    DataSourceBulkOnboardRequest as DataSourceBulkOnboardRequest,
+    DataSourceBulkOnboardResultRead as DataSourceBulkOnboardResultRead,
+    DataSourceCreate as DataSourceCreate,
+    DataSourceRead as DataSourceRead,
+    DataSourceSummaryRead as DataSourceSummaryRead,
+    DataSourceUpdate as DataSourceUpdate,
+)
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.ingestion.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import MetadataIngestionCreate` (etc.) caller keeps
+# working unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.ingestion.schemas import (  # noqa: E402, I001
+    MetadataAttribute as MetadataAttribute,
+    MetadataCatalogEnvelope as MetadataCatalogEnvelope,
+    MetadataColumnEnvelope as MetadataColumnEnvelope,
+    MetadataConstraintEnvelope as MetadataConstraintEnvelope,
+    MetadataGrantEnvelope as MetadataGrantEnvelope,
+    MetadataIngestionBatchCreate as MetadataIngestionBatchCreate,
+    MetadataIngestionBatchRead as MetadataIngestionBatchRead,
+    MetadataIngestionChunkCreate as MetadataIngestionChunkCreate,
+    MetadataIngestionChunkRead as MetadataIngestionChunkRead,
+    MetadataIngestionCreate as MetadataIngestionCreate,
+    MetadataIngestionRead as MetadataIngestionRead,
+    MetadataRoutineEnvelope as MetadataRoutineEnvelope,
+    MetadataRoutineParameterEnvelope as MetadataRoutineParameterEnvelope,
+    MetadataSchemaEnvelope as MetadataSchemaEnvelope,
+    MetadataTableEnvelope as MetadataTableEnvelope,
+    MetadataViewDefinitionEnvelope as MetadataViewDefinitionEnvelope,
+)
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.catalog.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import MetadataTableRead` (etc.) caller keeps working
+# unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.catalog.schemas import (  # noqa: E402, I001
+    MetadataColumnRead as MetadataColumnRead,
+    MetadataConstraintRead as MetadataConstraintRead,
+    MetadataIndexRead as MetadataIndexRead,
+    MetadataPartitionRead as MetadataPartitionRead,
+    MetadataTableRead as MetadataTableRead,
+)
+
+# Re-exported for backward compatibility -- tracker ST-05 moved the classes
+# below to `atlas.modules.observability_audit.schemas` (Phase 3 of
+# `Docs/40-engineering/06-refactor-plan.md`). Every existing
+# `from aida.schemas import AuditEventRead` (etc.) caller keeps working
+# unchanged. Same after-`ApiModel` placement requirement as the
+# identity_tenancy shim above.
+from atlas.modules.observability_audit.schemas import (  # noqa: E402, I001
+    ArchiveStatusRead as ArchiveStatusRead,
+    AuditEventRead as AuditEventRead,
+    OutboxEventRead as OutboxEventRead,
+    SloBudgetRead as SloBudgetRead,
+    SloDefinitionCreate as SloDefinitionCreate,
+    SloDefinitionRead as SloDefinitionRead,
+)
 
 
 class AnalysisRunCreate(ApiModel):
@@ -659,20 +219,6 @@ class AnalysisTaskRead(ApiModel):
     updated_at: datetime
 
 
-class AuditEventRead(ApiModel):
-    id: int
-    organization_id: UUID | None
-    principal_id: str
-    principal_type: str
-    action: str
-    resource_type: str
-    resource_id: str | None
-    outcome: str
-    correlation_id: str
-    source_ip: str | None
-    details: dict[str, Any]
-    occurred_at: datetime
-
 
 class FleetSummaryRead(ApiModel):
     organization_id: UUID
@@ -683,31 +229,6 @@ class FleetSummaryRead(ApiModel):
     pending_outbox_events: int
     dead_letter_outbox_events: int
     generated_at: datetime
-
-
-class OutboxEventRead(ApiModel):
-    id: UUID
-    organization_id: UUID | None
-    aggregate_type: str
-    aggregate_id: str
-    event_type: str
-    status: str
-    attempt_count: int
-    next_attempt_at: datetime
-    last_error: str | None
-    occurred_at: datetime
-    published_at: datetime | None
-
-
-class MetadataColumnRead(ApiModel):
-    id: UUID
-    name: str
-    ordinal_position: int
-    physical_type: str
-    nullable: bool
-    classification: str
-    classification_source: str
-    status: str
 
 
 class ClassificationEvidenceRead(ApiModel):
@@ -743,49 +264,6 @@ class ClassificationFeedIngestResponse(ApiModel):
     matched: int
     changed: int
     unmatched: list[str]
-
-
-class MetadataConstraintRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    constraint_type: str
-    columns: list[str]
-    referenced_table_id: UUID | None
-    referenced_columns: list[str]
-    status: str
-
-
-class MetadataIndexRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    index_type: str
-    columns: list[str]
-    is_unique: bool
-    is_primary: bool
-    status: str
-
-
-class MetadataPartitionRead(ApiModel):
-    id: UUID
-    table_id: UUID
-    name: str
-    partition_type: str
-    ordinal_position: int
-    key_columns: list[str]
-    high_value: str | None
-    status: str
-
-
-class MetadataTableRead(ApiModel):
-    id: UUID
-    datasource_id: UUID
-    schema_id: UUID
-    name: str
-    object_type: str
-    status: str
-    fingerprint: str
 
 
 class ColumnProfileRead(ApiModel):
@@ -3253,152 +2731,33 @@ class CatalogRowRead(ApiModel):
     updated_at: datetime
 
 
-# --- ADR-0018: three-axis tenancy -------------------------------------------
+class EvidenceItemRead(ApiModel):
+    """UX-13: one claim in an asset's evidence pane.
+
+    Every fact composed onto `AssetEvidenceRead` -- an ownership assignment,
+    an open incident, a consumption event, an AI decision -- is one of these,
+    carrying its own `source` string (the module and record the claim was
+    read from) so nothing in the pane is asserted without a traceable origin.
+    """
+
+    # BUSINESS_MEANING | OWNERSHIP | CERTIFICATION | DATA_QUALITY | CONSUMPTION | AI_DECISION
+    category: str
+    claim: str
+    source: str
+    occurred_at: datetime | None = None
 
 
-class WorkspaceCreate(ApiModel):
-    name: str = Field(min_length=2, max_length=200)
-    slug: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,99}$")
-    purpose: str = Field(default="", max_length=1000)
-    isolation_boundary_id: UUID | None = None
-    monthly_cost_ceiling: int | None = Field(default=None, ge=0)
+class AssetEvidenceRead(ApiModel):
+    """UX-13: `GET /v1/metadata/tables/{id}/evidence` -- composes business
+    meaning, ownership/certification (GL-2/GL-5), data quality, consumption
+    lineage (CX-4) and AI decision lineage including refusals (LN-3) for one
+    table. See `aida.asset_evidence` for how each `items` entry is sourced.
+    """
 
-
-class WorkspaceRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    isolation_boundary_id: UUID | None
-    name: str
-    slug: str
-    purpose: str
-    status: str
-    monthly_cost_ceiling: int | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class WorkspaceMembershipCreate(ApiModel):
-    principal_id: str = Field(min_length=1, max_length=255)
-    principal_kind: Literal["HUMAN", "AGENT", "SERVICE"] = "HUMAN"
-    role: Literal["viewer", "analyst", "steward", "reviewer", "workspace_owner"]
-    expires_at: datetime | None = None
-
-
-class WorkspaceMembershipRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    workspace_id: UUID
-    principal_id: str
-    principal_kind: str
-    role: str
-    granted_by: str
-    expires_at: datetime | None
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class SourceBindingCreate(ApiModel):
-    datasource_id: UUID
-    purpose: str = Field(min_length=3, max_length=500)
-    schema_scope: list[str] = Field(default_factory=list, max_length=200)
-    permitted_classifications: list[str] = Field(default_factory=list, max_length=50)
-    masking_profile: str = Field(default="DEFAULT", max_length=50)
-    max_query_cost: int | None = Field(default=None, ge=0)
-
-
-class SourceBindingRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    workspace_id: UUID
-    datasource_id: UUID
-    schema_scope: list[str]
-    permitted_classifications: list[str]
-    masking_profile: str
-    purpose: str
-    max_query_cost: int | None
-    status: str
-    requested_by: str
-    approved_by: str | None
-    approved_at: datetime | None
-    expires_at: datetime | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class SourceBindingDecision(ApiModel):
-    decision: Literal["APPROVE", "REJECT"]
-    valid_for_days: int = Field(default=365, ge=1, le=1095)
-    rationale: str = Field(default="", max_length=1000)
-
-
-class BusinessNodeCreate(ApiModel):
-    kind: Literal["LOB", "SUB_LOB", "DOMAIN", "SUB_DOMAIN", "CONCEPT"]
-    name: str = Field(min_length=2, max_length=200)
-    code: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{1,79}$")
-    parent_id: UUID | None = None
-    description: str = Field(default="", max_length=2000)
-    owner_principal: str | None = Field(default=None, max_length=255)
-
-
-class BusinessNodeRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    parent_id: UUID | None
-    kind: str
-    name: str
-    code: str
-    description: str
-    owner_principal: str | None
-    origin: str
-    effective_from: datetime
-    effective_to: datetime | None
-    status: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class BusinessAssignmentCreate(ApiModel):
-    business_node_id: UUID
-    target_type: Literal[
-        "PROJECT",
-        "WORKSPACE",
-        "DATASOURCE",
-        "TABLE",
-        "COLUMN",
-        "VIEW",
-        "METRIC",
-        "GLOSSARY_TERM",
-        "DATA_PRODUCT",
-        "KNOWLEDGE_PAGE",
-    ]
-    target_id: str = Field(min_length=1, max_length=120)
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-
-
-class BusinessAssignmentRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    business_node_id: UUID
-    target_type: str
-    target_id: str
-    assignment_kind: str
-    confidence: float | None
-    assigned_by: str
-    confirmed_by: str | None
-    effective_from: datetime
-    effective_to: datetime | None
-    status: str
-
-
-class BusinessNodeRollupRead(ApiModel):
-    business_node_id: UUID
-    descendant_node_count: int
-    assigned_by_target_type: dict[str, int]
-    as_of: datetime
-    # When the materialised roll-up was last computed. `None` means it has never been
-    # built and the counts were computed live on this request.
-    computed_at: datetime | None = None
+    table_id: UUID
+    table_name: str
+    generated_at: datetime
+    items: list[EvidenceItemRead]
 
 
 class AccessPolicyRead(ApiModel):
@@ -3644,51 +3003,6 @@ class TrustScoreRead(ApiModel):
     factors: list[TrustFactorRead]
 
 
-# --- OB-1 through OB-4: Observability ----------------------------------------
-
-
-class SloDefinitionCreate(ApiModel):
-    slo_key: str = Field(pattern=r"^[a-z][a-z0-9_-]{1,99}$")
-    name: str = Field(min_length=3, max_length=200)
-    target: float = Field(ge=0.0, le=100.0)
-    window_days: int = Field(ge=1, le=365)
-    threshold: float = Field(ge=0.0, le=100.0)
-
-
-class SloDefinitionRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    window_days: int
-    threshold: float
-    status: str
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class SloBudgetRead(ApiModel):
-    slo_id: UUID
-    slo_key: str
-    name: str
-    target: float
-    current_value: float | None
-    budget_remaining: float | None
-    window_days: int
-    status: str
-
-
-class ArchiveStatusRead(ApiModel):
-    total_archives: int
-    total_events_archived: int
-    latest_archive_id: str | None
-    latest_checksum: str | None
-    legal_hold_count: int
-    status: str
-
-
 # --- OB-6: cost / showback aggregation, per line of business -----------------
 
 
@@ -3725,63 +3039,6 @@ class CostShowbackRead(ApiModel):
     cost_basis: str
     rows: list[LobCostRowRead]
     totals: CostShowbackTotalsRead
-
-
-# --- OB-7: access review / self-service entitlement reporting ---------------
-
-
-class WorkspaceEntitlementRead(ApiModel):
-    workspace_id: UUID
-    workspace_name: str
-    workspace_slug: str
-    role: str
-    granted_by: str
-    expires_at: datetime | None
-
-
-class SourceEntitlementRead(ApiModel):
-    workspace_id: UUID
-    datasource_id: UUID
-    datasource_name: str
-    line_of_business_code: str | None
-    line_of_business_name: str | None
-    schema_scope: list[str]
-    permitted_classifications: list[str]
-    masking_profile: str
-    purpose: str
-    expires_at: datetime | None
-
-
-class ClassificationDecisionRead(ApiModel):
-    classification: str
-    decision: str
-    reasons: list[str]
-    contributing_policy_ids: list[str]
-
-
-class GenerateEntitlementReportRequest(ApiModel):
-    # Omit to generate a self-service report for the caller's own identity.
-    # Set to pull a report for a different principal -- requires an elevated
-    # role and is always audited as generated "on behalf of" that principal.
-    principal_id: str | None = Field(default=None, min_length=1, max_length=255)
-    principal_type: str = Field(default="USER", max_length=30)
-
-
-class EntitlementReportRead(ApiModel):
-    id: UUID
-    organization_id: UUID
-    subject_principal_id: str
-    subject_principal_type: str
-    is_self_service: bool
-    requested_by: str
-    workspace_memberships: list[WorkspaceEntitlementRead]
-    source_entitlements: list[SourceEntitlementRead]
-    abac_classification_decisions: list[ClassificationDecisionRead]
-    abac_note: str
-    checksum: str
-    generated_at: datetime
-    created_at: datetime
-    updated_at: datetime
 
 
 # ---------------------------------------------------------------------------

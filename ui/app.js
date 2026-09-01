@@ -1,4 +1,4 @@
-const { state, $, $$, setHtml, esc, when, human, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource, loadControlCenter } = window.AtlasUI;
+const { state, $, $$, setHtml, esc, when, human, statusClass, badge, empty, table, selectOptions, asNumberOrNull, preserveSelect, populateProjectSources, api, fetchAll, renderTable, integrationFlags, dbtEnabled, transformationMetadataSurfaceEnabled, renderTransformationOverview, renderDbtDisabledState, renderIntegrationPolicy, applyIntegrationPolicyVisibility, loadIntegrationPolicy, renderDbtProjects, renderOpenLineageHistory, renderDbtImports, renderDbtArtifact, loadDbtArtifact, selectDbtProject, loadDbtProjects, loadOpenLineage, showDbtResource, loadControlCenter } = window.AtlasUI;
 
 let knowledgeGraphEngine = null;
 
@@ -62,14 +62,16 @@ async function loadOrganizationData() {
   }
   ["sources-table","runs-table","governance-table","audit-table","recent-runs","evaluation-table","model-routes-table"].forEach(id => setHtml(id, '<div class="loading">Loading governed records</div>'));
   await loadHierarchy();
-  const [fleet, runs, reviews, runtime, evaluations] = await Promise.all([
+  const [fleet, fleetHealth, runs, reviews, runtime, evaluations] = await Promise.all([
     api(`/v1/organizations/${state.organizationId}/fleet-summary`),
+    fetchAll(`/v1/organizations/${state.organizationId}/fleet-health`),
     fetchAll(`/v1/organizations/${state.organizationId}/analysis-runs`),
     fetchAll("/v1/governance/reviews?status=PENDING"),
     api("/v1/ai/runtime-status"),
     fetchAll(`/v1/organizations/${state.organizationId}/agent-evaluations`)
   ]);
   Object.assign(state, {fleet, runs, reviews, runtime, evaluations});
+  state.fleetHealth = new Map(fleetHealth.map(item => [item.datasource_id, item]));
   await loadIntegrationPolicy();
   state.audit = [];
   renderCore();
@@ -149,9 +151,16 @@ function renderRuns(target, limit) {
   renderTable(target, ["Source / run","Status","Mode","Inventory","Created / changed / retired","Started","Action"], rows, "No analysis runs match this view");
 }
 
+function healthCell(sourceId) {
+  const health = state.fleetHealth?.get(sourceId);
+  if (!health) return `<span class="status neutral">Unscored</span>`;
+  const reasons = health.factors.map(f => `${f.name}: ${f.reason}`).join(" | ");
+  return `<span class="status ${statusClass(health.status)}" title="${esc(reasons)}">${esc(human(health.status))} (${health.score})</span>`;
+}
+
 function renderSources() {
-  const rows = state.sources.map(source => `<tr><td><span class="primary-cell">${esc(source.name)}</span><span class="secondary-cell">${esc(source.projectName)} / ${esc(source.lobName)}</span></td><td>${badge(source.status)}</td><td>${esc(source.connector_type)} / ${esc(source.dialect)}</td><td>${esc(source.environment)}</td><td>${esc(source.network_zone)}</td><td>${source.max_concurrency}</td><td><button class="row-action" data-test-source="${source.id}">Test</button><button class="row-action" data-scan="${source.id}">Scan now</button><button class="row-action ${source.status === "DISABLED" ? "" : "danger"}" data-toggle="${source.id}" data-enabled="${source.status === "DISABLED"}">${source.status === "DISABLED" ? "Enable" : "Disable"}</button></td></tr>`);
-  renderTable("sources-table", ["Source","Status","Connector","Environment","Network zone","Concurrency","Actions"], rows, "No sources are registered");
+  const rows = state.sources.map(source => `<tr><td><span class="primary-cell">${esc(source.name)}</span><span class="secondary-cell">${esc(source.projectName)} / ${esc(source.lobName)}</span></td><td>${badge(source.status)}</td><td>${healthCell(source.id)}</td><td>${esc(source.connector_type)} / ${esc(source.dialect)}</td><td>${esc(source.environment)}</td><td>${esc(source.network_zone)}</td><td>${source.max_concurrency}</td><td><button class="row-action" data-test-source="${source.id}">Test</button><button class="row-action" data-scan="${source.id}">Scan now</button><button class="row-action ${source.status === "DISABLED" ? "" : "danger"}" data-toggle="${source.id}" data-enabled="${source.status === "DISABLED"}">${source.status === "DISABLED" ? "Enable" : "Disable"}</button></td></tr>`);
+  renderTable("sources-table", ["Source","Status","Health","Connector","Environment","Network zone","Concurrency","Actions"], rows, "No sources are registered");
 }
 
 async function loadEnterpriseIngestion() {

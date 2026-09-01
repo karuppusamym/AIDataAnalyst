@@ -49,7 +49,13 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/aida", "src/atlas"]
+# TL-5: `sdk/aida_tool_sdk` is the public Tool SDK -- a separate top-level
+# package from `aida`/`atlas` (third-party developers only need it, not the
+# rest of the platform), colocated here the same way `src/atlas` already is,
+# since there is no established "public SDK as its own distribution"
+# precedent yet in this repo (CN-6, the sibling public-connector-SDK tracker
+# row, is itself still TODO).
+packages = ["src/aida", "src/atlas", "sdk/aida_tool_sdk"]
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
@@ -111,6 +117,13 @@ ignore_missing_imports = true
 root_packages = ["aida", "atlas"]
 
 [[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`): `aida.models`
+# and `aida.schemas` are added to `allowed_importers` below because they are the
+# sanctioned backward-compat re-export shims for the classes just moved out of them
+# into `atlas.modules.identity_tenancy.{models,schemas}` -- the same pattern
+# `aida.db` already uses for `atlas.platform.db` (Phase 1, ST-04). Nothing else may
+# import these two private files; only the shim files that exist expressly to keep
+# every existing `from aida.models import Organization` (etc.) caller unchanged.
 name = "identity_tenancy module privacy"
 type = "protected"
 protected_modules = [
@@ -131,6 +144,122 @@ allowed_importers = [
   "atlas.modules.identity_tenancy.router",
   "atlas.modules.identity_tenancy.workers",
   "atlas.modules.identity_tenancy.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), connectivity's
+# turn. Same shape and same rationale as the `identity_tenancy module privacy` contract
+# above -- this module was scaffolded (`scripts/generate_module.py connectivity`) and
+# populated with real content in the same pass, so its privacy contract is added here
+# rather than trailing behind as a later, separate PR.
+name = "connectivity module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.connectivity.service",
+  "atlas.modules.connectivity.repository",
+  "atlas.modules.connectivity.models",
+  "atlas.modules.connectivity.schemas",
+  "atlas.modules.connectivity.router",
+  "atlas.modules.connectivity.workers",
+]
+allowed_importers = [
+  "atlas.modules.connectivity.api",
+  "atlas.modules.connectivity.contracts",
+  "atlas.modules.connectivity.service",
+  "atlas.modules.connectivity.repository",
+  "atlas.modules.connectivity.models",
+  "atlas.modules.connectivity.schemas",
+  "atlas.modules.connectivity.router",
+  "atlas.modules.connectivity.workers",
+  "atlas.modules.connectivity.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), ingestion's
+# turn. Same shape and rationale as the two module-privacy contracts above.
+name = "ingestion module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.ingestion.service",
+  "atlas.modules.ingestion.repository",
+  "atlas.modules.ingestion.models",
+  "atlas.modules.ingestion.schemas",
+  "atlas.modules.ingestion.router",
+  "atlas.modules.ingestion.workers",
+]
+allowed_importers = [
+  "atlas.modules.ingestion.api",
+  "atlas.modules.ingestion.contracts",
+  "atlas.modules.ingestion.service",
+  "atlas.modules.ingestion.repository",
+  "atlas.modules.ingestion.models",
+  "atlas.modules.ingestion.schemas",
+  "atlas.modules.ingestion.router",
+  "atlas.modules.ingestion.workers",
+  "atlas.modules.ingestion.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), catalog's turn
+# -- the plan's own "Risk: medium" module ("many inbound callers"). Same shape and
+# rationale as the module-privacy contracts above; the shim-at-the-old-path technique
+# is this contract's actual mitigation for that risk, not a separate step.
+name = "catalog module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.catalog.service",
+  "atlas.modules.catalog.repository",
+  "atlas.modules.catalog.models",
+  "atlas.modules.catalog.schemas",
+  "atlas.modules.catalog.router",
+  "atlas.modules.catalog.workers",
+]
+allowed_importers = [
+  "atlas.modules.catalog.api",
+  "atlas.modules.catalog.contracts",
+  "atlas.modules.catalog.service",
+  "atlas.modules.catalog.repository",
+  "atlas.modules.catalog.models",
+  "atlas.modules.catalog.schemas",
+  "atlas.modules.catalog.router",
+  "atlas.modules.catalog.workers",
+  "atlas.modules.catalog.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
+# tracker ST-05 (Phase 3 of `Docs/40-engineering/06-refactor-plan.md`), observability_audit's
+# turn -- the fifth and last of the five Phase 3 leaf modules. Same shape and rationale as
+# the module-privacy contracts above.
+name = "observability_audit module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.observability_audit.service",
+  "atlas.modules.observability_audit.repository",
+  "atlas.modules.observability_audit.models",
+  "atlas.modules.observability_audit.schemas",
+  "atlas.modules.observability_audit.router",
+  "atlas.modules.observability_audit.workers",
+]
+allowed_importers = [
+  "atlas.modules.observability_audit.api",
+  "atlas.modules.observability_audit.contracts",
+  "atlas.modules.observability_audit.service",
+  "atlas.modules.observability_audit.repository",
+  "atlas.modules.observability_audit.models",
+  "atlas.modules.observability_audit.schemas",
+  "atlas.modules.observability_audit.router",
+  "atlas.modules.observability_audit.workers",
+  "atlas.modules.observability_audit.tests",
+  "aida.models",
+  "aida.schemas",
 ]
 
 [[tool.importlinter.contracts]]

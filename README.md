@@ -15,6 +15,16 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    docker compose up --build -d
    ```
 
+   For local UI/API editing with automatic pickup, use the development overlay:
+
+   ```powershell
+   docker compose -f compose.yaml -f compose.dev.yaml up --build -d
+   ```
+
+   The complete portal remains at `http://localhost:3000` and reflects `ui/`
+   changes after refresh. The React rebuild is at `http://localhost:5174` with
+   hot-module reload; API changes under `src/` reload automatically.
+
 3. Open:
 
    - API documentation: <http://localhost:8000/docs>
@@ -75,7 +85,7 @@ Current state is tracked honestly in the [status matrix](Docs/60-delivery/04-sta
 
 ```powershell
 python -m pip install -e ".[dev]"
-alembic upgrade head
+alembic upgrade heads
 pytest
 ruff check .
 mypy src

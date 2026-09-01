@@ -112,6 +112,161 @@ def resolve_canonical_table_id(
 
 
 # --------------------------------------------------------------------------
+# AT-15 -- per-signal confidence decomposition for RelationshipCandidate
+# --------------------------------------------------------------------------
+#
+# ``discover_relationship_candidates``/``discover_cross_source_relationship_candidates``
+# in ``aida.intelligence_api`` used to fold every signal straight into one
+# opaque ``confidence`` float (an if/elif ladder picking 0.90 / 0.75 / 0.65 /
+# 0.55) with no way for a steward to see which signal moved the number --
+# module 06's own concession that a bare confidence number is unreviewable
+# (`Docs/review-2026-08/atlan-context/00-decisions.md` AT-15). This
+# decomposes that same arithmetic into named, budgeted components --
+# mirroring ``aida.connector_health``'s ``HealthFactor`` idiom, where the
+# score never replaces the underlying evidence, it summarizes it -- without
+# changing a single computed confidence value: see
+# ``tests/test_relationship_intelligence.py``'s
+# ``test_score_relationship_candidate_signals_matches_*`` for the proof that
+# every existing tier (0.90 same-source; 0.75/0.65/0.55 cross-source) is
+# reproduced exactly.
+#
+# Exactly two real signals feed every ``RelationshipCandidate`` this
+# platform creates today, both already computed (as booleans folded straight
+# into the if/elif ladder) before this decomposition existed: column-name
+# similarity (an exact, case-insensitive match vs. only a canonical /
+# naming-convention-normalized match -- RL-5) and physical-type
+# compatibility (an exact dialect match vs. only a type-family match --
+# RL-5). A third, always-true structural fact anchors both and carries the
+# base score: the target column is a declared PRIMARY KEY (the discovery
+# loops in ``intelligence_api`` only ever pair a source column against a PK
+# column; there is no candidate this scoring path sees where that signal is
+# absent). Cardinality, existing-FK corroboration and query co-occurrence
+# are NOT signals this scoring path uses -- inventing budget lines for them
+# here would be exactly the fabricated, doesn't-match-the-code breakdown
+# AT-15 warns against, so they are not listed.
+RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION = "relationship-confidence-signals-v1"
+
+#: Base points for the one structural signal every candidate carries: the
+#: target column is a declared PRIMARY KEY. Same-source pairing is the
+#: stronger baseline -- both columns share one catalog's naming and typing
+#: conventions -- so it starts from a higher floor than a cross-datasource
+#: pairing, exactly mirroring the pre-decomposition code's own asymmetry
+#: (same-source: fixed 0.90; cross-source: 0.55-0.75).
+RELATIONSHIP_SIGNAL_BASE_SAME_SOURCE = 0.70
+RELATIONSHIP_SIGNAL_BASE_CROSS_SOURCE = 0.55
+#: Bonus points for each of the two comparison signals landing on their
+#: strongest (literal-exact) tier rather than their weaker
+#: (canonical-name / type-family-only) tier.
+RELATIONSHIP_SIGNAL_NAME_MATCH_BONUS = 0.10
+RELATIONSHIP_SIGNAL_TYPE_MATCH_BONUS = 0.10
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipSignal:
+    """One named, budgeted component of a `RelationshipCandidate.confidence` score.
+
+    Mirrors `aida.connector_health.HealthFactor`: a name a steward can key
+    on, the points it actually contributed, the points it could have
+    contributed, and a human-readable reason -- so the composite confidence
+    number is always traceable back to which signal produced it.
+    """
+
+    name: str
+    score: float
+    maximum: float
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RelationshipCandidateScore:
+    """Composite confidence plus its per-signal breakdown."""
+
+    confidence: float
+    signals: tuple[RelationshipSignal, ...]
+
+    def as_evidence(self) -> dict[str, Any]:
+        """JSON-safe breakdown to merge into `RelationshipCandidate.evidence`.
+
+        Additive only -- callers merge this alongside the existing
+        `column_name_match` / `physical_type_match` / ... evidence keys, so
+        a steward reading `evidence["signals"]` sees named, scored,
+        max-budgeted components that sum to `RelationshipCandidate.confidence`,
+        instead of trusting one opaque number.
+        """
+        return {
+            "confidence_algorithm_version": RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION,
+            "signals": [
+                {
+                    "name": signal.name,
+                    "score": round(signal.score, 10),
+                    "maximum": signal.maximum,
+                    "reason": signal.reason,
+                }
+                for signal in self.signals
+            ],
+        }
+
+
+def score_relationship_candidate_signals(
+    *, same_source: bool, name_match_exact: bool, type_match_exact: bool
+) -> RelationshipCandidateScore:
+    """Decompose one `RelationshipCandidate.confidence` value into its real signals.
+
+    Pure and value-free (ADR-0014): every input is a fact already resolved
+    from names/types/constraints by the caller, never a sampled value.
+
+    Same-source candidates (`discover_relationship_candidates`) only ever
+    reach this with both flags `True` -- that discovery loop requires a
+    literal case-insensitive name match and a literal type match before a
+    candidate is created at all -- so `confidence` is always exactly
+    `RELATIONSHIP_SIGNAL_BASE_SAME_SOURCE + NAME_MATCH_BONUS + TYPE_MATCH_BONUS`
+    == 0.90, matching that function's previous fixed literal exactly.
+    Cross-source candidates (`discover_cross_source_relationship_candidates`)
+    reach here with either flag `False` when only a canonical-name or
+    type-family match was found, reproducing that function's previous
+    0.75 / 0.65 / 0.55 if/elif tiers exactly.
+    """
+    structural_score = (
+        RELATIONSHIP_SIGNAL_BASE_SAME_SOURCE
+        if same_source
+        else RELATIONSHIP_SIGNAL_BASE_CROSS_SOURCE
+    )
+    structural = RelationshipSignal(
+        name="TARGET_IS_PRIMARY_KEY",
+        score=structural_score,
+        maximum=structural_score,
+        reason=(
+            "Source column matches a declared PRIMARY KEY column "
+            + ("in the same datasource." if same_source else "in a different datasource.")
+        ),
+    )
+    name_signal = RelationshipSignal(
+        name="COLUMN_NAME_MATCH",
+        score=RELATIONSHIP_SIGNAL_NAME_MATCH_BONUS if name_match_exact else 0.0,
+        maximum=RELATIONSHIP_SIGNAL_NAME_MATCH_BONUS,
+        reason=(
+            "Column names match exactly (case-insensitive)."
+            if name_match_exact
+            else "Column names match only after canonical "
+            "(naming-convention-normalized) comparison, not literally."
+        ),
+    )
+    type_signal = RelationshipSignal(
+        name="PHYSICAL_TYPE_MATCH",
+        score=RELATIONSHIP_SIGNAL_TYPE_MATCH_BONUS if type_match_exact else 0.0,
+        maximum=RELATIONSHIP_SIGNAL_TYPE_MATCH_BONUS,
+        reason=(
+            "Physical types match exactly."
+            if type_match_exact
+            else "Physical types match only by type family; dialect spelling differs."
+        ),
+    )
+    signals = (structural, name_signal, type_signal)
+    confidence = round(sum(signal.score for signal in signals), 10)
+    return RelationshipCandidateScore(confidence=confidence, signals=signals)
+
+
+# --------------------------------------------------------------------------
 # RL-3 -- composite (multi-column) relationship candidates
 # --------------------------------------------------------------------------
 

@@ -42,7 +42,9 @@ from aida.intelligence_api import (
     bulk_decide_relationship_candidates,
     decide_relationship_candidate,
     discover_cross_source_relationship_candidates,
+    discover_relationship_candidates,
     get_relationship_candidate_confidence_calibration,
+    list_relationship_candidates,
 )
 from aida.models import (
     AuditEvent,
@@ -64,12 +66,14 @@ from aida.projectors.graph_projector import (
     UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES,
     _event_datasource_id,
 )
+from aida.relationship_intelligence import RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.schemas import (
     CrossSourceRelationshipCandidateDiscoveryRequest,
     RelationshipCandidateBulkDecisionRequest,
     RelationshipCandidateBulkSelectionFilter,
     RelationshipCandidateDecision,
+    RelationshipCandidateDiscoveryRequest,
 )
 from aida.security_types import SecurityContext
 
@@ -462,6 +466,160 @@ async def test_cross_source_discovery_matches_camel_case_against_snake_case(
     assert created.evidence["column_name_match"] == "CANONICAL"
     assert created.evidence["physical_type_match"] == "FAMILY"
     assert created.confidence < 0.75
+
+
+# ---------------------------------------------------------------------------
+# AT-15: evidence grouped by signal source, exposed through the real
+# review-queue read endpoint (GET /datasources/{id}/relationship-candidates,
+# `list_relationship_candidates` below) -- no new endpoint, no schema change:
+# `RelationshipCandidate.evidence` already carried a free-form JSON dict, and
+# `RelationshipCandidateRead` already returned it verbatim.
+# ---------------------------------------------------------------------------
+
+
+async def test_review_queue_exposes_named_signal_breakdown_for_same_source_candidate(
+    session: AsyncSession,
+) -> None:
+    """A steward reading the real review-queue endpoint sees which named
+    signals produced the proposal and how many points each contributed --
+    not just the bare 0.90 -- and the breakdown sums to that confidence.
+    """
+    org = await _org(session)
+    lob = await _lob(session, org)
+    domain = await _domain(session, org, lob)
+    project = await _project(session, org, lob, domain)
+    datasource = await _datasource(session, org, lob, domain, project, name="core-banking")
+
+    target_table, target_column = await _table_with_column(
+        session, org, datasource, table_name="customers", column_name="customer_id",
+        physical_type="INTEGER",
+    )
+    constraint = MetadataConstraint(
+        organization_id=org.id,
+        datasource_id=datasource.id,
+        table_id=target_table.id,
+        name="pk_customers",
+        constraint_type="PRIMARY_KEY",
+        columns=["customer_id"],
+        fingerprint="f" * 8,
+    )
+    session.add(constraint)
+    await session.flush()
+    _source_table, source_column = await _table_with_column(
+        session, org, datasource, table_name="orders", column_name="customer_id",
+        physical_type="INTEGER",
+    )
+
+    context = _context(org)
+    discovery = await discover_relationship_candidates(
+        datasource.id,
+        RelationshipCandidateDiscoveryRequest(),
+        context=context,
+        session=session,
+        settings=get_settings(),
+    )
+    assert discovery.total == 1
+    assert discovery.items[0].confidence == 0.90
+
+    # The actual review-queue read a steward's UI calls -- reused as-is,
+    # not a new endpoint.
+    page = await list_relationship_candidates(
+        datasource.id,
+        candidate_status=None,
+        limit=100,
+        offset=0,
+        context=context,
+        session=session,
+    )
+    assert page.total == 1
+    reviewed = page.items[0]
+    assert reviewed.source_column_id == source_column.id
+    assert reviewed.target_column_id == target_column.id
+    assert reviewed.confidence == 0.90
+
+    assert reviewed.evidence["confidence_algorithm_version"] == (
+        RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION
+    )
+    signals = reviewed.evidence["signals"]
+    signal_names = [signal["name"] for signal in signals]
+    assert signal_names == ["TARGET_IS_PRIMARY_KEY", "COLUMN_NAME_MATCH", "PHYSICAL_TYPE_MATCH"]
+    # Decomposition, not a new number: the named signals sum to exactly the
+    # same confidence the (pre-AT-15) single-float computation produced.
+    assert round(sum(signal["score"] for signal in signals), 10) == reviewed.confidence
+    for signal in signals:
+        assert signal["score"] <= signal["maximum"]
+        assert signal["reason"]
+
+
+async def test_review_queue_exposes_weaker_signal_breakdown_for_cross_source_candidate(
+    session: AsyncSession,
+) -> None:
+    """The weaker cross-source tier (canonical name match only, family-only
+    type match) is also visible per-signal through the same read endpoint,
+    on the datasource that owns the FK-shaped (source) side of the pair.
+    """
+    org = await _org(session)
+    lob = await _lob(session, org)
+    domain = await _domain(session, org, lob)
+    project = await _project(session, org, lob, domain)
+    ds_pk = await _datasource(session, org, lob, domain, project, name="oracle-core")
+    ds_fk = await _datasource(session, org, lob, domain, project, name="bq-analytics")
+
+    pk_table, pk_column = await _table_with_column(
+        session, org, ds_pk, table_name="customers", column_name="customerId",
+        physical_type="NUMBER(38,0)",
+    )
+    constraint = MetadataConstraint(
+        organization_id=org.id,
+        datasource_id=ds_pk.id,
+        table_id=pk_table.id,
+        name="pk_customers",
+        constraint_type="PRIMARY_KEY",
+        columns=["customerId"],
+        fingerprint="f" * 8,
+    )
+    session.add(constraint)
+    await session.flush()
+    _fk_table, fk_column = await _table_with_column(
+        session, org, ds_fk, table_name="orders", column_name="customer_id",
+        physical_type="INT64",
+    )
+
+    context = _context(org)
+    discovery = await discover_cross_source_relationship_candidates(
+        domain.id,
+        CrossSourceRelationshipCandidateDiscoveryRequest(),
+        context=context,
+        session=session,
+        settings=get_settings(),
+    )
+    assert discovery.total == 1
+    assert discovery.items[0].confidence == 0.55  # neither name nor type is a literal match
+
+    # `list_relationship_candidates` reads by the source-owning datasource --
+    # the FK side (RelationshipCandidate.datasource_id), same as the
+    # same-source case above.
+    page = await list_relationship_candidates(
+        ds_fk.id,
+        candidate_status=None,
+        limit=100,
+        offset=0,
+        context=context,
+        session=session,
+    )
+    assert page.total == 1
+    reviewed = page.items[0]
+    assert reviewed.source_column_id == fk_column.id
+    assert reviewed.target_column_id == pk_column.id
+    assert reviewed.confidence == 0.55
+
+    signals = {signal["name"]: signal for signal in reviewed.evidence["signals"]}
+    assert signals["TARGET_IS_PRIMARY_KEY"]["score"] == 0.55
+    assert signals["COLUMN_NAME_MATCH"]["score"] == 0.0
+    assert signals["PHYSICAL_TYPE_MATCH"]["score"] == 0.0
+    assert "canonical" in signals["COLUMN_NAME_MATCH"]["reason"].lower()
+    assert "family" in signals["PHYSICAL_TYPE_MATCH"]["reason"].lower()
+    assert round(sum(signal["score"] for signal in signals.values()), 10) == reviewed.confidence
 
 
 # ---------------------------------------------------------------------------

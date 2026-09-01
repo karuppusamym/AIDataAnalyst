@@ -9,11 +9,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.authorization_gate import AuthorizationDenied, gate
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -21,7 +22,11 @@ from aida.domain_service import check_cross_boundary_grant
 from aida.events import record_audit, record_outbox
 from aida.identity_merge import merge_table_identity
 from aida.identity_resolution import IdentityMatch, score_cross_source_match
-from aida.knowledge_graph import GraphDirection, GraphLink, expand_frontier
+from aida.knowledge_graph import (
+    GraphDirection,
+    GraphLink,
+    expand_cross_source_frontier,
+)
 from aida.models import (
     AgentRun,
     CanonicalTableMapping,
@@ -52,6 +57,7 @@ from aida.relationship_intelligence import (
     ColumnMeta,
     generate_composite_relationship_candidates,
     resolve_canonical_table_id,
+    score_relationship_candidate_signals,
 )
 from aida.relationship_naming import canonical_column_name, physical_type_family
 from aida.schemas import (
@@ -430,7 +436,22 @@ async def get_knowledge_graph_neighborhood(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> KnowledgeGraphRead:
-    """Expand a bounded, value-free table neighborhood from one authorized node."""
+    """Expand a bounded, value-free table neighborhood from one authorized node.
+
+    KG-2: traversal is not confined to `datasource_id` -- a `RelationshipCandidate`
+    whose `datasource_id`/`target_datasource_id` differ (ADR-0017 phase 5) lets the
+    frontier cross into another datasource of the same organization. Every datasource
+    the traversal newly touches beyond the seed is checked twice before its tables can
+    join the response: `check_cross_boundary_grant` (an ACTIVE grant must let the
+    seed's data_domain see into the other one, when they differ -- the same governance
+    primitive `build_domain_unified_lineage_graph_payload` already enforces for the
+    Unified Lineage Explorer) and `authorization_gate.gate` with `READ_METADATA` on
+    that specific datasource (the caller's own RBAC, mirroring `list_tables_composed`
+    in api.py). A datasource that fails either check is dropped exactly as if the
+    candidate row leading to it did not exist -- no truncation reason, no field, no
+    distinguishable signal names it, matching `AuthorizationDenied`'s INV-6 contract
+    of carrying no resource detail.
+    """
 
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
@@ -452,6 +473,15 @@ async def get_knowledge_graph_neighborhood(
     node_depths: dict[UUID, int] = {focus.id: 0}
     truncation_reasons: set[str] = set()
     encountered_links: dict[str, GraphLink] = {}
+
+    # KG-2: the seed datasource is already authorized by the role check plus
+    # `enforce_organization` above (unchanged from before this row) -- everything
+    # else in these three dicts is *additional* state for crossing further.
+    seed_domain_id = datasource.data_domain_id
+    touched_datasource_ids: set[UUID] = {datasource.id}
+    datasource_allowed: dict[UUID, bool] = {datasource.id: True}
+    datasources_by_id: dict[UUID, DataSource] = {datasource.id: datasource}
+    node_datasource_id: dict[UUID, UUID] = {focus.id: datasource.id}
 
     for current_depth in range(1, depth + 1):
         if not frontier or len(visited) >= node_limit or len(encountered_links) >= edge_limit:
@@ -484,7 +514,7 @@ async def get_knowledge_graph_neighborhood(
             await session.scalars(
                 select(MetadataConstraint)
                 .where(
-                    MetadataConstraint.datasource_id == datasource.id,
+                    MetadataConstraint.datasource_id.in_(touched_datasource_ids),
                     MetadataConstraint.status == "ACTIVE",
                     MetadataConstraint.constraint_type == "FOREIGN_KEY",
                     MetadataConstraint.referenced_table_id.is_not(None),
@@ -494,8 +524,12 @@ async def get_knowledge_graph_neighborhood(
                 .limit(probe_limit)
             )
         ).all()
+        # Same-source (or already-crossed-and-authorized-on-both-ends) candidates --
+        # both `datasource_id` and `target_datasource_id` already sit in
+        # `touched_datasource_ids`, so no new authorization decision is needed here.
         candidate_filters = [
-            RelationshipCandidate.datasource_id == datasource.id,
+            RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
+            RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
             candidate_frontier,
         ]
         if suggestion_status != "ALL":
@@ -508,8 +542,113 @@ async def get_knowledge_graph_neighborhood(
                 .limit(probe_limit)
             )
         ).all()
-        if len(constraints) == probe_limit or len(candidates) == probe_limit:
+
+        # KG-2: candidates that would cross into a datasource not yet touched --
+        # probed separately because whether one may join `links` at all depends on
+        # a per-datasource policy decision below, not on row-level fields alone.
+        boundary_filters = [
+            RelationshipCandidate.organization_id == datasource.organization_id,
+            or_(
+                and_(
+                    RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
+                    RelationshipCandidate.target_datasource_id.notin_(touched_datasource_ids),
+                ),
+                and_(
+                    RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
+                    RelationshipCandidate.datasource_id.notin_(touched_datasource_ids),
+                ),
+            ),
+            candidate_frontier,
+        ]
+        if suggestion_status != "ALL":
+            boundary_filters.append(RelationshipCandidate.status == suggestion_status)
+        boundary_candidates = (
+            await session.scalars(
+                select(RelationshipCandidate)
+                .where(*boundary_filters)
+                .order_by(RelationshipCandidate.confidence.desc(), RelationshipCandidate.id)
+                .limit(probe_limit)
+            )
+        ).all()
+
+        if (
+            len(constraints) == probe_limit
+            or len(candidates) == probe_limit
+            or len(boundary_candidates) == probe_limit
+        ):
             truncation_reasons.add("EDGE_SCAN_LIMIT")
+
+        # Resolve authorization for every datasource `boundary_candidates` would
+        # newly cross into. One `gate()` (plus `check_cross_boundary_grant` when the
+        # data_domain also differs) per newly-discovered datasource, cached in
+        # `datasource_allowed` for the rest of this request -- not one per candidate
+        # row, mirroring the per-distinct-datasource `gate()` cost in
+        # `list_tables_composed` (api.py).
+        newly_seen_datasource_ids = {
+            other_id
+            for candidate in boundary_candidates
+            for other_id in (candidate.datasource_id, candidate.target_datasource_id)
+            if other_id not in touched_datasource_ids and other_id not in datasource_allowed
+        }
+        if newly_seen_datasource_ids:
+            loaded_datasources = (
+                await session.scalars(
+                    select(DataSource).where(DataSource.id.in_(newly_seen_datasource_ids))
+                )
+            ).all()
+            for other_datasource in loaded_datasources:
+                datasources_by_id[other_datasource.id] = other_datasource
+            for other_id in newly_seen_datasource_ids:
+                resolved_datasource = datasources_by_id.get(other_id)
+                if (
+                    resolved_datasource is None
+                    or resolved_datasource.organization_id != datasource.organization_id
+                ):
+                    # Fails closed: an unresolvable or foreign-org datasource is
+                    # never a valid crossing target (INV-4/INV-5), regardless of
+                    # what a stray candidate row claims.
+                    datasource_allowed[other_id] = False
+                    continue
+                allowed = True
+                if resolved_datasource.data_domain_id != seed_domain_id:
+                    allowed = await check_cross_boundary_grant(
+                        session,
+                        datasource.organization_id,
+                        resolved_datasource.data_domain_id,
+                        seed_domain_id,
+                        edge_kind="SUGGESTED_RELATIONSHIP",
+                    )
+                if allowed:
+                    try:
+                        await gate(
+                            session,
+                            context,
+                            settings=settings,
+                            action="READ_METADATA",
+                            resource_type="datasource",
+                            resource_id=str(resolved_datasource.id),
+                            datasource_id=resolved_datasource.id,
+                        )
+                    except AuthorizationDenied:
+                        allowed = False
+                datasource_allowed[other_id] = allowed
+                if allowed:
+                    touched_datasource_ids.add(other_id)
+
+        allowed_boundary_candidates = [
+            candidate
+            for candidate in boundary_candidates
+            if datasource_allowed.get(candidate.datasource_id, False)
+            and datasource_allowed.get(candidate.target_datasource_id, False)
+        ]
+
+        for constraint in constraints:
+            node_datasource_id[constraint.table_id] = constraint.datasource_id
+            if constraint.referenced_table_id is not None:
+                node_datasource_id[constraint.referenced_table_id] = constraint.datasource_id
+        for candidate in (*candidates, *allowed_boundary_candidates):
+            node_datasource_id[candidate.source_table_id] = candidate.datasource_id
+            node_datasource_id[candidate.target_table_id] = candidate.target_datasource_id
 
         links = [
             GraphLink(
@@ -526,7 +665,7 @@ async def get_knowledge_graph_neighborhood(
                 source_node_id=candidate.source_table_id,
                 target_node_id=candidate.target_table_id,
             )
-            for candidate in candidates
+            for candidate in (*candidates, *allowed_boundary_candidates)
         )
         remaining_edge_capacity = edge_limit - len(encountered_links)
         for link in sorted(links, key=lambda item: item.edge_id)[:remaining_edge_capacity]:
@@ -534,13 +673,15 @@ async def get_knowledge_graph_neighborhood(
         if len(links) > remaining_edge_capacity:
             truncation_reasons.add("EDGE_LIMIT")
 
-        expansion = expand_frontier(
+        expansion = expand_cross_source_frontier(
             frontier=frontier,
             visited=visited,
             links=list(encountered_links.values()),
             direction=direction,
             depth=current_depth,
             node_limit=node_limit,
+            node_datasource_id=node_datasource_id,
+            is_datasource_authorized=lambda ds_id: datasource_allowed.get(ds_id, False),
         )
         if expansion.truncated:
             truncation_reasons.add("NODE_LIMIT")
@@ -548,6 +689,10 @@ async def get_knowledge_graph_neighborhood(
         visited.update(frontier)
         node_depths.update(expansion.node_depths)
 
+    # KG-2: `touched_datasource_ids` only ever grew by an already-authorized crossing
+    # above, so this is belt-and-braces re-enforcement, not the primary check -- a
+    # table from a datasource that never cleared `gate()`/`check_cross_boundary_grant`
+    # cannot appear in the response even if something upstream had a bug.
     table_rows = (
         await session.execute(
             select(MetadataTable, MetadataSchema, MetadataCatalog)
@@ -555,7 +700,7 @@ async def get_knowledge_graph_neighborhood(
             .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
             .where(
                 MetadataTable.id.in_(visited),
-                MetadataTable.datasource_id == datasource.id,
+                MetadataTable.datasource_id.in_(touched_datasource_ids),
                 MetadataTable.status == "ACTIVE",
             )
         )
@@ -583,7 +728,7 @@ async def get_knowledge_graph_neighborhood(
         await session.scalars(
             select(MetadataConstraint)
             .where(
-                MetadataConstraint.datasource_id == datasource.id,
+                MetadataConstraint.datasource_id.in_(touched_datasource_ids),
                 MetadataConstraint.status == "ACTIVE",
                 MetadataConstraint.constraint_type == "FOREIGN_KEY",
                 MetadataConstraint.table_id.in_(active_table_ids),
@@ -593,8 +738,9 @@ async def get_knowledge_graph_neighborhood(
             .limit(edge_limit + 1)
         )
     ).all()
-    final_candidate_filters = [
-        RelationshipCandidate.datasource_id == datasource.id,
+    final_candidate_filters: list[ColumnElement[bool]] = [
+        RelationshipCandidate.datasource_id.in_(touched_datasource_ids),
+        RelationshipCandidate.target_datasource_id.in_(touched_datasource_ids),
         RelationshipCandidate.source_table_id.in_(active_table_ids),
         RelationshipCandidate.target_table_id.in_(active_table_ids),
     ]
@@ -1048,6 +1194,17 @@ async def discover_relationship_candidates(
                 or pair in existing_candidate_pairs
             ):
                 continue
+            # AT-15: same-source discovery only ever reaches here after an exact
+            # case-insensitive name match (columns_by_name lookup, above) and an
+            # exact physical-type match (the `continue` above), so both signals
+            # are always at their strongest tier -- score_relationship_candidate_signals
+            # reproduces the previous fixed confidence=0.90 exactly (see
+            # tests/test_relationship_intelligence.py), now with a named
+            # per-signal breakdown a steward can read from `evidence["signals"]`
+            # instead of trusting the bare 0.90.
+            candidate_score = score_relationship_candidate_signals(
+                same_source=True, name_match_exact=True, type_match_exact=True
+            )
             candidate = RelationshipCandidate(
                 organization_id=datasource.organization_id,
                 datasource_id=datasource.id,
@@ -1057,12 +1214,13 @@ async def discover_relationship_candidates(
                 target_table_id=target.table_id,
                 target_column_id=target.id,
                 detection_rule="EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
-                confidence=0.90,
+                confidence=candidate_score.confidence,
                 evidence={
                     "column_name_match": "EXACT",
                     "physical_type_match": "EXACT",
                     "target_is_primary_key": True,
                     "source_values_inspected": False,
+                    **candidate_score.as_evidence(),
                 },
                 created_by=context.principal_id,
             )
@@ -1302,13 +1460,23 @@ async def discover_cross_source_relationship_candidates(
                     )
                     if name_is_literal_exact and type_is_literal_exact:
                         detection_rule = "EXACT_NAME_TYPE_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.75
                     elif name_is_literal_exact or type_is_literal_exact:
                         detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.65
                     else:
                         detection_rule = "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1"
-                        confidence = 0.55
+                    # AT-15: previously this if/elif ladder assigned confidence
+                    # (0.75 / 0.65 / 0.55) directly with no way for a steward to
+                    # see which of the two signals -- name match, type match --
+                    # earned it. score_relationship_candidate_signals reproduces
+                    # each of those three values exactly (see
+                    # tests/test_relationship_intelligence.py) while also
+                    # returning the named per-signal breakdown stored below in
+                    # `evidence["signals"]`.
+                    candidate_score = score_relationship_candidate_signals(
+                        same_source=False,
+                        name_match_exact=name_is_literal_exact,
+                        type_match_exact=type_is_literal_exact,
+                    )
                     candidate = RelationshipCandidate(
                         organization_id=domain.organization_id,
                         datasource_id=other.id,
@@ -1318,7 +1486,7 @@ async def discover_cross_source_relationship_candidates(
                         target_table_id=target.table_id,
                         target_column_id=target.id,
                         detection_rule=detection_rule,
-                        confidence=confidence,
+                        confidence=candidate_score.confidence,
                         evidence={
                             "column_name_match": "EXACT" if name_is_literal_exact else "CANONICAL",
                             "physical_type_match": (
@@ -1329,6 +1497,7 @@ async def discover_cross_source_relationship_candidates(
                             "source_values_inspected": False,
                             "source_datasource": other.name,
                             "target_datasource": pk_owner.name,
+                            **candidate_score.as_evidence(),
                         },
                         created_by=context.principal_id,
                     )

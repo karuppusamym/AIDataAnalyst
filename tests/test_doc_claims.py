@@ -96,11 +96,15 @@ EXEMPT_BARE_FILENAMES = {
 }
 
 # Extra roots a bare `*.py` filename citation may legitimately live under besides
-# `src/aida/` — this repo also cites test files, test support fixtures, and Alembic
-# migration files by bare filename.
+# `src/aida/` — this repo also cites test files, test support fixtures, Alembic
+# migration files, standalone operational/CI scripts (`openapi_diff.py`,
+# `perf_baseline.py`, `generate_ui_types.py`), and the public tool SDK package
+# (TL-5, `sdk/aida_tool_sdk/`) by bare filename.
 EXTRA_BARE_FILENAME_ROOTS = (
     REPO_ROOT / "tests",
     REPO_ROOT / "migrations" / "versions",
+    REPO_ROOT / "scripts",
+    REPO_ROOT / "sdk",
 )
 
 # `src/...` path prefixes that name the pre-rename target package (`atlas`) used in
@@ -123,6 +127,9 @@ EXEMPT_SRC_PATH_PREFIXES = ("src/atlas",)
 # `connector-version-fixtures` (CN-3) is another CI job name (`.github/workflows/ci.yml`),
 # cited on `02-connectivity.md`'s PostgreSQL status-matrix row, which separately says
 # "Implemented for the current contract" about the adapter itself.
+# `ui-types-diff` and `ui-next` (UX-14) are two more CI job names (`.github/workflows/ci.yml`),
+# cited on the tracker's UX-14 row on a line that also uses the word "contract" (the
+# `--accept-baseline` idiom description), same shape as the entries above.
 EXEMPT_CONTRACT_SLUGS = {
     "lint-imports",
     "import-linter",
@@ -133,6 +140,8 @@ EXEMPT_CONTRACT_SLUGS = {
     "migration-drift",
     "snowflake-connector-python",
     "connector-version-fixtures",
+    "ui-types-diff",
+    "ui-next",
 }
 
 # A bare `test_xxx` mention that is a real, non-test artefact, verified by hand:

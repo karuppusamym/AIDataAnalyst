@@ -146,7 +146,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `glossary.term.approved.v1` / `.rejected.v1` | Governed term-version decision | term_version_id, term_id, version, review_id |
 | `asset.documentation.approved.v1` / `.rejected.v1` | Governed asset documentation decision | documentation_version_id, documentation_id, version, review_id |
 | `glossary.conflict_raised.v1` | Manual or detected conflict persisted | conflict_id, conflict_type, source_refs |
-| `glossary.conflict_resolved.v1` / `.conflict_resolution_rejected.v1` | Governed conflict-resolution decision | conflict_id, review_id, resolution_status |
+| `semantic.metric_conflict_raised.v1` | AT-17: detected metric-formula collision persisted as a `GlossaryConflict` row (`term_id=null`, `conflict_type="METRIC_FORMULA_COLLISION"`) | conflict_id, conflict_type |
+| `glossary.conflict_resolved.v1` / `.conflict_resolution_rejected.v1` | Governed conflict-resolution decision (also used for `semantic.metric_conflict_raised.v1` conflicts -- same `GlossaryConflict` row, same resolution path) | conflict_id, review_id, resolution_status |
 | `glossary.link_proposal_approved.v1` / `.link_proposal_rejected.v1` | Governed inferred-link decision | proposal_id, table_id, term_id, review_id |
 | `ownership.assigned.v1` | Approved bulk/rule ownership applied | operation_id, subject_type, applied_count |
 | `glossary.term_linked_bulk.v1` | Approved bulk term links applied | operation_id, term_id, applied_count |
@@ -284,6 +285,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `graph.rebuild.started` / `.completed` | Rebuild | projection, duration_seconds |
 | `retrieval.index_lagging` | Index lag | index, lag_seconds |
 | `retrieval.reindex_completed` | Reindex done | index, duration_seconds |
+| `knowledge_graph.drift_detected.v1` | KG-7 scheduled reconciliation found Postgres/Neo4j drift for a datasource | datasource_id, source, severity, fingerprint, missing_nodes, orphaned_nodes, missing_edges, orphaned_edges |
+| `knowledge_graph.drift_alert_routed.v1` | Drift finding matched a `NotificationRuleRecord` and was routed through DQ-1's engine | datasource_id, notification_id, rule_id, channel, severity, dedup_key |
+| `knowledge_graph.drift_itsm_payload.v1` | Drift alert routed to an ITSM-channel rule | datasource_id, correlation_id (see `notification_routing.format_itsm_payload`) |
 
 ### Audit — topic `atlas.audit.v1`
 

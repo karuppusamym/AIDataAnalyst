@@ -10,6 +10,7 @@ extracted from SQL, dbt, and OpenLineage.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
@@ -114,6 +115,44 @@ async def get_consumption_by_consumer(
         )
     ).all()
     return list(rows), total
+
+
+async def get_consumption_by_resource_counts(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    resource_type: str,
+    limit: int = 500,
+) -> list[tuple[str, int, datetime]]:
+    """AT-5: the top ``limit`` resources of ``resource_type`` by consumption-read
+    count, aggregated in one grouped query rather than loaded row-by-row.
+
+    Returns ``(resource_id, count, last_consumed_at)`` tuples, count
+    descending. Bounding by ``limit`` (rather than a time window) keeps this
+    a single indexed aggregate query regardless of how much consumption
+    history an organization has accumulated -- the same
+    ``ix_consumption_record_resource`` index `get_consumption_for_resource`
+    already relies on covers ``(organization_id, resource_type, resource_id,
+    consumed_at)``, so grouping by ``resource_id`` within that prefix stays
+    an index-driven aggregation rather than a full-table scan.
+    """
+    rows = (
+        await session.execute(
+            select(
+                ConsumptionRecord.resource_id,
+                func.count().label("consumption_count"),
+                func.max(ConsumptionRecord.consumed_at).label("last_consumed_at"),
+            )
+            .where(
+                ConsumptionRecord.organization_id == organization_id,
+                ConsumptionRecord.resource_type == resource_type,
+            )
+            .group_by(ConsumptionRecord.resource_id)
+            .order_by(func.count().desc())
+            .limit(limit)
+        )
+    ).all()
+    return [(resource_id, count, last_consumed_at) for resource_id, count, last_consumed_at in rows]
 
 
 async def get_consumption_graph(

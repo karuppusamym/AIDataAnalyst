@@ -318,7 +318,14 @@ class DatabricksConnector(SqlExecutor):
         indexes=False,
         partitions=False,
         explain=True,
-        query_history=True,
+        # INV-9 (tracker AT-D3, 2026-09-01). Advertised `True` while nothing in the
+        # platform consumes it -- there is no `get_query_history()` on any connector,
+        # this one included. Advertising a capability we do not implement is the exact
+        # failure this invariant exists to prevent, and under-claiming is the correct
+        # direction to fail. Returns to `True` when AT-12 (query-history mining)
+        # certifies it. Mirrors the same fix already landed for Snowflake's copy of
+        # this flag.
+        query_history=False,
         # PAT-only auth for now (see `_parse_dsn`); no delegated/workload identity path.
         delegated_identity=False,
         approximate_statistics=True,

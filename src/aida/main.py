@@ -19,6 +19,7 @@ from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
 from aida.asset_description_api import router as asset_description_router
+from aida.asset_evidence_api import router as asset_evidence_router
 from aida.bi_api import router as bi_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
@@ -56,6 +57,7 @@ from aida.persona_api import router as persona_router
 from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
+from aida.review_queue_api import router as review_queue_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
 from aida.schemas import HealthResponse
 from aida.search_api import router as search_router
@@ -325,8 +327,10 @@ app.include_router(detokenization_router)
 app.include_router(delegation_router)
 app.include_router(persona_router)
 app.include_router(asset_description_router)
+app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
+app.include_router(review_queue_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

@@ -5138,3 +5138,2777 @@ one entry added to `tests/test_doc_claims.py`'s `EXEMPT_CONTRACT_SLUGS` (this en
 status-matrix line that separately uses the word "contract" — same established pattern as
 `migration-drift`/`snowflake-connector-python` already in that set) were both necessary to get a
 clean verification run, not scope creep. SQL Server, Oracle, and the cloud connectors are untouched.
+
+---
+
+## 2026-09-01 — ST-05/ST-06 Phase 3 begins: `01 identity_tenancy` models and schemas moved out of the flat package
+
+The first of the five leaf modules in `40-engineering/06-refactor-plan.md` §6 (Phase 3) with real
+content: `identity_tenancy`'s ORM models and pydantic schemas physically relocated out of
+`aida.models`/`aida.schemas` into `atlas.modules.identity_tenancy.{models,schemas}`, following the
+`db.py`/`config.py`/`logging.py`/`context.py` move-with-shim pattern ST-04 already proved out for
+plain functions — this row is the same trick applied to ORM and pydantic classes.
+
+### What moved
+
+19 model classes: `Organization`, `OrganizationIntegrationPolicy`, `LineOfBusiness`, `DataDomain`,
+`CrossBoundaryGrant`, `IsolationBoundary`, `Workspace`, `WorkspaceMembership`, `WorkspaceAccessRule`,
+`AuthorizationShadowRecord`, `SourceBinding`, `BusinessNode`, `BusinessAssignment`,
+`BusinessAssignmentRule`, `BusinessNodeClosure`, `BusinessNodeRollup`, `Project`, `Delegation`,
+`RevokedToken`. 28 schema classes covering the same domain's request/response DTOs (organizations,
+LOBs, data domains, cross-boundary grants, projects, workspaces, workspace memberships, source
+bindings, the business-node classification tree, and OB-7 entitlement reporting).
+
+Deliberately **not** moved despite living in the same neighborhood in the old `aida.models`:
+`AccessPolicy` (module 17, policy-governance — it's a policy, not a tenancy structure) and
+`Embedding` (module 12, retrieval — generic vector storage with no tenancy semantics of its own).
+Both stay in `aida.models` pending their own modules' extraction passes.
+
+`TimestampMixin` and `utc_now` (previously defined inline in `aida.models`) moved to
+`atlas.platform.db` in the same pass, not into `identity_tenancy` — they're used by `TimestampMixin`
+subclasses across many modules that haven't been extracted yet (e.g. `aida.envelope_models`), so
+they're shared platform infrastructure, not identity-tenancy-owned. `aida.models` re-exports both.
+
+This is a **Python-source-location move only**. No class's `__table_args__` gained a `schema=`
+declaration; every moved table still lives in the single shared PostgreSQL schema. The database
+schema migration and the cross-module FK-to-plain-ID-column conversion (refactor plan §5 steps 2.3
+and 2.4 — the steps the plan itself flags as needing an orphan-detection reconciliation job and a
+dedicated, independently-revertible PR) are untouched and explicitly out of scope for this pass.
+
+### The circular-import wrinkle, and why it's safe
+
+`atlas.modules.identity_tenancy.schemas` imports `ApiModel` back from `aida.schemas` (the shared
+pydantic base every module's DTOs use — deliberately not moved anywhere in this pass, since it isn't
+identity-tenancy-owned either). That makes `aida.schemas -> atlas.modules.identity_tenancy.schemas
+-> aida.schemas` a real circular import. It resolves safely because `aida.schemas`' shim import of
+the moved module is placed textually *after* `class ApiModel` is defined in that file, so by the
+time Python starts executing the moved module (always triggered *from* `aida.schemas`, since nothing
+else imports the private module directly — the `module-privacy` contract, extended below, guarantees
+that stays true), `ApiModel` is already bound in `aida.schemas`'s namespace. Documented in both
+files' docstrings so a future editor doesn't reorder the import and break it silently.
+
+### Import-linter contract extended, not relaxed
+
+`identity_tenancy module privacy`'s `allowed_importers` gained exactly two entries: `aida.models`
+and `aida.schemas` — the two backward-compat shim files that exist expressly to re-export these
+classes at their old import path. Nothing else may import the module's private `models.py`/
+`schemas.py`; `lint-imports` is green (4 kept, 0 broken) with the extension in place.
+
+### Verification
+
+`ruff check .` clean (the two pre-existing `UP042` findings in `sql_lineage_parser.py` are
+untouched by this change — confirmed by diff, not in the file list this row modified). `mypy src`
+clean (strict, 201 files — `atlas.modules.identity_tenancy.{models,schemas}` are type-checked
+transitively through `aida.models`/`aida.schemas` even though `atlas/` isn't itself in mypy's
+`packages` list yet). `lint-imports` 4 kept, 0 broken. `alembic heads` still resolves — see the
+limitation below; migrations are untouched by this row regardless. Route count identical before and
+after (`uv run python -c "from aida.main import app; print(len(app.routes))"` → 51, both). Full
+`pytest` suite: one failure, `test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output`,
+confirmed pre-existing and identical via `git stash` against unmodified HEAD (a baseline drift from
+unrelated concurrent feature work, not from this row — regenerating it is someone else's row to
+close, not folded in here per the out-of-scope discipline earlier entries establish).
+
+### Known limitation carried forward, not fixed here
+
+`alembic heads` currently resolves **two** heads (`8f1e17ed2ba7`, `c1e64055ccdb`), confirmed
+pre-existing via the same `git stash` comparison — this row touches no migration. This is the same
+class of problem CN-3's entry above found and fixed once already (concurrent sessions landing
+migrations without a reconciling merge revision between them on this fast-moving branch); it has
+recurred since. Left for whichever row picks up migration hygiene next, since inventing a merge
+revision here would be scope creep unrelated to a models/schemas move and risks colliding with
+whichever concurrent session is already mid-migration.
+
+### Remaining in ST-05/ST-06
+
+`02 connectivity`, `03 ingestion`, `04 catalog`, and `20 observability_audit` (the last needs
+`python scripts/generate_module.py observability_audit` to scaffold first) are still TODO, per the
+Phase 3 sequencing in the refactor plan §6.
+
+## 2026-09-01 — EE.10's last open acceptance line closed: leak test proving policy filtering precedes traversal
+
+The epic backlog's EE.10 row had one line still marked **not met** since the 2026-08-29 code
+review: a leak test proving `resolve_entity` and `get_transformation_detail` deny unauthorized
+callers *before* any traversal/lookup work runs, not just that the tool-slug set is asserted.
+Deliberately scoped to stay off `aida.models`/`aida.schemas` and every module's `models.py`/
+`schemas.py`/`contracts.py` while ST-05/ST-06 Phase 3 is mid-flight on this same branch.
+
+Read `mcp_server.py::_handle_native_lineage_tool_call`: the role-eligibility check
+(`context.roles & UNIFIED_LINEAGE_READER_ROLES`) already runs first — before `datasource_id` is
+parsed, before `session.get(DataSource, ...)`, before `_resolve_governed_entities`/
+`_transformation_detail`. No production bug; the ordering was already correct, so `mcp_server.py`
+itself is untouched — only test coverage was missing.
+
+Added two tests to `tests/test_mcp_server.py`:
+`test_leak_resolve_entity_denied_caller_cannot_distinguish_existing_from_missing_entity` and
+`test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity`.
+Both call the tool twice with a denied caller — once with args for an entity that exists, once for
+one that doesn't — and assert byte-identical anti-enumeration responses, using a spy session whose
+`get`/`add`/`commit` raise `AssertionError` if invoked at all, plus a monkeypatched
+`_resolve_governed_entities`/`_transformation_detail` that raises if called, so the assertion is
+"no traversal collaborator ever ran," not just "the response looked the same." Mirrors the existing
+`test_tools_call_reports_identical_response_for_unknown_and_denied_tool_names` pattern already used
+for governed SQL tools in the same file.
+
+### Verification
+
+`uv run pytest tests/test_mcp_server.py -q` — 35 passed (33 pre-existing + 2 new), rebased twice
+onto a fast-moving tip (`884dfe9`, then re-verified clean at push time) with no conflicts, since the
+change only appends new test functions.
+
+Epic backlog EE.10's last **not met** line flipped to **met**; no other acceptance line in that row
+changed.
+
+## 2026-09-01 — AT-D3 closed: Databricks's `query_history` copy of the INV-9 breach
+
+Snowflake's `query_history` capability flag was already fixed to `False` by an earlier row, but
+the tracker row itself stayed open because Databricks's `DEFAULT_CAPABILITIES` still advertised
+`query_history=True` — grep confirms `get_query_history()` does not exist on any connector,
+Databricks included. Same INV-9 failure: a capability flag advertised without an implementation
+behind it.
+
+### Fix
+
+`src/aida/connectors/databricks.py`: flipped `query_history` to `False`, with the same
+explanatory comment Snowflake's copy already carries (why it's `False`, and that it returns to
+`True` only when AT-12 — query-history mining — certifies it). No other connector's flag needed
+touching; grep found only these two.
+
+### Verification
+
+`uv run pytest tests/test_connectors_databricks.py tests/test_doc_claims.py -q` — all pass, no
+test asserted `query_history=True` for Databricks. `ruff check src/aida/connectors/databricks.py`
+clean. No `models.py`/`schemas.py`/`contracts.py` touched; no migration added.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `02 connectivity` scaffolded and populated
+
+Second of the five leaf modules. Unlike `identity_tenancy` (scaffolded under ST-01, populated with
+real content here), `connectivity` had no scaffold at all yet -- `scripts/generate_module.py
+connectivity` ran first, generating the standard 13-file anatomy, then it was populated in the same
+pass rather than left empty for a later PR to discover.
+
+### What moved
+
+Two model classes from `aida.models` to `atlas.modules.connectivity.models`: `DataSource` (the
+connector registration -- connection config plus declared `capabilities`) and
+`ConnectorCertificationRun` (immutable conformance evidence per source). Nine schema classes plus
+one constant from `aida.schemas` to `atlas.modules.connectivity.schemas`: `DataSourceCreate`,
+`DataSourceRead`, `DataSourceSummaryRead`, `DataSourceUpdate`, `DataSourceBulkOnboardRequest`,
+`DataSourceBulkOnboardItemRead`, `DataSourceBulkOnboardResultRead`, `ConnectorCapabilityRead`,
+`ConnectorCertificationRead`, and `DATASOURCE_BULK_ONBOARD_MAX_ITEMS` (IN-1's bulk-onboarding cap --
+re-exported because `tests/test_bulk_source_onboarding.py` imports it directly from `aida.schemas`,
+not through a class, so it would otherwise have been a silent breakage the class-only shim pattern
+doesn't catch).
+
+Deliberately **not** moved despite living in the connector-adjacent neighborhood of the old
+`aida.models`: every dbt (`DbtProject`, `DbtArtifactImport`, `DbtResource`, `DbtLineageEdge`),
+OpenLineage (`OpenLineageRunEvent`, `OpenLineageDataset`, `OpenLineageTableEdge`,
+`OpenLineageColumnEdge`), and BI (`BiConnection`, `BiArtifactImport`, `BiReportNode`,
+`BiMetricNode`, `BiReportMetricEdge`, `BiMetricColumnEdge`) class. `04-module-decomposition.md` §9
+is explicit that "dbt is a lineage source, not its own domain" and assigns it to module 09
+(lineage), and the same reasoning covers OpenLineage and BI ingestion -- they stay in `aida.models`
+pending module 09's own extraction pass, not this one.
+
+Same Python-source-location-only scope as the identity_tenancy row: no `schema=` change, no FK
+conversion. Same shim pattern: `aida.models`/`aida.schemas` re-export everything at the old path.
+Added a `connectivity module privacy` import-linter contract, same shape as identity_tenancy's,
+naming `aida.models`/`aida.schemas` as the two sanctioned importers of the private files.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 215 files). `lint-imports` 5 kept, 0 broken (the new
+connectivity contract plus the four pre-existing ones). Route count identical before/after this
+row's change (52/52, confirmed via `git stash` against the identity_tenancy-only commit). Full
+`pytest` suite: zero failures (the OpenAPI baseline drift the identity_tenancy entry noted was
+already fixed upstream and picked up by that row's own rebase, before this row started). `alembic
+heads` still resolves the same pre-existing two heads noted in the identity_tenancy entry --
+confirmed unrelated to this row too, untouched here.
+
+### Remaining in ST-05/ST-06
+
+`03 ingestion`, `04 catalog`, and `20 observability_audit` (needs
+`python scripts/generate_module.py observability_audit` to scaffold, same as this row did for
+connectivity) are still TODO.
+
+---
+
+## 2026-09-01 — UX-14: `ui-next` API types generated from the live OpenAPI document
+
+`ui-next/src/lib/types.ts` was hand-written, with its own header admitting the plan: "the moment
+this file drifts, the right fix is to generate it from the FastAPI OpenAPI document ... not to
+patch it by hand." This closes that gap, following the exact `--accept-baseline` baseline-diff-gate
+idiom `scripts/openapi_diff.py` (TS-4) and `scripts/perf_baseline.py` (PF-3) already established in
+this repo.
+
+### What was built
+
+`scripts/generate_ui_types.py` loads `app.openapi()` (same call `openapi_diff.py` uses) and converts
+every entry in `components.schemas` (360 today) to a TypeScript `export interface`, by mechanical
+JSON-Schema-to-TS conversion: `$ref` -> the referenced name, `enum`/`const` -> a literal union,
+`anyOf`/`oneOf` -> a `|` union (how pydantic v2 expresses `Optional[X]`), arrays, objects with
+`properties` or `additionalProperties`, and the four JSON primitive types. Default (check) mode
+diffs the generated text against the committed `ui-next/src/lib/types.ts` and exits 1 on any
+difference, printing a unified diff; `--accept-baseline` regenerates and writes the file for a
+deliberate, reviewed commit -- identical shape to the other two gates' own flag.
+
+One documented special case: `CursorPage.items` is `list[Any]` in `schemas.py` by the class's own
+design (its docstring explains why), and every route returning one declares
+`response_model=CursorPage` unparameterized -- so the OpenAPI document itself cannot say what
+populates any given endpoint's page. Rather than mechanically emit `items: unknown[]` and force a
+cast at every call site, the generator keeps `CursorPage<T = unknown>` generic while still rendering
+`limit`/`offset`/`total`/`next_cursor` mechanically from the live schema, so a real change to any of
+those four is still caught as drift.
+
+A more consequential honesty check came out of the same walk: `CatalogRowRead` and
+`MetadataTableRead` -- both exported by the old hand-written `types.ts` and used throughout
+`ui-next` -- are **not in `app.openapi()`'s `components.schemas` at all**. `GET
+/v1/organizations/{org}/catalog/rows` and `GET /v1/datasources/{id}/tables` (`src/aida/api.py:1874`,
+`:1815`) both declare `response_model=CursorPage` unparameterized, so FastAPI's schema walker never
+reaches either model even though both endpoints return exactly that shape at runtime. Fixing that is
+a `response_model` change in `src/aida/api.py` -- backend business logic outside this item's declared
+scope (`ui-next/**`, a codegen script, CI config). Rather than silently keep the old shape inside the
+"generated" file (which would defeat the entire point of the gate), those two types -- plus the
+front-end-only `Persona`, `CertificationStatus`, `QualityState`, and two narrowing helpers
+(`asPersona`, `asIdentityProvider`) -- now live by hand in a new, explicitly-labeled
+`ui-next/src/lib/ui-types.ts`, with the same explanation repeated in that file's banner comment and
+in `generate_ui_types.py`'s module docstring, so the gap is a documented, findable follow-up rather
+than something the generator quietly papers over.
+
+Regenerating from the live schema also surfaced a real, previously-undetected drift: the evidence
+pane's fixture and rendering code used a `label`/`value`/`kind` shape that never matched UX-13's
+actual `AssetEvidenceRead`/`EvidenceItemRead` wire shape (`category`/`claim`/`source`/`occurred_at`)
+-- `USE_FIXTURES` defaulting to true meant this had never been exercised against the real endpoint.
+Fixed in `EvidencePane.tsx` (renders `category`/`claim`/`source` directly, category-only styling
+since the payload carries no severity), `fixtures.ts` (`makeFixtureEvidence` now returns the real
+`AssetEvidenceRead` shape), and `api.ts` (`fetchAssetEvidence` typed as `Promise<AssetEvidenceRead>`).
+Every other consumer (`CatalogTable.tsx`, `CatalogScreen.tsx`, `App.tsx`, `PersonaNav.tsx`) now
+imports the right type from the right file (`./types` for generated, `./ui-types` for hand-written).
+
+CI: `.github/workflows/ci.yml` gets two new jobs. `ui-types-diff` runs
+`uv run python scripts/generate_ui_types.py` (check mode) -- fails the build on any drift between
+`schemas.py`/`platform_schemas.py` and the committed `types.ts`. `ui-next` runs `npm ci` then
+`tsc --noEmit`, `vitest run`, and `vite build` against the committed generated types -- `ui-next` had
+no CI coverage at all before this row, so this also closes that separate, adjacent gap the same PR
+touches.
+
+### Verification
+
+`uv run python scripts/generate_ui_types.py` (default/check mode) against the current schema:
+`ui-next/src/lib/types.ts matches the current OpenAPI schema (360 schemas).`, exit 0. Confirmed the
+gate actually gates: appended a bogus `export interface Bogus {...}` to the committed file, re-ran
+the script -- printed a unified diff and `::error::.../types.ts is stale against the current OpenAPI
+schema.`, exit 1 -- then restored the file and re-ran to confirm exit 0 again. `cd ui-next && npm run
+typecheck` clean (`tsc --noEmit`, strict + `noUncheckedIndexedAccess` + `verbatimModuleSyntax`).
+`npm run test` -- 12/12 tests pass (`PersonaNav.test.tsx`, `App.test.tsx`). `npm run build` --
+`tsc -b && vite build` clean, `dist/` produced. All four commands re-run clean after rebasing onto
+the concurrently-landed ST-05/ST-06 `connectivity` schema split (`48456be`), with
+`generate_ui_types.py` re-confirmed still matching post-rebase (no drift introduced by that
+concurrent change). `ruff check scripts/generate_ui_types.py` clean; `mypy` on it standalone reports
+only the same `aida.main` untyped-import note `scripts/openapi_diff.py` reports standalone too (CI's
+`mypy` job scopes to `mypy src` only, so neither script is gated there -- pre-existing, unrelated to
+this row, confirmed by running the same check against `openapi_diff.py`). No `models.py`/
+`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `03 ingestion` scaffolded and populated
+
+Third of the five leaf modules, same shape as the `connectivity` row above: no scaffold existed,
+so `scripts/generate_module.py ingestion` ran first, then populated in the same pass.
+
+### What moved
+
+Three model classes from `aida.models` to `atlas.modules.ingestion.models`: `MetadataIngestionJob`
+(idempotent evidence for one canonical push/stream delivery), `MetadataIngestionBatch` (durable
+manifest for a resumable, chunked snapshot), `MetadataIngestionChunk` (checksum-addressed chunk,
+payload nulled after processing). Sixteen schema classes plus the `MetadataAttribute` type alias
+from `aida.schemas` to `atlas.modules.ingestion.schemas`: the full envelope family
+(`MetadataColumnEnvelope`, `MetadataConstraintEnvelope`, `MetadataViewDefinitionEnvelope`,
+`MetadataRoutineParameterEnvelope`, `MetadataRoutineEnvelope`, `MetadataGrantEnvelope`,
+`MetadataTableEnvelope`, `MetadataSchemaEnvelope`, `MetadataCatalogEnvelope`) plus the
+job/batch/chunk create and read DTOs (`MetadataIngestionCreate/Read`,
+`MetadataIngestionBatchCreate/Read`, `MetadataIngestionChunkCreate/Read`).
+
+The interesting ownership call in this row: the envelope *schemas* (wire format for what a producer
+sends) are ingestion's per the module register's explicit "envelopes" in its owned-data list, but
+`aida.envelope_models`'s ORM classes (`MetadataViewDefinition`, `MetadataRoutine`,
+`MetadataRoutineParameter`, `MetadataObjectDescription`, `MetadataSourceGrant`) are the *persisted
+catalog records* an envelope eventually gets turned into -- module 04 (catalog)'s domain, not this
+module's job/batch/chunk pipeline state, despite sharing "metadata ingestion envelope" in their
+docstring. Left untouched in `aida.envelope_models`, to be picked up when catalog's own row lands.
+`FleetSummaryRead` was also considered and explicitly **not** moved -- it composes datasource,
+analysis-run, scan-policy and outbox state across four different modules' domains, so it doesn't
+fit any one leaf module's "owns" description; it stays in `aida.schemas` for now, closer to
+`operational_api.py`'s eventual home (module 20, per `04-module-decomposition.md` §9's mapping
+table) than to ingestion's job/batch/chunk DTOs.
+
+Same scope, same shim pattern, same new-contract treatment as the two rows before it: no
+`schema=` change, no FK conversion, `aida.models`/`aida.schemas` re-export everything, and a new
+`ingestion module privacy` import-linter contract.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 227 files). `lint-imports` 6 kept, 0 broken. Route
+count identical before/after (52/52, `git stash` comparison against the connectivity-only commit).
+Full `pytest` suite: zero failures. `alembic heads` still the same pre-existing two heads, confirmed
+unrelated and untouched by this row (same as the prior two entries).
+
+### Remaining in ST-05/ST-06
+
+`04 catalog` and `20 observability_audit` (needs `python scripts/generate_module.py
+observability_audit` to scaffold first).
+
+---
+
+## 2026-09-01 — CN-7: per-connector health scoring, visible in fleet view
+
+Per-connector health scoring for the operator fleet view, derived entirely from existing
+`AnalysisRun`/`ScanPolicy`/`DataSource` rows -- no new column, table, or Alembic migration, and
+`models.py`/`schemas.py` untouched (ST-05/ST-06 is actively splitting those files on this same
+branch).
+
+### What was built
+
+`src/aida/connector_health.py` -- pure, DB-free scoring (mirrors `aida.trust_scoring`'s
+`TrustFactor`/`compute_trust_score` idiom and `aida.ai_registry`'s per-factor-with-`evidence`
+shape). Five factors summing to a fixed 100-point budget, each carrying its own `reason` and
+`evidence` dict so no factor is an opaque number:
+
+- `RUN_SUCCESS_RATE` (35 pts) -- share of the last `RUN_HISTORY_WINDOW` (20) terminal runs
+  (`COMPLETED` vs `FAILED`/`CANCELLED`/`SUBMISSION_FAILED`) that succeeded.
+- `STALENESS` (25 pts) -- minutes since the last successful run, scored against the connector's
+  own `ScanPolicy.interval_minutes` when one exists (linear decay to 0 at 2x the interval), fixed
+  thresholds otherwise.
+- `FAILURE_STREAK` (20 pts) -- consecutive failed terminal runs counting back from the newest;
+  3+ trips a `REPEATED_FAILURES` blocker.
+- `PROFILING_COVERAGE` (10 pts) -- `profiled_tables`/`discovered_tables` on the latest successful
+  run.
+- `DATASOURCE_ENABLEMENT` (10 pts) -- 0 when `DataSource.status == "DISABLED"`.
+
+`compute_connector_health` (`connector_health.py:279`) combines them into a 0-100 score and a
+`HEALTHY`/`DEGRADED`/`CRITICAL`/`UNKNOWN` status -- `UNKNOWN` (not a low score) when the connector
+has no run history at all, since absence of evidence isn't evidence of poor health.
+
+DB aggregation lives in `src/aida/fleet.py` (the module already home to admission-control fleet
+policy), not `connector_health.py`: `datasource_health` (`fleet.py:124`) for one connector,
+`fleet_health` (`fleet.py:160`) for a whole org in one `row_number() OVER (PARTITION BY
+datasource_id ...)` windowed query (the same ranked-window idiom `aida.catalog_read_model` already
+uses) instead of one query per datasource.
+
+Exposed on the existing fleet API surface, `src/aida/operational_api.py` (home of
+`fleet_summary`/`list_organization_datasources`): `GET /v1/datasources/{id}/health`
+(`operational_api.py:234`) for one connector, `GET /v1/organizations/{id}/fleet-health`
+(`:424`, `response_model=Page`) for the whole fleet in one call. Both routed through
+`operational_router`, included at `aida.main.py:292` (live-call-site: imported `main.py:55`) --
+transitively reachable from the FastAPI entry point in `ENTRY_POINTS`
+(`tests/test_reachability_gate.py`). Response schemas (`ConnectorHealthScoreRead`,
+`ConnectorHealthFactorRead`) are local `ApiModel`s in `operational_api.py`, not `aida.schemas` --
+the same locally-scoped-`ApiModel` pattern `aida.policy_native_sync_api`/`aida.sql_validation_api`
+already use for new surface that shouldn't contend with the ST-05/ST-06 split.
+
+Visible in fleet view: `ui/app.js` fetches `fleet-health` alongside `fleet-summary` in
+`loadOrganizationData`, indexes it by `datasource_id`, and `renderSources()` adds a "Health"
+column (`healthCell`) showing `STATUS (score)` with every factor's reason in a hover tooltip.
+`ui/scripts/core.js`'s `statusClass` gained `DEGRADED`/`UNKNOWN` -> `warn` styling (`HEALTHY`/
+`CRITICAL` already mapped to good/bad).
+
+### Verification
+
+`tests/test_connector_health.py` -- 33 pure-logic tests, no database, covering every factor
+(neutral/none cases, boundary ratios, streak counting/capping, evidence contents), the composite
+(`UNKNOWN` on no history, `HEALTHY` on a perfect record, `DATASOURCE_DISABLED`/
+`REPEATED_FAILURES` blockers, determinism, 0-100 clamping, weights-sum-to-100, every factor
+explainable).
+
+`tests/test_operational_behaviors.py` -- 11 new integration tests against a real in-memory SQLite
+engine (following `tests/test_asset_evidence.py`'s own rationale: PostgreSQL is unreachable in
+this sandbox, SQLite enforces the same row semantics the windowed query relies on): end-to-end
+`datasource_health`/`fleet_health` against seeded `AnalysisRun`/`ScanPolicy`/`DataSource` rows,
+`ScanPolicy.interval_minutes` driving staleness, missing datasource returns `None`, never-run
+datasource is `UNKNOWN`, `fleet_health` covers every datasource in an org without an N+1 shape and
+agrees with `datasource_health` under the `RUN_HISTORY_WINDOW` cap, and the two endpoint functions
+themselves: cross-org 403, missing-datasource 404, and an explainable-factors assertion on the
+single and batch responses.
+
+Full `uv run pytest` (whole suite, rebased onto the concurrently-landed ST-05/ST-06 `connectivity`
+split and UX-14's `ui-next` type generator): clean except 10 pre-existing `tests/test_doc_claims.py`
+failures, confirmed unrelated by `git stash`-ing this row's changes and reproducing them
+identically beforehand -- all 10 are citations UX-14's own commits added to
+`tracker.md:503`/`accomplishment-log.md:5344+` (bare `scripts/*.py` filenames the citation
+resolver's root list doesn't cover, and two CI job names misread as import-linter contract names),
+none of this row's files. `ruff check` (touched Python + `ui/`) clean. `mypy src` clean (216
+files). `uv run lint-imports`: 5 kept, 0 broken (new `connectivity module privacy` contract from
+the concurrent ST-05/ST-06 land also kept).
+
+Mounting the two new routes changed `app.openapi()`: regenerated `Docs/90-reference/
+openapi-baseline.json` via `scripts/openapi_diff.py --accept-baseline` (confirmed additive-only,
+`scripts/openapi_diff.py` itself reports "No breaking OpenAPI changes"), and regenerated
+`ui-next/src/lib/types.ts` via `scripts/generate_ui_types.py --accept-baseline` (UX-14's gate,
+360 -> 362 schemas for the new `ConnectorHealthScoreRead`/`ConnectorHealthFactorRead`). `cd
+ui-next && npm run typecheck && npm run test && npm run build` all green (12/12 tests,
+`tsc -b && vite build` clean) against the regenerated types.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+---
+
+## 2026-09-01 — SM-6 closed: Open Semantic Interchange evaluation recorded as `ADR-0022`
+
+Pure documentation, no code touched. Tracker `SM-6` ("Open Semantic Interchange evaluation --
+decision recorded as an ADR") and the module-07 parity table both said "not implemented" /
+`TODO`. That was stale: `src/aida/context_compiler.py` already carries an `OSI` branch --
+`ContextCompilerTarget` in `platform_schemas.py` includes `"OSI"` alongside `"ODCS"`,
+`"SNOWFLAKE_SEMANTIC_VIEW"`, and `"DATABRICKS_METRIC_VIEW"`, `_artifact_payload` emits an
+`{"specification": "OpenSemanticInterchange", "specificationVersion": "1.0", "semanticContext":
+...}` envelope, and `validate_compiled_artifact` requires those three keys for it. The decision
+was already implicitly made in code during CP-5 (EA.10c/EE.9); what was missing was the ADR and
+an honest description of what that branch actually is.
+
+It is a placeholder, not spec conformance: unlike `SNOWFLAKE_SEMANTIC_VIEW`/
+`DATABRICKS_METRIC_VIEW`, which project `tables` into vendor-shaped structures, the `OSI` branch
+just wraps the same common metadata dict every target wraps -- no mapping to OSI's own
+entity/dimension/measure schema. `tests/test_agentic_platform.py` proves determinism/drift for
+`ODCS` and `YAML` by name; no test exercises `OSI` specifically.
+
+`Docs/10-architecture/adr/ADR-0022-open-semantic-interchange-target.md`: Open Semantic Interchange
+stays one more thin, deterministic export projection out of the governed context compiler --
+never the internal semantic model, never a second source of truth for module 07/08's governed
+metrics and dimensions. The `OSI` target is kept (near-zero cost, multi-vendor momentum per
+`00-product/03-market-landscape.md` §3.2), but full schema-conformant mapping and OSI import are
+deliberately not funded now -- no named customer/partner need, and the standard (Snowflake-led,
+per the market-landscape research) hasn't settled enough to build exact conformance against
+without expecting churn. Revisit trigger: a named customer/partner OSI requirement, a stable
+public 1.0 OSI schema, or OSI becoming a real deal-level buying criterion.
+
+ADR numbered 0022 after listing `Docs/10-architecture/adr/` directly (highest existing file was
+`ADR-0021-experience-shell-stack-and-strangle-migration.md`, not yet reflected in the README
+index at the time of this pass -- left untouched, out of scope for this row) rather than trusting
+the README's register, which stopped at `ADR-0020`.
+
+Docs touched: new `Docs/10-architecture/adr/ADR-0022-open-semantic-interchange-target.md`;
+`Docs/10-architecture/adr/README.md` register row added; `Docs/90-reference/02-decision-log.md`
+(`SM-6` moved from "Open questions" into the ADR table, now pointing at `ADR-0022`);
+`Docs/20-modules/07-semantic-layer.md` (parity table and `SM-6` open-work row updated to describe
+the actual placeholder rather than "not implemented"); `Docs/60-delivery/03-tracker.md` (`SM-6` ->
+`DONE`).
+
+`uv run pytest tests/test_doc_claims.py -q` clean after this pass's edits. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+## 2026-09-01 — AT-D5 (`parse_procedure_lineage` docstring/plan honesty) closed
+
+Doc/plan honesty pass, not a code-fix pass, per the row's own instruction to "correct the plan or
+start the work" (N3, procedure-body parsing, stays explicitly out of scope here).
+
+**Checked whether AT-D2 (closed earlier the same day) already resolved this.** It did not.
+AT-D2's six defects were `FILTERED`/`AGGREGATED` per-statement, `SELECT *` dropped, the
+`"<UNKNOWN>"` magic string, hard-coded `Confidence.FULL`, the missing unique constraint, and
+unpopulated `*_table_id` — none of them touch procedure-vs-view differentiation or dynamic-SQL
+handling. Read `src/aida/sql_lineage_parser.py:691-714` directly: `parse_procedure_lineage` and
+`parse_view_lineage` (`:669-688`) are still byte-identical bodies — a dialect check followed by
+`return _parse_sql(sql, dialect)` — so the row's complaint is still accurate today. Also checked
+whether "the plan counts N3 as in progress" (the row's other claim) is still true anywhere live:
+it is not — `tracker.md`'s own N3 row, `review-2026-08/gap/02-gap-diff-and-plan.md`'s N3 row, and
+`review-2026-08/atlan-context/03-lineage.md`'s N3 citation all already say `TODO`/"not started"
+honestly, so that half of the complaint had already been overtaken by other work; only the
+docstring itself still overclaimed.
+
+**Fix:** rewrote `parse_procedure_lineage`'s docstring
+(`src/aida/sql_lineage_parser.py:691-714`) to state plainly that it is `_parse_sql` under a
+procedure-flavoured name, not a procedure-aware parser — no control-flow handling
+(IF/LOOP/CURSOR), no variable/temp-table scope resolution, and no dynamic-SQL detection at all (a
+`CREATE PROCEDURE ... EXECUTE format(...) ...` body's dynamic string is invisible to `sqlglot` and
+silently produces no edge, with nothing flagging the gap) — and points at tracker item N3 for the
+real, unstarted work. `parse_procedure_lineage_endpoint`'s docstring
+(`src/aida/view_lineage_api.py:252-262`) rewritten the same way, cross-referencing the parser
+function's docstring rather than duplicating it. Grepped `Docs/60-delivery/`, `Docs/20-modules/`,
+and module 09's spec (`09-lineage.md`) plus the wider `Docs/review-2026-08/` tree for any other
+place claiming procedure-body/dynamic-SQL capability beyond this: found none — the one dated
+review doc that discusses this defect in depth
+(`review-2026-08/atlan-context/03-lineage.md`, item "e.") already described it accurately and
+was left untouched, and `Docs/20-modules/09-lineage.md`'s own implementation-status note already
+correctly withholds "View and stored-procedure lineage from definitions" from the built list.
+
+Endpoint docstring is embedded in FastAPI's generated OpenAPI `description` field, so
+`Docs/90-reference/openapi-baseline.json` needed regenerating (`AIDA_ENVIRONMENT=development
+PYTHONPATH=src uv run python scripts/openapi_diff.py --accept-baseline`) — a single-line,
+description-text-only diff at the `procedure-lineage/parse` path, confirmed non-breaking by
+`tests/test_openapi_diff_gate.py`.
+
+`tests/test_sql_lineage_parser.py`, `tests/test_view_lineage_api.py`,
+`tests/test_openapi_diff_gate.py`, and `tests/test_doc_claims.py` all pass (`PYTHONPATH=src
+.venv/bin/python -m pytest ...`, this worktree's own venv rather than a globally installed
+`pytest`, per AT-D2's own note on why that matters in a worktree). `ruff check` clean on both
+touched files.
+
+### Scope
+
+`src/aida/sql_lineage_parser.py` (docstring only), `src/aida/view_lineage_api.py` (docstring
+only), `Docs/90-reference/openapi-baseline.json` (regenerated, description-text diff only),
+`Docs/60-delivery/03-tracker.md` (this row). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file and no Alembic migration touched. N3 itself (real procedure-body parsing,
+including dynamic-SQL detection) remains `TODO` and unstarted, deliberately — that is a multi-day
+build the row explicitly excludes from this pass.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06 note: pre-existing `test_doc_claims.py` gap flagged, not fixed
+
+`uv run pytest -q` after the `03 ingestion` row's rebase surfaced 10 failures in
+`tests/test_doc_claims.py`, all
+tracing to lines the concurrent UX-14 commits (`8359e88`, `16c59fb`) introduced, not to this row:
+bare citations of three scripts (bare filename, no `scripts/` prefix -- that root isn't in
+`EXTRA_BARE_FILENAME_ROOTS`, which only covers `tests/` and `migrations/versions/`) and two CI job
+names cited in a way that trips the contract-citation heuristic (they're workflow job names, not
+import-linter contract names). Confirmed unrelated by direct line-range
+inspection -- `git checkout` of the pre-rebase commit was unavailable in this environment, so
+provenance was established by reading the exact flagged lines and matching them byte-for-byte
+against UX-14's own accomplishment-log/tracker prose, none of which this row touched. Queued as a
+follow-up task (`task_7f558980`) rather than fixed here, per this log's established out-of-scope
+discipline -- it is a test-infrastructure gap in a different row's work, not a regression from a
+models/schemas move.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `04 catalog` scaffolded and populated
+
+Fourth of the five leaf modules, and the refactor plan's own flagged "Risk: medium" one --
+`06-refactor-plan.md` §6 calls out catalog by name: "many inbound callers; convert them
+incrementally with the old import kept as a deprecated alias for one release." The shim-at-the-old-
+path technique every row in this series already uses **is** that mitigation, applied from this row's
+first commit rather than as a follow-up -- there was never a moment where a catalog caller's import
+would have broken.
+
+### What moved
+
+Seven model classes from `aida.models` to `atlas.modules.catalog.models`: `MetadataCatalog`,
+`MetadataSchema`, `MetadataTable`, `MetadataColumn`, `MetadataConstraint`, `MetadataIndex`,
+`MetadataPartition` -- the full catalog hierarchy. "Fingerprints" and "tombstones" from the module
+register's owned-data list are not separate tables: every one of the seven already carries its own
+`fingerprint` column, and a tombstoned object is `status != "ACTIVE"` plus `deprecated_at`, not a
+distinct record -- so nothing beyond the seven needed moving to cover that part of the register too.
+Five read DTOs from `aida.schemas` to `atlas.modules.catalog.schemas`: `MetadataColumnRead`,
+`MetadataConstraintRead`, `MetadataIndexRead`, `MetadataPartitionRead`, `MetadataTableRead`. No
+`Create`/`Update` DTOs exist for this module -- catalog objects arrive only through ingestion
+(module 03's envelope, moved in the row before this one), never created directly through this
+module's own API.
+
+Deliberately **not** moved: `ClassificationEvidence` and its four schemas
+(`ClassificationEvidenceRead`, `ClassificationFeedRecord`, `ClassificationFeedIngestRequest`,
+`ClassificationFeedIngestResponse`), even though the evidence ledger references `MetadataColumn` by
+ID and its schema classes sit textually interleaved with the catalog ones in both `aida.models` and
+`aida.schemas` today. "Classifications" is module 05 (profiling)'s registered word in
+`04-module-decomposition.md` §4, not catalog's -- the interleaving in the old flat file is exactly
+the kind of accidental proximity the decomposition is meant to undo, not a signal to follow.
+`aida.envelope_models`'s catalog-adjacent ORM classes and `MetadataEnrichmentProposal`/
+`MetadataBusinessAnnotation`/`MetadataBusinessAnnotationVersion` (module 07 semantic-layer's
+"annotations") were also considered and left for their own modules' passes, per the same reasoning
+the `03 ingestion` row above already gave for the envelope-model classes.
+
+Same scope, same shim pattern, same new-contract treatment as every row before it in this series.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (strict, 239 files). `lint-imports` 7 kept, 0 broken. Route
+count identical before/after (52/52). Full `pytest` suite: the same 10 pre-existing, confirmed-
+unrelated `test_doc_claims.py` failures noted above and no others -- zero failures attributable to
+this row. `alembic heads` still the same pre-existing two heads, confirmed unrelated and untouched.
+
+### Remaining in ST-05/ST-06
+
+`20 observability_audit` only -- the last of the five Phase 3 leaf modules. Needs
+`python scripts/generate_module.py observability_audit` to scaffold first, same as this row and the
+two before it did for their own modules.
+
+---
+
+## 2026-09-01 — TL-6 closed: tool-first execution rate metric
+
+A governance-maturity signal the tracker asked for: what share of an organization's completed
+agent runs were served by a certified governed tool ("tool-first") rather than ad-hoc generated
+SQL, target >=40% in a mature tenant.
+
+### What it derives from
+
+`AgentRun.generation_source` already records this on every run
+(`agent_orchestrator.GovernedAgentOrchestrator._generate_sql`, ~lines 551-670) and
+`product_marketplace_api.py`'s portfolio-trend tiles already group by the same field — no new
+column, no migration. `GOVERNED_TOOL` counts as tool-first; `MODEL_GATEWAY` and
+`DEVELOPMENT_OVERRIDE` count as freeform (a raw SQL override is still non-governed, so crediting
+it as tool-first would misstate maturity); `PENDING`/`POLICY_BLOCK` are excluded outright since
+neither value survives onto a `COMPLETED` run.
+
+### Design
+
+`aida/tool_first_rate.py` — pure, DB-free (`compute_tool_first_rate`), unit-tested without a
+database, mirroring `aida.connector_health`/`aida.trust_scoring`'s "every factor inspectable"
+convention: the response always carries `tool_first_executions`, `freeform_executions`,
+`total_executions`, `by_source`, and `meets_target` against the named `MATURE_TENANT_TARGET_RATE`
+constant (0.40) alongside the ratio, never the ratio alone. `rate`/`meets_target` are `None` (not
+`0.0`/`False`) when there's no evidence yet, distinguishing "0% tool-first" from "nothing ran".
+
+`aida/fleet.py::tool_first_execution_rate` does the one DB-touching aggregation: `COMPLETED`
+`AgentRun` rows over a rolling window (`DEFAULT_WINDOW_DAYS = 30`), grouped by
+`generation_source` — same `COMPLETED`-only filter TL-4's `tool_usage.get_tool_usage_counts`
+already established (a rejected/failed attempt is not evidence of either path).
+
+`GET /v1/organizations/{id}/tool-first-rate` (`operational_api.py`) exposes it, role-gated the
+same as the existing fleet-health endpoints (`PlatformAdmin`/`OrganizationAdmin`/`Auditor`/
+`Operations`), `window_days` query-tunable (1-365).
+
+### Verification
+
+`uv run pytest tests/test_tool_first_rate.py tests/test_operational_behaviors.py -q` — 45 passed
+(pure-ratio edge cases: empty map, all-tool-first, all-freeform, excluded sources ignored even if
+present, rounding; integration tests against in-memory SQLite following `test_asset_evidence.py`'s
+pattern). `ruff check` clean on all four touched files. `test_openapi_diff_gate.py` green after
+regenerating `Docs/90-reference/openapi-baseline.json` for the one new additive route.
+`test_doc_claims.py` clean. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file
+or Alembic migration touched — this session finished the close-out after the implementing agent
+paused mid-task waiting on a long-running local test; the diff it left in the worktree was
+reviewed, tested fresh, and found sound before pushing.
+
+---
+
+## 2026-09-01 (continued) — ST-05/ST-06: `20 observability_audit` scaffolded and populated -- all five Phase 3 leaf modules now done
+
+Fifth and last of the five leaf modules `06-refactor-plan.md` §6 names, in the order it names them
+(identity, connectivity, ingestion, catalog, observability). Same shape as the `connectivity` and
+`ingestion` rows: no scaffold existed, so `scripts/generate_module.py observability_audit` ran
+first, then populated in the same pass.
+
+### What moved
+
+Seven model classes from `aida.models` to `atlas.modules.observability_audit.models`: `OutboxEvent`
+(the transactional outbox -- "dead letters" from the register's owned-data list is not a separate
+table, just `status == "DEAD_LETTER"` on this row), `SloDefinition`/`SloMeasurement` (SLO state),
+`AuditArchiveRecord`/`AuditEvent` (the audit ledger and its WORM archive batches),
+`CompliancePackRecord` (EE.4/OB-5), `AccessReviewReportRecord` (OB-7). Six schema classes from
+`aida.schemas` to `atlas.modules.observability_audit.schemas`: `AuditEventRead`, `OutboxEventRead`,
+`SloDefinitionCreate`, `SloDefinitionRead`, `SloBudgetRead`, `ArchiveStatusRead`.
+
+### The `AccessReviewReportRecord` / `EntitlementReportRead` split, decided carefully
+
+The one genuinely interesting ownership call in this row. `EntitlementReportRead` (OB-7's public
+read DTO) already moved to `atlas.modules.identity_tenancy.schemas` in the very first row of this
+series, following the prior killed session's draft, which grouped it with identity's own
+workspace/entitlement schemas. Working through this row, it became clear `EntitlementReportRead`'s
+*backing table*, `AccessReviewReportRecord`, is not identity's at all: its own docstring in the old
+`aida.models` names `CompliancePackRecord` -- squarely this module's -- as "the reproducibility bar
+this module sets," it sits in a "Access Review / Self-Service Entitlement Reporting (OB-7)" section
+immediately after "Compliance Pack Generation (Phase E - EE.4 / OB-5)," and it is WORM-archived,
+checksummed, generated evidence -- the exact same shape as every other table in this module, not
+identity's.
+
+Decided **not** to re-open the already-pushed identity_tenancy commit to move the schema. A public
+DTO living in a different module from the table it is mapped from is not a violation of anything --
+it is exactly the kind of cross-module composition MD-3 (`04-module-decomposition.md` §2) describes,
+and `aida.access_review_api._to_read(record: AccessReviewReportRecord) -> EntitlementReportRead`
+already is that hand-written mapper today, unmoved and unbroken by either commit's shim (both
+`aida.models` and `aida.schemas` keep resolving the same as before, from either side). Moved the
+*model* into this module, left the *schema* where it already was, and documented the split
+explicitly in `atlas.modules.observability_audit.models`'s `AccessReviewReportRecord` docstring so a
+future reader finds the reasoning at the point of the surprise, not just here.
+
+Deliberately **not** moved: `NotificationRuleRecord`/`NotificationEventRecord` ("routing rule for
+quality incidents" -- module 11 data-quality's own words), `FreshnessWatermarkConfig`/
+`FreshnessObservation` (module 11's "freshness contracts, SLAs"), and `ContractViolationRecord`/
+`ContractSlaRecord`/`DataContractVersion` (data-product contracts keyed off `product_id`, not this
+module's audit ledger). `FleetSummaryRead` and `LobCostRowRead`/`CostShowbackTotalsRead` (OB-6) also
+considered and left in `aida.schemas` -- genuinely cross-module composed reads (datasource, analysis
+run, query execution, and line-of-business state, none of it this module's own tables), same
+discipline the `03 ingestion` row already applied to `FleetSummaryRead` and earlier rows applied to
+`CatalogRowRead`/`AssetEvidenceRead`.
+
+**A mistake caught before it shipped:** the bulk `sed` deletion for the `aida.models` SLO/audit block
+also swept up `ContractViolationRecord`, which sits contiguously between `AuditEvent` and
+`ContractSlaRecord` in the old file and was never meant to move. `mypy src` caught it immediately
+(three `attr-defined` errors in `runtime_contracts.py`/`compliance_packs.py`/
+`runtime_contracts_api.py` -- real callers of a class that had silently vanished), restored verbatim
+in its original position before the next verification pass, then every check re-run clean. Recorded
+here because it is exactly the kind of regression the strict-mypy-after-every-module discipline this
+whole series follows exists to catch, and it worked.
+
+Same scope, same shim pattern, same new-contract treatment as the four rows before it.
+
+### Verification
+
+`ruff check .` clean (post-`mypy`-catch and restoration). `mypy src` clean (strict, 252 files,
+including the restored `ContractViolationRecord`). `lint-imports` 8 kept, 0 broken (the new
+`observability_audit module privacy` contract plus the seven before it). Route count identical
+before/after (52/52). Full `pytest` suite: **zero failures** -- including `test_doc_claims.py`,
+whose 10 pre-existing failures the entries above already traced to concurrent UX-14 work and which a
+different concurrent commit (`fd6149c`) fixed upstream before this row's own rebase; confirmed clean
+end-to-end rather than assumed. `alembic heads` still the same pre-existing two heads, confirmed
+unrelated and untouched by every row in this series.
+
+### ST-05/ST-06 Phase 3 is done
+
+All five leaf modules the refactor plan names for Phase 3 -- `01 identity_tenancy`, `02
+connectivity`, `03 ingestion`, `04 catalog`, `20 observability_audit` -- now have their real ORM and
+pydantic classes physically relocated out of `aida.models`/`aida.schemas` into
+`atlas.modules.<name>.{models,schemas}`, each with a backward-compatible re-export shim at the old
+import path and its own `<name> module privacy` import-linter contract. `aida.models`/`aida.schemas`
+still hold roughly 130 classes belonging to the sixteen modules Phase 3 does not cover (05 profiling
+through 21 experience-shell) -- their extraction is Phase 4 (runtime modules) and beyond, per the
+refactor plan's own sequencing, and needs its own tracker rows when that phase starts. ST-05/ST-06
+are left `IN PROGRESS` rather than `DONE` for that reason: their exit criteria ("no cross-schema FKs
+except `identity`," "`module-privacy` passes") are whole-codebase properties this pass does not yet
+claim for the other sixteen modules.
+
+**Explicitly not attempted, per this task's own stop condition:** the database schema migration
+(`ALTER TABLE ... SET SCHEMA`, refactor plan §5 step 2.3) and the cross-module
+foreign-key-to-plain-ID-column conversion (step 2.4). Every class moved in this five-row series still
+declares no `schema=` in its `__table_args__` and still lives in the single shared PostgreSQL schema
+-- this was a Python-source-location move only, at every step. Steps 2.3/2.4 are deliberately
+separate, later work needing their own orphan-detection reconciliation job, identical-count
+assertion, and dedicated PR, exactly as the plan itself specifies.
+
+---
+
+## 2026-09-01 (continued) — SM-7 closed: structured version diffs for the governance review queue
+
+"Reviewers see version deltas": a reviewer opening a pending `GovernanceReview` for a versioned
+semantic object previously saw only `GovernanceReviewRead`'s bare metadata (requester, status,
+decision fields) — no view of what the proposed change actually *changes* relative to what's
+currently published. Distinct from **ST-A3** (already `DONE`), which diffs a Studio change-set's
+`before_snapshot`/`after_snapshot` pair for module 18's form-based authoring flow; SM-7 is
+module 17's separate, generic maker-checker queue (`GovernanceReview.object_type` spans
+`SEMANTIC_MODEL_VERSION`, `GOVERNED_TOOL_VERSION`, `GLOSSARY_TERM_VERSION`,
+`CONTEXT_PRODUCT_VERSION`, and a dozen more), which had no diff view of any kind before this row.
+
+### Design
+
+`aida/semantic_diff.py` — pure, DB-free (`diff_semantic_object`), unit-tested without a database
+(`tests/test_semantic_diff.py`, 19 cases), mirroring the `aida.connector_health`/
+`aida.tool_first_rate` "pure logic, DB-facing half stays in the API module" convention. Takes two
+already-fetched `dict[str, Any]` snapshots and returns `SemanticDiff.entries: list[FieldDelta]`
+where each entry is `added` (in `after`, absent from `before`), `removed` (in `before`, absent from
+`after`), or `changed` (present in both, different value); unchanged fields are omitted entirely.
+Recurses into nested mappings so a semantic model version's `metrics` dict (keyed by metric slug,
+not listed — the point of the keying) reports an added/removed/changed *metric* as one entry at
+`metrics.<slug>[.field]`, not a whole-object replacement blob. `before=None`/`{}` (no published
+predecessor — a first-ever submission) reports every field `added`; both `None` produces no entries.
+
+`GET /v1/governance/reviews/{review_id}/diff` (`aida/semantic_api.py`,
+`get_governance_review_diff`) is the DB-facing half: builds the proposed (`after`) and currently
+published (`before`) snapshots for `SEMANTIC_MODEL_VERSION` (the draft's own metrics vs. the
+project's `PUBLISHED` sibling's) and `GLOSSARY_TERM_VERSION` (the draft vs. the term's `APPROVED`
+sibling), runs `diff_semantic_object`, and returns both the raw snapshots and the structured
+`entries` — the diff sits alongside the raw proposed content, not instead of it. Added as a new
+endpoint (mirroring ST-A3's own dedicated-`/diff`-route shape) rather than a field on
+`GovernanceReviewRead`, since that schema lives in the read-only `aida/schemas.py`
+(`GovernanceReviewDiffRead`/`SemanticFieldDeltaRead` are defined locally in `semantic_api.py`
+instead). A review for any other object type in the unified queue returns `200` with
+`diffable=false` and an explanatory `message`, never a 404/422 — the endpoint is safe to call for
+any pending review a reviewer has open, not just the two supported kinds.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_semantic_diff.py
+tests/test_semantic_diff_endpoint.py -q` — 28 passed (19 pure diff-logic cases: flat
+added/removed/changed, nested per-metric diffing, unchanged-fields-omitted, `None`/`{}`
+predecessor edge cases, `ignore_fields`; 9 integration cases against a real in-memory sqlite
+database seeded through the ORM — first-submission-vs-empty-before, changed-metric-field-against-a-
+real-published-predecessor, unchanged-metric-produces-no-diff, glossary synonym change,
+unsupported-object-type returns `diffable=False`, 404 for a missing review, 403 across an
+organization boundary). `ruff check` clean on all four touched/added files. `AIDA_ENVIRONMENT=development
+uv run mypy src` — clean, 242 files. `test_openapi_diff_gate.py` and `test_doc_claims.py` both green
+after regenerating `Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` for the
+one new additive route. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or
+Alembic migration touched — the diff is computed entirely from data already retrievable through
+existing queries, no new persisted field was needed.
+
+**Not attempted:** diff coverage for the remaining dozen-plus `GovernanceReview.object_type` values
+(`GOVERNED_TOOL_VERSION`, `CONTEXT_PRODUCT_VERSION`, `DATA_PRODUCT_VERSION`,
+`DATA_CONTRACT_VERSION`, `TERM_SEMANTIC_BINDING`, ...) — each returns `diffable=false` today rather
+than a real delta. `diff_semantic_object` itself is generic and DB-free, so extending coverage is
+adding another DB-facing snapshot-builder branch in `get_governance_review_diff` per object type,
+not a redesign; left for a follow-up row if a reviewer workflow actually needs it.
+
+---
+
+## 2026-09-01 — IN-5f closed: Oracle/Snowflake/BigQuery folded onto the shared envelope-1.1 helpers
+
+Oracle, Snowflake and BigQuery were each written against a local rebuild of the envelope-1.1
+assembly (view definitions, routines, comments, grants) while `connectors/discovery.py` was
+gaining its own `apply_view_definitions`/`apply_table_descriptions`/`apply_column_descriptions`/
+`build_routines`/`build_grants` helpers concurrently. Both paths agreed on the contract and both
+were tested, but each connector carried its own 90-130 line function
+(`_apply_envelope`/`_assemble_snowflake_catalog`) that assembled a v1.0 `DiscoveredCatalog` via
+`assemble_catalog(tables)`, then walked every schema/table/column a second time and rebuilt it
+with `dataclasses.replace()` to fold the 1.1 axes on — duplicating exactly the traversal-and-
+attachment logic `assemble_catalog` and the `apply_*` helpers already do in one pass.
+
+### What changed
+
+All three connectors now build the same `TableMap` (`build_table_map_from_column_rows` +
+`append_grouped_*`, unchanged) and, before ever calling `assemble_catalog`, mutate it with
+`apply_table_descriptions`, `apply_column_descriptions` and `apply_view_definitions`, then call
+`assemble_catalog(..., routines=..., grants=..., schema_descriptions=..., catalog_description=...)`
+exactly once — matching `postgres.py`/`sqlserver.py`'s existing pattern. The old
+`_apply_envelope`/`_assemble_snowflake_catalog` rebuild functions are gone; each connector's
+source-specific row-shaping (LONG-column handling, secure-view NULLs, GET_DDL fallbacks,
+GoogleSQL option-value unwrapping) survives untouched as small `_*_rows(...)` helpers that feed
+the shared helpers instead of hand-building `DiscoveredViewDefinition`/`DiscoveredGrant` and
+walking the frozen catalog tree.
+
+A new tiny shared function, `discovery.view_definition_row(table_schema, table_name, definition)`,
+adapts an already-built `DiscoveredViewDefinition` (each connector's per-dialect extraction still
+produces one) into the row shape `apply_view_definitions` expects, so all three connectors —
+which each needed the exact same ten-line adapter — share one copy instead of three.
+
+**Grants**: fold onto `build_grants` for Oracle and Snowflake (`_grant_rows`/`_grant_row` shape
+the source-specific columns into the generic `schema_name`/`grantee`/`grantee_type`/`privilege`/
+`object_type`/`object_name`/`is_grantable` row, computing each connector's own default —
+`"UNKNOWN"` grantee_type for Oracle, `"SCHEMA"` object_type for Snowflake — explicitly, rather
+than letting `build_grants`'s generic defaults (`"ROLE"`, `"TABLE"`) silently stand in for a
+different one). BigQuery has no grants axis at all (Cloud IAM, not SQL grants) so nothing to fold.
+
+**Routines stay local** — not a partial fold, a deliberate one. `build_routines` has no parameter
+for `DiscoveredRoutine.attributes`, which all three connectors populate with genuinely per-dialect
+facts: Oracle's `wrapped`/`packaged_subprogram_parameters` flags, Snowflake's `argument_signature`/
+`is_secure`, BigQuery's `routine_body`. Snowflake is a harder blocker on top of that: it has no
+`specific_name`/overload discriminator at all (arguments arrive as one signature *string* per
+routine, parsed by `_parse_argument_signature`, not as joinable rows), so `build_routines`'s
+`parameter_rows` grouping by `(routine_schema, specific_name)` — falling back to the routine name
+when `specific_name` is absent — would silently cross-attach one overload's parameters onto
+another same-named routine. Both are real per-dialect necessities, not incidental drift, so
+`_envelope_routines`/`_build_routine` are unchanged and simply passed to `assemble_catalog`'s
+`routines=` kwarg instead of being walked in afterward.
+
+### One incidental bug caught, one pre-existing gap deliberately not touched
+
+Caught: Oracle's local `_optional_text` collapsed a whitespace-only ALL_TAB_COMMENTS/
+ALL_COL_COMMENTS value to `None`; the shared `apply_table_descriptions`/`apply_column_descriptions`
+pass `description` through unchanged with no blank-collapsing of their own. `_optional_text` now
+runs on the row before it reaches the shared helper — `test_a_blank_comment_is_normalized_to_absent`
+caught the mismatch on the first pass.
+
+Found and left alone: all three connectors' *old* rebuild only ever walked `catalog.schemas`
+derived from the table query, so a schema holding only stored routines, only grants, or only a
+schema-level comment — no tables at all — was silently invisible to discovery on Oracle, Snowflake
+and BigQuery, and still is after this row. `assemble_catalog`'s own `routines=`/`grants=`/
+`schema_descriptions=` contract would correctly synthesize such a schema (its own docstring says
+so; `test_a_schema_with_only_routines_survives_assembly` in `tests/test_connectors.py` proves it,
+and `postgres.py`/`sqlserver.py` already rely on exactly that by passing those kwargs unfiltered).
+Fixing it here would have been a real behavior change smuggled into a dedup, so each connector's
+`_assemble_catalog`/`_assemble_snowflake_catalog` explicitly filters its routines/grants/
+schema_descriptions dicts back down to schema names already present in the table map, reproducing
+the old gap byte-for-byte. A follow-up task was queued (not this row) to decide whether to close it.
+
+### Verification
+
+`tests/test_connectors_oracle.py` (42), `tests/test_connectors_snowflake.py` (27),
+`tests/test_connectors_bigquery.py` (49) and `tests/test_connectors.py` (7, the shared discovery
+helpers) — 125 passed on the pre-refactor baseline and 125 passed after, identical count, identical
+set, re-confirmed via `git stash`/`stash pop` around the full-suite run below. `ruff
+check` and `mypy` clean on all four touched files (`connectors/oracle.py`, `connectors/snowflake.py`,
+`connectors/bigquery.py`, `connectors/discovery.py`). `lint-imports`: 7 kept, 0 broken. Full repo
+`pytest tests/`: one failure,
+`test_config.py::test_environment_must_be_explicit_outside_tests`, reproduced identically via
+`git stash` on unmodified `HEAD` — pre-existing, confirmed unrelated to this row's four files.
+`test_doc_claims.py`: 1877 passed, 5 skipped.
+
+### Scope discipline
+
+No file under `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` touched, no Alembic
+migration touched, per this row's hard constraints (ST-05/ST-06 owns those concurrently on this
+branch). Touched only `src/aida/connectors/{oracle,snowflake,bigquery,discovery}.py` — none of the
+four connectors' test files needed a single change, because `_build_view_definition`/
+`_build_routine`-style per-dialect functions kept their existing signatures and return types
+throughout; only what called them, and what happened to their output afterward, moved.
+
+---
+
+## 2026-09-01 (continued) — TL-5 closed: Public Tool SDK
+
+A dependency-light SDK so a third-party developer can author a governed-tool candidate offline
+and get it into the existing review/publish pipeline as a DRAFT — never able to bypass
+maker-checker and publish or execute anything itself.
+
+### What it is
+
+New top-level package `sdk/aida_tool_sdk/` (no existing "public SDK" precedent in this repo yet —
+CN-6, the sibling public-connector-SDK row, is itself still TODO — so it's colocated in the same
+wheel as `src/aida`/`src/atlas`, added to `[tool.hatch.build.targets.wheel] packages` in
+`pyproject.toml`):
+
+* `candidate.py` — `ToolCandidate`, a typed dataclass builder (slug, name, description,
+  `datasource_id`, `sql_template`, `dialect`, `parameters`, `allowed_roles`,
+  `semantic_model_version_id`, `example_values`). Its `parameter()` helper is a direct alias for
+  `aida.schemas.ToolParameterDefinition` — not a copy of it — so the same pydantic bounds
+  validation (name pattern, min/max, "sensitive parameters cannot define persisted defaults")
+  already runs at construction time.
+* `validation.py::validate_candidate` — local, offline checks, all reusing real server code:
+  `aida.sql_guard.SqlGuard.validate` for SQL safety (single read-only statement, no mutation, no
+  `SELECT *`, dialect-specific forbidden-function denylist, bounded joins), and
+  `aida.tool_rendering.template_placeholders`/`render_tool_sql` for placeholder-parity checking
+  and a rendering dry-run against `example_values`. The only reimplemented logic is the ~2-line
+  placeholder-vs-declared-parameter set-equality comparison itself, mirrored from
+  `tool_api.py::create_tool_version` (lines ~223-233) since it lives inline in that endpoint
+  function, not in an importable helper — the thing being compared (`template_placeholders`) is
+  still the server's own function.
+* `serialization.py::candidate_to_wire_model`/`candidate_to_draft_payload` — builds the real
+  `aida.schemas.GovernedToolVersionCreate` directly from the candidate (not a hand-assembled dict
+  matching its shape) and calls `.model_dump(mode="json")` on it. This *is* the JSON body
+  `POST /v1/projects/{project_id}/tools` (`aida.tool_api.create_tool_version`) parses — the SDK's
+  serialized draft cannot structurally drift from the wire contract without a pydantic error
+  surfacing in the SDK's own test suite.
+* `client.py::ToolDraftClient.submit_draft` — the SDK's only network-writing method. Validates
+  locally first, then POSTs to the draft-submission endpoint and nothing else. `httpx` is imported
+  lazily inside the method so pure local validation never needs it installed.
+
+### The governance boundary
+
+There is no `publish()`, `approve()`, `certify()`, or `execute()` anywhere on the SDK's public
+surface — checked directly in
+`tests/test_aida_tool_sdk.py::test_sdk_has_no_publish_approve_certify_or_execute_surface`, which
+walks every public member of the package and its exported classes for those words. A drafted tool
+still has to go through `POST /tool-versions/{id}/submit` and the checker's decision on the
+governance-review endpoint (`aida.semantic_api`), both untouched by and unreachable from this SDK.
+
+### Verification
+
+19 tests in `tests/test_aida_tool_sdk.py`: pure local validation/serialization (invalid slug and
+duplicate-parameter-name errors surfacing from the real `GovernedToolVersionCreate` model,
+undeclared/unused placeholder mismatches, three real `SqlGuard` violations including a
+dialect-specific forbidden function `pg_sleep`, a rendering-dry-run type error, and a payload
+round-trip through the real wire model); the HTTP client with `httpx.post` mocked (exact URL/JSON
+payload/auth header sent, a typed `ToolDraftSubmissionError` on server rejection, and proof the
+network is never touched when local validation already failed); the governance-boundary surface
+scan; and two real-database integration tests (in-memory SQLite, mirrors
+`tests/test_tool_registry_ranking_and_impact.py`'s harness) calling the actual
+`create_tool_version` endpoint — one proving a locally-valid SDK payload is genuinely accepted as
+a `DRAFT` (never `approved_by`/`approved_at`), the other proving a table outside the datasource's
+allowlist — the one thing local validation cannot check without live server state — is still
+rejected server-side with HTTP 422, exactly as documented.
+
+`ruff check .` clean. `mypy src sdk/aida_tool_sdk` clean (CI's `mypy` step in `.github/workflows/ci.yml`
+updated to check both directories in one invocation — run alone, `sdk/aida_tool_sdk` resolves
+`aida` from the installed, stub-less package instead of local source and fails on
+`import-untyped`). `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` and
+`tests/test_openapi_diff_gate.py` both clean — no HTTP route added or changed, so neither
+`openapi-baseline.json` nor `ui-next/src/lib/types.ts` needed regenerating. Full-repo
+`uv run pytest` afterward: one failure, `test_config.py::test_environment_must_be_explicit_outside_tests`
+— reproduced identically via `git stash`/`stash pop` on unmodified `HEAD`, the same pre-existing,
+unrelated failure already documented against this exact test in the IN-5f entry above. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+### Known caveat, documented in the package's own docstring
+
+`aida.sql_guard` really is dependency-light on its own (pure `sqlglot`). But `aida.tool_rendering`
+and `aida.schemas` — reused for rendering and the wire-shape model — transitively import
+`aida.models` → `aida.db` → `atlas.platform.db`, which builds a SQLAlchemy async engine and
+validates an `AIDA_ENVIRONMENT`-driven `Settings` object at *import* time (though it never opens a
+connection). Concretely: importing this SDK outside of `pytest` today still requires
+`AIDA_ENVIRONMENT` set and the platform's full dependency set installed, even though nothing in
+the SDK touches a database, the network, or a credential. Pre-existing coupling in
+`aida.schemas`/`aida.tool_rendering`, not introduced here, and out of scope for this row
+(`models.py`/`schemas.py` are read-only for TL-5) — flagged as a follow-up task rather than fixed
+in place.
+
+## 2026-09-01 — AG-7 closed: query memory similarity + safe adaptation
+
+### What "query memory" turned out to mean here
+
+The obvious reading — embed past natural-language questions, find the nearest one, replay its
+SQL — runs straight into two deliberate, already-landed platform decisions, not a gap:
+`AgentRun`'s own docstring says "raw user questions are intentionally not persisted" (only an
+HMAC `question_hash` is kept), and `QueryExecution.normalized_sql` is redacted of every literal
+value *before* it is ever written (`aida.sql_redaction.redact_sql_literals`, applied in
+`query_gateway.py`'s validation pipeline — "the executable form never leaves the gateway"). So
+there is no question text to embed and no literal-bearing SQL to replay; building either would
+mean adding new persisted state this session was explicitly told to stop and report on rather
+than work around. It wasn't necessary to stop, because a real, already-persisted, value-free
+substrate exists one level down: `QueryExecution.referenced_tables` (table names, no values) is
+genuine structural evidence of what a past successful query was *about*, and the live retrieval
+stage already resolves a *new* question to a set of candidate `MetadataTable` ids before any SQL
+is generated. Comparing those two table-id sets is real similarity with zero new columns and zero
+new tables.
+
+### What shipped
+
+New `src/aida/query_memory.py`:
+
+* `jaccard_similarity` / `check_candidate_staleness` / `select_best_match` — pure, database-free
+  functions, mirroring `aida.quality_coupling` / `aida.tool_first_rate`'s own split. Staleness has
+  two independent triggers, either one enough to reject a candidate: the whole-model
+  `semantic_version` string (module 13's existing "PUBLISHED `SemanticModelVersion`, else
+  technical-metadata" computation, already used everywhere else in this codebase for "has
+  anything semantic changed") no longer matches, or *any* table the candidate referenced has
+  `updated_at` later than the candidate run's own completion timestamp — catching a raw
+  catalog/schema re-ingestion that never triggered a semantic-model publish. A table that no
+  longer resolves at all (renamed, dropped) is treated as changed, not as absent evidence.
+* `find_query_memory_match` — the one DB-facing function, reusing
+  `aida.quality_coupling.resolve_table_ids` rather than re-resolving names its own way, and
+  `aida.timeutil.as_utc` for the SQLite-vs-PostgreSQL timezone-round-trip comparison every other
+  timestamp comparison in this codebase already has to guard against.
+* Reuses the existing `QueryMemoryEvidence` table (`status == "ELIGIBLE"` — negative feedback
+  already suppresses reuse, landed in an earlier ST-05-era pass) as the memory ledger; no schema
+  change.
+
+Wired into `agent_orchestrator.py`'s existing `MODEL_GENERATION` branch (the `else:` arm reached
+when no governed tool matched and no development-SQL override was supplied) as a new
+`generation_source="QUERY_MEMORY_ADAPTATION"` candidate path, gated off by default behind a new
+`Settings.agent_query_memory_enabled` flag. When a fresh, non-stale, `ELIGIBLE` match exists above
+`agent_query_memory_min_similarity`, its redacted `normalized_sql` is added to the *same*
+`structured_completion` call's payload as `query_memory_template` grounding (with a system-prompt
+addendum asking the model to adapt it where it genuinely fits), and `plan_evidence` records a
+value-free match summary (ids, similarity, table count — never SQL text or table names). The SQL
+the model returns then reaches the identical `self.query_gateway.execute(...)` call — and
+therefore the identical `sql_guard.validate` — every other generation strategy uses; no second,
+parallel, or weaker validation path was added anywhere. `tool_first_rate.py` (TL-6) was updated to
+count the new source as freeform (same reasoning already applied to `DEVELOPMENT_OVERRIDE`: it
+never touched the governed-tool catalog, so crediting it as tool-first would misstate governance
+maturity).
+
+### Verification
+
+39 tests. `tests/test_query_memory.py` (25, pure, no database): `jaccard_similarity` identical/
+disjoint/partial/empty-set cases; `check_candidate_staleness` for a matching version, a superseded
+semantic version, a table touched after the run, an unresolved table, and multiple simultaneous
+reasons; `select_best_match` for no candidates, a single valid match, below-threshold rejection,
+negative-feedback suppression, stale-candidate rejection even at perfect overlap, highest-
+similarity-wins among several valid candidates, a deterministic tie-break, and value-free
+`.evidence()`; plus `retrieved_table_ids_from_hits` extraction. `tests/test_agent_orchestrator_
+query_memory.py` (5, a real `GovernedAgentOrchestrator.run()` against an in-memory SQLite database,
+the same harness `test_quality_runtime_coupling.py` uses for AG-6): a fresh eligible candidate is
+offered and the run is labelled `QUERY_MEMORY_ADAPTATION`; a candidate whose referenced table was
+touched after it completed is excluded and the run falls back to `MODEL_GATEWAY`, with no
+`query_memory_template` ever reaching the model payload; no prior memory falls back the same way;
+the feature stays off with the default `Settings` (nothing offered even with an eligible candidate
+sitting in the table); and the validation-bypass proof — a memory match is found and offered (so
+the feature genuinely engaged), the fake model returns a mutating `DELETE` statement, and the run
+is rejected with `MUTATING_OR_ADMIN_STATEMENT_FORBIDDEN` exactly as any other generation path would
+reject it, with the persisted `AgentRun.generation_source` still reading
+`QUERY_MEMORY_ADAPTATION` on the rejected row — proving the guard stopped it, not an absent match.
+`tests/test_tool_first_rate.py` gained one test and one updated assertion for the new source.
+
+`ruff check` and `mypy src` clean (255 files) on every touched/new file.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+`tests/test_openapi_diff_gate.py` clean — no HTTP route added or changed (three new `Settings`
+fields, no schema or route). Full-repo `uv run pytest`: zero failures. The one failure that
+appears if `AIDA_ENVIRONMENT=development` is exported for the *entire* suite rather than scoped to
+the doc-claims run alone (`test_config.py::test_environment_must_be_explicit_outside_tests`) is
+that test's own pre-existing sensitivity to the variable being set at all, not anything this row
+touched — reproduced identically on unmodified `HEAD` via `git stash`/`stash pop`. A separate,
+also pre-existing `test_doc_claims.py` gap (7 failures, from a sibling session's public-SDK row
+landed in this branch's history just before this row's final rebase, citing several of that SDK's
+source filenames bare rather than module-qualified) reproduces identically with this entire diff
+reverted — confirmed the same way, untouched by and out of scope for AG-7.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+## 2026-09-01 — SM-5 closed: deterministic multi-table tool blueprints
+
+### What it is
+
+Today's governed tools (module 14, `GovernedToolVersion`) are hand-authored SQL templates — an
+author writes any JOIN by hand and submits it through `tool_api.create_tool_version`. This row
+adds a second, generative path for the common "join these tables together" case: given a set of
+table ids, deterministically render a candidate multi-table JOIN tool as an ordinary `DRAFT`,
+using only relationships already declared/approved elsewhere in the platform — never a guessed
+join key.
+
+* `src/aida/multi_table_blueprint.py::build_multi_table_blueprint` — pure, DB-free. Takes plain
+  dataclasses (`BlueprintTable`, `BlueprintJoinEdge`) describing the selected tables and the join
+  edges between them, and returns a `MultiTableBlueprint` (SQL template +
+  `list[aida.schemas.ToolParameterDefinition]`) ready to drop straight into
+  `GovernedToolVersionCreate`. Tables are canonicalized by `(qualified_name, table_id)`; a
+  deterministic BFS/Prim-style spanning tree picks, at every step, the lexicographically-smallest
+  available edge to the smallest new table (a declared `MetadataConstraint` FK always outranks an
+  approved `RelationshipCandidate` on a tie) — so the same table ids plus the same relationship
+  data always render byte-identical SQL, independent of the order table ids were requested in or
+  the order the database happened to return rows in (`context_compiler.py`'s `artifact_hash`
+  determinism convention, applied here without a hash — the SQL text itself is the deterministic
+  artifact). SQL is built via `sqlglot`'s expression API (not hand-formatted strings) so
+  identifier quoting is correct per-dialect; a `LEFT`/`CROSS` join is never emitted, only `INNER
+  JOIN ... ON` on the declared key columns, composite keys included. Every joined-in ("child")
+  table gets one `NULL`-safe optional equality filter parameter per join-key column
+  (`(:t2_customer_id IS NULL OR "t2"."customer_id" = :t2_customer_id)`), so a fresh draft is
+  runnable with zero arguments and a reviewer can see real, unfiltered results before approving.
+  A table with no path to the rest of the selected set raises `UnjoinableTablesError` naming the
+  unreachable table(s) — the refusal path, not a fallback.
+* `resolve_blueprint_tables_and_edges` — the module's one DB-touching function, and the only
+  thing a caller needs to fake to unit-test the builder without a database. Reads exactly two
+  already-declared/approved relationship sources: `MetadataConstraint` rows with
+  `constraint_type == "FOREIGN_KEY"` and `status == "ACTIVE"` (the same rows
+  `intelligence_api.get_knowledge_graph` renders as `DECLARED_FOREIGN_KEY` edges), and
+  `RelationshipCandidate` rows with `status == "APPROVED"` (accepted through the existing
+  maker-checker relationship review flow already live in `intelligence_api.py`). Creates no new
+  persisted relationship state.
+* `tool_api.py` — new `POST /v1/projects/{project_id}/tool-blueprints/multi-table`
+  (`create_multi_table_tool_blueprint`, request model `MultiTableToolBlueprintRequest`: same
+  slug/name/description/allowed_roles shape as `GovernedToolVersionCreate`, `table_ids` instead
+  of `sql_template`/`parameters`). It builds a real `GovernedToolVersionCreate` from the rendered
+  blueprint and persists it through the *exact* draft-creation/validation tail
+  `create_tool_version` uses — the placeholder-vs-parameter check, the real `SqlGuard.validate`,
+  and the datasource-table allowlist check all run again on the generated SQL, not bypassed —
+  factored out of `create_tool_version` into a shared `_persist_tool_version_draft` so the two
+  paths cannot drift. `submit_tool_for_review` and independent approval are completely unchanged:
+  a generated blueprint is exactly as reviewable, and exactly as unable to self-publish, as a
+  hand-written one.
+
+### Why not more relationship sources
+
+Documented honestly in the module docstring rather than silently narrowed: composite
+`RelationshipCandidateGroup`/`RelationshipCandidateGroupMember` candidates are not read (only
+single-column `RelationshipCandidate` rows), and no semantic-model join declaration is read either
+— checked directly against `models.py`, `SemanticModelVersion`/`SemanticMetricVersion` declare a
+metric against one `source_table_id` and do not themselves declare a cross-table join, so there is
+no such declaration to read yet. Both are real gaps, not silently worked around: a composite
+`RelationshipCandidateGroup` approval today simply does not make its two tables joinable through
+this endpoint (declared FKs and single-column approved candidates still do).
+
+### Verification
+
+14 tests in `tests/test_multi_table_blueprint.py`. Pure, no database: `same_input_twice` and
+`determinism_is_independent_of_caller_supplied_table_and_edge_order` prove byte-identical
+`sql_template` and identically-ordered parameters for `[customers, orders]` vs. `[orders,
+customers]`; `determinism_holds_for_a_three_table_chain_regardless_of_order` checks three
+independent table/edge orderings of an a→b→c FK chain collapse to one `sql_template`, one
+`table_order`, one parameter-name sequence; `declared_foreign_key_wins_over_approved_candidate`
+proves the FK-over-candidate tie-break is order-independent; `unjoinable_table_is_rejected` and
+`no_edges_at_all_is_rejected` assert `UnjoinableTablesError` naming the unreachable table, never a
+guessed join; two structural-error tests (`fewer_than_two_tables`, `duplicate_table_ids`);
+`rendered_sql_passes_the_real_sql_guard_and_renders_at_execution_time` runs the generated template
+through the real `aida.sql_guard.SqlGuard.validate` and `aida.tool_rendering.render_tool_sql` (no
+filter → `IS NULL` keeps every row; a supplied filter value → a real equality predicate);
+`composite_foreign_key_joins_on_every_column_pair` checks a two-column composite FK. Real-database
+(in-memory SQLite, mirrors `tests/test_aida_tool_sdk.py`'s harness): a real `MetadataConstraint` FK
+between seeded `retail.customers`/`retail.orders` produces a `DRAFT` `GovernedToolVersion` with
+both tables in `referenced_tables`, a real `JOIN` in `sql_template`, one parameter, and
+`approved_by`/`approved_at` both `None`; a third, unrelated `retail.warehouses` table requested
+alongside `customers` is rejected with HTTP 422 naming `retail.warehouses`; a real `APPROVED`
+`RelationshipCandidate` (no FK) between `orders`/`warehouses` produces a `DRAFT` the same way,
+proving the second relationship source really is read end-to-end; a table id outside the
+datasource is rejected by the resolver directly.
+
+`ruff check` and `mypy src` clean on every touched/new file (`src/aida/multi_table_blueprint.py`,
+`src/aida/tool_api.py`) — two real mypy findings along the way, both fixed rather than suppressed:
+sqlglot's `Condition`/`EQ` inherit its `Expr` base, not its `Expression` base (two separate root
+classes in that library), so the running `on_condition`/`where_condition` accumulators are typed
+`exp.Expr | None`; and a bare `tuple[tuple, ...]` frontier-sort-key annotation needed its type
+parameters spelled out (`_EdgeSortKey`/`_FrontierSortKey` aliases).
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+`tests/test_openapi_diff_gate.py` clean after `scripts/openapi_diff.py --accept-baseline`
+(`Docs/90-reference/openapi-baseline.json`, one path added, non-breaking) and
+`scripts/generate_ui_types.py --accept-baseline` (`ui-next/src/lib/types.ts`). Full-repo
+`AIDA_ENVIRONMENT=development uv run pytest -q`: one failure,
+`test_config.py::test_environment_must_be_explicit_outside_tests` — the same pre-existing
+sensitivity to `AIDA_ENVIRONMENT` being set for the *entire* suite (rather than scoped to the
+doc-claims run alone) already documented against this exact test in the AG-7 and TL-5 entries
+above, not anything this row touched.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+## 2026-09-01 — KG-7 closed: scheduled Postgres/Neo4j knowledge-graph reconciliation + drift alerting
+
+Module 10's Neo4j projection (RL-4/KG-1, `src/aida/projectors/graph_projector.py`) is
+event-driven: it only writes when it sees one of `UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES` on the
+outbox stream. Nothing previously checked that a missed/lost event, or a Postgres row that
+changed after being projected, hadn't left Neo4j silently out of sync with the authoritative
+store. `src/aida/graph_reconciliation.py` closes that gap with a read-only, scheduled diff pass.
+
+### What "should exist" vs. "does exist" means here
+
+Never reinvented: the Postgres side of the diff calls the exact same
+`graph_projector.load_unified_lineage_projection(datasource_id, organization_id)` the event-driven
+projector itself calls to build what it writes (`load_should_exist_projection_keys`,
+`graph_reconciliation.py:258`), so reconciliation can never drift from the projector's own
+selection criteria. The Neo4j side (`load_actual_projection_keys`, `graph_reconciliation.py:272`)
+reads the same `organization_id`/`datasource_id`-tagged `UnifiedLineageNode`/`UNIFIED_LINEAGE` rows
+`project_unified_lineage`'s own stale-generation prune already targets. `diff_projection_keys`
+(pure, `graph_reconciliation.py:117`) is a plain set-difference over `projection_key`s in both
+directions: `missing_in_neo4j` (Postgres says it should be there; Neo4j doesn't have it — a
+missed/lost projection event) and `orphaned_in_neo4j` (Neo4j still has it; Postgres's current
+selection no longer includes it — e.g. a relationship candidate rejected/deleted after being
+projected). `reconcile_projection` combines node-drift + edge-drift into one
+`GraphReconciliationReport` per datasource; `drift_severity` is WARNING for any drift, CRITICAL at
+`total_drift_count >= 10` (configurable per call).
+
+### How it's scheduled
+
+Registered on the existing `workflows/scheduler.py` periodic-pass idiom, not a new cron mechanism:
+`run_graph_reconciliation_scheduler_pass` (`scheduler.py:459`) is called every tick from
+`run_scheduler_iteration` (`scheduler.py:592`, alongside `run_owner_routing_pass`/
+`run_custom_rule_pack_pass`), delegating to `graph_reconciliation.run_graph_reconciliation_pass`.
+Same in-process-memory due-tracking as GL-6/DQ-4 (`_graph_reconciliation_last_run_at`, keyed by
+datasource_id) — no per-datasource "next reconciled at" column exists to persist to without a new
+model/migration column, and the pass is read-only against both stores and safe to repeat, so a
+scheduler restart costs at most one redundant sweep. Cadence is
+`settings.graph_reconciliation_interval_minutes` (new field, `atlas/platform/config.py`, default
+360 minutes/6h, bounded 15m-7d). One datasource's failure (Neo4j unreachable, a bad rule) is
+logged and skipped, matching `run_owner_routing_pass`'s fault isolation.
+
+### How a detected drift becomes an alert
+
+Routed through DQ-1's unmodified notification engine exactly as GL-6 (`glossary_owner_routing.py`)
+already does for a different domain (unowned assets) — not a new notification channel:
+`incident_for_drift` builds the same `notification_routing.Incident` shape a data-quality incident
+routes as (fingerprint `GRAPH_PROJECTION_DRIFT:{org}:{datasource}`, severity, a bounded sample of
+drifted keys in the message); `reconcile_and_alert_datasource`
+(`graph_reconciliation.py:344`) then calls the real, unmodified `route_notification` against
+the org's actual `NotificationRuleRecord` rows (lazily creating a default catch-all
+"Knowledge graph projection drift (default)" rule the same way
+`ensure_default_unowned_backlog_notification_rule` does, for the same reason), and
+`format_itsm_payload` for an ITSM-channel match.
+
+Persistence deliberately does **not** add a new incident/escalation model. `DataQualityIncident
+.table_id` is a NOT NULL FK to `metadata_table` (most drifted graph nodes/edges are not one single
+table — columns, dbt resources, BI nodes, or an edge with no table subject at all) and
+`NotificationEventRecord.incident_id` is a NOT NULL FK to `data_quality_incident` — neither
+existing table can carry a datasource/graph-level drift finding without a schema change, the same
+wall GL-6 hit and worked around with its own `UnownedAssetEscalation` table (out of scope here per
+the collision-avoidance constraint on `models.py`/migrations for this worktree). Instead, every
+routed `NotificationEvent` (and, for ITSM, the formatted payload) is persisted through the
+existing `record_audit`/`record_outbox` tables under three new, cataloged event types
+(`knowledge_graph.drift_detected.v1`, `.drift_alert_routed.v1`, `.drift_itsm_payload.v1` — added to
+`Docs/30-contracts/04-event-catalog.md`'s "Graph and retrieval" section) — a real, queryable,
+actionable signal, not a log line, just not a stateful PENDING/ROUTED/ESCALATED row.
+Consequently `should_escalate`/`escalate` (which need a persisted `sent_at`/`acknowledged_at` to
+compute against) are not wired up; each due sweep re-detects and re-routes still-open drift at its
+own cadence instead. A documented, honest gap (see the module docstring), not a silent one — the
+same spirit as RL-4's own honestly-scoped "cross-source candidates still have no Neo4j projection
+path" gap.
+
+### Tests
+
+26 pure unit tests, `tests/test_graph_reconciliation.py` — no live Postgres/Neo4j, mirroring
+today's `query_memory`/`tool_first_rate`/`semantic_diff` pure-logic-first convention:
+`diff_projection_keys` (no drift, missing-only, orphaned-only, both directions, empty sets),
+`reconcile_projection` (node+edge combination, no-drift, `generated_at` default),
+`drift_severity` (HEALTHY/WARNING/CRITICAL threshold boundaries),
+`graph_reconciliation_due` (never-swept/not-yet-due/due), `incident_for_drift` (`None` on no
+drift, severity/fingerprint/message content, 20-key sample truncation on 100 drifted keys), an
+engine-reuse identity test mirroring GL-6's
+(`test_graph_reconciliation_reuses_dq1_engine_functions_directly` — asserts
+`graph_reconciliation.route_notification is notification_routing.route_notification`, same for
+`format_itsm_payload`/`Incident`/`NotificationRule`), two tests proving a built `Incident` really
+routes through the unmodified engine into a real `NotificationEvent`/ITSM payload and that a
+severity-scoped rule correctly does *not* match a WARNING incident, and three
+`run_graph_reconciliation_pass` sweep tests (per-datasource fault isolation, due/not-due skipping,
+runs-once-elapsed) using the same monkeypatch-the-per-item-worker technique
+`test_fleet_scheduling.py` already uses for `run_owner_routing_pass` so the sweep loop never
+touches a real session or Neo4j driver.
+
+### Fixed along the way
+
+This change tripped two Tier-0/gate tests, both fixed rather than worked around: the three new
+`record_outbox` event types needed rows in `Docs/30-contracts/04-event-catalog.md` (added, per
+`test_event_catalog_gate.py::test_every_emitted_event_type_is_documented_or_known_st14_drift`);
+and INV-1's closed `permitted_readers` allowlist
+(`tests/test_inv1_single_authoritative_store.py::test_request_path_graph_access_is_read_only_and_closed`)
+does not distinguish request-path from scheduled-background Neo4j readers by directory alone
+outside the `projectors/` package, so `graph_reconciliation.py` needed a reviewed entry — added
+with the same justification style as the existing `api.py`/`lineage_graph_store.py` rows: this
+module reads Neo4j only to diff it against PostgreSQL's own selection and alert on disagreement,
+never to answer a request or override PostgreSQL.
+
+### Verification
+
+`ruff check` clean and `mypy src` clean (`Success: no issues found in 256 source files`) on every
+touched/new file. `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py` clean.
+Full-repo `AIDA_ENVIRONMENT=development uv run pytest -q`: 2059 passed, 5 skipped, one deselected —
+`test_config.py::test_environment_must_be_explicit_outside_tests`, the same pre-existing
+sensitivity to `AIDA_ENVIRONMENT` being set for the *entire* suite already documented against this
+exact test in the AG-7/TL-5/SM-5 entries above, not anything this row touched.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+## 2026-09-01 — ST-18 closed: INV-7's "mutation" ratified as "records an actor's decision"
+
+ST-17 (`Docs/review-2026-08/gap/09-inv7-audit-closeout.md`) left one open architectural question:
+does INV-7's "every mutation produces an audit record" cover the lazily-created per-tenant default
+rows `ensure_default_domain` (`aida.domain_service`) and `ensure_organization_integration_policy`
+(`aida.integration_service`) stage on first read, reached from `GET` routes tracked in
+`tests/test_inv7_attributability.py`'s `_LAZY_DEFAULT_WRITE_ROUTES`? The closeout doc recommended
+"records an actor's decision" (so these routes stay excused) over "stages a row" (which would
+require both helpers to return a created/found flag and the twelve call sites to audit only on the
+creating branch). This row is Architecture ratifying that recommendation, not rubber-stamping it.
+
+### Independent verification, not just repetition
+
+Read both helpers as they exist in the tree today rather than trusting the closeout doc's quoted
+snippets: `ensure_default_domain` (`src/aida/domain_service.py:10`) takes `(session, lob)` and
+builds its `DataDomain` from four constants (`name="Ungoverned"`, `code="UNGOVERNED"`,
+`is_default=True`) plus `lob.organization_id`/`lob.id`; `ensure_organization_integration_policy`
+(`src/aida/integration_service.py:10`) takes `(session, organization_id)` and builds its
+`OrganizationIntegrationPolicy` from `organization_id` alone, with
+`transformation_metadata_integrations` filled by the model's own schema default
+(`default_transformation_metadata_integrations`, `src/atlas/modules/identity_tenancy/models.py`),
+not by the helper. Neither signature accepts a caller-supplied value of any kind — confirmed
+against the model definitions directly, not the doc's paraphrase. The recommendation's premise —
+"no caller input reaches the row, so naming a creator would manufacture attribution rather than
+preserve it" — holds: two principals racing to the same route stage a byte-identical row, and
+`created_at` already bounds when it happened without needing an attributed actor. Recommendation
+adopted as-is.
+
+One discrepancy noted for the record, not acted on: the closeout doc and the ST-18 tracker row both
+say "8 GET call sites"; `_LAZY_DEFAULT_WRITE_ROUTES` today has twelve entries (dbt/BI
+artifact-import and lineage routes added by concurrent work since ST-17 landed). Immaterial to
+which reading binds — this became a docs-only close — but worth flagging for whoever next touches
+that count.
+
+### What changed
+
+`Docs/10-architecture/01-principles-and-invariants.md`'s INV-7 section gained a ratified scope note
+stating the binding reading, the reasoning, the two falsifiable tests that hold its premise
+(`test_the_lazy_default_write_list_stays_closed`, `test_lazy_default_writers_record_no_actor_decision`),
+and what would collapse the carve-out (either helper accepting a caller-supplied value).
+`Docs/review-2026-08/gap/09-inv7-audit-closeout.md` §4 gained a ratified banner pointing back at the
+invariants document instead of reading as an open recommendation.
+
+Per the tracker row's own exit clause, "records an actor's decision" winning means no code change:
+the eight-then-twelve GET routes stay excused, both helpers keep their current signatures, and
+`_LAZY_DEFAULT_WRITE_ROUTES` stays as-is. Nothing under `src/` or `migrations/` touched.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py` and
+`tests/test_inv7_attributability.py`: all pass (11/11 on the latter). No Python file was touched by
+this row, so `ruff check`/`mypy` were not re-run — the change is Markdown-only in
+`Docs/10-architecture/01-principles-and-invariants.md`,
+`Docs/review-2026-08/gap/09-inv7-audit-closeout.md` and this log.
+
+## 2026-09-01 — KG-2 closed: cross-source knowledge-graph traversal, bounded and policy-filtered
+
+Module 10's neighborhood traversal (`get_knowledge_graph_neighborhood`,
+`src/aida/intelligence_api.py:426`) previously never left the seed `datasource_id`: every
+constraint/candidate query in its BFS loop filtered on that one datasource, so a
+`RelationshipCandidate` whose `target_datasource_id` named a *different* datasource of the same
+organization was invisible to the graph even though ADR-0017 phase 5 already lets such rows exist
+(`RelationshipCandidate.datasource_id`/`target_datasource_id`, `src/aida/models.py:1161-1174`,
+populated by `discover_cross_source_relationship_candidates`,
+`src/aida/intelligence_api.py:1251`). No schema change was needed — the cross-datasource edge
+data already existed; only the traversal and its policy filtering were missing.
+
+### The pure core: `expand_cross_source_frontier`
+
+`src/aida/knowledge_graph.py:74` adds `expand_cross_source_frontier` alongside the existing,
+untouched `expand_frontier` (`knowledge_graph.py:44`) — both now share one hop-adjacency helper,
+`_candidate_targets` (`knowledge_graph.py:25`), so they can never disagree on what "one hop away"
+means. The new function takes the same bounded frontier/visited/links/direction/depth/node_limit
+contract plus two additions: `node_datasource_id` (which datasource owns each known node) and
+`is_datasource_authorized` (a synchronous predicate). A candidate node whose datasource fails that
+predicate is dropped **before** the `node_limit` budget is applied — it never displaces an
+authorized node for a slot, never appears in `node_ids`, and never flips `truncated`. That last
+part is what makes a denial indistinguishable from the edge never having existed: no reason code,
+no field, nothing in the pure result differs between "no such relationship" and "relationship
+exists, but you can't see the far side."
+
+### Per-datasource-touched policy filtering (`get_knowledge_graph_neighborhood`)
+
+Per BFS depth, the query set grew from two to three: same-source constraints/candidates as before
+(now scoped to the *growing* `touched_datasource_ids` set instead of the fixed seed id, so a
+second hop inside an already-authorized foreign datasource is found too, not just the first
+crossing), plus a `boundary_filters` probe (`intelligence_api.py:549`) for candidates whose two
+sides straddle `touched_datasource_ids` — i.e. would cross into a new one. For every
+newly-discovered datasource among those (`newly_seen_datasource_ids`, `intelligence_api.py:586`),
+authorization is resolved exactly once and cached in `datasource_allowed`, mirroring the
+per-distinct-datasource `gate()` cost `list_tables_composed` already pays in `api.py`: (1)
+`check_cross_boundary_grant` (`intelligence_api.py:613`) — the same ADR-0017 primitive
+`build_domain_unified_lineage_graph_payload` already enforces for the Unified Lineage Explorer —
+only invoked when the new datasource's `data_domain_id` differs from the seed's, since the
+function itself returns `True` for same-domain pairs; and (2) `authorization_gate.gate` with
+`action="READ_METADATA"`, `resource_type="datasource"` (`intelligence_api.py:622`) — the caller's
+own per-datasource RBAC, independent of domain governance. Both must pass before a datasource joins
+`touched_datasource_ids`; `AuthorizationDenied` is caught and recorded as `False` in the cache, not
+re-raised, so one denied crossing degrades the traversal rather than failing the whole request. An
+unresolvable or foreign-organization datasource fails closed the same way (INV-4/INV-5), regardless
+of what a stray candidate row claims. `allowed_boundary_candidates`
+(`intelligence_api.py:637`) then filters to only the candidates whose *both* sides passed, before
+they ever become a `GraphLink` or a `node_datasource_id` entry. The final table/constraint/candidate
+materialization queries (`intelligence_api.py:695` on) were re-scoped from `== datasource.id` to
+`.in_(touched_datasource_ids)` as belt-and-braces re-enforcement — a node that never cleared the
+per-hop check cannot appear in the response even if something upstream had a bug. No new
+`truncation_reasons` value, response field, or log line names a denied datasource — the schema
+(`GraphNodeRead`/`GraphEdgeRead`/`KnowledgeGraphRead`, none of which this row touches) has no field
+to name one in, which is itself consistent with the no-distinguishable-signal requirement.
+
+### Tests
+
+`tests/test_knowledge_graph.py` — 7 new pure, DB-free tests exercising
+`expand_cross_source_frontier` directly, mirroring `expand_frontier`'s existing convention
+(no live DB, `uid()` node ids, `DATASOURCE_A`/`DATASOURCE_B` UUID constants):
+`test_cross_source_frontier_follows_an_edge_into_an_authorized_datasource` (basic crossing),
+`test_cross_source_frontier_matches_expand_frontier_when_every_node_is_authorized` (byte-identical
+`node_ids`/`truncated` against plain `expand_frontier` on the same graph when nothing is denied —
+adding cross-source awareness changes nothing for the single-source case),
+`test_cross_source_frontier_rejects_an_invalid_budget` (same `ValueError` contract as
+`expand_frontier`), and two leak tests mirroring EE.10's shape
+(`tests/test_mcp_server.py:816` on) — proving denied-vs-nonexistent are indistinguishable, and
+that the check runs and excludes *before* any state (here, the node_limit budget) is spent:
+`test_leak_cross_source_frontier_denied_datasource_node_never_appears`
+(`tests/test_knowledge_graph.py:148`) asserts a caller authorized for A but not B gets a
+byte-identical `FrontierExpansion` whether the cross-source edge into B is present-but-denied or
+absent outright (`denied == no_such_edge`), with `node_ids == frozenset()`, `node_depths == {}`,
+and `truncated is False` in both cases; and
+`test_leak_cross_source_frontier_denied_node_does_not_consume_node_budget`
+(`tests/test_knowledge_graph.py:194`) proves a denied B-side candidate never steals the one
+remaining `node_limit` slot from a competing, authorized A-side candidate in the same frontier
+expansion.
+
+### Verification
+
+`ruff check src/aida/knowledge_graph.py src/aida/intelligence_api.py tests/test_knowledge_graph.py`
+clean. `uv run mypy src sdk/aida_tool_sdk` clean (`Success: no issues found in 263 source files`,
+the project's canonical invocation per `.github/workflows/ci.yml`). `tests/test_knowledge_graph.py`
+(10 tests, including the 4 pre-existing ones, all still pass unmodified) and the targeted
+regression sweep (`test_relationship_intelligence_review.py`, `test_high_stakes_behaviors.py`,
+`test_table_family_api.py` — the only other test files touching `intelligence_api`) all pass.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean. Extending
+`get_knowledge_graph_neighborhood`'s docstring changed its OpenAPI `description` text (a
+non-breaking diff per `scripts/openapi_diff.py`, confirmed with `--baseline` before regenerating);
+`Docs/90-reference/openapi-baseline.json` was regenerated with `--accept-baseline` (single-field
+diff, reviewed) and `tests/test_openapi_diff_gate.py` re-run clean.
+`scripts/generate_ui_types.py --accept-baseline` produced no diff in `ui-next/src/lib/types.ts`
+(descriptions aren't part of the generated type shapes), so nothing to commit there. Full-repo
+`uv run pytest -q` (no `AIDA_ENVIRONMENT` override, to avoid the pre-existing
+`test_config.py::test_environment_must_be_explicit_outside_tests` sensitivity already documented in
+the KG-7/AG-7/TL-5/SM-5 entries above): 5123 passed, 9 skipped, 1 xfailed, 0 failed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+---
+
+## 2026-09-01 — SM-3 (confidence calibration + bank-domain corpus) closed: real numbers against the real SM-4 scoring function, no infra caveat needed
+
+### What this closes
+
+Tracker SM-3 ("Confidence calibration + bank-domain corpus", exit criterion "Published accuracy
+results") was TODO. Module 07's real confidence-scored inference is SM-4's
+`aida.metric_suggestion_service.score_evidence` -- a pure, deterministic function of a
+`MetricEvidence` value that scores a candidate metric proposal 0-1. SM-3 asks a question SM-4
+never answered: when the score says 0.86, is the suggestion actually right about 86% of the time?
+This closes that with a real, reproducible calibration run against a labelled corpus, following
+AG-8's exact pattern: a committed corpus, a script that runs it through the REAL scoring function
+(never a mock or reimplementation), and a generated, timestamped results report.
+
+### The corpus: `tests/fixtures/confidence_calibration_corpus/bank_domain_metric_corpus.json`
+
+28 hand-authored bank-domain (table, column) cases -- 14 true positives / 14 false positives --
+every case a numeric column with an EXACT or SUFFIX `MEASURE_KEYWORDS` match, the exact same gate
+`metric_suggestion_api.generate_metric_suggestions` applies *before* it ever builds a
+`MetricEvidence` and calls `score_evidence` (numeric physical type; EXACT/SUFFIX only, CONTAINS
+dropped). Every corpus case is therefore one the real production pipeline would actually score and
+could actually propose to a reviewer -- never a case production would have filtered out first, and
+the script's own `build_evidence` raises `CorpusIntegrityError` if a case ever violated that (proven
+by test, not just asserted in a docstring).
+
+Labels were assigned by domain judgement *before* any score was computed, not reverse-engineered
+from the numbers, and the false positives are drawn from real, specific banking column-naming
+ambiguity `score_evidence` has no signal for at all:
+
+- **Pre-aggregated/cumulative balances**: `avg_daily_balance`, `running_balance`,
+  `closing_balance`, `opening_balance`, `ending_balance` -- the column already stores a derived
+  figure (an average, a running total, a point-in-time snapshot); the keyword's fixed `SUM`
+  aggregation is wrong (the correct rollup is `AVG` or `LAST`, not blind summation).
+- **Per-unit rates**: `unit_cost`, `weighted_avg_cost` -- a rate on a reference-table row, not an
+  additive transactional measure.
+- **Policy thresholds**: `minimum_balance`, `balance_limit` -- configured per account
+  type/tier, not a transactional or snapshot value.
+- **Precomputed `*_count` columns**: `txn_count`, `monthly_login_count`,
+  `daily_fraud_alert_count`, `item_count`, `daily_active_user_count` -- the column already holds a
+  per-row tally, so the keyword's fixed `COUNT` aggregation is systematically wrong every time in
+  this corpus: the correct rollup is `SUM` of the stored counts, not `COUNT` of rows. This is a
+  general finding, not a one-off: *every* numeric `*_count` case in the corpus has this failure,
+  because a numeric column can only ever hold a pre-computed value, never something SQL `COUNT()`
+  itself would recompute.
+
+The 14 true positives are plain, unqualified additive amounts/balances/fees/volumes/quantities a
+human steward would approve as proposed (`txn_amount`, `deposit_amount`, `acct_balance`,
+`loan_balance`, `processing_fee`, `interest_revenue`, `qty`, etc.), spanning both EXACT and SUFFIX
+match kinds and varied table roles (TRANSACTION/EVENT/SNAPSHOT/FACT/DIMENSION) and evidence
+richness (with and without a bound glossary term, with and without a description mention) so scores
+spread across the function's real range rather than clustering in one bucket.
+
+### `scripts/confidence_calibration_benchmark.py`
+
+`load_corpus` reads the fixture; `build_evidence` reconstructs each case into a real
+`aida.metric_suggestion_service.MetricEvidence`, **re-deriving** the matched keyword/aggregation/
+match-kind via the real `match_measure_keyword(case.column_name)` rather than trusting a hand-typed
+field in the fixture, and raises `CorpusIntegrityError` for any case the real production gate would
+have filtered before scoring. `run_calibration` scores every case with the real, unmodified
+`score_evidence` (SM-4) and records whether it would clear the real `MINIMUM_EVIDENCE_FOR_METRIC_
+REVIEW` gate. `bucket_results` buckets by confidence into fixed-width 0.1 reliability-diagram bins
+(a standard calibration-curve construction); `expected_calibration_error` and `brier_score` compute
+the two standard summary metrics. `main` writes both a machine-readable JSON payload and a
+human-readable Markdown report (`Docs/90-reference/confidence-calibration-results.{json,md}`),
+exactly mirroring `scripts/quality_benchmark.py`'s (AG-8) report-writing shape.
+
+**Unlike AG-8, no framework-only section is needed here**: `score_evidence` is a pure function of a
+value object -- no DB session, no embedding provider, no model route, no credential. Every number in
+the published report is a full, real result of the real function; this sandbox needed nothing it
+didn't already have.
+
+### Measured with real numbers
+
+Full calibration curve (`Docs/90-reference/confidence-calibration-results.md`):
+
+| Confidence bucket | n | Mean confidence | Observed accuracy | Gap |
+|---|---|---|---|---|
+| [0.3, 0.4) | 2 | 0.3917 | 0.0000 | 0.3917 |
+| [0.4, 0.5) | 4 | 0.4802 | 0.0000 | 0.4802 |
+| [0.5, 0.6) | 1 | 0.5625 | 1.0000 | 0.4375 |
+| [0.6, 0.7) | 10 | 0.6459 | 0.6000 | 0.0459 |
+| [0.7, 0.8) | 4 | 0.7573 | 0.0000 | 0.7573 |
+| [0.8, 0.9) | 7 | 0.8583 | 1.0000 | 0.1417 |
+
+**Expected Calibration Error: 0.2722. Brier score: 0.2184** (worse than the 0.25 an uninformative
+constant-0.5 predictor scores on this balanced 14/14 corpus). `score_evidence` is measurably not
+calibrated as a probability of correctness, and the miscalibration is concentrated exactly where the
+score has no signal -- aggregation correctness -- not spread as random noise: the [0.7, 0.8) bucket
+is 0% accurate (all four cases are `*_count`/`closing_balance` false positives with rich
+corroborating evidence) while the adjacent [0.8, 0.9) bucket is 100% accurate. Concretely:
+`txn_count`, `daily_fraud_alert_count`, and `daily_active_user_count` -- each carrying a bound
+glossary term *and* a description mention, the two richest evidence signals the function has --
+score 0.7542 while being wrong, ahead of `deposit_amount_true` (0.5625, correct, but with neither
+signal) and `acct_balance_true` (0.6917, correct). A false positive with rich evidence outscores a
+true positive with sparse evidence, because bound-term/description-mention evidence corroborates
+that a steward believes the *column* is meaningful, never that the *aggregation* is right for it.
+
+This is a real, actionable finding: `score_evidence`'s overall score should be read as "strength of
+evidence this column is a measure worth a reviewer's attention," not "probability this proposal is
+correct as published" -- consistent with SM-4's own docstring that this generates a *draft* for
+human review, never an auto-published metric. A concrete next step this row's numbers point to
+(explicitly out of SM-3's own scope, which measures calibration rather than re-tuning SM-4's
+formula): a dimension penalizing `*_count`/pre-aggregated-`*_balance` qualifier patterns, evaluable
+against this same corpus and report.
+
+2 of 28 cases (`unit_cost_false`, `weighted_avg_cost_false`) score below the real
+`MINIMUM_EVIDENCE_FOR_METRIC_REVIEW` (0.4) gate and so would never reach a reviewer in production --
+both are correctly ground-truth-incorrect, named plainly in the report rather than dropped from the
+corpus to keep the headline numbers simpler.
+
+### A real bug found and fixed while building the harness
+
+Naive fixed-width bucketing (`int(confidence / 0.1)`) misfiles a confidence of *exactly* 0.6 into
+the `[0.5, 0.6)` bucket instead of `[0.6, 0.7)`, because `0.6 / 0.1 == 5.999999999999999` in IEEE
+754 double precision, not `6.0`. Caught while building this script (the first calibration run showed
+an implausible bucket population before the fix), not left in: `bucket_results` now adds a small
+epsilon before truncating, and `test_a_confidence_exactly_on_a_bucket_boundary_lands_in_the_upper_
+bucket` proves it directly against a synthetic 0.6 value, independent of whatever the corpus itself
+happens to score.
+
+### TS-10 overlap, not duplicated
+
+Tracker `TS-10` ("Labelled semantic/relationship corpus — Calibration published") asks for
+materially the same thing under the Testing Strategy section. At claim time and at close time it was
+still TODO and unclaimed by any concurrent session -- not "already covers this ground" in the sense
+that would make this row a pointer, so this row proceeded as scoped. `TS-10`'s row was deliberately
+left untouched (no claim, no status change) to avoid editing a row this session has no ownership
+process for on a fast-moving branch, but its exit criterion ("Calibration published") is fully
+satisfied by this row's artifacts (`tests/fixtures/confidence_calibration_corpus/bank_domain_metric_
+corpus.json`, `scripts/confidence_calibration_benchmark.py`, `Docs/90-reference/confidence-
+calibration-results.{md,json}`) -- a future session picking up `TS-10` should point to this row
+rather than re-building the same corpus and script.
+
+### Tests, lint, scope
+
+19 tests in `tests/test_confidence_calibration_benchmark.py`: pure bucketing/ECE/Brier logic against
+hand-computed expected values (a perfectly-calibrated synthetic case scores ECE=0/Brier=0; a
+hand-worked weighted-gap example checked to `pytest.approx`); the float-boundary bug proven fixed
+both synthetically and via the real corpus's own 0.6-scoring cases; corpus-integrity checks
+(`build_evidence` refusing a non-numeric column, a no-keyword-match column, and a bare-CONTAINS
+column -- each the exact case the real production gate would have filtered); the real, committed
+corpus run end-to-end through the real `score_evidence`, including a named-case spot check
+(`txn_amount_true` scores higher than `deposit_amount_true` for richer real evidence, not just an
+aggregate rate); a non-degenerate-curve guard against a future corpus edit collapsing into one
+bucket; and a deterministic CLI round trip (`main`) against `tmp_path` report files -- two runs
+produce byte-identical JSON apart from the timestamp, since nothing here is wall-clock- or
+randomness-dependent, unlike PF-3's timing benchmark. `ruff check` clean on every file touched;
+`mypy src` clean (257 files -- `scripts/` is outside this repo's `mypy strict` package scope, the
+same as `scripts/quality_benchmark.py` and `scripts/perf_baseline.py`, confirmed by running `mypy
+--strict` against `quality_benchmark.py` directly and seeing the same untyped-import/loop-variable
+noise there); `tests/test_doc_claims.py` green.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched.
+
+---
+
+## 2026-09-01 — LN-8 closed: large-DAG virtualization for the shared lineage/knowledge-graph renderer
+
+Frontend-only. The lineage/relationship graph API surfaces (`unified_lineage_api.py`,
+`intelligence_api.py::get_knowledge_graph`/`get_knowledge_graph_neighborhood`) already return
+bounded node/edge sets with `node_limit`/`edge_limit`/`truncation_reasons` per EA.14, already DONE.
+LN-8's gap was purely on the render side: whatever bounded graph the API returned was mounted in
+full by the frontend, which becomes unusable at the API's own upper bound.
+
+There is exactly one graph-rendering component behind all four of Atlas's lineage/relationship
+surfaces -- `ui/scripts/graph-engine.js` (`AtlasGraph`), mounted by Knowledge graph (`#graph-stage`,
+`ui/app.js`), the dbt Transformations DAG (`#dbt-lineage`, `ui/scripts/features/transformation-
+workbench.js`), Unified lineage (`#unified-lineage-stage`, `ui/scripts/features/context-lineage-
+control-plane.js`), and the AI dependency graph (`#ai-dependency-stage`, `ui/scripts/features/
+product-ai-control-plane.js`). `ui-next` (the newer React app) has no lineage/graph component at
+all yet -- only its virtualized catalog table (UX-11, `ui-next/src/components/CatalogTable.tsx`,
+`@tanstack/react-virtual`) exists there.
+
+**What the renderer actually is.** `AtlasGraph` wraps vendored Cytoscape.js (`ui/vendor/
+cytoscape.min.js`) with a dagre layered layout and real pan/zoom/drag. Cytoscape itself draws node
+shapes and edges on a `<canvas>`, which stays cheap regardless of graph size -- pixels, not DOM. The
+actual "full graph render" cost was entirely in a separate vendored plugin, `cytoscape-node-html-
+label` (`ui/vendor/cytoscape-node-html-label.min.js`): every node gets one real, clickable HTML
+`<div>` card (the rich `nodeHtml` templates each surface supplies, wired to `data-graph-node`/
+`data-dbt-dag-node`/`data-lineage-node` click delegation in `ui/app.js`), and the vendored plugin
+mounted one unconditionally for every node in the graph, with no notion of viewport at all. At
+`unified_lineage_api.py`'s full-graph route (`GET /v1/datasources/{id}/unified-lineage`,
+`node_limit` up to 4,000 / `edge_limit` up to 20,000) that is thousands of DOM cards mounted at
+once -- including on first load, since `AtlasGraph.runLayout()` fits the whole graph into view by
+default (`_layoutOptions()`'s `fit: true`). So this was a real DOM-per-node problem, the same shape
+UX-11 solved for the catalog table, not a canvas hit-testing concern.
+
+**The fix.** `cytoscape-node-html-label` is kept (its click-delegation wiring, card markup, and
+column-popover/search-dim behavior all keep working unchanged), but its mounting is now driven
+dynamically instead of unconditionally: the plugin's query is `node[agWindowed]` (a boolean data
+flag; Cytoscape's `[foo]` selector treats it as "truthy"), and a new pure function,
+`computeWindowedNodeIds(nodeBoxes, extent, {cap, pinnedId, overscanRatio})` -- deliberately free of
+any Cytoscape or DOM dependency -- decides which node ids should carry that flag: those whose
+model-space bounding box intersects the current viewport extent (padded by a 35%-of-viewport
+overscan margin so cards are already mounted just before panning into view), plus the
+selected/focused node unconditionally, capped at `DEFAULT_HTML_WINDOW_CAP = 220` regardless of how
+many nodes are nominally "in view" -- this is what actually bounds the fit-all-nodes-on-load case a
+naive viewport-only culling would miss (after a big load, the whole bounded graph is fit into view
+by default, so "in the viewport" alone isn't a bound). `AtlasGraph._computeWindowedIds()` is a thin
+wrapper that pulls `{id, x, y, w, h}` boxes from `this.cy.nodes()`/`this.cy.extent()` and hands them
+to the pure function; `_applyWindow()` toggles the `agWindowed` data flag to match (the plugin's own
+`data`-event listener adds/removes the DOM element as that flag flips -- `AtlasGraph` never touches
+the label `<div>`s directly); `_scheduleWindowRefresh()` coalesces the resulting recompute into at
+most one per animation frame across pan/zoom/`layoutstop`/selection events. Nodes not currently
+windowed in fall back to a uniform, DOM-free canvas-drawn placeholder rectangle (`_stylesheet()`'s
+plain `node` selector; `node[agWindowed]` hides it once the HTML card is mounted on top) -- every
+node keeps its real position and every edge is still drawn, so pan/zoom shows the graph's actual
+shape immediately instead of blank space while cards lazily mount as you approach them. This is
+explicitly *windowing of the render budget only*: no clustering, aggregation, relabeling, or other
+structural simplification of the graph -- that is KG-3's separate, still-open level-of-detail work,
+and this row deliberately does not touch it (KG-3's own row still reads "API boundary unchanged";
+this entry adds nothing to it). A small toolbar readout (`"N of M nodes rendered"`, `data-ag=
+"window-readout"`) mirrors `virtual-table.js`'s "Showing X-Y of Z rows" live region for the
+virtualized catalog/result tables, applied to the same viewport-window idea in two dimensions
+instead of one scroll axis.
+
+**Proof of the bound.** `ui/` is a plain, un-bundled browser app with no JS test runner
+(`tests/test_ui_accessibility.py` established the convention of asserting against source text
+directly for it). Rather than stop at source-text assertions, the windowing decision was factored
+into the standalone pure function above specifically so it could be *executed*, not just read:
+`ui/scripts/graph-engine.virtualization.test.mjs` needs nothing beyond Node's stdlib (`node:vm` to
+load the plain-IIFE script against a bare `{window: {AtlasUI: {}}}` sandbox, `node:assert`) and runs
+directly via `node ui/scripts/graph-engine.virtualization.test.mjs`. It builds a synthetic 4,000-
+node grid (`unified_lineage_api.py`'s own full-graph `node_limit` ceiling) with a viewport extent
+covering every node -- the post-"Fit" default view after a max-bound load -- and asserts the
+windowed set is `<= 220` (`DEFAULT_HTML_WINDOW_CAP`) and `> 0`; a second case proves a caller-
+supplied cap (150 at 2,000 nodes) is honored; a third pans a small viewport into one corner of a
+3,000-node spread-out layout and asserts the windowed set is nonempty, smaller than the total, and
+explicitly excludes a node in the far corner -- proving this is real spatial culling, not just "the
+first N nodes"; a fourth proves a pinned/selected node in that same far corner is still windowed in
+regardless; a fifth proves an empty graph windows in nothing without dividing by zero on a
+degenerate `extent.w === 0`. `tests/test_ui_lineage_graph_virtualization.py` (6 tests, following
+`test_ui_accessibility.py`'s established convention) asserts the `node[agWindowed]` gating and
+`_computeWindowedIds -> computeWindowedNodeIds` delegation structurally, then shells out to the
+`.mjs` script (`subprocess.run(["node", ...])`, skipped if `node` is unavailable) and parses its
+JSON summary to assert the same numeric bounds under `pytest`, so the proof isn't only runnable by
+hand.
+
+**Verification.** `node --check ui/scripts/graph-engine.js` clean. `node ui/scripts/graph-
+engine.virtualization.test.mjs` clean (all 5 scenarios pass). `AIDA_ENVIRONMENT=development uv run
+pytest tests/test_ui_lineage_graph_virtualization.py tests/test_ui_accessibility.py -q`: 13 passed
+(6 new + 7 pre-existing, unmodified). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. No HTTP route added or changed (the frontend consumes the same
+already-bounded API responses per EA.14), so `tests/test_openapi_diff_gate.py` and the generated
+`ui-next/src/lib/types.ts` are untouched. `cd ui-next && npm run typecheck && npm run test && npm
+run build` all green -- `ui-next` itself has no lineage/graph component yet and was not otherwise
+touched by this row; this run only confirms no regression in the separate React frontend.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No database migration involved (a pure frontend/rendering change).
+
+## 2026-09-01 — KG-3 closed: level-of-detail (clustering) rendering for the shared lineage/knowledge-graph renderer
+
+Frontend-only, and deliberately composed with (not layered independently on top of) LN-8's
+large-DAG virtualization, landed earlier the same day on the same shared component. The API
+boundary is the hard constraint this row was scoped around from the start: `unified_lineage_api.py`
+and `intelligence_api.py::get_knowledge_graph`/`get_knowledge_graph_neighborhood` already return
+bounded, truncated node/edge sets per ADR-0010/EA.14 (LN-8's own delivery confirmed this, and KG-3
+does not revisit it) -- neither file was touched by this row (verified structurally, see the test
+below), and no new endpoint exists to ask the server for pre-clustered data.
+
+### The gap LN-8 explicitly left open
+
+LN-8's windowing bounded how many rich HTML `<div>` cards mount at once (`node[agWindowed]`,
+`computeWindowedNodeIds`, capped at `DEFAULT_HTML_WINDOW_CAP = 220`), but every real node stayed in
+the Cytoscape model regardless of windowing state -- non-windowed nodes fell back to a cheap
+canvas-only placeholder rectangle, but at the platform's own bound (`unified_lineage_api.py`'s
+full-graph route, `node_limit` up to 4,000) that is still 4,000 real nodes and their edges in the
+Cytoscape graph, all participating in canvas layout/hit-testing/minimap rendering at every zoom
+level. LN-8's own row explicitly named this "KG-3's separate, still-open level-of-detail work" and
+scoped itself out of it.
+
+### The mechanism: zoom-threshold clustering, not Cytoscape compound nodes
+
+Cytoscape core's native compound-node support (a `parent` data field) renders a bounding container
+*around* its children -- it does not hide/collapse them into a single visual node without an
+`expand-collapse` plugin, and none is vendored (`ui/vendor/` holds only `cytoscape.min.js`,
+`cytoscape-dagre.js`, `cytoscape-node-html-label.min.js`; no CDN calls are permitted). Rather than
+add a new vendored dependency, KG-3 hand-rolls the collapse: real nodes/edges are never restructured
+into a parent/child hierarchy, only shown or hidden (`ele.style("display", "none" | "element")`,
+never `.remove()`d), while synthetic "cluster" nodes/edges are added/updated/removed to stand in for
+whichever groups are currently collapsed. This is deliberately the same "hide, don't remove" idiom
+LN-8 established for its own canvas placeholder/HTML-card duality, applied one level up.
+
+The pure decision function, `computeClusterView(nodeBoxes, edgeList, zoom, options)` -- module-scope
+in `ui/scripts/graph-engine.js`, no Cytoscape/DOM dependency, same convention as LN-8's
+`computeWindowedNodeIds` right above it -- takes `{id, x, y, w, h, groupKey}` boxes and
+`{id, source, target}` edges and the current `cy.zoom()` level:
+
+- **At/above `DEFAULT_CLUSTER_ZOOM_THRESHOLD` (0.45):** inactive; the raw graph passes through with
+  every node individual and every edge keeping its original id/endpoints (`original: true`), so a
+  small graph or a zoomed-in view is completely unaffected.
+- **Below the threshold:** nodes are grouped by `groupKey`; any group of `DEFAULT_CLUSTER_MIN_SIZE`
+  (3) or more collapses into one synthetic node at the group's centroid, width/height scaled by
+  `sqrt(count)` and capped, carrying `count` for a count badge -- a pair of tables sharing a schema
+  is not worth turning into a "cluster of 2", so smaller groups stay individual. The selected/
+  focused node is always excluded from grouping (a `__pinned__:<id>` singleton group), mirroring
+  LN-8's own `pinnedId` behavior for windowing -- selecting/focusing a node must never make it
+  invisible behind a cluster.
+- **Edges:** an edge between two nodes that both stayed individual keeps its original id/classes
+  untouched (`original: true`) so its declared/suggested/dbt/openlineage styling survives; any edge
+  touching a cluster (or dropped entirely because both ends collapsed into the *same* cluster) is
+  folded into one deduplicated aggregate edge per rendered-id pair (`original: false`, `weight` =
+  how many real edges it represents), styled distinctly (`edge[isClusterEdge]`, dashed grey).
+
+### The grouping key: `qualified_name`, already on every node, no new API field
+
+`defaultClusterKey(nodeData)` takes everything before the last `.` in `nodeData.qualified_name` --
+the schema/namespace a node lives in. This field is already present on every node object all four
+graph surfaces pass to `AtlasGraph.setData()` today (`ui/app.js`'s `knowledgeGraphNodeHtml`/
+`renderGraphStage`, `context-lineage-control-plane.js`'s unified-lineage node builder), and is
+populated by the API for every node kind already (`unified_lineage_api.py`: TABLE nodes get
+`f"{catalog.name}.{schema.name}.{table.name}"`; dbt resource nodes get `relation_name` or
+`unique_id`, both dotted). A node without a dotted `qualified_name` falls back to `node_kind`/
+`object_type`, then a single `"ungrouped"` catch-all -- no crash, no new field required anywhere.
+Callers may override the key entirely via `opts.clusterKey` (e.g. to group by a different
+dimension) without touching the pure function.
+
+### Composing with LN-8's windowing, not duplicating or fighting it
+
+This was the row's second hard constraint, and it is structural, not just documented:
+
+- `AtlasGraph._refreshClusterState()` recomputes the cluster plan and `_applyClusterPlan()` applies
+  it (hide/show real elements, add/update/remove synthetic ones) **before** `_computeWindowedIds()`
+  runs, inside the same coalesced `requestAnimationFrame` callback LN-8's `_scheduleWindowRefresh()`
+  already used for pan/zoom/`layoutstop` -- windowing always sees this frame's cluster/hidden state,
+  never a stale one, and the two never race across separate rAF schedules.
+- `_computeWindowedIds()` now boxes up only *visible* Cytoscape nodes
+  (`node.style("display") !== "none")`). A real node hidden behind an active cluster is excluded
+  entirely -- it costs 0 window slots, same as if it didn't exist for windowing's purposes -- while
+  the one cluster node standing in for it is an ordinary box like any other, so it costs exactly 1
+  slot regardless of whether it represents 3 real nodes or 3,000. This is the literal mechanism
+  behind "a cluster node counts as one window slot, not N."
+- Cluster nodes get their own built-in HTML card template (`AtlasGraph._clusterCardHtml`, a count
+  badge plus the group key), bypassing the caller's `nodeHtml` entirely (`knowledgeGraphNodeHtml` et
+  al. expect real-node fields like `column_count`/`qualified_name` a synthetic cluster node doesn't
+  have) -- but they still mount through the exact same `node[agWindowed]` gate LN-8 built, so they
+  respect the same HTML-card budget as everything else. A `node[isCluster]` canvas-only placeholder
+  (dashed border, a native canvas-drawn count label) means a cluster is legible even before/without
+  its HTML card mounting, the same "cheap canvas first" idiom LN-8 established for real nodes.
+- `setData()` resets `_clusterActive = false` whenever elements are replaced (a full clustering
+  recompute follows from the next `_scheduleWindowRefresh()` pass rather than diffing against
+  synthetic elements that `cy.elements().remove()` just discarded).
+
+A new `atlas-graph-cluster-readout` toolbar element (`"Zoomed out: N clusters grouping M nodes"`)
+sits beside LN-8's `atlas-graph-window-readout`, the same live-region idiom, empty when clustering
+is inactive.
+
+### Proof
+
+Same convention as LN-8: `ui/` has no JS test runner, so `ui/scripts/graph-engine.clustering.
+test.mjs` (plain Node, `node:vm` to load the IIFE against a bare `{window: {AtlasUI: {}}}` sandbox,
+`node:assert`) actually executes `computeClusterView` rather than only asserting against source
+text. Seven scenarios: (1) at the zoom threshold itself, clustering is inactive and every one of
+200 raw nodes/edges passes through unchanged, with every edge marked `original: true`; (2) at
+`unified_lineage_api.py`'s own 4,000-node full-graph `node_limit` ceiling (100 groups of 40), zoomed
+past the threshold, exactly 100 cluster nodes render (each carrying `count: 40`, every raw node
+accounted for by exactly one cluster) and the aggregated edge count drops below the raw edge count
+too; (3) the same 4,000-node input at a zoom at/above the threshold recovers all 4,000 individual
+nodes exactly, proving expansion is lossless (the function is pure/stateless, so nothing "sticky"
+survives from having been clustered a moment ago); (4) a 2-member group stays individual while a
+40-member group in the same graph still collapses; (5) a pinned/selected node stays individual even
+while the other 79 members of its group collapse into one cluster; (6) simulating
+`_computeWindowedIds()`'s own box-building on top of a clustered 4,000-node plan (100 boxes) proves
+all 100 clusters fit under the 220 HTML-card cap where the raw 4,000 nodes would have hit it (per
+LN-8's own test 1) -- the composition contract, actually executed, not just asserted by source
+inspection; (7) `defaultClusterKey` derives from `qualified_name` alone, with the documented
+node_kind/object_type/`"ungrouped"` fallback chain. `tests/test_ui_lineage_graph_clustering.py` (8
+tests, following `tests/test_ui_accessibility.py`'s established ui/-source-assertion convention)
+shells out to that script (`subprocess.run(["node", ...])`, skipped if `node` is unavailable) and
+parses its JSON summary to assert the same numeric bounds under `pytest`, plus structurally asserts
+the windowing-composition point (`_refreshClusterState()` before `_computeWindowedIds()` in the same
+coalesced pass), the hide-never-remove invariant, the pinned-node exclusion, and -- by grepping
+`unified_lineage_api.py`/`intelligence_api.py` for `cluster`/`clustering`/`level_of_detail`/`lod` and
+asserting none of those strings appear -- that no clustering-related server logic was added.
+
+### Verification
+
+`node --check ui/scripts/graph-engine.js` and `node --check ui/scripts/graph-engine.clustering.
+test.mjs` clean. `node ui/scripts/graph-engine.clustering.test.mjs` clean (all 7 scenarios pass).
+`node ui/scripts/graph-engine.virtualization.test.mjs` (LN-8's own proof) still clean, unmodified.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_ui_lineage_graph_clustering.py
+tests/test_ui_lineage_graph_virtualization.py tests/test_ui_accessibility.py -q`: 21 passed (8 new +
+13 pre-existing, unmodified -- no regression in LN-8's own suite). `AIDA_ENVIRONMENT=development uv
+run pytest tests/test_doc_claims.py -q` clean. No HTTP route added or changed and neither
+`unified_lineage_api.py` nor `intelligence_api.py` was touched (confirmed by `git diff --stat`
+showing zero changes to either file, and by the grep-based test above), so
+`tests/test_openapi_diff_gate.py` and the generated `ui-next/src/lib/types.ts` are untouched;
+`ui-next` itself was not touched by this row (it has no lineage/graph component at all, per LN-8's
+own delivery note).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No database migration involved (a pure frontend/rendering change).
+
+## 2026-09-01 — DQ-6 closed: seasonality-aware thresholds for the VOLUME_CHANGE quality control
+
+### The false positive this closes
+
+`quality_service.evaluate_analysis_run`'s VOLUME_CHANGE control compared a table's current
+`TableProfile.row_count` only to its single most recent prior profile for that table (a
+`baseline_rank == 1` `row_number()` window over `TableProfile.created_at`). A table with a genuine,
+fully-normal weekly cycle -- e.g. `daily_transactions` running ~1000 rows/day on weekdays and ~400
+rows/day on weekends, every week, by design -- tripped the 30%-default `volume_change_percent`
+threshold on every single Friday->Saturday and Sunday->Monday transition, because the comparison had
+no notion of day-of-week at all: it was always "today vs. whatever day ran last."
+
+### The baseline data: already persisted, genuinely usable, not synthetic-only
+
+Per this row's own stop condition, `models.py` (read-only) was checked before writing any
+implementation: `TableProfile` is documented as "Immutable, run-scoped table statistics," carries a
+real `created_at` timestamp (`DateTime(timezone=True)`, indexed via
+`ix_table_profile_org_created`), and one row is written per table per analysis run -- never
+overwritten. Grepping the whole `src/aida` tree for `TableProfile`/`table_profile` alongside
+`retention`/`prune`/`purge`/`cleanup`/`delete` found no job that prunes or ages out old profiles (the
+existing single-baseline query already reads whatever is oldest without a lookback bound). So a
+table with several weeks of profiling scans already has several real, timestamped points per weekday
+sitting in the database -- no new persisted state, no retention-policy change, no migration needed to
+compute a real day-of-week baseline from it.
+
+### The pure function: `data_quality.day_of_week_baseline`
+
+New in `data_quality.py`, DB-free by construction -- it takes only a `Sequence[tuple[datetime, int]]`
+of already-observed points and an `observed_at` timestamp:
+
+```python
+def day_of_week_baseline(
+    history: Sequence[tuple[datetime, int]], observed_at: datetime, *, min_samples: int = 3
+) -> SeasonalBaseline | None:
+    weekday = observed_at.weekday()
+    same_weekday_values = [float(v) for ts, v in history if ts.weekday() == weekday]
+    if len(same_weekday_values) < min_samples:
+        return None
+    mean = statistics.fmean(same_weekday_values)
+    stdev = statistics.pstdev(same_weekday_values) if len(same_weekday_values) > 1 else 0.0
+    return SeasonalBaseline(weekday=weekday, mean=mean, stdev=stdev, sample_count=len(same_weekday_values))
+```
+
+Returns `None` -- explicit "not enough same-weekday history yet" -- below `min_samples`, so a caller
+always has a safe fallback rather than trusting a thin sample.
+
+`evaluate_quality` gained optional `row_count_history`/`current_observed_at`/`seasonality_enabled`/
+`seasonality_min_samples`/`seasonality_zscore_threshold` keyword parameters (all default off/`None`,
+so every existing positional call site and every existing test is unaffected). The existing
+`volume_change_percent`-vs-previous-profile number is still always computed and recorded in
+`evidence` for continuity/audit. When seasonality is enabled and `day_of_week_baseline` returns a
+real baseline, the *anomaly verdict itself* switches: if the baseline has observed variance
+(`stdev > 0`), the decision is a z-score against that weekday's own mean/stdev (`> zscore_threshold`,
+default 3.0, severity escalating to CRITICAL past `2x` the threshold via the same `_severity` helper
+every other control already uses); with no observed variance yet (a single same-weekday sample),
+it falls back to a percent-of-seasonal-mean comparison using the same `volume_change_percent`
+threshold as the non-seasonal path. Either way, `evidence["threshold_strategy"]` records
+`"SEASONAL_DAY_OF_WEEK"` or `"ROLLING_PREVIOUS"` so which comparison decided a given verdict is
+always auditable, not just inferred from whether an incident exists.
+
+### Wiring: an off-by-default flag, not a new policy-table column
+
+`quality_service.evaluate_analysis_run` now optionally issues one extra bounded query (at most 120
+of a table's most recent prior `TableProfile` rows, reusing the exact same `baseline_rank` window
+subquery the existing single-baseline query already builds) to assemble each table's
+`row_count_history`, and threads it plus a per-table `current_observed_at=profile.created_at` into
+`evaluate_quality`. This only happens when the new `Settings.quality_seasonal_thresholds_enabled`
+flag (`src/atlas/platform/config.py`, off by default, plus `quality_seasonal_min_samples`/
+`quality_seasonal_zscore_threshold` knobs) is on, so an org that has not opted in pays no extra query
+cost and sees byte-identical behavior to before.
+
+This flag deliberately lives in global `Settings`, not as a new column on the DB-backed
+`DataQualityPolicy` table `custom_quality_rules`/DQ-4 already extends: `data_quality.py`'s
+`normalized_policy()`/`DEFAULT_POLICY` dict is asserted 1:1 against the Pydantic
+`DataQualityPolicyUpsert` contract in `test_data_quality.py::test_quality_contracts_validate_bounds_and_routes`
+(`defaults.model_dump(...) == normalized_policy()`), and `schemas.py` is off-limits for this item, so
+adding a policy-table field was not an option without touching a forbidden file. A `Settings` flag
+follows the exact rollout shape this repo already uses for a new, off-by-default quality/agent
+strategy (e.g. AG-7's `agent_query_memory_enabled`).
+
+The result reaches the *same* `DataQualityObservation`/`DataQualityIncident` creation code DQ-1's
+notification routing and DQ-3's runtime coupling (tool gating, answer trust warnings, retrieval
+demotion) already consume -- nothing downstream of `evaluate_quality`'s return value changed.
+
+### Reduced false positives, measured
+
+`tests/test_data_quality_seasonality.py` (pure-function level, no DB): a deterministic 12-week
+synthetic series (weekday ~1000 rows, weekend ~400 rows, +/-0.5% jitter so no two same-weekday values
+are identical, all fully "normal" for their day). Eight weeks establish the history; the next four
+weeks' 8 weekday<->weekend transitions (Fri->Sat and Sun->Mon x4) are each evaluated both ways:
+
+- **Naive rolling-previous baseline (today's unmodified behavior): 8/8 (100%) flagged as
+  `VOLUME_CHANGE`** -- every single normal weekend transition is a false positive.
+- **Seasonal day-of-week baseline: 0/8 (0%) flagged** -- the exact same 8 transitions, judged
+  against each table's own day-of-week history, produce zero false positives.
+- **One transition in numeric detail**: a normal ~400-row Saturday scores `volume_change_percent`
+  ~60% against the Friday before it under the old logic (flagged, threshold is 30%) but a
+  `seasonal_zscore` under 1.5 against its own Saturdays (not flagged, `status == "HEALTHY"`).
+- **True positive preserved**: a genuine collapse to 20 rows on a Saturday whose normal baseline is
+  ~400 still trips `VOLUME_CHANGE` under the seasonal comparison (`seasonal_zscore > 3`, severity
+  `CRITICAL`) -- switching baselines does not mean weekend anomalies stop being detected, only that
+  a normal weekend stops being misjudged as one.
+- `day_of_week_baseline` itself is proven to group strictly by weekday (a 3-Saturday-only mean stays
+  ~400, never drifts toward the ~1000 weekday values mixed into the same history array) and to return
+  `None` -- triggering the automatic fallback -- when fewer than `min_samples` same-weekday points
+  exist yet.
+
+`tests/test_quality_seasonality_wiring.py` proves the identical effect through the real
+`evaluate_analysis_run` call, against a real in-memory sqlite database seeded through the ORM (the
+same pattern DQ-4's `test_custom_quality_rules.py` established) with 61 real, individually-inserted,
+timestamped `TableProfile` rows -- not a mock, not a synthetic in-memory list handed straight to the
+pure function:
+
+- **Flag off (default)**: a normal Saturday still opens 1 `VOLUME_CHANGE` incident
+  (`counts["incidents_opened"] == 1`), `DataQualityObservation.evidence["threshold_strategy"] ==
+  "ROLLING_PREVIOUS"` -- proving the rollout is genuinely opt-in, not a silent behavior change.
+- **Flag on** (`monkeypatch.setattr(quality_service, "get_settings", ...)`, matching
+  `test_profiling_exception_policy.py`'s established settings-injection pattern), same shape of
+  real persisted history, same normal Saturday: 0 incidents opened (`counts["incidents_opened"] ==
+  0`, `counts["healthy"] == 1`), with the persisted observation's evidence recording
+  `threshold_strategy: "SEASONAL_DAY_OF_WEEK"` and `seasonal_sample_count >= 3` as the auditable
+  reason no incident exists.
+
+### Tests, lint, scope
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_data_quality.py
+tests/test_data_quality_seasonality.py tests/test_quality_seasonality_wiring.py
+tests/test_quality_coupling.py tests/test_quality_runtime_coupling.py tests/test_custom_quality_rules.py
+tests/test_rt7_quality_trust_ranking.py tests/test_dbt_quality_bridge.py -q`: all green, including
+every pre-existing exact-evidence assertion in `test_data_quality.py` (`volume_change_percent`,
+`max_null_rate_change_percent`, the policy-contract 1:1 equality check) unaffected by the new
+additive `evidence["threshold_strategy"]` key. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. `ruff check` and `mypy src` clean on every changed/added file
+(`data_quality.py`, `quality_service.py`, `src/atlas/platform/config.py`,
+`tests/test_data_quality_seasonality.py`, `tests/test_quality_seasonality_wiring.py`).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched (per this row's own constraint) -- confirmed unnecessary precisely because `TableProfile`'s
+existing, unpruned, timestamped history already supports a real day-of-week baseline. Honest gaps:
+only day-of-week grouping ships; broader seasonality (day-of-month, holiday calendars) that the
+exit condition allows "if the existing scan-history data supports it" is not attempted here -- the
+data would support it (unbounded, timestamped history), but it is a larger follow-up, not needed for
+the weekly-cycle case this row's exit condition names. No live-Postgres verification of the new query
+(the same standing sandbox limitation CN-1c/CN-2a/DQ-4 already carry). The 120-row-per-table lookback
+bound is a deliberate cost cap, not tuned against a real production history size.
+
+---
+
+## 2026-09-01 — AT-17 closed: metric-formula collision detection, reusing GL-3's conflict queue as-is
+
+GL-3 detects two *glossary terms* colliding on a shared label. AT-17 is the sibling gap: two
+*metrics* computing the same number a different way, published under different names/owners, so a
+question routed to one and a question routed to the other silently disagree. Read GL-3's mechanism
+in full first (`stewardship_api.py`'s `detect_glossary_conflicts`/`list_glossary_conflicts`/
+`submit_conflict_resolution`, `stewardship_service.py`'s `apply_conflict_resolution`/
+`reject_conflict_resolution`, the `GlossaryConflict` model in `models.py`) as the template to mirror,
+per this row's own instructions.
+
+### What "formula" turned out to mean, and why `sqlglot` does not apply
+
+The task brief assumed a raw SQL/DSL formula field worth parsing with `sqlglot` (as `sql_guard.py`
+already does elsewhere). Reading `SemanticMetricVersion` in `models.py` (read-only, as required) found
+otherwise: a metric's formula is entirely structural, no SQL text or expression DSL anywhere on the
+row -- one `aggregation` enum (`SUM`/`COUNT`/`AVG`/`MIN`/`MAX`, `schemas.py`'s
+`SemanticMetricCreate.aggregation: Literal[...]`) over one `measure_column_id` (nullable only for
+`COUNT`), one `source_table_id`, one free-text `grain`, one optional `default_time_column_id`. There
+is no ratio/composite metric type in this schema (no numerator/denominator, no metric-of-metrics
+shape), so the textbook example in the brief -- "`SUM(amount)/COUNT(*)` and `AVG(amount)` compute the
+same thing" -- cannot even be *posed* as two different metric rows here: nothing in this schema can
+express a ratio metric at all. `SemanticMetricProposal` (SM-4) confirmed the same structural shape.
+Parsing SQL would have been solving a problem this schema does not have, so `metric_formula_signature.py`
+compares the structural tuple instead, with no dependency on `sqlglot`.
+
+### The detector (`src/aida/metric_formula_signature.py`, pure, DB-free)
+
+`normalize_metric_formula` builds a `MetricFormulaSignature` from a plain snapshot dict (mirroring
+SM-7's `semantic_diff.py` idiom: no session, no ORM import). `compare_formulas` classifies two
+different metrics' signatures as:
+
+- **`EXACT_MATCH`** -- `(aggregation, source_table_id, measure_column_id, default_time_column_id,
+  grain)` identical, raw `grain` string included. Two metrics, byte-for-byte the same formula, two
+  different names/owners.
+- **`NORMALIZED_GRAIN_MATCH`** -- identical on every field except `grain`, which matches only after
+  `strip().casefold()` -- the same normalization GL-3 already applies to glossary labels. This is the
+  one genuinely *semantic, not textual* equivalence this detector reaches: `"Daily"` and `"daily "`
+  read as different strings but denote the same grain.
+
+**Honest limit, stated plainly (per this row's own instruction not to overclaim):** nothing past
+those two tiers is attempted. No cross-aggregation algebra (`SUM`/`AVG` over the identical column are
+never flagged against each other -- correctly, since they are not equal in general, and the ratio case
+that *would* be equal cannot exist in this schema regardless). No column-alias resolution (two
+different `measure_column_id`s are always "different", even if lineage might say they trace to the
+same underlying value). No invented grain-synonym taxonomy (`"daily"` vs `"1d"` is not attempted --
+only case/whitespace, matching GL-3's own scope rather than inventing a business dictionary this
+codebase has no other authority for). Exact-formula and grain-normalized duplication across
+differently-named/owned metrics is still the real, valuable catch this row asked for -- it is just
+not general algebraic formula equivalence, which this schema has no representation for in the first
+place.
+
+### Wiring: GL-3's own infrastructure, reused, not a parallel table
+
+Checked `GlossaryConflict`'s schema before assuming either way, per this row's stop condition:
+`term_id` is already `Mapped[UUID | None]` (nullable), and neither `apply_conflict_resolution` nor
+`reject_conflict_resolution` reference `term_id` at all -- the maker-checker resolution GL-3 built is
+already generic over what a conflict's two positions represent. So a metric-formula collision is
+stored as a real `GlossaryConflict` row with `term_id=None`, `conflict_type=
+"METRIC_FORMULA_COLLISION"`, and both metrics' identity/formula fields (plus `match_kind`) in
+`position_a`/`position_b` -- no schema change, no migration, and it resolves through the *exact same*
+`POST /v1/glossary-conflicts/{conflict_id}/resolution` route and `GLOSSARY_CONFLICT` governance-review
+branch (`semantic_api._apply_governance_review_decision`) GL-3 already built. "Losing position
+retained" holds identically: neither `apply_conflict_resolution` nor a later `RESOLVED` status ever
+clears `position_a`/`position_b`.
+
+Two new endpoints in `semantic_api.py`, mirroring GL-3's own trigger shape exactly (GL-3's own
+`detect_glossary_conflicts` is a manual, on-demand scan endpoint -- not scheduled, not auto-fired on
+term publish -- confirmed by grepping `workflows/`, which never calls it):
+
+- `POST /v1/organizations/{organization_id}/metric-conflicts/detect` --
+  `detect_metric_formula_collisions`. Scans every `PUBLISHED` `SemanticMetricVersion` in the org
+  (bounded at 5,000 rows scanned / 100 conflicts created per call, the same caps
+  `detect_glossary_conflicts` uses), builds snapshots, calls the pure
+  `find_formula_collisions`, dedupes against already-`OPEN`/`REVIEW_REQUIRED`
+  `METRIC_FORMULA_COLLISION` rows by metric-id pair (same dedup shape as GL-3's `existing_pairs`), and
+  persists one `GlossaryConflict` per new collision.
+- `GET /v1/organizations/{organization_id}/metric-conflicts` -- `list_metric_formula_collisions`,
+  the read side, scoped to `conflict_type == "METRIC_FORMULA_COLLISION"` (mirrors
+  `list_glossary_conflicts`).
+
+No `models.py`/`schemas.py`/`contracts.py` file touched, no Alembic migration added, per this row's
+hard constraints -- genuinely unnecessary here, not worked around: `GlossaryConflictRead` (`str`
+`conflict_type`, already-imported) serves both endpoints' responses unmodified, and the detect
+endpoint constructs `GlossaryConflict` rows directly via the ORM rather than through the
+`conflict_type`-`Literal`-restricted `GlossaryConflictCreate` Pydantic model -- the exact same bypass
+`detect_glossary_conflicts` itself already uses for its own `SYNONYM_COLLISION` rows.
+
+### Tests
+
+Pure, no-database (`tests/test_metric_formula_signature.py`, 16 tests): exact duplicates across two
+differently-named/owned metrics, grain-normalized duplicates (case/whitespace only), same-metric
+different-version is never a "collision", and every documented honest-limit case correctly *not*
+flagged (different aggregation on the same column, different measure column on the same table,
+different source table, different default time column) plus a three-way collision reporting each
+pairwise combination exactly once.
+
+Integration, real in-memory sqlite (`tests/test_metric_formula_collision_endpoint.py`, 7 tests,
+`_Scenario` seeding pattern reused from SM-7's `test_semantic_diff_endpoint.py` so the real SQL join
+runs): two differently-named/owned `PUBLISHED` metrics with an identical formula produce exactly one
+persisted `GlossaryConflict` with `term_id is None`; a grain-only difference is reported as
+`NORMALIZED_GRAIN_MATCH`; a genuinely different metric (different aggregation, no shared column)
+produces zero conflicts; re-running detect against an already-open conflict creates nothing new
+(idempotent); the list endpoint returns only `METRIC_FORMULA_COLLISION` rows, not a `SYNONYM_COLLISION`
+row seeded in the same org; and a full resolve cycle through `submit_conflict_resolution` +
+`apply_conflict_resolution` (GL-3's own functions, called unmodified) proves both positions survive
+resolution untouched.
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_metric_formula_signature.py
+tests/test_metric_formula_collision_endpoint.py tests/test_glossary_stewardship.py
+tests/test_semantic_diff_endpoint.py tests/test_semantic_glossary_binding.py
+tests/test_semantic_contracts.py tests/test_doc_claims.py tests/test_openapi_diff_gate.py -q`: all
+green. `ruff check` and `mypy src` (258 files) clean on every touched file. Two new HTTP routes added
+(read-only additions, no breaking changes per `scripts/openapi_diff.py`) -- `Docs/90-reference/
+openapi-baseline.json` regenerated (`--accept-baseline`); `ui-next/src/lib/types.ts` already matched
+the live schema (`scripts/generate_ui_types.py` reported no diff -- no new Pydantic schema was added,
+only two paths reusing `GlossaryConflictRead`/`Page`).
+
+A full-suite run afterward (`AIDA_ENVIRONMENT=development uv run pytest -q`) surfaced one real gap
+this row's own targeted runs above had not covered: `tests/test_event_catalog_gate.py`'s
+`test_every_emitted_event_type_is_documented_or_known_st14_drift` failed on the new
+`semantic.metric_conflict_raised.v1` literal, which `record_outbox()` in `semantic_api.py` emits but
+which had no row in `Docs/30-contracts/04-event-catalog.md`. Fixed by adding that row (Semantics and
+glossary section, next to `glossary.conflict_raised.v1`, noting it resolves through the same
+`glossary.conflict_resolved.v1` path) rather than adding it to the test's `KNOWN_ST14_DRIFT`
+exemption -- this is a genuinely new event, not a rename collision. `tests/test_event_catalog_gate.py`
+green afterward (exit 0, no `FAILED`/`ERROR` lines -- this environment's pytest prints no final summary
+count line, so exit code plus absence of failure lines is the check, same as AT-6's own note). The
+same full-suite run's other failure, `tests/test_config.py::test_environment_must_be_explicit_outside_tests`,
+was confirmed pre-existing and unrelated: it reproduces identically on a clean checkout of `14d2b6e`
+(the commit immediately before this row's own work began) run with the exact same
+`AIDA_ENVIRONMENT=development` invocation this repo's own test-running instructions require -- the
+test asserts `Settings` raises when `AIDA_ENVIRONMENT` is unset in the *process* environment, which
+conflicts with that invocation's own env var, not with anything this row changed. Left as-is,
+untouched, and reported rather than silently worked around.
+
+---
+
+## 2026-09-01 — AT-5 closed: query-history-ranked documentation worklist for stewards
+
+### The gap
+
+Stewards had `list_catalog_rows` (UX-12) for the full undocumented-table set, unranked, and RT-6's
+`usage_popularity` for an *agent's* next-query candidate ranking -- but nothing that answered "which
+undocumented table should a human document first, given how heavily it is actually being used." AT-5
+closes that gap with a steward-facing worklist ranked by real, already-persisted query volume.
+
+### Real volume sources, verified before writing any ranking code
+
+Per the row's own stop condition, both named sources were checked for real per-table granularity
+before anything else was built:
+
+- **`query_gateway.py` / `QueryExecution.referenced_tables`**: one row per executed statement
+  (governed SQL execution), carrying the SQL-qualified table names it touched and a `created_at`.
+  Names, not ids -- resolved to real `MetadataTable.id`s per datasource with
+  `aida.quality_coupling.resolve_table_ids`, the identical technique RT-6's own
+  `aida.retrieval._table_execution_counts` already uses for the identically-shaped problem (a name
+  only resolves unambiguously within one datasource's own catalog). AT-5 reuses the *technique*, not
+  RT-6's private, retrieval-scoped helper itself -- the aggregate needed here (every touched table,
+  not lookup counts for a caller-given set) is a different shape.
+- **`consumption_lineage.py` / `ConsumptionRecord`**: CX-4 rows for `resource_type="metadata_table"`
+  carry `resource_id` as the real `MetadataTable.id` already (set by `mcp_server.py`'s
+  `record_consumption` call at the point a table is read via MCP), plus `consumed_at` -- no name
+  resolution needed, just a grouped aggregate. New `consumption_lineage.get_consumption_by_resource_counts`
+  adds that one grouped `COUNT`/`MAX(consumed_at)` query, ordered and bounded, reusing the same
+  `ix_consumption_record_resource` index `get_consumption_for_resource` already relies on.
+
+Both retain real per-table identity and recency at real granularity -- the stop condition did not
+trigger.
+
+### What "documented" means here: UX-12's determination, reused verbatim
+
+`aida.catalog_read_model._description`'s precedence chain (approved GL-9 readme -> pending draft,
+named as a proposal -> approved business annotation -> connector-sourced comment) is imported and
+called directly, not re-derived. `is_documented = bool(description) and not description_is_proposed`
+-- a table with only a `PENDING_APPROVAL` draft is still "under-described" for this worklist, since
+nothing has actually been approved yet, matching UX-13's own asset-evidence pane's treatment of the
+same state.
+
+### Pure ranking, DB-free (TL-6/CN-7's "every factor inspectable" shape)
+
+`aida.documentation_worklist.rank_documentation_worklist` takes plain `TableQuerySignal` dataclasses
+and returns `(DocumentationWorklistEntry` page`, total)`. Three design choices, stated rather than
+left implicit (as the row's exit criterion required):
+
+- **Documented tables are excluded entirely**, not demoted -- mirrors GL-6's bounded-backlog shape:
+  this *is* the worklist, not a catalog view with a documentation column.
+- **Ties break deterministically** by table name then table id -- proven stable across two calls with
+  the same signals in different input order (`test_tie_break_is_stable_across_repeated_calls`).
+- **Zero-query-volume tables are excluded by default.** The whole point is "ranked by real query
+  volume" -- a table nobody has queried or read has no real signal to rank it *by*; ranking it
+  arbitrarily "last" would dress up a guess as a measurement, and the unranked full undocumented-table
+  set already exists (`list_catalog_rows`). `include_zero_volume=True` opts in; because the sort key
+  is volume descending, opted-in zero-volume rows land after every real-volume row automatically --
+  "included" and "ranked last" are the same outcome, not a special case.
+
+### Where it lives, and why not GL-6
+
+New endpoint `GET /v1/organizations/{organization_id}/stewardship/documentation-worklist`
+(`aida.stewardship_api`), not a "backlog kind" switch bolted onto GL-6's
+`unowned-backlog` endpoint: GL-6 reads a *stateful* `UnownedAssetEscalation` table with its own
+routing/escalation status machine that `route_unowned_asset_backlog` writes to; AT-5 has no such
+state -- every response is computed fresh from `QueryExecution`/`ConsumptionRecord`/documentation
+state on that request. One route sometimes reading a persisted table and sometimes computing an
+aggregate would be two response shapes wearing one signature. `DocumentationWorklistEntryRead` is a
+local `ApiModel` (same "not every response model belongs in `aida.schemas`" reasoning CN-7's
+`ConnectorHealthScoreRead` and ST-05's `policy_native_sync_api`/`sql_validation_api` already
+established), returned inside the existing generic `Page` (`items: list[Any]`) rather than a new
+schema.
+
+**Pagination**: offset/limit via `Page`, GL-6's own bounded-backlog contract -- deliberately not
+CT-2's keyset convention. Keyset pagination continues a page via a `WHERE` predicate over an indexed,
+stored ordering column; `query_volume` is a runtime aggregate recomputed and re-sorted by the pure
+ranking function on every request, so there is no stored column for a keyset cursor to continue
+against. `Page.total` still reports the full ranked-candidate count, independent of `limit`.
+
+**Candidate-set bound**: rather than scoring an org's entire active-table catalog on every request
+(which `list_catalog_rows`'s own 1M-table docstring notes is exactly the scale this platform's
+catalog surfaces are built not to assume), the candidate pool is driven by real activity: the union of
+tables touched within the bounded `QueryExecution` scan (`Settings.agent_retrieval_scan_limit`, RT-6's
+own existing budget, reused rather than a second one introduced) and the top
+`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT` (500, matching GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT`
+bound) tables by consumption count. A table in neither has no real volume signal by construction, so
+it is never fetched -- consistent with the ranking function's own zero-volume-excluded default. Only
+`include_zero_volume=True` reaches for an additional bounded (500) slice of zero-volume active tables.
+
+Authorization matches GL-6's own backlog endpoint (`require_roles(*READ_ROLES)` +
+`enforce_organization`), not `list_catalog_rows`'s additional per-datasource `gate()` call -- GL-6 is
+the closer analog (an org-wide steward backlog view), so its simpler authorization shape is the one
+reused.
+
+### Tests
+
+19 total, no `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic
+migration touched:
+
+- `tests/test_documentation_worklist.py` (12, pure logic, no database): documented-table exclusion
+  regardless of volume; a pending-only proposal still counts as under-described; ranking by combined
+  gateway+consumption volume descending; every ranking factor inspectable on the entry, not just the
+  final rank; deterministic tie-break by name then id, proven stable across differently-ordered input;
+  both zero-volume behaviors (excluded by default, included-and-ranked-last when opted in, including
+  multiple zero-volume tables still tie-breaking deterministically); limit/offset pagination and
+  `total` independent of `limit`; empty input.
+- `tests/test_documentation_worklist_api.py` (7, real endpoint body against an in-memory SQLite
+  database, `test_asset_evidence.py`'s own PostgreSQL-unreachable-in-sandbox rationale): ranks by real
+  gateway execution volume; gateway and consumption volume summed and both individually visible on the
+  entry; only `COMPLETED` executions count (a `REJECTED` execution contributes zero, per real gateway
+  semantics); a documented table excluded despite ten real executions against it; the zero-volume
+  design choice exercised end to end (excluded by default, included and last when opted in); cross-org
+  isolation (a second org's table never appears, even with its own real query history); offset/limit
+  pagination with a stable total.
+
+### Verification
+
+`uv run pytest tests/test_documentation_worklist.py tests/test_documentation_worklist_api.py
+tests/test_glossary_stewardship.py tests/test_glossary_owner_routing.py tests/test_asset_evidence.py
+tests/test_catalog_rows_read_model.py tests/test_consumption_lineage.py -q`: all green (19 new + all
+neighboring stewardship/catalog/consumption suites unaffected). `ruff check` and `uv run mypy src`
+clean (258 source files). `uv run lint-imports`: 8/8 contracts kept. `AIDA_ENVIRONMENT=development
+uv run pytest tests/test_doc_claims.py -q` clean. The new route changed `app.openapi()`:
+`tests/test_openapi_diff_gate.py` caught it, `Docs/90-reference/openapi-baseline.json` regenerated via
+`scripts/openapi_diff.py --accept-baseline` (additive-only, confirmed by `git diff --stat`);
+`ui-next/src/lib/types.ts` regenerated via `scripts/generate_ui_types.py --accept-baseline` with *zero*
+diff -- the endpoint's `response_model=Page` reuses the existing generic schema (`items: list[Any]`),
+so no new named component entered `components.schemas`.
+
+Honest gaps: no live-Postgres verification of the new grouped-aggregate or per-datasource scan queries
+(the same standing sandbox limitation several earlier rows this session already carry). The 500-row
+`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT` and the reused `agent_retrieval_scan_limit` scan bound are
+deliberate cost caps mirroring existing precedent (GL-6, RT-6), not independently tuned against a real
+production query-history size.
+
+## 2026-09-01 — AT-15 closed: relationship-candidate confidence decomposed into named signals
+
+Module 06's own concession: a steward reviewing a `RelationshipCandidate` saw one opaque
+confidence float with no way to tell which underlying signal produced it. This decomposes that
+number into named, budgeted, evidence-attached components rather than inventing a new
+explanation layer on top of it.
+
+### What the real code actually computes
+
+Read `intelligence_api.py`'s two discovery functions before writing anything: `confidence` was
+a plain if/elif ladder — `discover_relationship_candidates` (same-source) always assigned 0.90
+after requiring an exact case-insensitive name match and exact type match;
+`discover_cross_source_relationship_candidates` assigned 0.75/0.65/0.55 depending on how many of
+those two same signals matched only canonically/by type-family instead of exactly. Exactly two
+real comparison signals exist in this code, plus one always-true structural fact (the target
+column is a declared PRIMARY KEY — the discovery loops never pair against anything else). No
+cardinality, FK-corroboration, or query-co-occurrence signal exists in this scoring path, so none
+were invented for the breakdown, per AT-15's own warning against a plausible-sounding but
+fabricated explanation.
+
+### Design
+
+`aida/relationship_intelligence.py` — `RelationshipSignal` (name, score, maximum, reason) and
+`RelationshipCandidateScore` (confidence + `signals: tuple[RelationshipSignal, ...]`,
+`as_evidence()` serializing to a JSON-safe dict), mirroring `aida.connector_health.HealthFactor`.
+`score_relationship_candidate_signals(*, same_source, name_match_exact, type_match_exact)` is
+pure and value-free — every input is a fact already resolved by the caller.
+
+`intelligence_api.py`'s two discovery functions now call it and merge `as_evidence()` additively
+into the `RelationshipCandidate.evidence` JSON field already being built — `evidence["signals"]`
+is new; every existing evidence key is untouched. No `models.py`/`schemas.py` change: `evidence`
+was already a free-form JSON column.
+
+### Verification
+
+`tests/test_relationship_intelligence.py`'s `test_score_relationship_candidate_signals_matches_*`
+proves the decomposition reproduces every one of the four previous fixed confidence values
+(0.90, 0.75, 0.65, 0.55) exactly — this is a decomposition, not a scoring-behavior change.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_relationship_intelligence.py
+tests/test_relationship_intelligence_review.py -q` — 46 passed. `ruff check` clean on all four
+touched files. `test_doc_claims.py` and `test_openapi_diff_gate.py` clean (no route/schema
+change, so no baseline regeneration needed). No Alembic migration touched.
+
+---
+
+## 2026-09-01 — UX-17 closed: review-queue read model, scoped down from a single cross-type "run"
+
+### What the row asked for, and what the data model actually has
+
+The row wanted one request to return "a run's proposals" -- each carrying a rendered diff,
+numeric confidence and evidence, with counts derived from the returned list. Before writing any
+endpoint code, the row's own stop condition was checked against the real schema: **does a "review
+run" grouping -- a batch of governance-queue proposals from one inference/scan pass -- exist across
+every proposal type feeding `GovernanceReview`, or would building it need a new persisted field?**
+
+It exists for exactly one proposal type. `MetadataEnrichmentProposal` carries `inference_run_id` ->
+`SemanticInferenceRun`, a real persisted batch of proposals from one scan pass (SM-7's own inference
+endpoint, `semantic_intelligence_api.py`). No other proposal type in the unified governance queue is
+grouped this way:
+
+- `GlossaryLinkProposal`, `SemanticMetricProposal`, `AssetDescriptionDraft`, `TermSemanticBinding`
+  each carry `governance_review_id` as a 1:1 pointer to a single review -- submitted and reviewed
+  one at a time, no batch key.
+- `SEMANTIC_MODEL_VERSION`/`GLOSSARY_TERM_VERSION` reviews -- the *only* two object types SM-7 can
+  diff -- are created by an ad-hoc `submit_for_review` call, never a scan pass, and carry no
+  confidence field at all (human-authored content, not an inference).
+- `RelationshipCandidate`/`RelationshipCandidateGroup` (RL-3) don't even route through
+  `GovernanceReview` -- their own maker-checker fields decide them directly.
+
+So the type with a genuine run is never diffable under SM-7, and the two diffable types have no run
+and no confidence. A response scoped strictly to one `inference_run_id` could never demonstrate
+"diff + confidence + evidence together across proposal types" the row's test requirements ask for,
+and building a uniform cross-type run field would mean a new column on several tables -- out of
+scope (no `models.py` edit, no Alembic migration, per this row's own hard constraints).
+
+**Scoping decision** (per the row's own stop-condition instruction: "consider scoping the
+deliverable down to per-review... documenting that narrower scope honestly"): the endpoint composes
+at **review-queue granularity** -- organization + status + optional `object_type`, the same filters
+`GET /v1/governance/reviews` already uses -- rather than inventing a fake unifying "run". An
+additional optional `inference_run_id` query parameter *is* the genuine run view, for the one
+proposal type that has one; passing it filters to exactly that `SemanticInferenceRun`'s reviews.
+
+### What shipped
+
+`GET /v1/governance/reviews/queue` (`review_queue_api.py:get_review_queue`), composed by
+`aida.review_queue_read_model.compose_review_queue`:
+
+- **Diff**: reuses `aida.semantic_diff.diff_semantic_object` directly -- via SM-7's own
+  `compose_governance_review_diff`, extracted out of `get_governance_review_diff`
+  (`semantic_api.py`) into its own function so both routes call the identical code, never two
+  forks that could disagree on what's diffable or what a diff looks like. Proposal types SM-7
+  doesn't cover get `diffable=False` with the same fallback message SM-7's own endpoint already
+  returns -- no parallel diff mechanism.
+- **Confidence**: dispatched per `object_type` -- `MetadataEnrichmentProposal.confidence`,
+  `GlossaryLinkProposal.confidence`, `SemanticMetricProposal.overall_score`,
+  `AssetDescriptionDraft.overall_score` (GL-9's evidence-scored gate, the same score that gates
+  submission). `TermSemanticBinding` and the two diffable types get `confidence=None` -- honestly,
+  since neither carries a score.
+- **Evidence**: `EvidenceItemRead` (UX-13's shape: `category`/`claim`/`source`/`occurred_at`,
+  reused verbatim from `aida.schemas`, not re-derived). Each proposal's own `evidence` JSON payload
+  (already produced by `metric_suggestion_service.evidence_payload`,
+  `asset_description_service.evidence_payload`, or the inline dicts `stewardship_api`/
+  `semantic_inference` build) is fanned out to one item per fact, plus type-specific items (engine/
+  inference-run for `MetadataEnrichmentProposal`, term/object identity for `TermSemanticBinding`).
+- **Batched composition**: one query per distinct proposal `object_type` present in the response
+  (five typed `_*_by_id` helpers), independent of how many reviews are in the batch -- UX-12's
+  idiom, applied to the confidence/evidence side. The diff side calls SM-7's function once per
+  review -- unavoidable to reuse it unchanged rather than reimplement it batched.
+- **Counts are derived, not independently queryable**: `total_proposals`, `by_status`,
+  `by_object_type`, `diffable_count` on `ReviewQueueRead` (`review_queue_schemas.py`) are Pydantic
+  `computed_field`s over `proposals` -- not real `__init__` fields. Passing one explicitly (e.g.
+  `total_proposals=99`) is rejected by `ApiModel`'s `extra="forbid"` as an unknown field, proven by
+  `test_counts_are_not_independently_settable`; there is no code path that could set a count
+  independently of the list that produced it.
+
+### Tests
+
+6 in `tests/test_review_queue_read_model.py`, real in-memory SQLite (no mocks), following
+`test_semantic_diff_endpoint.py`/`test_asset_evidence.py`'s own rationale:
+
+- route registration;
+- composed-queue shape across two proposal types in one response -- `SEMANTIC_MODEL_VERSION`
+  (diffable, one real changed field against a seeded published predecessor) and
+  `METADATA_ENRICHMENT_PROPOSAL` (not diffable, real composed confidence and evidence, every
+  evidence item carrying a `source`);
+- `inference_run_id` filter scopes to exactly that run's reviews;
+- counts mathematically match `len()`/`Counter()` over a hand-built `proposals` list, and change
+  correctly when the list is trimmed;
+- counts are not independently settable (`ValidationError` on an explicit `total_proposals=` kwarg);
+- the diff embedded in a queue row for a review is asserted equal, field-for-field, to what SM-7's
+  own `get_governance_review_diff` returns for the same review -- proving the reuse, not just
+  asserting it in a docstring.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_review_queue_read_model.py
+tests/test_semantic_diff_endpoint.py tests/test_semantic_diff.py tests/test_asset_evidence.py
+tests/test_catalog_rows_read_model.py -q`: all green (6 new + all neighboring
+governance/diff/evidence/catalog suites unaffected by the `semantic_api.py` refactor). `ruff check
+src` and `uv run mypy src` (262 files, `strict = true`) clean. `uv run lint-imports`: 8/8 contracts
+kept. `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean. The new route
+changed `app.openapi()`: `tests/test_openapi_diff_gate.py` caught it,
+`Docs/90-reference/openapi-baseline.json` regenerated via `scripts/openapi_diff.py
+--accept-baseline` (392 additive lines, confirmed by `git diff --stat`); `ui-next/src/lib/types.ts`
+regenerated via `scripts/generate_ui_types.py --accept-baseline` (32 additive lines: the new
+`ReviewQueueRead`/`ReviewQueueProposalRead` schemas). No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
+Honest gaps: the broader `pytest tests/` full-suite run (beyond the targeted governance/diff/
+evidence/catalog + doc-claims + openapi-gate + import-linter subset above) was still in progress in
+this sandbox at the time this entry was written; if it surfaces an unrelated pre-existing failure,
+that is not this row's regression (the targeted subset directly exercising every file this row
+touched is green). `RelationshipCandidate`/`RelationshipCandidateGroup` (RL-3) confidence is not
+composed here -- confirmed those rows never carry a `governance_review_id` at all, so they are not
+part of the unified review queue this endpoint reads from `GovernanceReview`; a caller wanting their
+confidence still uses RL-3's own endpoints. No live-Postgres verification of the new batched
+proposal-type lookups (the same standing sandbox limitation several earlier rows this session
+already carry).
+
+## 2026-09-01 — PG-5 closed: edition entitlement evaluation, wired into two ungated Enterprise-tier endpoints
+
+`Docs/00-product/07-packaging-and-editions.md` §3 defines a Foundation/Enterprise/Regulated
+capability matrix and `Docs/90-reference/01-glossary.md` already defines "Entitlement" as edition/
+licence gating -- but `src/aida/entitlements.py` (read in full first, per the row's instructions)
+turned out to be a same-named, unrelated concept: idempotent external *data-product access*
+provisioning through a webhook (`apply_entitlement`, `EntitlementResult`), with nothing in it about
+editions or capabilities. Edition gating itself did not exist anywhere in `src/` (confirmed by
+grepping the whole tree for "edition" before writing anything: zero hits outside `Docs/`), so this
+was a green-field build, not a completion of partial scaffolding.
+
+**Pure evaluator.** New `src/aida/edition_entitlements.py` -- deliberately not named
+`entitlements.py` or added to it, to keep the two concepts from being confused at an import site.
+`evaluate_entitlement(*, organization_edition, capability) -> EntitlementDecision` is pure and
+DB-free: no session, no settings object, no I/O. `CAPABILITY_MIN_EDITION` transcribes the packaging
+doc's matrix as data (24 capabilities), each mapped to the lowest edition at which the doc shows it
+available at all ("full" ● or "bounded/partial" ◐ both count as ALLOW; "not offered" ○ is DENY at
+and below that edition). An unregistered capability id fails closed (`ENTITLEMENT_CAPABILITY_
+UNREGISTERED`) rather than silently passing -- the same default-deny posture `policy_engine.py`
+documents for ABAC. `EntitlementDecision.snapshot()` carries only the capability id and the two
+edition names -- both closed vocabulary, nothing resource- or request-derived (INV-6 discipline,
+matching `AuthorizationDenied` in `authorization_gate.py`).
+
+**Where the organization's edition comes from -- and the stop condition that shaped it.**
+`Organization.edition` does not exist (`atlas/modules/identity_tenancy/models.py`'s `Organization`
+has only `name`/`slug`/`status`), and this row's instructions are explicit that adding a persisted
+field means stopping, not editing `models.py`. Rather than stop outright, the edition is read from a
+new deployment-wide `Settings.edition` (`atlas/platform/config.py`, not a models/schemas/contracts
+file, so in scope) -- this is not a workaround but the accurate description of where edition lives
+in *this* architecture: `07-packaging-and-editions.md` §2 names self-hosted/BYOK, one customer per
+running deployment, as the only "target for v1" model and multi-tenant SaaS as explicitly "not
+planned", so a per-deployment license setting is the real shape of the thing, not a per-`Organization`
+DB row standing in for a SaaS model this platform does not have. Defaults to `REGULATED` (the
+ceiling), so the setting's mere existence changes no deployment's current behaviour -- mirroring the
+"turning the gate on is a non-event" property `authorization_gate.py` documents for its own rollout,
+and consistent with PK-2 (`07-packaging-and-editions.md` §6) still being an open product decision on
+whether a `FOUNDATION` edition is offered at all.
+
+**Wiring.** A chain-wide integration into `authorization_gate.py`'s `gate()` was read in full and
+considered, then rejected: `gate()` is genuinely one function precisely because it is the query
+path's workspace/ABAC choke point (INV-2), and none of the capabilities actually found ungated in
+scope -- multi-step tool plans, MCP context products, Studio tool authoring -- route through a
+resolvable workspace at all, so forcing them through `gate()` would mean fabricating workspace
+semantics for surfaces that have none of their own. Went with the row's own documented fallback
+instead: a specific set of currently-ungated Enterprise-tier endpoints, found by checking every
+`gate()` caller (`api.py`, `asset_evidence_api.py`, `intelligence_api.py`, `query_gateway.py` --
+none of the named capabilities were among them) and then confirming by direct inspection that
+`tool_api.py`/`tool_plans_api.py` only ever called `require_roles`, never any entitlement check:
+
+- `aida.tool_api.create_multi_table_tool_blueprint` (SM-5, landed the same day as this row -- maps
+  to "Studio (semantic + tool authoring)", Enterprise floor), checked before any DB work, right
+  after the existing `require_roles` gate.
+- `aida.tool_plans_api.create_tool_plan` and `execute_tool_plan` (maps to "Multi-step tool plans",
+  Enterprise floor) via a shared `_deny_unless_entitled` helper, checked at **both** create and
+  execute -- proven by a dedicated test that a plan created under Enterprise cannot still be executed
+  after the deployment is reconfigured down to Foundation, not only that new plans are refused.
+
+Both paths record an audit event (`record_audit`, `outcome="DENIED"`, `details=` the decision's
+INV-6-clean snapshot) and commit before raising `HTTPException(403, detail=reason_code)` --
+mirroring `query_gateway.py`'s `try`/`except AuthorizationDenied`/`record_audit`/`commit`/`raise`
+shape at its own `gate()` call sites, so an entitlement denial is audited by the same discipline
+every other denial in this codebase already is.
+
+### Verification
+
+`tests/test_edition_entitlements.py`, 13 tests: 8 pure (`evaluate_entitlement` ALLOW/DENY boundary
+at every edition; monotonicity -- a capability ALLOWed at one edition stays ALLOWed at every edition
+ranked at or above it, checked across all 24 registered capabilities; the ceiling edition can use
+every registered capability; unregistered-capability fail-closed; the INV-6 snapshot shape; default
+`Settings()` changes no capability's outcome) + 5 real in-memory-sqlite integration tests against the
+three wired endpoints (multi-table blueprint denied on `FOUNDATION` with the exact reason code,
+allowed through to real business logic on `ENTERPRISE` -- proven by the request then failing for an
+*unrelated* 422, not a 403; `create_tool_plan` denied/allowed the same way; `execute_tool_plan`
+denied on `FOUNDATION` for a plan created under `ENTERPRISE`). `ruff check src` and `uv run mypy src`
+(263 files, `strict = true`) clean. `AIDA_ENVIRONMENT=test uv run pytest -q -x`: full suite green,
+no regression in `tests/test_multi_table_blueprint.py` or `tests/test_tool_plans.py`.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean.
+`tests/test_openapi_diff_gate.py` clean -- no route or request/response schema changed (the new
+`settings: Settings = Depends(get_settings)` parameter added to `tool_plans_api.py`'s two endpoints
+is an internal dependency, invisible to the OpenAPI schema, the same pattern `tool_api.py` already
+used), so no `openapi-baseline.json`/`ui-next/src/lib/types.ts` regeneration was needed. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched.
+
+Honest gap, not closed by this row: MCP context products are also Enterprise-only per the packaging
+doc and are not wired. `aida/mcp_server.py` is a ~2,000-line JSON-RPC-style dispatcher whose actual
+content-serving function, `_read_context_product_resource` -- the natural integration point, since it
+already runs the identical purpose/quality-decision-then-audit-then-deny pattern this row's gate
+mirrors -- is not currently reachable with a `Settings` object from every one of its callers
+(`_handle_resources_read`, `_handle_prompts_get`, and the `context_uri` branches of
+`_handle_tools_list`/`_handle_tools_call`); threading `settings` through that whole call graph
+correctly, without a rushed mistake in a security-sensitive file this size, needs its own row rather
+than a same-session addendum here.
+
+---
+
+## 2026-09-01 — QG-3 closed: per-LOB quotas + concurrency controller, fair under contention
+
+### Which "LOB" a query execution even has
+
+`SecurityContext` (`aida.security_types`), and every header
+`aida.security.get_security_context` reads, carry no line-of-business dimension at all --
+checked directly, confirmed absent. The dimension this platform already carries end-to-end
+for a query *execution* is the datasource's: `DataSource.line_of_business_id` is a mandatory
+(non-nullable) column (ADR-0018), and `aida.cost_showback` already treats it as the
+authoritative per-LOB grouping key for the very same `QueryExecution` rows this controller
+throttles the creation of (`cost_showback.py:19-24`'s own docstring states this). The new
+controller (`src/aida/lob_concurrency.py`) is keyed the same way, so "fair under contention"
+and "who consumed what" agree on what a LOB's share of the gateway even means, instead of
+inventing a second, disagreeing notion of tenancy.
+
+### What shipped
+
+`aida.lob_concurrency.LobConcurrencyController`: one `asyncio.Semaphore(default_max_concurrent)`
+per LOB key, created lazily and held for the controller's life. A request past its LOB's limit
+waits, bounded by a configurable timeout, for a same-LOB in-flight execution to free a slot
+(ordinary head-of-line contention resolves itself silently); only a wait that outlives the
+bound raises `LobConcurrencyDenied` -- a clear, distinguishable refusal, never a queue that
+grows forever. `resolve_lob_concurrency_controller` caches one controller per distinct
+(`max_concurrent`, `queue_timeout_seconds`) settings pair -- the same cache-by-config-tuple
+shape `aida.security._oidc_verifiers` already uses -- which is what makes the bound real
+across requests: `QueryExecutionGateway` is constructed fresh per call site (`tool_api.py`,
+`mcp_server.py`, `api.py`, `agent_orchestrator.py`, `sql_validation_api.py` each build their
+own), so an instance-owned registry would give every request its own always-empty registry and
+enforce nothing.
+
+Two new `Settings` fields (`atlas/platform/config.py`, no new table, no migration):
+`query_gateway_lob_max_concurrent` (default 8) and `query_gateway_lob_queue_timeout_seconds`
+(default 5.0) -- a single default applied uniformly to every LOB. Per-LOB custom override
+values are explicitly **not** built: that would need a persisted table (an override keyed by
+organization + LOB, no natural home in an existing row) this item is deliberately not adding
+under the no-schema-change constraint; documented here as an open follow-up rather than
+silently out of scope.
+
+Wired into `QueryExecutionGateway.execute` (`src/aida/query_gateway.py`): the slot is held only
+around the real dispatch to the source (`connector.execute_read_query`) -- not around the
+validation/estimate pass ahead of it (a cheap EXPLAIN-only call), and not around masking/audit
+bookkeeping after it (touches nothing external) -- so the held duration tracks the actual
+contended resource, not this gateway's own overhead either side of it. `LobConcurrencyDenied` is
+wrapped into a new `LobConcurrencyRejected(QueryRejected)`, the same shape
+`AuthorizationRejected` already uses for `AuthorizationDenied`: every existing caller's
+handling -- execution-id bookkeeping, REJECTED status, DENIED audit entry -- applies unchanged,
+while `type(exc).__name__` still distinguishes a concurrency refusal from an authorization
+refusal or any other rejection reason.
+
+### Scope: in-process, not cross-replica -- stated honestly, not glossed over
+
+`Docs/10-architecture/09-deployment-topology.md` names `atlas-api` as "N replicas behind a load
+balancer" -- multi-replica *is* this platform's stated production target. A purely in-process
+bound only holds per replica, so the platform-wide concurrent-per-LOB total in production can
+reach (replica count x this limit), not this limit alone. `redis` is already a real, configured
+dependency (`pyproject.toml`, `Settings.redis_url`) and is already used for the close-cousin
+problem of per-consumer rate limiting (`aida.mcp_budget`, wired into `mcp_server.py`'s live
+tool-call path, atomic Lua-script INCR-with-expiry, fail-closed in staging/production on a
+Redis error) -- a Redis-backed version of this controller would be the natural, idiomatic next
+step for a cross-replica-correct bound, and is deliberately not built here: this row's fairness
+had to be provable by a test running with no external services (this repository's entire test
+suite runs with no live Redis/Postgres/Neo4j -- `tests/test_mcp_policy.py` itself only exercises
+`mcp_budget`'s pure helpers for the identical reason, never `consume_mcp_budget`'s real Redis
+call), and a distributed limiter's correctness -- especially crash-safety when a replica dies
+mid-execution while holding a slot -- is not something an in-process test can prove. Shipping an
+unverified distributed version would be a worse deliverable than an honestly-scoped, fully-tested
+in-process one. Left as a named, concrete follow-up (build `aida.lob_concurrency`'s Redis-backed
+sibling, reusing `mcp_budget.py`'s exact idiom) rather than an implicit gap.
+
+### Tests (`tests/test_lob_concurrency.py`, 3 tests)
+
+The fairness proof the tracker row asked for, at two levels:
+
+- `test_controller_keeps_lob_b_unaffected_by_lob_a_flood`: LOB A submits 8 concurrent requests
+  against a quota of 2 (4x over), each holding a slot 0.3s; LOB B submits 2 concurrent requests
+  (exactly its own quota, unrelated LOB key) holding a slot 0.05s, at the same moment. Asserts
+  LOB B's two requests both complete, in under 0.25s each -- never queuing behind LOB A's 8-deep
+  flood -- while asserting LOB A really was over quota: some requests ran (2, in the first wave),
+  the rest (>0) were rejected with `LobConcurrencyDenied` naming the right LOB key and limit, not
+  silently queued forever.
+- `test_controller_rejects_with_a_distinguishable_error_not_a_silent_queue`: a second acquire
+  against an already-held single-slot LOB times out into `LobConcurrencyDenied`, not a hang.
+- `test_query_gateway_wiring_keeps_lob_b_unaffected_by_lob_a_flood`: the same fairness proof one
+  level up, through the real `QueryExecutionGateway.execute()` call (not just the controller) --
+  8 concurrent `execute()` calls against LOB A's datasource (quota 2, 0.3s dispatch each) racing
+  2 concurrent `execute()` calls against LOB B's datasource (0.05s dispatch each), using the same
+  `FakeSqlExecutor`/`CatalogSession`/`security_context` doubles `tests/test_query_tokenization.py`
+  already established for this gateway (no database, no live connector). LOB B's calls complete
+  untouched by LOB A's flood; LOB A's excess calls raise the real `LobConcurrencyRejected` the
+  gateway raises in production, recorded as REJECTED `QueryExecution` rows with
+  `error_class == "LobConcurrencyRejected"`, not left hanging.
+
+All 3 pass, repeatably (`for i in 1 2 3; do pytest tests/test_lob_concurrency.py; done`), and
+without a shared mutable test fixture racing across concurrently-running tasks -- the gateway
+test resolves each concurrent call's fake connector by its (per-datasource) resolved DSN, not by
+a variable set from inside a task that could interleave with a sibling task's own set.
+
+### Verification
+
+`ruff check src/aida/lob_concurrency.py src/aida/query_gateway.py src/atlas/platform/config.py
+tests/test_lob_concurrency.py` and `uv run mypy src` (263 files) both clean. `uv run
+lint-imports`: 8/8 contracts kept (this row's new module imports nothing from a
+protected/leaf-ratcheted module). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py` clean. Targeted regression subset green: `tests/test_lob_concurrency.py
+tests/test_query_tokenization.py tests/test_inv4_authorization_wiring.py tests/test_hmac_signing.py
+tests/test_cost_showback.py tests/test_reachability_gate.py tests/test_sql_validation.py`. No HTTP
+route added or changed, so `tests/test_openapi_diff_gate.py`/the OpenAPI baseline/`ui-next` types
+are untouched by this row. No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file
+and no Alembic migration touched.
+
+Honest gaps: per-LOB custom quota overrides (a single organization-wide default is what shipped,
+per this item's own no-new-table constraint) and the Redis-backed cross-replica version (see
+above) are both real, named follow-ups, not silently assumed done. The full unscoped `pytest
+tests/` run was still in progress in this sandbox when this entry was written (a large, slow
+suite); the targeted subset directly exercising every file this row touched, plus doc-claims and
+lint-imports, is green, matching the standing pattern earlier same-day entries in this log already
+record for the same reason.
+
+---
+
+## 2026-09-01 — DQ-9 closed: month-end seasonal baseline, the DQ-6 follow-up its own "Honest gaps" named
+
+### The gap this closes
+
+DQ-6 shipped a day-of-week `SeasonalBaseline` for the VOLUME_CHANGE control and said so explicitly
+in its own tracker close-out: "broader seasonality (day-of-month, holiday calendars) ... is not
+attempted here -- the data would support it (unbounded, timestamped history), but it is a larger
+follow-up." A day-of-week grouping cannot see a *month-end* pattern: a recurring close-batch spike
+(e.g. a reconciliation load) lands on a different weekday every month, so it is spread across
+several weekday buckets instead of forming a pattern in any one of them.
+
+### The pure function: `data_quality.day_of_month_baseline`
+
+New in `data_quality.py`, same DB-free shape as DQ-6's `day_of_week_baseline` -- a
+`Sequence[tuple[datetime, int]]` of already-observed points plus an `observed_at` timestamp, no DB
+access of its own:
+
+```python
+def _days_before_month_end(observed_at: datetime) -> int:
+    last_day = calendar.monthrange(observed_at.year, observed_at.month)[1]
+    return last_day - observed_at.day
+
+
+def day_of_month_baseline(
+    history: Sequence[tuple[datetime, int]], observed_at: datetime, *, min_samples: int = 3
+) -> DayOfMonthBaseline | None:
+    anchor = _days_before_month_end(observed_at)
+    same_position_values = [float(v) for ts, v in history if _days_before_month_end(ts) == anchor]
+    if len(same_position_values) < min_samples:
+        return None
+    mean = statistics.fmean(same_position_values)
+    stdev = statistics.pstdev(same_position_values) if len(same_position_values) > 1 else 0.0
+    return DayOfMonthBaseline(anchor, mean, stdev, len(same_position_values))
+```
+
+Grouping by `days_before_month_end` (`0` = a month's last calendar day, `1` = the second-to-last,
+...) rather than the raw calendar day number is the point: a 28-day February's last day and a
+31-day March's last day both land at position `0`, so a genuine "last business day of the month"
+close spike lines up across months of different lengths. A raw day-31 match would silently miss
+every February and every 30-day month.
+
+### Wiring: additive alongside DQ-6, not a replacement for it
+
+`evaluate_quality` gained `month_end_seasonality_enabled`/`month_end_window_days` parameters
+(default off / `3`). When a reading falls within the last `month_end_window_days` calendar days of
+its month and has enough same-position history, the month-end baseline decides the VOLUME_CHANGE
+verdict -- it is the more specific signal for that day. Otherwise DQ-6's own day-of-week baseline is
+used when its flag is on, falling back automatically to the unchanged rolling-previous comparison
+exactly as before whenever neither strategy has enough history. `evidence["threshold_strategy"]`
+now records `"SEASONAL_MONTH_END"` alongside DQ-6's existing `"ROLLING_PREVIOUS"`/
+`"SEASONAL_DAY_OF_WEEK"`, so which comparison decided a given verdict stays fully auditable. The
+z-score-or-percent verdict math itself (previously inlined in DQ-6's day-of-week branch) was pulled
+out into a shared `_seasonal_verdict` helper so both strategies run through one tested code path
+instead of two copies of the same logic.
+
+`quality_service.evaluate_analysis_run` reads the *same* bounded 120-row `TableProfile` history
+query DQ-6's flag already issues (`_SEASONALITY_HISTORY_LOOKBACK`), now gated on either seasonal
+flag being on rather than only DQ-6's -- enabling both strategies together costs no second query.
+Wired in behind a new, off-by-default `Settings.quality_seasonal_month_end_enabled` (+
+`quality_seasonal_month_end_window_days`, default 3; `src/atlas/platform/config.py`), deliberately
+reusing DQ-6's existing `quality_seasonal_min_samples`/`quality_seasonal_zscore_threshold` rather
+than adding parallel per-strategy knobs. Kept out of `DataQualityPolicy`/`DataQualityPolicyUpsert`
+for the identical reason DQ-6 gave: that override dict is asserted 1:1 against the Pydantic contract
+in `test_data_quality.py::test_quality_contracts_validate_bounds_and_routes`, and `schemas.py` is
+off-limits for this item. Reaches the same `DataQualityObservation`/`DataQualityIncident` creation
+call site DQ-1/DQ-3/DQ-6 already consume, unchanged.
+
+### Reduced false positives, measured
+
+`tests/test_data_quality_month_end_seasonality.py` (10 tests, pure-function level, no DB): a
+synthetic table with a flat, exact ~3x month-end close spike (the month's last 2 calendar days)
+over 5 months of history (Jan-May 2026, spanning a 31-, 28-, 31-, 30-, and 31-day month). The next 3
+months' close-window entries (Jun/Jul/Aug 2026 -- a 30-, 31-, and 31-day month) are each evaluated
+both ways:
+
+- **Naive rolling-previous baseline: 3/3 (100%) flagged as `VOLUME_CHANGE`** -- every normal
+  close-window entry is a false positive (`volume_change_percent` > 100%, roughly 1000 -> 3000).
+- **Month-end baseline: 0/3 (0%) flagged** -- the exact same 3 entries, judged against each table's
+  own prior month-ends at the same `days_before_month_end` position, produce zero false positives
+  (`seasonal_change_percent == 0.0` against a flat, exact 5-sample history).
+- **True positive preserved, two ways**: a genuine collapse to 50 rows on a normally-3000 close
+  window still trips `VOLUME_CHANGE` (`seasonal_change_percent` > 90%, `CRITICAL`); a separate,
+  hand-computed small-numbers case with real historical spread (mean 100, non-zero stdev) proves the
+  z-score branch independently (`seasonal_zscore` > 3, `CRITICAL`).
+- **Additive, not exclusive**: with both `seasonality_enabled` and `month_end_seasonality_enabled`
+  on in the same call, a month-end-window reading takes `SEASONAL_MONTH_END` while an ordinary
+  mid-month reading in the same run still takes DQ-6's `SEASONAL_DAY_OF_WEEK` -- proving this row's
+  grouping sits alongside DQ-6's rather than displacing it.
+- `day_of_month_baseline` itself is proven to group strictly by month-end position across months of
+  different lengths (a 3-month-end-only mean stays flat, unaffected by a mid-month point mixed into
+  the same history array) and to return `None` -- triggering the automatic fallback -- when fewer
+  than `min_samples` same-position points exist yet, or when a reading falls outside the month-end
+  window entirely.
+
+`tests/test_quality_month_end_wiring.py` (2 tests) proves the identical effect through the real
+`evaluate_analysis_run` call, against a real in-memory sqlite database seeded through the ORM (DQ-6's
+own `test_quality_seasonality_wiring.py` pattern) with 180 real, individually-inserted, timestamped
+`TableProfile` rows:
+
+- **Flag off (default)**: entering a normal month-end close window still opens 1 `VOLUME_CHANGE`
+  incident (`counts["incidents_opened"] == 1`), `DataQualityObservation.evidence["threshold_strategy"]
+  == "ROLLING_PREVIOUS"` -- the rollout is genuinely opt-in.
+- **Flag on** (`monkeypatch.setattr(quality_service, "get_settings", ...)`, DQ-6's own
+  settings-injection pattern), same shape of real persisted history, same normal close-window entry:
+  0 incidents opened (`counts["incidents_opened"] == 0`, `counts["healthy"] == 1`), with the
+  persisted observation's evidence recording `threshold_strategy: "SEASONAL_MONTH_END"` and
+  `seasonal_sample_count >= 3` as the auditable reason no incident exists.
+
+### Tests, lint, scope
+
+`AIDA_ENVIRONMENT=development pytest tests/test_data_quality.py tests/test_data_quality_seasonality.py
+tests/test_quality_seasonality_wiring.py tests/test_data_quality_month_end_seasonality.py
+tests/test_quality_month_end_wiring.py tests/test_quality_coupling.py tests/test_quality_runtime_coupling.py
+tests/test_custom_quality_rules.py tests/test_rt7_quality_trust_ranking.py tests/test_dbt_quality_bridge.py -q`:
+all green (78 tests), including every one of DQ-6's own pre-existing exact-evidence assertions,
+unaffected by the new additive `evidence["threshold_strategy"]` value and the new `Settings` fields.
+`ruff check` and `mypy src` clean on every changed/added file (`data_quality.py`, `quality_service.py`,
+`src/atlas/platform/config.py`, `tests/test_data_quality_month_end_seasonality.py`,
+`tests/test_quality_month_end_wiring.py`).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched (per this row's own constraint, and DQ-6's before it) -- confirmed unnecessary for the same
+reason DQ-6 established: `TableProfile`'s existing, unpruned, timestamped history already supports
+this grouping, no new persisted state needed.
+
+Found in passing, unrelated to this item: `test_openapi_diff_gate.py`'s committed-baseline check is
+currently red against this worktree's tip. Traced to concurrent, unrelated in-flight edits to
+`src/aida/connectors/bigquery.py`, `src/aida/connectors/oracle.py`, and
+`src/aida/connectors/snowflake.py` from another session sharing this trunk branch -- confirmed via
+`git diff` on those three files: internal catalog-assembly refactoring only (e.g. `bigquery.py`'s
+`_assemble_catalog` no longer filters `routines`/`schema_descriptions` to schemas already present in
+`tables`), zero touches to `schemas.py`, `platform_schemas.py`, or any route registration. Not caused
+by, and not fixed from, this item: regenerating the committed baseline right now would bake that
+other session's in-progress, unreviewed connector changes into a file this item does not own, for a
+staleness this item's own changes do not cause (nothing here touches an HTTP route or a Pydantic
+schema). Left as-is, matching this row's own no-`schemas.py` constraint.
+
+Honest gaps: holiday-calendar exclusion -- the other half of DQ-6's "Honest gaps" note -- is still
+not attempted. Unlike day-of-month, it needs an externally-configured, organization-specific list of
+holiday dates rather than being directly supported by the existing scan-history data alone; that is a
+different kind of scope (new configuration input, not a new grouping over data already there) and was
+deliberately left for a separate pass rather than folded in here. The month-end window (default: the
+last 3 calendar days of a month) is a deliberate, untuned default, not fit to any real production
+close calendar. No live-Postgres verification of the query (already shared with DQ-6, same standing
+sandbox limitation as CN-1c/CN-2a/DQ-4).

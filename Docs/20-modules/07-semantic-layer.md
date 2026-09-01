@@ -111,7 +111,7 @@ Emits `semantic.inference_completed`, `semantic.proposal_created`, `semantic.ann
 | Tool blueprints | Implemented — deterministic rendering to a governed tool draft | Multi-table blueprints |
 | Semantic authoring IDE | Not implemented | Module 18 Studio — parity requirement vs. Snowflake Semantic Studio and Atlan Context Engineering Studio |
 | Conflict handling | Not implemented | Module 08 |
-| Open Semantic Interchange | Not implemented | Evaluate — commoditization risk and interoperability opportunity |
+| Open Semantic Interchange | Decided (ADR-0022): a thin, unconformed export target already exists in `context_compiler.py` (`OSI` in `ContextCompilerTarget`); kept as-is, not adopted as the canonical semantic model | Full schema-conformant mapping only if a named customer/partner need, a stable public OSI schema, or a real deal-level buying criterion appears — see ADR-0022's revisit trigger |
 
 ## 12. Open work
 
@@ -122,5 +122,5 @@ Emits `semantic.inference_completed`, `semantic.proposal_created`, `semantic.ann
 | SM-3 | Confidence calibration + bank-domain evaluation corpus | P1 |
 | SM-4 | Metric suggestions from approved annotations | P1 |
 | SM-5 | Multi-table tool blueprints | P1 |
-| SM-6 | OSI import/export evaluation | P2 |
+| SM-6 | OSI import/export evaluation — decided via ADR-0022 (export target kept thin; import out of scope) | P2 |
 | SM-7 | Semantic diff view for reviewers | P1 |

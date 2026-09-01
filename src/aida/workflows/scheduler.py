@@ -15,6 +15,7 @@ from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
+from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
 from aida.models import (
     AnalysisRun,
@@ -442,6 +443,33 @@ async def run_custom_rule_pack_pass(*, now: datetime | None = None) -> int:
     return await run_due_rule_packs(now=now, last_run_at=_custom_rule_pack_last_run_at)
 
 
+# --- KG-7: scheduled knowledge-graph reconciliation + drift alerting -------
+#
+# graph_reconciliation.run_graph_reconciliation_pass is a read-only diff pass
+# (Postgres's current projection selection vs. what Neo4j actually holds)
+# that, like GL-6's owner-routing pass and DQ-4's rule packs above, needs a
+# periodic home outside the event-driven projector. Same in-process-memory
+# due-tracking tradeoff as those two: no per-datasource "next reconciled at"
+# column exists to persist to without a new model/migration, and the pass is
+# safe to repeat, so a scheduler restart costs at most one redundant sweep
+# per datasource.
+_graph_reconciliation_last_run_at: dict[UUID, datetime] = {}
+
+
+async def run_graph_reconciliation_scheduler_pass(
+    settings: Settings, *, now: datetime | None = None
+) -> int:
+    """Sweep every datasource due for a KG-7 reconciliation pass (see
+    ``graph_reconciliation.graph_reconciliation_due``). Delegates entirely to
+    ``graph_reconciliation.run_graph_reconciliation_pass``, which already
+    isolates one datasource's failure (Neo4j unreachable, a bad rule) from
+    the rest, matching ``run_owner_routing_pass``/``run_custom_rule_pack_pass``.
+    """
+    return await run_graph_reconciliation_pass(
+        settings, now=now, last_run_at=_graph_reconciliation_last_run_at
+    )
+
+
 async def _start_workflow(client: Client, settings: Settings, run: AnalysisRun) -> None:
     try:
         await client.start_workflow(
@@ -561,6 +589,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await rebalance_usage_weighted_priorities(settings, now=now)
     await run_owner_routing_pass(settings, now=now)
     await run_custom_rule_pack_pass(now=now)
+    await run_graph_reconciliation_scheduler_pass(settings, now=now)
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.

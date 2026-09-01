@@ -6,6 +6,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import Field
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,7 @@ from aida.asset_description_service import (
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.metric_formula_signature import find_formula_collisions
 from aida.metric_suggestion_service import (
     apply_metric_suggestion_proposal,
     reject_metric_suggestion_proposal,
@@ -55,6 +57,8 @@ from aida.models import (
 from aida.product_marketplace_api import approve_access_request
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
+    ApiModel,
+    GlossaryConflictRead,
     GovernanceDecisionRequest,
     GovernanceReviewBulkDecisionItemRead,
     GovernanceReviewBulkDecisionRequest,
@@ -76,6 +80,7 @@ from aida.security import (
     require_roles,
     require_roles_or_delegated,
 )
+from aida.semantic_diff import ChangeKind, diff_semantic_object
 from aida.semantic_inference import apply_enrichment_proposal
 from aida.stewardship_service import (
     apply_bulk_operation,
@@ -473,6 +478,202 @@ async def list_metric_versions(
     )
 
 
+METRIC_FORMULA_COLLISION_TYPE = "METRIC_FORMULA_COLLISION"
+# Scan/creation caps mirror `stewardship_api.detect_glossary_conflicts`
+# exactly (same bounded-batch rationale: a governance-queue detector must
+# never turn one call into an unbounded write).
+_METRIC_COLLISION_SCAN_LIMIT = 5000
+_METRIC_COLLISION_CREATE_LIMIT = 100
+
+
+@router.post(
+    "/organizations/{organization_id}/metric-conflicts/detect",
+    response_model=Page,
+)
+async def detect_metric_formula_collisions(
+    organization_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """AT-17: raise a governance conflict for two *different* published
+    metrics that compute the same thing via the same (or grain-normalized
+    same) formula -- GL-3's own detect-on-demand pattern
+    (`stewardship_api.detect_glossary_conflicts`), mirrored for metric
+    formulas instead of glossary-term synonyms.
+
+    Reuses `GlossaryConflict` as-is rather than adding a parallel
+    conflict-tracking table: `term_id` is already nullable (checked in
+    `aida.models` before writing this), and neither
+    `stewardship_service.apply_conflict_resolution` nor
+    `reject_conflict_resolution` -- the maker-checker resolution GL-3 built,
+    reached identically through `semantic_api.decide_governance_review`'s
+    existing `GLOSSARY_CONFLICT` branch -- reference `term_id` at all. A
+    metric-formula collision is stored with `term_id=None`,
+    `conflict_type="METRIC_FORMULA_COLLISION"`, and both metrics' identity
+    and formula fields in `position_a`/`position_b`, so "losing position
+    retained" holds for metrics exactly as it does for glossary terms: a
+    resolution never deletes either side's recorded position.
+
+    The comparison itself is `aida.metric_formula_signature`
+    (`find_formula_collisions`), a pure DB-free function -- see its
+    docstring for precisely what "collision" means here and its honest
+    limit (exact/grain-normalized structural duplication of `(aggregation,
+    source_table_id, measure_column_id, default_time_column_id, grain)`,
+    not general algebraic formula equivalence, which this schema's
+    single-aggregation metric shape cannot even pose).
+    """
+    enforce_organization(context, organization_id)
+    rows = (
+        await session.execute(
+            select(SemanticMetricVersion, SemanticMetric)
+            .join(SemanticMetric, SemanticMetric.id == SemanticMetricVersion.metric_id)
+            .where(
+                SemanticMetricVersion.organization_id == organization_id,
+                SemanticMetricVersion.status == "PUBLISHED",
+            )
+            .limit(_METRIC_COLLISION_SCAN_LIMIT)
+        )
+    ).all()
+    versions_by_metric_version_id = {str(version.id): version for version, _metric in rows}
+    snapshots = [
+        {
+            "metric_version_id": version.id,
+            "metric_id": metric.id,
+            "metric_name": version.name,
+            "aggregation": version.aggregation,
+            "source_table_id": version.source_table_id,
+            "measure_column_id": version.measure_column_id,
+            "default_time_column_id": version.default_time_column_id,
+            "grain": version.grain,
+        }
+        for version, metric in rows
+    ]
+    existing_rows = (
+        await session.scalars(
+            select(GlossaryConflict).where(
+                GlossaryConflict.organization_id == organization_id,
+                GlossaryConflict.status.in_(("OPEN", "REVIEW_REQUIRED")),
+                GlossaryConflict.conflict_type == METRIC_FORMULA_COLLISION_TYPE,
+            )
+        )
+    ).all()
+    existing_pairs = {
+        tuple(sorted((row.position_a.get("metric_id", ""), row.position_b.get("metric_id", ""))))
+        for row in existing_rows
+    }
+    created: list[GlossaryConflict] = []
+    for collision in find_formula_collisions(snapshots):
+        pair = tuple(sorted((collision.left.metric_id, collision.right.metric_id)))
+        if pair in existing_pairs:
+            continue
+        left_version = versions_by_metric_version_id[collision.left.metric_version_id]
+        right_version = versions_by_metric_version_id[collision.right.metric_version_id]
+        conflict = GlossaryConflict(
+            organization_id=organization_id,
+            term_id=None,
+            conflict_type=METRIC_FORMULA_COLLISION_TYPE,
+            position_a={
+                "metric_id": collision.left.metric_id,
+                "metric_version_id": collision.left.metric_version_id,
+                "metric_name": collision.left.metric_name,
+                "aggregation": collision.left.aggregation,
+                "source_table_id": collision.left.source_table_id,
+                "measure_column_id": collision.left.measure_column_id,
+                "default_time_column_id": collision.left.default_time_column_id,
+                "grain": collision.left.grain_raw,
+                "created_by": left_version.created_by,
+                "match_kind": collision.match_kind,
+            },
+            position_b={
+                "metric_id": collision.right.metric_id,
+                "metric_version_id": collision.right.metric_version_id,
+                "metric_name": collision.right.metric_name,
+                "aggregation": collision.right.aggregation,
+                "source_table_id": collision.right.source_table_id,
+                "measure_column_id": collision.right.measure_column_id,
+                "default_time_column_id": collision.right.default_time_column_id,
+                "grain": collision.right.grain_raw,
+                "created_by": right_version.created_by,
+                "match_kind": collision.match_kind,
+            },
+            assigned_owner=left_version.created_by,
+            raised_by=context.principal_id,
+        )
+        session.add(conflict)
+        created.append(conflict)
+        existing_pairs.add(pair)
+        if len(created) == _METRIC_COLLISION_CREATE_LIMIT:
+            break
+    await session.flush()
+    for conflict in created:
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="glossary_conflict",
+            aggregate_id=str(conflict.id),
+            event_type="semantic.metric_conflict_raised.v1",
+            payload={"conflict_id": str(conflict.id), "conflict_type": conflict.conflict_type},
+        )
+    record_audit(
+        session,
+        replace(context, organization_id=organization_id),
+        action="semantic.metric_conflict.detect",
+        resource_type="glossary_conflict",
+        resource_id=str(organization_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"published_metrics_scanned": len(rows), "conflicts_created": len(created)},
+    )
+    await session.commit()
+    return Page(
+        items=[GlossaryConflictRead.model_validate(row) for row in created],
+        limit=_METRIC_COLLISION_CREATE_LIMIT,
+        offset=0,
+        total=len(created),
+    )
+
+
+@router.get("/organizations/{organization_id}/metric-conflicts", response_model=Page)
+async def list_metric_formula_collisions(
+    organization_id: UUID,
+    conflict_status: str | None = Query(default=None, alias="status", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """AT-17 read side -- `stewardship_api.list_glossary_conflicts`, scoped to
+    `conflict_type="METRIC_FORMULA_COLLISION"` rows only.
+    """
+    enforce_organization(context, organization_id)
+    filters = [
+        GlossaryConflict.organization_id == organization_id,
+        GlossaryConflict.conflict_type == METRIC_FORMULA_COLLISION_TYPE,
+    ]
+    if conflict_status:
+        filters.append(GlossaryConflict.status == conflict_status.upper())
+    total = await session.scalar(select(func.count()).select_from(GlossaryConflict).where(*filters))
+    rows = (
+        await session.scalars(
+            select(GlossaryConflict)
+            .where(*filters)
+            .order_by(GlossaryConflict.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[GlossaryConflictRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
 async def _semantic_metric_and_project(
     session: AsyncSession, metric_id: UUID, context: SecurityContext
 ) -> tuple[SemanticMetric, Project]:
@@ -856,6 +1057,229 @@ async def list_governance_reviews(
         offset=offset,
         total=total or 0,
     )
+
+
+# ---------------------------------------------------------------------------
+# SM-7: structured version diffs for the governance review queue
+#
+# `diff_semantic_object` (aida.semantic_diff) is the pure, DB-free diff
+# engine -- see its module docstring. Everything below is the DB-facing half:
+# turning a pending review's target row(s) into plain-dict snapshots and
+# finding the currently published sibling version to diff against. Only the
+# object types with an established DRAFT/PUBLISHED-style version lineage are
+# supported today (SEMANTIC_MODEL_VERSION, GLOSSARY_TERM_VERSION); the
+# governance queue itself spans many more object types (see
+# `_apply_governance_review_decision` below), and a review for one of those
+# still returns 200 with `diffable=False` and an explanatory `message` rather
+# than a 404 or 422 -- the endpoint is meant to be safe to call for *any*
+# pending review a reviewer is looking at, not just the two supported kinds.
+# ---------------------------------------------------------------------------
+
+
+class SemanticFieldDeltaRead(ApiModel):
+    """One field-level difference, as returned to a reviewer.
+
+    Mirrors `aida.semantic_diff.FieldDelta` field-for-field; kept as its own
+    response model (rather than reusing the dataclass directly) so this
+    endpoint's wire shape is independent of the pure module's internals.
+    """
+
+    field: str
+    change: ChangeKind
+    before: Any = None
+    after: Any = None
+
+
+class GovernanceReviewDiffRead(ApiModel):
+    """Structured version delta for one pending (or decided) governance review."""
+
+    review_id: UUID
+    object_type: str
+    object_id: str
+    diffable: bool
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    entries: list[SemanticFieldDeltaRead] = Field(default_factory=list)
+    message: str | None = None
+
+
+async def _semantic_model_version_snapshot(
+    session: AsyncSession, model_id: UUID
+) -> dict[str, Any] | None:
+    """Flatten one `SemanticModelVersion` plus its `SemanticMetricVersion`s
+    into a plain-dict snapshot, keyed so a reviewer can see exactly what
+    changed at the model level and per metric (see `diff_semantic_object`'s
+    docstring on why metrics are keyed by slug rather than listed).
+    """
+    model = await session.get(SemanticModelVersion, model_id)
+    if model is None:
+        return None
+    rows = (
+        await session.execute(
+            select(SemanticMetricVersion, SemanticMetric)
+            .join(SemanticMetric, SemanticMetricVersion.metric_id == SemanticMetric.id)
+            .where(SemanticMetricVersion.semantic_model_version_id == model.id)
+        )
+    ).all()
+    return {
+        "name": model.name,
+        "change_summary": model.change_summary,
+        "metrics": {
+            metric.slug: {
+                "name": metric_version.name,
+                "description": metric_version.description,
+                "aggregation": metric_version.aggregation,
+                "grain": metric_version.grain,
+                "source_table_id": str(metric_version.source_table_id),
+                "measure_column_id": (
+                    str(metric_version.measure_column_id)
+                    if metric_version.measure_column_id
+                    else None
+                ),
+                "default_time_column_id": (
+                    str(metric_version.default_time_column_id)
+                    if metric_version.default_time_column_id
+                    else None
+                ),
+                "allowed_dimension_column_ids": sorted(
+                    metric_version.allowed_dimension_column_ids
+                ),
+            }
+            for metric_version, metric in rows
+        },
+    }
+
+
+async def _published_semantic_model_version_id(
+    session: AsyncSession, model: SemanticModelVersion
+) -> UUID | None:
+    published = await session.scalar(
+        select(SemanticModelVersion.id).where(
+            SemanticModelVersion.project_id == model.project_id,
+            SemanticModelVersion.status == "PUBLISHED",
+            SemanticModelVersion.id != model.id,
+        )
+    )
+    return published
+
+
+async def _glossary_term_version_snapshot(
+    session: AsyncSession, version_id: UUID
+) -> dict[str, Any] | None:
+    version = await session.get(GlossaryTermVersion, version_id)
+    if version is None:
+        return None
+    return {
+        "display_name": version.display_name,
+        "definition": version.definition,
+        "synonyms": sorted(version.synonyms),
+        "owner_principal": version.owner_principal,
+    }
+
+
+async def _published_glossary_term_version_id(
+    session: AsyncSession, version: GlossaryTermVersion
+) -> UUID | None:
+    published = await session.scalar(
+        select(GlossaryTermVersion.id).where(
+            GlossaryTermVersion.term_id == version.term_id,
+            GlossaryTermVersion.status == "APPROVED",
+            GlossaryTermVersion.id != version.id,
+        )
+    )
+    return published
+
+
+async def compose_governance_review_diff(
+    session: AsyncSession, review: GovernanceReview
+) -> GovernanceReviewDiffRead:
+    """The DB-facing half of SM-7 for one already-fetched review: turns its
+    target row(s) into plain-dict snapshots and calls `diff_semantic_object`
+    (`aida.semantic_diff`) directly -- no reimplementation of the diff itself.
+
+    Factored out of `get_governance_review_diff` (below) so a caller that
+    already has a batch of reviews on hand -- UX-17's `review_queue_read_model`
+    composing a whole run's proposals in one response -- can reuse the exact
+    same object-type dispatch and fallback wording per review, rather than
+    forking it, so the two surfaces cannot disagree on what is diffable and
+    what a diff looks like for a given review.
+    """
+    before: dict[str, Any] | None = None
+    after: dict[str, Any] | None = None
+    message: str | None = None
+
+    if review.object_type == "SEMANTIC_MODEL_VERSION":
+        model = await session.get(SemanticModelVersion, UUID(review.object_id))
+        if model is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        after = await _semantic_model_version_snapshot(session, model.id)
+        published_id = await _published_semantic_model_version_id(session, model)
+        before = (
+            await _semantic_model_version_snapshot(session, published_id)
+            if published_id is not None
+            else {}
+        )
+    elif review.object_type == "GLOSSARY_TERM_VERSION":
+        term_version = await session.get(GlossaryTermVersion, UUID(review.object_id))
+        if term_version is None:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        after = await _glossary_term_version_snapshot(session, term_version.id)
+        published_id = await _published_glossary_term_version_id(session, term_version)
+        before = (
+            await _glossary_term_version_snapshot(session, published_id)
+            if published_id is not None
+            else {}
+        )
+    else:
+        message = (
+            f"structured diffs are not yet available for {review.object_type}; "
+            "the raw proposed object is still reachable through its own read endpoint"
+        )
+
+    diff = diff_semantic_object(before, after) if after is not None else None
+    return GovernanceReviewDiffRead(
+        review_id=review.id,
+        object_type=review.object_type,
+        object_id=review.object_id,
+        diffable=diff is not None,
+        before=before,
+        after=after,
+        entries=[
+            SemanticFieldDeltaRead(
+                field=entry.field,
+                change=entry.change,
+                before=entry.before,
+                after=entry.after,
+            )
+            for entry in (diff.entries if diff is not None else [])
+        ],
+        message=message,
+    )
+
+
+@router.get(
+    "/governance/reviews/{review_id}/diff",
+    response_model=GovernanceReviewDiffRead,
+)
+async def get_governance_review_diff(
+    review_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> GovernanceReviewDiffRead:
+    """The structured version delta for one governance review, alongside
+    (not instead of) the raw proposed content -- SM-7, "reviewers see version
+    deltas". `before` is the currently published version's snapshot (`{}` if
+    the object has never been published before, e.g. a brand-new metric),
+    `after` is the proposed version's snapshot, and `entries` is the
+    field-level diff between them.
+    """
+    review = await session.get(GovernanceReview, review_id)
+    if review is None:
+        raise HTTPException(status_code=404, detail="governance review not found")
+    enforce_organization(context, review.organization_id)
+    return await compose_governance_review_diff(session, review)
 
 
 async def _apply_governance_review_decision(

@@ -2423,6 +2423,41 @@
         "title": "AssetDocumentationVersionRead",
         "type": "object"
       },
+      "AssetEvidenceRead": {
+        "additionalProperties": false,
+        "description": "UX-13: `GET /v1/metadata/tables/{id}/evidence` -- composes business\nmeaning, ownership/certification (GL-2/GL-5), data quality, consumption\nlineage (CX-4) and AI decision lineage including refusals (LN-3) for one\ntable. See `aida.asset_evidence` for how each `items` entry is sourced.",
+        "properties": {
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "table_name": {
+            "title": "Table Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_id",
+          "table_name",
+          "generated_at",
+          "items"
+        ],
+        "title": "AssetEvidenceRead",
+        "type": "object"
+      },
       "AssetTermLinkCreate": {
         "additionalProperties": false,
         "properties": {
@@ -5467,6 +5502,88 @@
           "updated_at"
         ],
         "title": "ConnectorCertificationRead",
+        "type": "object"
+      },
+      "ConnectorHealthFactorRead": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "maximum": {
+            "title": "Maximum",
+            "type": "number"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "score",
+          "maximum",
+          "reason",
+          "evidence"
+        ],
+        "title": "ConnectorHealthFactorRead",
+        "type": "object"
+      },
+      "ConnectorHealthScoreRead": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "factors": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorHealthFactorRead"
+            },
+            "title": "Factors",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "score",
+          "status",
+          "factors",
+          "blockers",
+          "computed_at"
+        ],
+        "title": "ConnectorHealthScoreRead",
         "type": "object"
       },
       "ConsumptionRecordPage": {
@@ -9821,6 +9938,43 @@
         "title": "EvaluationResponse",
         "type": "object"
       },
+      "EvidenceItemRead": {
+        "additionalProperties": false,
+        "description": "UX-13: one claim in an asset's evidence pane.\n\nEvery fact composed onto `AssetEvidenceRead` -- an ownership assignment,\nan open incident, a consumption event, an AI decision -- is one of these,\ncarrying its own `source` string (the module and record the claim was\nread from) so nothing in the pane is asserted without a traceable origin.",
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "claim": {
+            "title": "Claim",
+            "type": "string"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "category",
+          "claim",
+          "source"
+        ],
+        "title": "EvidenceItemRead",
+        "type": "object"
+      },
       "ExecutionRead": {
         "additionalProperties": false,
         "properties": {
@@ -11209,6 +11363,79 @@
           }
         },
         "title": "GovernanceReviewBulkSelectionFilter",
+        "type": "object"
+      },
+      "GovernanceReviewDiffRead": {
+        "additionalProperties": false,
+        "description": "Structured version delta for one pending (or decided) governance review.",
+        "properties": {
+          "after": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After"
+          },
+          "before": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before"
+          },
+          "diffable": {
+            "title": "Diffable",
+            "type": "boolean"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SemanticFieldDeltaRead"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "object_type",
+          "object_id",
+          "diffable"
+        ],
+        "title": "GovernanceReviewDiffRead",
         "type": "object"
       },
       "GovernanceReviewRead": {
@@ -14712,6 +14939,75 @@
           "updated_at"
         ],
         "title": "ModelRouteConfigurationRead",
+        "type": "object"
+      },
+      "MultiTableToolBlueprintRequest": {
+        "additionalProperties": false,
+        "description": "SM-5: request a deterministically-rendered multi-table JOIN tool\ndraft instead of hand-authoring `sql_template`. Everything below mirrors\n`GovernedToolVersionCreate`'s equivalent fields exactly (same\nslug/name/description/allowed_roles constraints) -- only `sql_template`\nand `parameters` are replaced with `table_ids`, since those two are\ngenerated from the tables' declared/approved relationships rather than\nwritten by hand.",
+        "properties": {
+          "allowed_roles": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Allowed Roles",
+            "type": "array"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "description": {
+            "maxLength": 4000,
+            "minLength": 3,
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 200,
+            "minLength": 2,
+            "title": "Name",
+            "type": "string"
+          },
+          "semantic_model_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Model Version Id"
+          },
+          "slug": {
+            "pattern": "^[a-z][a-z0-9_]{1,99}$",
+            "title": "Slug",
+            "type": "string"
+          },
+          "table_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 8,
+            "minItems": 2,
+            "title": "Table Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "datasource_id",
+          "table_ids",
+          "allowed_roles"
+        ],
+        "title": "MultiTableToolBlueprintRequest",
         "type": "object"
       },
       "NativePolicySyncDecisionRequest": {
@@ -18622,6 +18918,215 @@
         "title": "RenameCandidateRead",
         "type": "object"
       },
+      "ReviewQueueProposalRead": {
+        "additionalProperties": false,
+        "description": "One governance-review-queue proposal: its own review/decision fields\n(mirrors `GovernanceReviewRead` field-for-field), a numeric `confidence`\nwhere the proposal type carries one (`None` for a human-authored\nsubmission with no inference score), the evidence each rationale cites\n(`aida.asset_evidence`'s `EvidenceItemRead` shape), and a structured\n`diff` -- SM-7's own `compose_governance_review_diff`\n(`aida.semantic_api`), reused verbatim.",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "decided_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided By"
+          },
+          "decision_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Reason"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/GovernanceReviewDiffRead"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceItemRead"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "requested_action": {
+            "title": "Requested Action",
+            "type": "string"
+          },
+          "requested_by": {
+            "title": "Requested By",
+            "type": "string"
+          },
+          "review_id": {
+            "format": "uuid",
+            "title": "Review Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "organization_id",
+          "object_type",
+          "object_id",
+          "requested_action",
+          "status",
+          "requested_by",
+          "decided_by",
+          "decision_reason",
+          "decided_at",
+          "created_at",
+          "diff"
+        ],
+        "title": "ReviewQueueProposalRead",
+        "type": "object"
+      },
+      "ReviewQueueRead": {
+        "additionalProperties": false,
+        "description": "A composed batch of review-queue proposals plus the filters that\nselected it. See `aida.review_queue_read_model` module docstring for why\nthis is scoped to \"whatever batch of reviews the caller selected\" rather\nthan a single, uniform \"run\" concept the data model does not have for\nevery proposal type -- and for the one type that does (`inference_run_id`\non `MetadataEnrichmentProposal`), `inference_run_id_filter` reflects it\nwhen the caller used it.",
+        "properties": {
+          "by_object_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "readOnly": true,
+            "title": "By Object Type",
+            "type": "object"
+          },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "readOnly": true,
+            "title": "By Status",
+            "type": "object"
+          },
+          "diffable_count": {
+            "readOnly": true,
+            "title": "Diffable Count",
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "inference_run_id_filter": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inference Run Id Filter"
+          },
+          "object_type_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type Filter"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewQueueProposalRead"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "status_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Filter"
+          },
+          "total_proposals": {
+            "readOnly": true,
+            "title": "Total Proposals",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "status_filter",
+          "object_type_filter",
+          "inference_run_id_filter",
+          "generated_at",
+          "proposals",
+          "total_proposals",
+          "by_status",
+          "by_object_type",
+          "diffable_count"
+        ],
+        "title": "ReviewQueueRead",
+        "type": "object"
+      },
       "ScanPolicyRead": {
         "additionalProperties": false,
         "properties": {
@@ -18882,6 +19387,37 @@
           "score"
         ],
         "title": "SearchSuggestion",
+        "type": "object"
+      },
+      "SemanticFieldDeltaRead": {
+        "additionalProperties": false,
+        "description": "One field-level difference, as returned to a reviewer.\n\nMirrors `aida.semantic_diff.FieldDelta` field-for-field; kept as its own\nresponse model (rather than reusing the dataclass directly) so this\nendpoint's wire shape is independent of the pure module's internals.",
+        "properties": {
+          "after": {
+            "title": "After"
+          },
+          "before": {
+            "title": "Before"
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "changed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "change"
+        ],
+        "title": "SemanticFieldDeltaRead",
         "type": "object"
       },
       "SemanticInferenceRequest": {
@@ -22120,6 +22656,84 @@
         "title": "ToolExecutionResponse",
         "type": "object"
       },
+      "ToolFirstRateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "by_source": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Source",
+            "type": "object"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "freeform_executions": {
+            "title": "Freeform Executions",
+            "type": "integer"
+          },
+          "meets_target": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Meets Target"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "target_rate": {
+            "title": "Target Rate",
+            "type": "number"
+          },
+          "tool_first_executions": {
+            "title": "Tool First Executions",
+            "type": "integer"
+          },
+          "total_executions": {
+            "title": "Total Executions",
+            "type": "integer"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "window_days",
+          "tool_first_executions",
+          "freeform_executions",
+          "total_executions",
+          "rate",
+          "by_source",
+          "target_rate",
+          "meets_target",
+          "computed_at"
+        ],
+        "title": "ToolFirstRateRead",
+        "type": "object"
+      },
       "ToolParameterDefinition": {
         "additionalProperties": false,
         "properties": {
@@ -23046,6 +23660,13 @@
       },
       "ValidationError": {
         "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
           "loc": {
             "items": {
               "anyOf": [
@@ -36493,6 +37114,135 @@
         "summary": "Get Graph Summary"
       }
     },
+    "/v1/datasources/{datasource_id}/health": {
+      "get": {
+        "description": "CN-7: one connector's explainable health score.\n\nDerived entirely from existing `AnalysisRun`/`ScanPolicy` history --\nsee `aida.connector_health` for the five scored factors and\n`aida.fleet.datasource_health` for how they're gathered.",
+        "operationId": "get_datasource_health_v1_datasources__datasource_id__health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectorHealthScoreRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Datasource Health",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/knowledge-graph": {
       "get": {
         "description": "Return a bounded authoritative graph slice with declared and suggested edges.",
@@ -36647,7 +37397,7 @@
     },
     "/v1/datasources/{datasource_id}/knowledge-graph/neighborhood": {
       "get": {
-        "description": "Expand a bounded, value-free table neighborhood from one authorized node.",
+        "description": "Expand a bounded, value-free table neighborhood from one authorized node.\n\nKG-2: traversal is not confined to `datasource_id` -- a `RelationshipCandidate`\nwhose `datasource_id`/`target_datasource_id` differ (ADR-0017 phase 5) lets the\nfrontier cross into another datasource of the same organization. Every datasource\nthe traversal newly touches beyond the seed is checked twice before its tables can\njoin the response: `check_cross_boundary_grant` (an ACTIVE grant must let the\nseed's data_domain see into the other one, when they differ -- the same governance\nprimitive `build_domain_unified_lineage_graph_payload` already enforces for the\nUnified Lineage Explorer) and `authorization_gate.gate` with `READ_METADATA` on\nthat specific datasource (the caller's own RBAC, mirroring `list_tables_composed`\nin api.py). A datasource that fails either check is dropped exactly as if the\ncandidate row leading to it did not exist -- no truncation reason, no field, no\ndistinguishable signal names it, matching `AuthorizationDenied`'s INV-6 contract\nof carrying no resource detail.",
         "operationId": "get_knowledge_graph_neighborhood_v1_datasources__datasource_id__knowledge_graph_neighborhood_get",
         "parameters": [
           {
@@ -38498,7 +39248,7 @@
     },
     "/v1/datasources/{datasource_id}/procedure-lineage/parse": {
       "post": {
-        "description": "Parse a stored procedure body and extract column-level lineage.\n\nThe SQL is never executed.  Literal values are redacted.  Extracted edges\nare persisted for the datasource.",
+        "description": "Parse SQL text as a flat sequence of DML statements and extract\ncolumn-level lineage. Not procedure-aware: identical parsing to\n`parse_view_lineage_endpoint` above, with no control-flow handling and\nno dynamic-SQL detection (AT-D5; real procedure-body parsing is tracker\nitem N3, not started -- see `parse_procedure_lineage`'s docstring).\n\nThe SQL is never executed.  Literal values are redacted.  Extracted edges\nare persisted for the datasource.",
         "operationId": "parse_procedure_lineage_endpoint_v1_datasources__datasource_id__procedure_lineage_parse_post",
         "parameters": [
           {
@@ -44776,6 +45526,189 @@
         ]
       }
     },
+    "/v1/governance/reviews/queue": {
+      "get": {
+        "description": "One request returns a batch of governance-review-queue proposals --\neach carrying its rendered diff (SM-7, reused verbatim), numeric\nconfidence and the evidence its rationale cites. Every count on the\nresponse (`total_proposals`, `by_status`, `by_object_type`,\n`diffable_count`) is a `computed_field` derived from `proposals` itself,\nnever a separately queried number that could disagree with what was\nactually returned.\n\n`status` (default `PENDING`, matching `GET /v1/governance/reviews`) and\n`object_type` narrow the batch the same way that list endpoint's own\n`status` filter does; pass `status=` (empty) for every status.\n`inference_run_id` additionally scopes to one `SemanticInferenceRun`'s\n`METADATA_ENRICHMENT_PROPOSAL` reviews -- the one proposal type the data\nmodel genuinely groups into a batch from one inference pass (see\n`aida.review_queue_read_model` module docstring).",
+        "operationId": "get_review_queue_v1_governance_reviews_queue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "PENDING",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "inference_run_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Inference Run Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 1000,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQueueRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Queue",
+        "tags": [
+          "governance-review-queue"
+        ]
+      }
+    },
     "/v1/governance/reviews/{review_id}/decision": {
       "post": {
         "operationId": "decide_governance_review_v1_governance_reviews__review_id__decision_post",
@@ -44909,6 +45842,135 @@
           }
         },
         "summary": "Decide Governance Review",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/governance/reviews/{review_id}/diff": {
+      "get": {
+        "description": "The structured version delta for one governance review, alongside\n(not instead of) the raw proposed content -- SM-7, \"reviewers see version\ndeltas\". `before` is the currently published version's snapshot (`{}` if\nthe object has never been published before, e.g. a brand-new metric),\n`after` is the proposed version's snapshot, and `entries` is the\nfield-level diff between them.",
+        "operationId": "get_governance_review_diff_v1_governance_reviews__review_id__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernanceReviewDiffRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Governance Review Diff",
         "tags": [
           "semantic-governance"
         ]
@@ -47920,6 +48982,134 @@
         "summary": "Create Asset Documentation Version",
         "tags": [
           "glossary-and-documentation"
+        ]
+      }
+    },
+    "/v1/metadata/tables/{table_id}/evidence": {
+      "get": {
+        "operationId": "get_asset_evidence_v1_metadata_tables__table_id__evidence_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetEvidenceRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Asset Evidence",
+        "tags": [
+          "asset-evidence"
         ]
       }
     },
@@ -54399,6 +55589,135 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/fleet-health": {
+      "get": {
+        "description": "CN-7: per-connector health scores for every datasource in the fleet.\n\nThe batch counterpart to `GET /v1/datasources/{id}/health` -- powers the\nfleet view's per-connector health column without one request per\nconnector. Each item carries the same explainable factor breakdown.",
+        "operationId": "organization_fleet_health_v1_organizations__organization_id__fleet_health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Organization Fleet Health",
+        "tags": [
+          "operations"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/fleet-summary": {
       "get": {
         "operationId": "fleet_summary_v1_organizations__organization_id__fleet_summary_get",
@@ -57124,6 +58443,304 @@
         "summary": "Create Line Of Business"
       }
     },
+    "/v1/organizations/{organization_id}/metric-conflicts": {
+      "get": {
+        "description": "AT-17 read side -- `stewardship_api.list_glossary_conflicts`, scoped to\n`conflict_type=\"METRIC_FORMULA_COLLISION\"` rows only.",
+        "operationId": "list_metric_formula_collisions_v1_organizations__organization_id__metric_conflicts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Metric Formula Collisions",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/metric-conflicts/detect": {
+      "post": {
+        "description": "AT-17: raise a governance conflict for two *different* published\nmetrics that compute the same thing via the same (or grain-normalized\nsame) formula -- GL-3's own detect-on-demand pattern\n(`stewardship_api.detect_glossary_conflicts`), mirrored for metric\nformulas instead of glossary-term synonyms.\n\nReuses `GlossaryConflict` as-is rather than adding a parallel\nconflict-tracking table: `term_id` is already nullable (checked in\n`aida.models` before writing this), and neither\n`stewardship_service.apply_conflict_resolution` nor\n`reject_conflict_resolution` -- the maker-checker resolution GL-3 built,\nreached identically through `semantic_api.decide_governance_review`'s\nexisting `GLOSSARY_CONFLICT` branch -- reference `term_id` at all. A\nmetric-formula collision is stored with `term_id=None`,\n`conflict_type=\"METRIC_FORMULA_COLLISION\"`, and both metrics' identity\nand formula fields in `position_a`/`position_b`, so \"losing position\nretained\" holds for metrics exactly as it does for glossary terms: a\nresolution never deletes either side's recorded position.\n\nThe comparison itself is `aida.metric_formula_signature`\n(`find_formula_collisions`), a pure DB-free function -- see its\ndocstring for precisely what \"collision\" means here and its honest\nlimit (exact/grain-normalized structural duplication of `(aggregation,\nsource_table_id, measure_column_id, default_time_column_id, grain)`,\nnot general algebraic formula equivalence, which this schema's\nsingle-aggregation metric shape cannot even pose).",
+        "operationId": "detect_metric_formula_collisions_v1_organizations__organization_id__metric_conflicts_detect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detect Metric Formula Collisions",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/metric-suggestions": {
       "get": {
         "operationId": "list_metric_suggestion_proposals_v1_organizations__organization_id__metric_suggestions_get",
@@ -59699,6 +61316,170 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/stewardship/documentation-worklist": {
+      "get": {
+        "description": "AT-5: undocumented/under-described tables ranked by real query volume.\n\nDistinct from RT-6's `usage_popularity` retrieval signal\n(`aida.retrieval.hybrid_retrieve_enhanced`) -- that ranks *candidate\ntables for an agent's next SQL statement*; this ranks *tables a human\nsteward should document next*, and excludes any table that already has a\nreal (non-proposed) description rather than merely weighting it down.\n\nPaginated with the same bounded offset/limit `Page` contract GL-6's own\nbacklog endpoint above uses, not CT-2's keyset convention: keyset\npagination continues a page via a `WHERE` predicate over an indexed,\nstored ordering column, and there is no such column here -- `query_volume`\nis a runtime aggregate over a bounded `QueryExecution`/`ConsumptionRecord`\nscan (`_documentation_worklist_signals`), recomputed and re-sorted by the\npure `rank_documentation_worklist` on every request. `Page.total` still\nreports the full ranked-candidate count, independent of `limit`.",
+        "operationId": "list_documentation_worklist_v1_organizations__organization_id__stewardship_documentation_worklist_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Include tables with zero real query volume (no gateway execution, no MCP consumption read), sorted after every real-volume row. Off by default: this worklist ranks by real usage, and a zero-volume table has none to rank it by (see `documentation_worklist.py`).",
+            "in": "query",
+            "name": "include_zero_volume",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Include tables with zero real query volume (no gateway execution, no MCP consumption read), sorted after every real-volume row. Off by default: this worklist ranks by real usage, and a zero-volume table has none to rank it by (see `documentation_worklist.py`).",
+              "title": "Include Zero Volume",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Documentation Worklist",
+        "tags": [
+          "glossary-stewardship"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/stewardship/leaver-reassignment": {
       "post": {
         "description": "GL-7: reassign a leaving principal's *whole* active ownership\nportfolio -- every ACTIVE `OwnershipAssignment` row it holds, table and\nglossary-term stewardship alike (any subject_type GL-2's ownership model\ncovers) -- to a successor in one governed action, reusing the exact\n`BulkStewardshipOperation` / `GovernanceReview` maker-checker contract\nGL-2/GL-5/GL-8 already established (module 08 SS7) rather than a\nbespoke mechanism: `_apply_governance_review_decision`'s existing\n`BULK_STEWARDSHIP_OPERATION` dispatch (`semantic_api.py`) requires no\nchange at all -- it already calls `apply_bulk_operation` generically for\nwhatever `operation_type` the row carries.\n\nSelection mirrors CT-1's explicit-vs-filter split: an explicit\n`assignment_ids` list must name only ACTIVE assignments currently owned\nby `leaving_principal` (409 otherwise), and is capped at\n`LEAVER_REASSIGNMENT_MAX_ITEMS` by the request schema itself (a 422 over\nthe limit, exactly CT-1's explicit-selection behavior); omitting it\ndiscovers the leaving principal's whole current portfolio server-side,\ncapped at the same limit with `truncated=True` recorded in the\noperation's own parameters -- never silently dropped, CT-1's\nfilter-selection behavior.\n\nA validated `OwnershipAssignment.id` list is exactly what\n`BulkStewardshipOperation.subject_ids` holds here\n(`subject_type=\"OWNERSHIP_ASSIGNMENT\"`), which is what lets one operation\nspan every asset kind the leaver owned -- table *and* term -- in a\nsingle governed decision; the other three operation types this module\ndefines are each constrained to one subject_type per operation because\ntheir subjects are bare catalog/glossary ids, not already-typed\nassignment rows.\n\nCertifications (`AssetCertification.certified_by`) are a historical\nattestation, not an ownership assignment, and are deliberately out of\nscope -- consistent with this module's \"never last-write-wins\"\nretained-evidence principle (module 08 SS6): reassigning who currently\nowns a table must never rewrite the historical record of who certified\nit.",
@@ -60684,6 +62465,147 @@
           }
         },
         "summary": "Bulk Tag Tables"
+      }
+    },
+    "/v1/organizations/{organization_id}/tool-first-rate": {
+      "get": {
+        "description": "TL-6: what share of this organization's completed agent-run executions\nwent through a certified governed tool (\"tool-first\") rather than ad-hoc\ngenerated SQL, over a rolling window.\n\nDerived entirely from existing `AgentRun.generation_source` history --\nsee `aida.tool_first_rate` for the pure ratio computation and\n`aida.fleet.tool_first_execution_rate` for how it's gathered. The\nnumerator (`tool_first_executions`), denominator (`total_executions`),\nand the full per-source breakdown (`by_source`) are always returned\nalongside the ratio so the number is never opaque.",
+        "operationId": "organization_tool_first_rate_v1_organizations__organization_id__tool_first_rate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window_days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolFirstRateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Organization Tool First Rate",
+        "tags": [
+          "operations"
+        ]
       }
     },
     "/v1/organizations/{organization_id}/workspaces": {
@@ -63349,6 +65271,145 @@
         "summary": "Create Semantic Model Version",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/tool-blueprints/multi-table": {
+      "post": {
+        "description": "SM-5: deterministically render a candidate multi-table JOIN tool from\n`table_ids` and the relationships already declared/approved between them\n(database foreign keys, or reviewer-approved `RelationshipCandidate`\nrows -- see `multi_table_blueprint.py`), then persist it as an ordinary\n``DRAFT`` `GovernedToolVersion` through the exact same validation and\npersistence path `create_tool_version` uses. Never guesses a join: two\nselected tables with no declared relationship between them make the\nwhole request fail with 422 rather than fabricating a join key.\nPublication still requires `submit_tool_for_review` and independent\napproval, unchanged.",
+        "operationId": "create_multi_table_tool_blueprint_v1_projects__project_id__tool_blueprints_multi_table_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MultiTableToolBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernedToolVersionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Multi Table Tool Blueprint",
+        "tags": [
+          "governed-tools"
         ]
       }
     },

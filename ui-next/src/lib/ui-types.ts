@@ -1,0 +1,107 @@
+/* ---------------------------------------------------------------------------
+   Hand-written types. NOT generated -- see ./types.ts (tracker UX-14) for the
+   file that is, and scripts/generate_ui_types.py for the generator and gate.
+
+   Everything in this file falls into one of two buckets:
+
+   1. Front-end-only concepts with no server representation at all (`Persona`).
+      There is nothing in `schemas.py` to generate these from, so they stay
+      hand-written by definition.
+
+   2. Types this app needs that ARE meant to come from the live API, but
+      currently can't: `CatalogRowRead`, `MetadataTableRead` and the two
+      literal unions below them. `GET /v1/organizations/{org}/catalog/rows`
+      and `GET /v1/datasources/{id}/tables` (`src/aida/api.py`) both declare
+      `response_model=CursorPage` un-parameterized, so FastAPI's schema
+      walker never reaches `CatalogRowRead` or `MetadataTableRead` -- neither
+      name appears in `app.openapi()`'s `components.schemas` today, even
+      though both endpoints return exactly these shapes at runtime. Fixing
+      that means changing a route's `response_model` in `src/aida/api.py`,
+      which is backend business logic outside UX-14's scope (ui-next + CI
+      config only). Tracked as a follow-up (see 03-tracker.md UX-14's exit
+      note), not silently hidden: this comment, and the matching one in
+      scripts/generate_ui_types.py's module docstring, are the paper trail.
+      `certification`/`quality` are typed here as their known literal unions
+      per `CatalogRowRead`'s own field comments in schemas.py (`certification:
+      str  # CERTIFIED | EXPIRED | NONE | REVOKED`); the live schema (once
+      reachable) will only widen them to `string`, so this narrowing is a
+      strictly front-end convenience, not a claim the server enforces it.
+--------------------------------------------------------------------------- */
+
+/** `CursorPage` (./types.ts) narrowed to the two field types this app pins
+ *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
+ *  OpenAPI document (see the file banner above). */
+export type { CursorPage } from "./types";
+
+export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
+export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
+
+/** `MetadataTableRead` -- schemas.py:712. Eight fields. Not in the live
+ *  OpenAPI document yet; see this file's banner comment for why. */
+export interface MetadataTableRead {
+  id: string;
+  datasource_id: string;
+  schema_id: string;
+  name: string;
+  object_type: string;
+  status: string;
+  fingerprint: string;
+}
+
+/** `CatalogRowRead` -- schemas.py:3154 ("Mirrors `CatalogRowRead` in
+ *  `ui-next/src/lib/types.ts` field-for-field; that file is the client
+ *  already typed against this endpoint, so this schema follows it rather
+ *  than the reverse" -- that comment now points at this file instead). Not
+ *  in the live OpenAPI document yet; see this file's banner comment for why. */
+export interface CatalogRowRead {
+  id: string;
+  name: string;
+  schema_name: string;
+  datasource_name: string;
+  object_type: string;
+  status: string;
+  description: string | null;
+  /** True when the description was model-proposed and not yet approved.
+   *  ADR-0001: models propose, humans and deterministic services decide — so
+   *  the UI must never render a proposal as though it were established fact. */
+  description_is_proposed: boolean;
+  owner: string | null;
+  certification: CertificationStatus;
+  certification_expires_at: string | null;
+  quality: QualityState;
+  glossary_terms: string[];
+  row_count_estimate: number | null;
+  updated_at: string;
+}
+
+/** Front-end persona set (module 21 §5). No server enum backs this: in
+ *  production a persona comes back as `MeRead.persona: string | null`
+ *  (./types.ts) and must be checked against this list with `asPersona`
+ *  below before it can be trusted as one of these five, exactly the same
+ *  way any other untrusted external string would be narrowed. */
+export type Persona = "Analyst" | "Steward" | "Reviewer" | "Operator" | "Auditor";
+
+const PERSONAS: readonly Persona[] = ["Analyst", "Steward", "Reviewer", "Operator", "Auditor"];
+
+/** Narrows a server-reported persona string to `Persona`, or `null` if it
+ *  isn't one of the five the shell knows about (an unmapped OIDC principal,
+ *  or a future persona the client hasn't shipped support for yet) -- fails
+ *  closed to "no persona", never to a guess. */
+export function asPersona(value: string | null | undefined): Persona | null {
+  return value != null && (PERSONAS as readonly string[]).includes(value)
+    ? (value as Persona)
+    : null;
+}
+
+/** `MeRead.identity_provider` (./types.ts) is `string` on the wire -- the
+ *  server's own prod/dev gate (`Settings.identity_provider`), but not a
+ *  literal type there since schemas.py leaves it as `str`. `PersonaNav`
+ *  needs the narrower two-value type module 21 §5 actually specifies; this
+ *  narrows the same way `asPersona` does, and just as deliberately fails
+ *  closed to `null` (== "render nothing yet") on anything else, rather than
+ *  guessing which of the two real modes an unrecognised value means. */
+export type IdentityProvider = "OIDC" | "DEVELOPMENT";
+
+export function asIdentityProvider(value: string | null | undefined): IdentityProvider | null {
+  return value === "OIDC" || value === "DEVELOPMENT" ? value : null;
+}

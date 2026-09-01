@@ -164,11 +164,17 @@ is a visible act.
 
 ---
 
-## 4. Recommendation — does INV-7's "mutation" cover lazily-created default rows?
+## 4. Ratified — does INV-7's "mutation" cover lazily-created default rows?
 
-This answers the open question in `06-tier0-invariant-suite.md` §6.2. It is a
-recommendation, not a ratification: `Docs/10-architecture/01-principles-and-invariants.md`
-is another workstream's file and was not edited.
+> **Ratified 2026-09-01 (tracker `ST-18`).** The recommendation below was adopted
+> without change. `Docs/10-architecture/01-principles-and-invariants.md`'s INV-7
+> section now carries the ratified scope note verbatim (independently re-verified
+> against `ensure_default_domain` and `ensure_organization_integration_policy` as
+> they exist in the tree today, not just against this write-up). This section is
+> kept as the full trade-off record the invariants document points back to; it is
+> no longer an open question.
+
+This answers the open question in `06-tier0-invariant-suite.md` §6.2.
 
 ### The subject
 

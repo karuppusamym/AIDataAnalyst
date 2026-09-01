@@ -689,16 +689,33 @@ def parse_view_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
 
 
 def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ParseResult:
-    """Parse a stored procedure body and extract column-level lineage.
+    """Parse SQL text as a flat sequence of DML statements -- currently
+    identical to `parse_view_lineage`, not a procedure-aware parser.
 
-    Extracts lineage from DML statements within the procedure body.
+    AT-D5: this is `_parse_sql` under a procedure-flavoured name, not real
+    procedure-body parsing (tracker item N3, TODO, not started). It has no
+    control-flow handling (IF/LOOP/CURSOR/branching), no
+    variable/temp-table scope resolution, and -- most importantly --
+    **no dynamic-SQL detection at all**: a `CREATE PROCEDURE ... AS $$ ...
+    EXECUTE format(...) ... $$` body's dynamic string is invisible to
+    sqlglot and silently produces no edge for that statement, with nothing
+    flagging the gap as unresolved rather than merely absent. It works
+    today only because `sqlglot.parse` on a bare (non-`CREATE PROCEDURE`)
+    sequence of statements -- e.g. a body already unwrapped by the caller
+    into `SELECT`/`INSERT`/`UPDATE`/`MERGE` statements -- happens to
+    extract the same per-statement edges `parse_view_lineage` would extract
+    from the same SQL; a real `CREATE PROCEDURE`/`CREATE FUNCTION` wrapper
+    generally fails to parse under `sqlglot` and falls back to
+    `Confidence.LOW` with a parse error, same as any unparseable input.
+    Do not read the separate name as evidence of procedure-specific
+    capability -- see N3 in `Docs/60-delivery/03-tracker.md` for the real,
+    unstarted work this would take.
+
     The SQL is never executed.  Literal values are redacted from hashes.
 
-    For procedures, the parser extracts lineage from individual DML statements
-    (SELECT, INSERT, UPDATE, MERGE) found within the body.
-
     Args:
-        sql: The SQL procedure body
+        sql: The SQL text (ideally already unwrapped to its constituent DML
+            statements; a full `CREATE PROCEDURE` wrapper is not parsed).
         dialect: Target SQL dialect
 
     Returns:

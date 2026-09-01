@@ -341,6 +341,29 @@ def apply_view_definitions(
         )
 
 
+def view_definition_row(
+    table_schema: str, table_name: str, definition: DiscoveredViewDefinition
+) -> dict[str, Any]:
+    """Adapt an already-built ``DiscoveredViewDefinition`` into an `apply_view_definitions` row.
+
+    Oracle, Snowflake and BigQuery each build the definition locally -- LONG-column
+    quirks, secure-view NULLs, GET_DDL fallbacks are genuinely per-dialect -- but all
+    three then only need to *attach* it, which is exactly what `apply_view_definitions`
+    already does. This is the round trip that lets them use it instead of re-walking
+    and rebuilding the catalog tree by hand to do the same attachment themselves.
+    """
+    return {
+        "table_schema": table_schema,
+        "table_name": table_name,
+        "definition": definition.definition_sql,
+        "is_materialized": definition.is_materialized,
+        "is_updatable": definition.is_updatable,
+        "check_option": definition.check_option,
+        "truncated": definition.truncated,
+        "unavailable_reason": definition.unavailable_reason,
+    }
+
+
 def build_routines(
     routine_rows: Sequence[Mapping[str, Any]],
     parameter_rows: Sequence[Mapping[str, Any]] = (),

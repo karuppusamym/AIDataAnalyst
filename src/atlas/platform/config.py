@@ -119,6 +119,21 @@ class Settings(BaseSettings):
     default_query_row_limit: int = Field(default=5000, ge=1, le=100_000)
     hard_query_row_limit: int = Field(default=100_000, ge=1, le=1_000_000)
     query_timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    # QG-3: fairness under contention. Each line of business (DataSource.line_of_
+    # business_id, the same per-LOB dimension aida.cost_showback already groups
+    # QueryExecution rows by) may hold at most this many concurrently in-flight
+    # executions against the gateway's real source-execution path
+    # (aida.lob_concurrency.LobConcurrencyController, checked in
+    # QueryExecutionGateway.execute). A single default applied to every LOB, not a
+    # per-LOB override table -- a persisted override would need a new schema this
+    # item is deliberately not adding.
+    query_gateway_lob_max_concurrent: int = Field(default=8, ge=1, le=1_000)
+    # A request past its LOB's limit waits, bounded, for another in-flight
+    # execution from the same LOB to free a slot, rather than either queuing
+    # forever or rejecting on the first collision -- see aida.lob_concurrency's
+    # module docstring. A wait that outlives this bound is rejected with a clear,
+    # distinguishable error (LobConcurrencyRejected) instead of growing the queue.
+    query_gateway_lob_queue_timeout_seconds: float = Field(default=5.0, gt=0, le=300)
     max_postgres_plan_cost: float = Field(default=1_000_000.0, gt=0)
     # BigQuery bills by bytes scanned rather than exposing a comparable cost plan,
     # so the gateway gates dry-run byte estimates against this separate budget
@@ -180,6 +195,14 @@ class Settings(BaseSettings):
     # Default once a day; bounded 5 minutes to 7 days so an operator can tighten or
     # loosen it without a code change but cannot accidentally turn it into a per-tick scan.
     owner_routing_interval_minutes: int = Field(default=1_440, ge=5, le=10_080)
+    # KG-7: scheduled Postgres/Neo4j knowledge-graph reconciliation cadence.
+    # Reconciliation is read-only against both stores and diffs the projector's
+    # own selection criteria against what Neo4j actually holds -- not a
+    # real-time check, so a sub-hourly cadence would only add per-tick,
+    # per-datasource Postgres+Neo4j reads for no earlier drift detection.
+    # Default every 6 hours; bounded 15 minutes to 7 days so an operator can
+    # tighten or loosen it without a code change.
+    graph_reconciliation_interval_minutes: int = Field(default=360, ge=15, le=10_080)
     knowledge_graph_max_nodes: int = Field(default=250, ge=25, le=2_000)
     knowledge_graph_max_edges: int = Field(default=1_000, ge=50, le=10_000)
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)
@@ -197,6 +220,43 @@ class Settings(BaseSettings):
     mcp_consumer_requests_per_minute: int = Field(default=30, ge=1, le=100_000)
     mcp_consumer_tool_calls_per_day: int = Field(default=200, ge=1, le=1_000_000)
     mcp_consumer_context_reads_per_day: int = Field(default=1_000, ge=1, le=1_000_000)
+    # --- Data quality (DQ-6) -------------------------------------------------
+    #
+    # Off by default so a tenant that has not reviewed the feature keeps today's
+    # rolling-previous-profile comparison in `quality_service.evaluate_analysis_run`
+    # (VOLUME_CHANGE compares the current row count only to the single most recent
+    # prior `TableProfile`). Flipping it on makes `evaluate_analysis_run` also fetch
+    # each table's own bounded history of past `TableProfile` row counts and hand it
+    # to `data_quality.day_of_week_baseline`, which -- purely, with no DB access of
+    # its own -- groups those already-persisted points by weekday and judges the
+    # current value against its own day-of-week mean/stdev instead of whatever day
+    # happened to run last (see `data_quality.evaluate_quality`'s `seasonality_*`
+    # parameters). It falls back to the unchanged rolling-previous comparison,
+    # automatically and per-table, whenever fewer than `quality_seasonal_min_samples`
+    # same-weekday points exist yet -- so enabling this can only change a VOLUME_CHANGE
+    # verdict where there is already enough real history to trust one.
+    quality_seasonal_thresholds_enabled: bool = False
+    quality_seasonal_min_samples: int = Field(default=3, ge=2, le=52)
+    quality_seasonal_zscore_threshold: float = Field(default=3.0, ge=1.0, le=10.0)
+    # --- Data quality: month-end seasonality (DQ-6 follow-up) ----------------
+    #
+    # A second, independent, off-by-default seasonal grouping alongside (not
+    # replacing) `quality_seasonal_thresholds_enabled`'s day-of-week baseline above.
+    # A recurring month-end close batch lands on a different weekday every month, so
+    # the day-of-week grouping alone spreads it across several weekday buckets
+    # instead of recognizing it as a pattern. When on, `evaluate_analysis_run` also
+    # hands its already-fetched history to `data_quality.day_of_month_baseline`,
+    # which -- purely, with no DB access of its own -- groups those points by
+    # calendar days-before-month-end (so a 28-day February's last day lines up with
+    # a 31-day March's) and judges a reading that falls within the last
+    # `quality_seasonal_month_end_window_days` days of its month against that
+    # position's own mean/stdev instead. When both this and the day-of-week flag are
+    # on, a reading inside the month-end window prefers this baseline (the more
+    # specific signal for that day); everything else still falls back to the
+    # day-of-week baseline, then to the unchanged rolling-previous comparison,
+    # exactly as before this flag existed.
+    quality_seasonal_month_end_enabled: bool = False
+    quality_seasonal_month_end_window_days: int = Field(default=3, ge=1, le=10)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids
@@ -255,6 +315,26 @@ class Settings(BaseSettings):
     # completion of the rollout, and until it happens the platform should say so (INV-9).
     unresolved_workspace_posture: Literal["SHADOW", "DENY"] = "SHADOW"
 
+    # PG-5: which product edition this deployment is licensed for
+    # (`Docs/00-product/07-packaging-and-editions.md` §3's capability matrix).
+    # Deployment-wide, not per-`Organization` -- `07-packaging-and-editions.md`
+    # §2 names self-hosted (BYOK), one customer per running deployment, as the
+    # primary and only "target for v1" model, and multi-tenant SaaS as "not
+    # planned"; a per-deployment license setting is therefore the accurate
+    # description of where an edition actually lives today, not a workaround.
+    # `aida.edition_entitlements.evaluate_entitlement` is the pure evaluator
+    # this feeds; `atlas.platform` must not import from `aida` (see the
+    # import-linter contract this module's docstring already documents), so
+    # the literal values are repeated here rather than importing `aida`'s
+    # `Edition` alias -- the two are kept in sync by
+    # `tests/test_edition_entitlements.py`. Defaults to the ceiling
+    # (`REGULATED`) so an unconfigured deployment's existing behaviour is
+    # unchanged by this setting's mere existence (PK-2, `07-packaging-and-
+    # editions.md` §6, is still an open product decision on whether a
+    # `FOUNDATION` edition is even offered; defaulting down would make this
+    # setting's addition alone start denying capability nobody asked to gate).
+    edition: Literal["FOUNDATION", "ENTERPRISE", "REGULATED"] = "REGULATED"
+
     entitlement_provider: Literal["outbox", "webhook"] = "outbox"
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None
@@ -262,6 +342,15 @@ class Settings(BaseSettings):
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
+    # AG-7: query-memory similarity/adaptation. Off by default so a tenant that has
+    # not reviewed the feature keeps today's MODEL_GATEWAY-only behaviour; flipping
+    # it on only changes what grounding a MODEL_GENERATION-strategy run's prompt
+    # carries (a matched-and-version-checked prior query's redacted SQL shape) --
+    # the generated SQL still reaches the identical `query_gateway.execute` guard
+    # call every other path uses (see `query_memory.py`, `agent_orchestrator.py`).
+    agent_query_memory_enabled: bool = False
+    agent_query_memory_min_similarity: float = Field(default=0.6, ge=0.0, le=1.0)
+    agent_query_memory_scan_limit: int = Field(default=200, ge=1, le=5_000)
     model_generation_enabled: bool = False
     model_route: str | None = Field(default=None, min_length=3, max_length=255)
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)

@@ -154,22 +154,31 @@ def test_projections_are_written_only_by_projectors() -> None:
 
 
 def test_request_path_graph_access_is_read_only_and_closed() -> None:
-    """INV-1's other half: a projection may be *read* on the request path (that is
-    what it is for), but only from modules that are known to fall back to
-    PostgreSQL when the graph is unavailable or disagrees.
+    """INV-1's other half: a projection may be *read* -- on the request path (that
+    is what it is for) or, for KG-7, on a scheduled background pass -- but only
+    from modules that are known to fall back to, or reconcile against, PostgreSQL
+    rather than trust the graph.
 
     The list is closed rather than pattern-matched so that a new module reaching
-    into Neo4j is a reviewable change. Both current entries degrade to the
-    authoritative store by design: `api.get_graph_summary` reconciles the graph's
-    counts against PostgreSQL before returning them, and
+    into Neo4j is a reviewable change. Every entry degrades to (or is checked
+    against) the authoritative store by design: `api.get_graph_summary` reconciles
+    the graph's counts against PostgreSQL before returning them,
     `lineage_graph_store.read_bounded_impact` returns `None` on any graph failure
-    so the caller recomputes from PostgreSQL.
+    so the caller recomputes from PostgreSQL, and `graph_reconciliation` (KG-7) is
+    not request-path at all -- it is the scheduled job that reads Neo4j purely to
+    diff it against what PostgreSQL says should be there and alert on the
+    difference; PostgreSQL's selection is never overridden by what it finds.
     """
     permitted_readers = {
         "api.py": "graph summary, reconciled against PostgreSQL counts in the same handler",
         "lineage_graph_store.py": (
             "bounded lineage impact; returns None on any graph error so PostgreSQL "
             "remains the fallback authority"
+        ),
+        "graph_reconciliation.py": (
+            "KG-7 scheduled drift reconciliation; reads Neo4j only to diff it "
+            "against PostgreSQL's own projection selection and alert on "
+            "disagreement, never to answer a request or override PostgreSQL"
         ),
     }
     readers = sorted(

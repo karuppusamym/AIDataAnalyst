@@ -23,6 +23,7 @@
 | ADR-0014 | Source values are not platform memory | Accepted | [link](../10-architecture/adr/ADR-0014-value-free-control-plane.md) |
 | ADR-0015 | Schema per module; no cross-schema foreign keys | Accepted | [link](../10-architecture/adr/ADR-0015-schema-per-module.md) |
 | ADR-0016 | Quality baselines value-free; source freshness fails closed | Accepted | [link](../10-architecture/adr/ADR-0016-quality-freshness-fails-closed.md) |
+| ADR-0022 | Open Semantic Interchange stays a thin export target, not the internal semantic model | Accepted | [link](../10-architecture/adr/ADR-0022-open-semantic-interchange-target.md) |
 
 ## Product decisions
 
@@ -52,7 +53,6 @@
 | DC-2 | Does a data-contract breach block consumers or only warn them? | Runtime coupling design | Product |
 | DC-3 | Who arbitrates when a producer must break a contract? | Governance operating model | Data Governance |
 | DC-4 | Is a data contract versioned independently of its asset? | Data model | Architecture |
-| SM-6 | Should Atlas adopt Open Semantic Interchange? | Semantic interoperability; commoditization risk | Architecture |
 
 ## Decisions required from the bank
 

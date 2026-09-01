@@ -20,7 +20,6 @@ from aida.connectors.base import (
     ColumnProfileSnapshot,
     ConnectorCapabilities,
     DiscoveredCatalog,
-    DiscoveredGrant,
     DiscoveredRoutine,
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
@@ -29,11 +28,17 @@ from aida.connectors.base import (
     TableProfileSnapshot,
 )
 from aida.connectors.discovery import (
+    TableMap,
     append_grouped_foreign_key_rows,
     append_grouped_key_rows,
+    apply_column_descriptions,
+    apply_table_descriptions,
+    apply_view_definitions,
     assemble_catalog,
+    build_grants,
     build_table_map_from_column_rows,
     normalize_object_type,
+    view_definition_row,
 )
 from aida.connectors.sql_execution import SqlExecutor
 
@@ -431,24 +436,27 @@ def _build_routine(
     )
 
 
-def _build_grant(row: Mapping[str, Any]) -> DiscoveredGrant:
-    """Turn one `SHOW GRANTS` result row into a grant.
+def _grant_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Shape one `SHOW GRANTS` result row for the shared `build_grants`.
 
     `SHOW GRANTS` is a metadata command, not a view over INFORMATION_SCHEMA: it
     cannot be joined, filtered or aggregated, and it has to be issued one object at a
     time. The only set-returning grant surface Snowflake offers is
     `SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES`, which needs access to the shared
     SNOWFLAKE database and lags reality by up to two hours.
+
+    `object_name` is unqualified here rather than left to `build_grants`, which has
+    no notion of Snowflake's dotted `SHOW GRANTS` naming.
     """
-    return DiscoveredGrant(
-        grantee=str(row.get("grantee_name") or ""),
-        grantee_type=str(row.get("granted_to") or "ROLE"),
-        privilege=str(row.get("privilege") or ""),
-        object_type=str(row.get("granted_on") or "SCHEMA"),
-        object_name=_unqualified_name(row.get("name")),
-        schema_name=_optional_text(row.get("schema_name")),
-        is_grantable=_is_true(row.get("grant_option")),
-    )
+    return {
+        "schema_name": row.get("schema_name"),
+        "grantee": row.get("grantee_name") or "",
+        "grantee_type": row.get("granted_to") or "ROLE",
+        "privilege": row.get("privilege") or "",
+        "object_type": row.get("granted_on") or "SCHEMA",
+        "object_name": _unqualified_name(row.get("name")),
+        "is_grantable": row.get("grant_option"),
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +623,81 @@ def _fetch_envelope_rows(
     )
 
 
+def _table_description_rows(column_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Shape the table-comment half of `column_rows` for `apply_table_descriptions`.
+
+    Snowflake's comments ride along on the same INFORMATION_SCHEMA.COLUMNS /
+    .TABLES join that produces `column_rows`, rather than a query of their own.
+    """
+    return [
+        {
+            "table_schema": row["table_schema"],
+            "table_name": row["table_name"],
+            "description": _optional_text(row.get("table_comment")),
+        }
+        for row in column_rows
+    ]
+
+
+def _column_description_rows(column_rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Shape the column-comment half of `column_rows` for `apply_column_descriptions`."""
+    return [
+        {
+            "table_schema": row["table_schema"],
+            "table_name": row["table_name"],
+            "column_name": row["column_name"],
+            "description": _optional_text(row.get("column_comment")),
+        }
+        for row in column_rows
+    ]
+
+
+def _view_definition_rows(
+    tables: TableMap, envelope: _SnowflakeEnvelopeRows
+) -> list[dict[str, Any]]:
+    """Build one `apply_view_definitions` row per view/materialized-view table.
+
+    INFORMATION_SCHEMA first, GET_DDL second: a materialized view has no
+    INFORMATION_SCHEMA.VIEWS row at all, so it always arrives via the GET_DDL pass
+    -- or as that call's refusal.
+    """
+    view_rows = {
+        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.views
+    }
+    ddl_rows = {
+        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.view_ddl
+    }
+    views_reason = envelope.reason("views")
+
+    rows: list[dict[str, Any]] = []
+    for schema_name, schema_tables in tables.items():
+        for table_name, table in schema_tables.items():
+            if table.object_type not in _VIEW_OBJECT_TYPES:
+                continue
+            key = (schema_name, table_name)
+            view_row: dict[str, Any] = view_rows.get(key, {})
+            ddl_row: dict[str, Any] = ddl_rows.get(key, {})
+            # INFORMATION_SCHEMA first, GET_DDL second. A materialized view has no
+            # INFORMATION_SCHEMA.VIEWS row at all, so it always arrives via the
+            # GET_DDL pass -- or as that call's refusal.
+            text = view_row.get("view_definition")
+            fallback_reason = None
+            if text is None:
+                text = ddl_row.get("view_definition")
+                fallback_reason = ddl_row.get("unavailable_reason") or views_reason
+            definition = _build_view_definition(
+                text,
+                object_label=f"{schema_name}.{table_name}",
+                is_materialized=table.object_type == "MATERIALIZED_VIEW",
+                is_secure=view_row.get("is_secure"),
+                is_updatable=view_row.get("is_updatable"),
+                check_option=view_row.get("check_option"),
+                fallback_reason=fallback_reason,
+            )
+            rows.append(view_definition_row(schema_name, table_name, definition))
+    return rows
+
+
 def _assemble_snowflake_catalog(
     catalog_name: str,
     column_rows: list[dict[str, Any]],
@@ -623,115 +706,70 @@ def _assemble_snowflake_catalog(
     *,
     envelope: _SnowflakeEnvelopeRows | None = None,
 ) -> tuple[DiscoveredCatalog, ...]:
-    """Assemble the v1.0 catalog, then fold the envelope 1.1 axes onto it.
-
-    A rebuild rather than a change to `aida.connectors.discovery`, whose shared
-    helpers are on the v1.0 contract and are used by connectors this workstream does
-    not own.
-    """
+    """Assemble the catalog, folding in any envelope 1.1 axes the caller collected."""
     table_map = build_table_map_from_column_rows(column_rows)
     append_grouped_key_rows(table_map, pk_rows, constraint_type_map=_CONSTRAINT_TYPE_MAP)
     append_grouped_foreign_key_rows(table_map, fk_rows)
-    catalogs = assemble_catalog(catalog_name, table_map)
     if envelope is None:
-        return catalogs
+        return assemble_catalog(catalog_name, table_map)
 
-    table_comments = {
-        (str(row["table_schema"]), str(row["table_name"])): _optional_text(row.get("table_comment"))
-        for row in column_rows
-    }
-    column_comments = {
-        (str(row["table_schema"]), str(row["table_name"]), str(row["column_name"])): _optional_text(
-            row.get("column_comment")
-        )
-        for row in column_rows
-    }
-    schema_comments = {
-        str(row["schema_name"]): _optional_text(row.get("comment")) for row in envelope.schemata
-    }
-    catalog_comment = next(
-        (_optional_text(row.get("comment")) for row in envelope.databases), None
-    )
-    view_rows = {
-        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.views
-    }
-    ddl_rows = {
-        (str(row["table_schema"]), str(row["table_name"])): row for row in envelope.view_ddl
-    }
+    apply_table_descriptions(table_map, _table_description_rows(column_rows))
+    apply_column_descriptions(table_map, _column_description_rows(column_rows))
+    apply_view_definitions(table_map, _view_definition_rows(table_map, envelope))
+
+    # Scoped to schemas `table_map` already knows about, matching the previous
+    # rebuild-based assembly, which only ever walked `catalog.schemas` derived from
+    # `table_map` and so never surfaced a schema holding only routines or only
+    # grants. `assemble_catalog`'s own routines=/grants= contract would happily
+    # synthesize such a schema (see `test_a_schema_with_only_routines_survives_assembly`
+    # in tests/test_connectors.py) -- correct for postgres/sqlserver, which pass it
+    # unfiltered, but a behavior change here that this dedup does not make silently.
     routines: dict[str, list[DiscoveredRoutine]] = {}
     for row in envelope.routines:
-        routines.setdefault(str(row["routine_schema"]), []).append(_build_routine(row))
-    grants: dict[str, list[DiscoveredGrant]] = {}
-    for row in envelope.grants:
-        grants.setdefault(str(row["schema_name"]), []).append(_build_grant(row))
-    views_reason = envelope.reason("views")
+        schema_name = str(row["routine_schema"])
+        if schema_name in table_map:
+            routines.setdefault(schema_name, []).append(_build_routine(row))
+    grants = {
+        schema_name: grant_list
+        for schema_name, grant_list in build_grants(
+            [_grant_row(row) for row in envelope.grants]
+        ).items()
+        if schema_name in table_map
+    }
 
-    rebuilt: list[DiscoveredCatalog] = []
-    for catalog in catalogs:
-        schemas = []
-        for schema in catalog.schemas:
-            tables = []
-            for table in schema.tables:
-                key = (schema.name, table.name)
-                definition: DiscoveredViewDefinition | None = None
-                if table.object_type in _VIEW_OBJECT_TYPES:
-                    view_row: dict[str, Any] = view_rows.get(key, {})
-                    ddl_row: dict[str, Any] = ddl_rows.get(key, {})
-                    # INFORMATION_SCHEMA first, GET_DDL second. A materialized view has
-                    # no INFORMATION_SCHEMA.VIEWS row at all, so it always arrives via
-                    # the GET_DDL pass -- or as that call's refusal.
-                    text = view_row.get("view_definition")
-                    fallback_reason = None
-                    if text is None:
-                        text = ddl_row.get("view_definition")
-                        fallback_reason = ddl_row.get("unavailable_reason") or views_reason
-                    definition = _build_view_definition(
-                        text,
-                        object_label=f"{schema.name}.{table.name}",
-                        is_materialized=table.object_type == "MATERIALIZED_VIEW",
-                        is_secure=view_row.get("is_secure"),
-                        is_updatable=view_row.get("is_updatable"),
-                        check_option=view_row.get("check_option"),
-                        fallback_reason=fallback_reason,
-                    )
-                columns = tuple(
-                    replace(
-                        column,
-                        source_description=column_comments.get(
-                            (schema.name, table.name, column.name)
-                        ),
-                    )
-                    for column in table.columns
-                )
-                tables.append(
-                    replace(
-                        table,
-                        columns=columns,
-                        source_description=table_comments.get(key),
-                        view_definition=definition,
-                    )
-                )
-            schemas.append(
-                replace(
-                    schema,
-                    tables=tuple(tables),
-                    routines=tuple(routines.get(schema.name, ())),
-                    grants=tuple(grants.get(schema.name, ())),
-                    source_description=schema_comments.get(schema.name),
-                )
-            )
-        attributes = dict(catalog.attributes)
-        if envelope.unavailable:
-            attributes["envelope_v11_unavailable"] = dict(envelope.unavailable)
-        rebuilt.append(
+    # Same scoping as routines/grants above: a schema known only through its own
+    # COMMENT, with no tables, routines, or grants, was never surfaced before. A
+    # `None` description is dropped rather than kept -- `assemble_catalog` reads a
+    # missing key exactly the same way it would read one mapped to `None`.
+    schema_descriptions = {
+        str(row["schema_name"]): description
+        for row in envelope.schemata
+        if str(row["schema_name"]) in table_map
+        and (description := _optional_text(row.get("comment"))) is not None
+    }
+
+    catalogs = assemble_catalog(
+        catalog_name,
+        table_map,
+        routines=routines,
+        grants=grants,
+        schema_descriptions=schema_descriptions,
+        catalog_description=next(
+            (_optional_text(row.get("comment")) for row in envelope.databases), None
+        ),
+    )
+    if envelope.unavailable:
+        catalogs = tuple(
             replace(
                 catalog,
-                schemas=tuple(schemas),
-                source_description=catalog_comment,
-                attributes=attributes,
+                attributes={
+                    **catalog.attributes,
+                    "envelope_v11_unavailable": dict(envelope.unavailable),
+                },
             )
+            for catalog in catalogs
         )
-    return tuple(rebuilt)
+    return catalogs
 
 
 class SnowflakeConnector(SqlExecutor):

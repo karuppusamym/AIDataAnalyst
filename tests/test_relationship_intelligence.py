@@ -2,10 +2,12 @@ from uuid import UUID
 
 from aida.main import app
 from aida.relationship_intelligence import (
+    RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION,
     ColumnMeta,
     composite_group_fingerprint,
     generate_composite_relationship_candidates,
     resolve_canonical_table_id,
+    score_relationship_candidate_signals,
 )
 
 
@@ -275,3 +277,128 @@ def test_composite_group_fingerprint_is_order_sensitive_and_stable() -> None:
 
     assert first == again
     assert first != swapped
+
+
+# --------------------------------------------------------------------------
+# AT-15 -- per-signal confidence decomposition
+#
+# Pure proof that score_relationship_candidate_signals is a *decomposition*
+# of the discovery endpoints' previous single if/elif confidence ladder, not
+# a scoring-behavior change: every known (same_source, name_match_exact,
+# type_match_exact) input below reproduces the exact literal confidence the
+# pre-decomposition code assigned for that same case
+# (discover_relationship_candidates always assigned 0.90;
+# discover_cross_source_relationship_candidates assigned 0.75 / 0.65 / 0.55),
+# and each case's named signals sum to exactly that total.
+# --------------------------------------------------------------------------
+
+
+def test_score_same_source_signals_matches_previous_fixed_confidence_of_0_90() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=True, name_match_exact=True, type_match_exact=True
+    )
+
+    assert result.confidence == 0.90
+    assert [signal.name for signal in result.signals] == [
+        "TARGET_IS_PRIMARY_KEY",
+        "COLUMN_NAME_MATCH",
+        "PHYSICAL_TYPE_MATCH",
+    ]
+    assert [signal.score for signal in result.signals] == [0.70, 0.10, 0.10]
+    assert [signal.maximum for signal in result.signals] == [0.70, 0.10, 0.10]
+    assert round(sum(signal.score for signal in result.signals), 10) == result.confidence
+
+
+def test_score_cross_source_both_exact_matches_previous_confidence_of_0_75() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=True, type_match_exact=True
+    )
+
+    assert result.confidence == 0.75
+    assert [signal.score for signal in result.signals] == [0.55, 0.10, 0.10]
+    assert round(sum(signal.score for signal in result.signals), 10) == result.confidence
+
+
+def test_score_cross_source_name_exact_only_matches_previous_confidence_of_0_65() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=True, type_match_exact=False
+    )
+
+    assert result.confidence == 0.65
+    assert [signal.score for signal in result.signals] == [0.55, 0.10, 0.0]
+    assert round(sum(signal.score for signal in result.signals), 10) == result.confidence
+
+
+def test_score_cross_source_type_exact_only_matches_previous_confidence_of_0_65() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=False, type_match_exact=True
+    )
+
+    assert result.confidence == 0.65
+    assert [signal.score for signal in result.signals] == [0.55, 0.0, 0.10]
+    assert round(sum(signal.score for signal in result.signals), 10) == result.confidence
+
+
+def test_score_cross_source_neither_exact_matches_previous_confidence_of_0_55() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=False, type_match_exact=False
+    )
+
+    assert result.confidence == 0.55
+    assert [signal.score for signal in result.signals] == [0.55, 0.0, 0.0]
+    assert round(sum(signal.score for signal in result.signals), 10) == result.confidence
+
+
+def test_score_signal_reasons_name_the_actual_comparison_tier() -> None:
+    exact = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=True, type_match_exact=False
+    )
+    weak = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=False, type_match_exact=False
+    )
+
+    name_signal_exact = exact.signals[1]
+    name_signal_weak = weak.signals[1]
+    assert "exactly" in name_signal_exact.reason.lower()
+    assert "canonical" in name_signal_weak.reason.lower()
+    assert name_signal_exact.reason != name_signal_weak.reason
+
+
+def test_score_as_evidence_shape_is_named_and_json_safe_and_carries_algorithm_version() -> None:
+    result = score_relationship_candidate_signals(
+        same_source=False, name_match_exact=True, type_match_exact=True
+    )
+
+    evidence = result.as_evidence()
+
+    assert evidence["confidence_algorithm_version"] == RELATIONSHIP_CONFIDENCE_ALGORITHM_VERSION
+    assert evidence["signals"] == [
+        {
+            "name": "TARGET_IS_PRIMARY_KEY",
+            "score": 0.55,
+            "maximum": 0.55,
+            "reason": (
+                "Source column matches a declared PRIMARY KEY column "
+                "in a different datasource."
+            ),
+        },
+        {
+            "name": "COLUMN_NAME_MATCH",
+            "score": 0.10,
+            "maximum": 0.10,
+            "reason": "Column names match exactly (case-insensitive).",
+        },
+        {
+            "name": "PHYSICAL_TYPE_MATCH",
+            "score": 0.10,
+            "maximum": 0.10,
+            "reason": "Physical types match exactly.",
+        },
+    ]
+    # Every value is a plain str/float -- no dataclass instances -- so this
+    # is safe to merge directly into RelationshipCandidate.evidence (JSON).
+    for signal in evidence["signals"]:
+        assert isinstance(signal["name"], str)
+        assert isinstance(signal["score"], float)
+        assert isinstance(signal["maximum"], float)
+        assert isinstance(signal["reason"], str)

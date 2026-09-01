@@ -272,7 +272,9 @@ services:
       postgres:
         condition: service_healthy
     environment: *app-environment
-    command: ["alembic", "upgrade", "head"]
+    # This repository intentionally has independent Alembic branches. `heads`
+    # upgrades each of them; `head` fails as soon as more than one branch exists.
+    command: ["alembic", "upgrade", "heads"]
     restart: "no"
 
   api:

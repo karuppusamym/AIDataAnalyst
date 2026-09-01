@@ -1,0 +1,36 @@
+# Local development overlay. Keep compose.yaml production-like; opt into this
+# file when editing the UI or Python API. The full portal remains on :3000;
+# the React rebuild is available separately on :5174 with Vite HMR.
+services:
+  api:
+    command: ["uvicorn", "aida.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./src:/app/src
+      - ./migrations:/app/migrations
+      - ./alembic.ini:/app/alembic.ini:ro
+
+  ui:
+    volumes:
+      # Nginx serves these files directly, so legacy portal changes need only
+      # a browser refresh -- no image rebuild or container restart.
+      - ./ui:/usr/share/nginx/html:ro
+
+  ui-next:
+    build:
+      context: ./ui-next
+      dockerfile: Dockerfile.dev
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0 --port 5174"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+      VITE_API_PROXY_TARGET: http://api:8000
+    ports:
+      - "5174:5174"
+    volumes:
+      - ./ui-next:/app
+      - ui-next-node-modules:/app/node_modules
+
+volumes:
+  ui-next-node-modules:
