@@ -4109,6 +4109,20 @@ class ViewLineageEdge(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_view_lineage_edge_org_target", "organization_id", "target_table_id"),
         Index("ix_view_lineage_edge_datasource", "datasource_id"),
+        # AT-D2: without this, re-parsing the same view definition doubled
+        # the graph on every call -- nothing stopped a blind insert of the
+        # same edge on top of itself. `view_lineage_api.py` pairs this with
+        # an application-level delete-then-insert scoped to the target
+        # table(s) a parse actually produced edges for.
+        UniqueConstraint(
+            "datasource_id",
+            "source_table",
+            "source_column",
+            "target_table",
+            "target_column",
+            "transformation_type",
+            name="uq_view_lineage_edge_natural_key",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -4147,6 +4161,16 @@ class ProcedureLineageEdge(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_procedure_lineage_edge_org_target", "organization_id", "target_table_id"),
         Index("ix_procedure_lineage_edge_datasource", "datasource_id"),
+        # AT-D2: see the matching constraint on ViewLineageEdge.
+        UniqueConstraint(
+            "datasource_id",
+            "source_table",
+            "source_column",
+            "target_table",
+            "target_column",
+            "transformation_type",
+            name="uq_procedure_lineage_edge_natural_key",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

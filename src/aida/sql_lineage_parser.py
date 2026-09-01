@@ -8,6 +8,26 @@ placeholders) so no source data leaks into lineage metadata.
 Supported dialects: postgres, snowflake, bigquery, tsql (SQL Server), oracle.
 Graceful degradation: if a parse fails the module returns an empty edge list
 with LOW confidence rather than raising.
+
+Two facts about a source column are orthogonal and never override one
+another: what a column's own SELECT-list expression is (a plain pass-through,
+a derived expression, or an aggregate -- `DIRECT`/`DERIVED`/`AGGREGATED`) and
+whether that column also happens to appear in the statement's WHERE clause.
+A column that is filtered on but never selected is not silently dropped
+either -- it gets its own `FILTERED` evidence edge, targeting the reserved
+`FILTER_EVIDENCE_TARGET_COLUMN` marker rather than a real output column.
+
+A `SELECT *` (or `alias.*`) projection cannot be resolved to individual
+output columns without the source table's real column list -- this module is
+deliberately catalog- and database-free (see `AT-D2`) -- so it is recorded as
+honest table-level evidence (`TABLE_STAR`) rather than silently discarded.
+
+A source table reference sqlglot could not resolve to a name (an unqualified
+column with no single table in scope, an alias sqlglot did not bind, ...) is
+never represented by a bare string that could collide with a real table
+name.  `LineageEdge.source_resolved` is the authoritative, type-level signal
+-- callers must check it, never string-compare `source_table` against
+`UNRESOLVED_TABLE`, which is a cosmetic label only.
 """
 
 from __future__ import annotations
@@ -16,7 +36,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Literal
+from typing import Final, Literal
 
 try:
     import sqlglot
@@ -32,7 +52,15 @@ class TransformationType(str, Enum):
     DIRECT = "DIRECT"
     DERIVED = "DERIVED"
     AGGREGATED = "AGGREGATED"
+    # A column referenced only in a WHERE predicate -- never in the SELECT
+    # list -- so there is no real output column to attribute it to (see
+    # `FILTER_EVIDENCE_TARGET_COLUMN`). Not used to override a SELECT-list
+    # column's own classification anymore; see the module docstring.
     FILTERED = "FILTERED"
+    # Table-level evidence for a `SELECT *` / `alias.*` projection: the view
+    # or procedure depends on every column of the named source table, but
+    # individual columns could not be resolved (see `parse_view_lineage`).
+    TABLE_STAR = "TABLE_STAR"
 
 
 class Confidence(str, Enum):
@@ -51,6 +79,25 @@ _SQLGLOT_DIALECT_MAP: dict[str, str] = {
     "oracle": "oracle",
 }
 
+# Cosmetic label for an edge whose `source_table` sqlglot could not resolve
+# to a name. Never compare `source_table` against this to detect
+# unresolved edges -- a real table could coincidentally share the name.
+# `LineageEdge.source_resolved` is the real, type-level signal.
+UNRESOLVED_TABLE: Final[str] = "UNRESOLVED"
+
+# Reserved `target_table` for a standalone SELECT (procedure-body analysis
+# with no INSERT/CREATE VIEW target) -- not customer data, so no collision
+# risk with a real table name.
+PROCEDURE_RESULT_TARGET: Final[str] = "<RESULT>"
+
+# Reserved `target_column` for a `FILTERED` (filter-only) evidence edge --
+# there is no real output column since the source column was never selected.
+FILTER_EVIDENCE_TARGET_COLUMN: Final[str] = "<FILTER_PREDICATE>"
+
+# `source_column` / `target_column` for a `TABLE_STAR` table-level edge --
+# the literal star notation, which can never collide with a real column name.
+STAR_COLUMN_MARKER: Final[str] = "*"
+
 
 @dataclass(frozen=True, slots=True)
 class LineageEdge:
@@ -63,6 +110,11 @@ class LineageEdge:
     transformation_type: str
     confidence: str
     dialect: str
+    # Real, typed signal for whether `source_table` is an actual resolved
+    # name or just carries the cosmetic `UNRESOLVED_TABLE` label. Defaults to
+    # True so every existing call site that builds an edge for a table it
+    # positively resolved does not need to change.
+    source_resolved: bool = True
 
 
 @dataclass(slots=True)
@@ -108,16 +160,19 @@ def _resolve_table_name(table_expr: object) -> str:
     return ".".join(parts) if parts else ""
 
 
-def _classify_transformation(
-    column_expr: object,
-    has_aggregation: bool,
-    has_filter: bool,
-) -> str:
-    """Classify the transformation type of a column expression."""
+def _classify_transformation(column_expr: object, has_aggregation: bool) -> str:
+    """Classify a SELECT-list column's own transformation type.
+
+    `has_aggregation` must be evaluated on this specific column's own
+    expression, never on the statement as a whole -- otherwise one aggregated
+    column in a SELECT list marks every sibling column AGGREGATED too. WHERE
+    clause presence never factors in here: whether a column is filtered on is
+    an orthogonal fact, recorded separately (see `_extract_filter_only_edges`)
+    rather than overriding what this column's SELECT-list expression actually
+    is.
+    """
     if has_aggregation:
         return TransformationType.AGGREGATED.value
-    if has_filter:
-        return TransformationType.FILTERED.value
     if not _SQLGLOT_AVAILABLE:
         return TransformationType.DERIVED.value
     if isinstance(column_expr, exp.Column):
@@ -180,11 +235,35 @@ def _has_aggregate_functions(expression: object) -> bool:
     return any(True for _ in expression.find_all(*agg_types))
 
 
-def _has_where_clause(statement: object) -> bool:
-    """Check whether a statement has a WHERE clause."""
-    if not _SQLGLOT_AVAILABLE or not isinstance(statement, exp.Expression):
-        return False
-    return statement.find(exp.Where) is not None
+def _immediate_source_tables(select_stmt: object) -> list[str]:
+    """Resolve the table(s) named in a Select's own FROM/JOIN clauses.
+
+    Deliberately scoped to this select's immediate FROM and JOIN nodes (not a
+    recursive `find_all` over the whole subtree, which would also sweep up
+    tables from nested subqueries several levels down) -- used to attribute
+    an unqualified `SELECT *` to the table(s) actually in scope for it.
+    """
+    if not _SQLGLOT_AVAILABLE or not isinstance(select_stmt, exp.Select):
+        return []
+    tables: list[str] = []
+    seen: set[str] = set()
+    nodes: list[exp.Expression] = []
+    # sqlglot's Select stores its FROM clause under the arg key "from_" (the
+    # trailing underscore avoids shadowing the `from` keyword) -- "from"
+    # is never a key here.
+    from_clause = select_stmt.args.get("from_")
+    if isinstance(from_clause, exp.Expression):
+        nodes.append(from_clause)
+    for join in select_stmt.args.get("joins") or []:
+        if isinstance(join, exp.Expression):
+            nodes.append(join)
+    for node in nodes:
+        for table in node.find_all(exp.Table):
+            fqn = _resolve_table_name(table)
+            if fqn and fqn not in seen:
+                seen.add(fqn)
+                tables.append(fqn)
+    return tables
 
 
 def _extract_target_table(statement: object) -> str:
@@ -210,20 +289,140 @@ def _extract_target_table(statement: object) -> str:
     return ""
 
 
+def _resolve_or_mark_unresolved(table_ref: str, merged_aliases: dict[str, str]) -> tuple[str, bool]:
+    """Resolve a raw table reference; report whether resolution succeeded.
+
+    Returns the raw resolved key (which may be `""`, used as the dedupe key
+    shared with `_extract_filter_only_edges`) alongside the boolean that
+    tells the caller whether it is a real name or should be displayed as
+    `UNRESOLVED_TABLE`.
+    """
+    resolved = _resolve_alias_to_table(table_ref, merged_aliases)
+    return resolved, bool(resolved)
+
+
+def _extract_star_edges(
+    star_table_alias: str | None,
+    target_table: str,
+    dialect: str,
+    merged_aliases: dict[str, str],
+    cte_aliases: dict[str, str],
+    table_aliases: dict[str, str],
+    inner_select: object,
+) -> list[LineageEdge]:
+    """Emit honest table-level evidence for a `SELECT *` / `alias.*` projection.
+
+    Individual output columns cannot be resolved without the source table's
+    real column list, which this deliberately catalog- and database-free
+    module does not have -- so this records one edge per source table the
+    star expands over (all tables in scope for an unqualified `*`, or just
+    the one the alias names for `alias.*`) rather than the previous bare
+    `continue`, which made a star view indistinguishable from a view with no
+    upstreams at all.
+    """
+    if star_table_alias:
+        candidates = [_resolve_alias_to_table(star_table_alias, merged_aliases)]
+    else:
+        candidates = _immediate_source_tables(inner_select)
+
+    resolved_tables = [
+        table
+        for table in candidates
+        if table and not (table in cte_aliases and table not in table_aliases)
+    ]
+
+    if not resolved_tables:
+        return [
+            LineageEdge(
+                source_table=UNRESOLVED_TABLE,
+                source_column=STAR_COLUMN_MARKER,
+                target_table=target_table,
+                target_column=STAR_COLUMN_MARKER,
+                transformation_type=TransformationType.TABLE_STAR.value,
+                confidence=Confidence.LOW.value,
+                dialect=dialect,
+                source_resolved=False,
+            )
+        ]
+
+    return [
+        LineageEdge(
+            source_table=table,
+            source_column=STAR_COLUMN_MARKER,
+            target_table=target_table,
+            target_column=STAR_COLUMN_MARKER,
+            transformation_type=TransformationType.TABLE_STAR.value,
+            confidence=Confidence.PARTIAL.value,
+            dialect=dialect,
+            source_resolved=True,
+        )
+        for table in resolved_tables
+    ]
+
+
+def _extract_filter_only_edges(
+    inner_select: object,
+    target_table: str,
+    dialect: str,
+    merged_aliases: dict[str, str],
+    cte_aliases: dict[str, str],
+    table_aliases: dict[str, str],
+    already_sourced: set[tuple[str, str]],
+) -> list[LineageEdge]:
+    """Emit evidence edges for columns referenced only in this select's own
+    WHERE clause -- never in its SELECT list.
+
+    Only this select's own WHERE is examined (`.args["where"]`, a direct
+    attribute, not a recursive `find`), so a WHERE in a sibling UNION branch
+    or an unrelated nested subquery can never leak filter evidence onto this
+    select's own columns -- the "assigned per-statement" bug AT-D2 names.
+    `already_sourced` (raw resolve keys, pre-`UNRESOLVED_TABLE` substitution)
+    excludes any column that already has a real SELECT-list edge -- a column
+    that is both selected and filtered on keeps its SELECT-list
+    classification and does not also get a redundant FILTERED edge.
+    """
+    if not _SQLGLOT_AVAILABLE or not isinstance(inner_select, exp.Select):
+        return []
+    where_node = inner_select.args.get("where")
+    if where_node is None:
+        return []
+
+    edges: list[LineageEdge] = []
+    seen: set[tuple[str, str]] = set()
+    for table_ref, col_name in _extract_source_columns(where_node):
+        resolved_table, source_resolved = _resolve_or_mark_unresolved(table_ref, merged_aliases)
+        if resolved_table in cte_aliases and resolved_table not in table_aliases:
+            continue
+        key = (resolved_table, col_name)
+        if key in already_sourced or key in seen:
+            continue
+        seen.add(key)
+        edges.append(
+            LineageEdge(
+                source_table=resolved_table if source_resolved else UNRESOLVED_TABLE,
+                source_column=col_name,
+                target_table=target_table,
+                target_column=FILTER_EVIDENCE_TARGET_COLUMN,
+                transformation_type=TransformationType.FILTERED.value,
+                confidence=Confidence.PARTIAL.value,
+                dialect=dialect,
+                source_resolved=source_resolved,
+            )
+        )
+    return edges
+
+
 def _extract_edges_from_select(
     select_stmt: object,
     target_table: str,
     dialect: str,
     table_aliases: dict[str, str],
-    parent_has_where: bool,
 ) -> list[LineageEdge]:
     """Extract lineage edges from a SELECT statement."""
     if not _SQLGLOT_AVAILABLE or not isinstance(select_stmt, exp.Expression):
         return []
 
     edges: list[LineageEdge] = []
-    has_agg = _has_aggregate_functions(select_stmt)
-    has_filter = parent_has_where or _has_where_clause(select_stmt)
 
     # Collect CTE aliases so CTE references resolve correctly
     cte_aliases: dict[str, str] = {}
@@ -246,13 +445,12 @@ def _extract_edges_from_select(
             if table.name:
                 merged_aliases[table.name] = fqn
 
-    # Handle UNION queries
+    # Handle UNION queries -- each branch resolves its own WHERE/aggregation
+    # independently; nothing is inherited from the union as a whole.
     if isinstance(select_stmt, exp.Union):
         for branch in [select_stmt.left, select_stmt.right]:
             edges.extend(
-                _extract_edges_from_select(
-                    branch, target_table, dialect, merged_aliases, has_filter
-                )
+                _extract_edges_from_select(branch, target_table, dialect, merged_aliases)
             )
         return edges
 
@@ -263,6 +461,10 @@ def _extract_edges_from_select(
 
     if not isinstance(inner_select, exp.Select):
         return edges
+
+    # (resolved_table, column) pairs that already have a real SELECT-list
+    # edge, so filter-only evidence below does not duplicate them.
+    select_list_refs: set[tuple[str, str]] = set()
 
     # Process each output column
     for i, select_expr in enumerate(inner_select.expressions):
@@ -277,32 +479,62 @@ def _extract_edges_from_select(
             target_col = f"_col{i}"
             source_expr = select_expr
 
-        # Star expansion - we cannot resolve individual columns
+        # Star expansion: bare `SELECT *` (source_expr is the Star itself) or
+        # a qualified `alias.*` (source_expr is a Column wrapping a Star).
         if isinstance(source_expr, exp.Star):
+            edges.extend(
+                _extract_star_edges(
+                    None, target_table, dialect, merged_aliases, cte_aliases,
+                    table_aliases, inner_select,
+                )
+            )
+            continue
+        if isinstance(source_expr, exp.Column) and isinstance(source_expr.this, exp.Star):
+            edges.extend(
+                _extract_star_edges(
+                    source_expr.table or None, target_table, dialect, merged_aliases,
+                    cte_aliases, table_aliases, inner_select,
+                )
+            )
             continue
 
         source_refs = _extract_source_columns(source_expr)
-        transformation = _classify_transformation(source_expr, has_agg, has_filter)
+        # Evaluated on this column's own expression, never the whole
+        # statement -- one aggregated sibling must not mark every column
+        # AGGREGATED (the "assigned per-statement" bug AT-D2 names).
+        has_agg = _has_aggregate_functions(source_expr)
+        transformation = _classify_transformation(source_expr, has_agg)
 
         for table_ref, col_name in source_refs:
-            resolved_table = _resolve_alias_to_table(table_ref, merged_aliases)
+            resolved_table, source_resolved = _resolve_or_mark_unresolved(
+                table_ref, merged_aliases
+            )
             # Skip CTE self-references (they will be resolved through their own edges)
             if resolved_table in cte_aliases and resolved_table not in table_aliases:
                 continue
-            if not resolved_table:
-                resolved_table = "<UNKNOWN>"
+            select_list_refs.add((resolved_table, col_name))
 
             edges.append(
                 LineageEdge(
-                    source_table=resolved_table,
+                    source_table=resolved_table if source_resolved else UNRESOLVED_TABLE,
                     source_column=col_name,
                     target_table=target_table,
                     target_column=target_col,
                     transformation_type=transformation,
-                    confidence=Confidence.FULL.value,
+                    confidence=(
+                        Confidence.FULL.value if source_resolved else Confidence.PARTIAL.value
+                    ),
                     dialect=dialect,
+                    source_resolved=source_resolved,
                 )
             )
+
+    edges.extend(
+        _extract_filter_only_edges(
+            inner_select, target_table, dialect, merged_aliases, cte_aliases,
+            table_aliases, select_list_refs,
+        )
+    )
 
     return edges
 
@@ -350,13 +582,20 @@ def _parse_sql(sql: str, dialect: str) -> ParseResult:
         except Exception as exc:
             errors.append(f"extraction error: {exc!s}")
 
-    # Determine overall confidence
+    # Determine overall confidence. Rolled up from each edge's own confidence
+    # (never hard-coded FULL, AT-D2) -- a view or procedure that resolved
+    # every reference cleanly is FULL; one that leans on any unresolved
+    # reference, filter-only evidence, or a `SELECT *` table-level fallback
+    # is honestly PARTIAL, whichever entry point produced it.
     if errors and not all_edges:
         confidence = Confidence.LOW.value
     elif errors:
         confidence = Confidence.PARTIAL.value
     elif all_edges:
-        confidence = Confidence.FULL.value
+        if all(edge.confidence == Confidence.FULL.value for edge in all_edges):
+            confidence = Confidence.FULL.value
+        else:
+            confidence = Confidence.PARTIAL.value
     else:
         confidence = Confidence.PARTIAL.value
 
@@ -378,34 +617,34 @@ def _extract_from_statement(
         return []
 
     table_aliases = _collect_table_aliases(statement)
-    has_filter = _has_where_clause(statement)
 
     # CREATE VIEW AS SELECT / CREATE TABLE AS SELECT
     if isinstance(statement, exp.Create):
         target_table = _extract_target_table(statement)
         if not target_table:
             return []
-        inner_select: exp.Select | exp.Union | None = statement.find(exp.Select)
+        # Union must be checked first: `find` is a preorder search, and a
+        # UNION's own leaf Select branches would otherwise match `find
+        # (exp.Select)` before the Union wrapping them is ever considered --
+        # silently truncating the query to just its first branch and
+        # dropping every other branch's edges (the same "per-statement"
+        # under-scoping shape as AT-D2's FILTERED/AGGREGATED defect).
+        inner_select: exp.Select | exp.Union | None = statement.find(exp.Union)
         if inner_select is None:
-            # Might be a UNION
-            inner_select = statement.find(exp.Union)
+            inner_select = statement.find(exp.Select)
         if inner_select is None:
             return []
-        return _extract_edges_from_select(
-            inner_select, target_table, dialect, table_aliases, has_filter
-        )
+        return _extract_edges_from_select(inner_select, target_table, dialect, table_aliases)
 
     # INSERT INTO ... SELECT
     if isinstance(statement, exp.Insert):
         target_table = _extract_target_table(statement)
         if not target_table:
             return []
-        inner_select = statement.find(exp.Select) or statement.find(exp.Union)
+        inner_select = statement.find(exp.Union) or statement.find(exp.Select)
         if inner_select is None:
             return []
-        return _extract_edges_from_select(
-            inner_select, target_table, dialect, table_aliases, has_filter
-        )
+        return _extract_edges_from_select(inner_select, target_table, dialect, table_aliases)
 
     # MERGE statements
     if isinstance(statement, exp.Merge):
@@ -415,17 +654,13 @@ def _extract_from_statement(
             return []
         edges: list[LineageEdge] = []
         for select in statement.find_all(exp.Select):
-            edges.extend(
-                _extract_edges_from_select(
-                    select, target_table, dialect, table_aliases, has_filter
-                )
-            )
+            edges.extend(_extract_edges_from_select(select, target_table, dialect, table_aliases))
         return edges
 
     # Standalone SELECT (for procedure analysis)
     if isinstance(statement, exp.Select | exp.Union):
         return _extract_edges_from_select(
-            statement, "<RESULT>", dialect, table_aliases, has_filter
+            statement, PROCEDURE_RESULT_TARGET, dialect, table_aliases
         )
 
     return []

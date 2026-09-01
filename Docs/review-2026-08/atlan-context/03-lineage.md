@@ -169,17 +169,29 @@ before it ever looks at the projection. So:
 CREATE VIEW v AS SELECT col_a FROM t WHERE col_a > 0
 ```
 
-produces `t.col_a → v.col_a` typed **`FILTERED`**, when it is a `DIRECT` value edge on a
-row-filtered view — and `tests/test_sql_lineage_parser.py::test_where_clause_produces_filtered_transformation`
-asserts that this is correct. Meanwhile a column that appears *only* in a `WHERE` or `JOIN`
-clause — the case `FILTERED` is for — produces no edge at all, because the walker only visits
+produced `t.col_a → v.col_a` typed **`FILTERED`**, when it is a `DIRECT` value edge on a
+row-filtered view — and a test asserted that this was correct (renamed by AT-D2's fix; see
+below). Meanwhile a column that appeared *only* in a `WHERE` or `JOIN`
+clause — the case `FILTERED` is for — produced no edge at all, because the walker only visited
 projections. `target/02` §3: *"Filter-only columns produce a distinct edge kind (`INFLUENCES`).
 A column in a `WHERE` clause affects which rows appear but does not flow into a value.
-Conflating the two is how impact analysis becomes uselessly broad."* We have conflated them in
+Conflating the two is how impact analysis becomes uselessly broad."* This was conflated in
 the opposite direction, which is worse: impact analysis that discounts `FILTERED` edges as
-non-value-carrying will drop real value edges. The same bug affects `AGGREGATED`, which is also
-computed per-statement — in `SELECT department, COUNT(id) … GROUP BY department`, the
-`department → department` edge is typed `AGGREGATED`.
+non-value-carrying would drop real value edges. The same bug affected `AGGREGATED`, which was
+also computed per-statement — in `SELECT department, COUNT(id) … GROUP BY department`, the
+`department → department` edge was typed `AGGREGATED`.
+
+**Resolved by AT-D2 (2026-09-01).** `_classify_transformation` now evaluates aggregation
+per-column-expression rather than per-statement, and WHERE-clause presence no longer overrides a
+SELECT-list column's own classification at all — the two facts are recorded independently. A
+column referenced only in a WHERE clause now gets its own `FILTERED` evidence edge (targeting the
+reserved `FILTER_EVIDENCE_TARGET_COLUMN` marker) instead of being silently dropped —
+`target/02`'s `INFLUENCES` naming was not adopted verbatim, but the shape (a distinct, real edge
+kind for filter-only evidence, not silence) is the same fix it was asking for. See
+`tests/test_sql_lineage_parser.py::test_where_clause_does_not_override_a_selected_columns_own_classification`,
+`::test_filter_only_column_produces_filtered_evidence_not_silence`,
+`::test_union_branch_where_clause_does_not_leak_into_sibling_branch`, and
+`::test_aggregation_does_not_mark_a_sibling_non_aggregated_column`.
 
 **e. `parse_procedure_lineage` is `parse_view_lineage` with a different docstring.** Both call
 `_parse_sql`. There is no per-dialect statement splitter, no temp-table or table-variable

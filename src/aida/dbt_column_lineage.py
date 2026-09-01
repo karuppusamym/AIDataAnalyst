@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from aida.dbt_artifacts import ParsedDbtResource
-from aida.sql_lineage_parser import parse_view_lineage
+from aida.sql_lineage_parser import TransformationType, parse_view_lineage
 
 # Bounds the number of column edges emitted per resource, in the same spirit
 # (and rough order of magnitude) as the per-manifest bounds in
@@ -106,9 +106,11 @@ def extract_column_lineage(
 
     Returns an empty list when the resource's compiled SQL was not
     successfully parsed (`sql_parse_status != "PARSED"`), when it has no
-    declared dependencies to resolve against, or when `sql_lineage_parser`
-    finds no edges (unsupported dialect, unparseable statement shape,
-    star-only projection, etc.) -- it never raises.
+    declared dependencies to resolve against, when `sql_lineage_parser` finds
+    no edges (unsupported dialect, unparseable statement shape, etc.), or
+    when every edge it finds is non-column-level evidence this module does
+    not model (a `SELECT *` table-level `TABLE_STAR` edge, a filter-only
+    `FILTERED` edge) -- it never raises.
     """
     if resource.sql_parse_status != "PARSED" or not resource.compiled_sql_redacted:
         return []
@@ -123,6 +125,23 @@ def extract_column_lineage(
 
     edges: list[ColumnLineageEdge] = []
     for edge in result.edges:
+        # AT-D2 taught sql_lineage_parser two new evidence kinds that do not
+        # fit this module's contract (and its `ColumnLineageEdge` shape) of
+        # specifically column-level `COLUMN_DEPENDS_ON` edges between a real
+        # source column and a real compiled output column: `TABLE_STAR`
+        # (honest table-level `*` evidence, `source_column="*"`, no real
+        # output column resolved) and `FILTERED` (filter-only evidence for a
+        # column that is never actually a selected/output column, targeting
+        # the reserved `FILTER_EVIDENCE_TARGET_COLUMN` marker). Both are real
+        # facts for standalone view/procedure lineage, but neither is a
+        # column-to-column dependency, so both are dropped here for the same
+        # reason an unresolved reference already is -- never fabricate a
+        # specific column edge from evidence that isn't actually column-level.
+        if edge.transformation_type in (
+            TransformationType.TABLE_STAR.value,
+            TransformationType.FILTERED.value,
+        ):
+            continue
         normalized_source = _normalize_identifier_path(edge.source_table)
         source_unique_id = (
             by_relation.get(normalized_source)

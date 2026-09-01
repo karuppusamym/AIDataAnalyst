@@ -5,14 +5,17 @@ Pure unit tests: no database, no network. Each test builds a
 produces) plus a small list of `DependencyResource` siblings, and exercises
 `extract_column_lineage` directly.
 
-NOTE ON FIXTURE SQL: `sql_lineage_parser` (LN-2, unmodified here) attributes
-a selected column to a source table only when the column reference is
-qualified by a table name or alias in the SQL -- an unqualified column in a
-single-table `SELECT` resolves to its own `"<UNKNOWN>"` sentinel rather than
-the sole table in the `FROM` clause. Guessing that sentinel back to "the one
-table in scope" would risk mis-attributing lineage whenever a resource's
-compiled SQL happens not to reference one of its declared dependencies at
-all, so `extract_column_lineage` deliberately never does that (same "don't
+NOTE ON FIXTURE SQL: `sql_lineage_parser` (LN-2; its table-resolution logic
+is unchanged by AT-D2) attributes a selected column to a source table only
+when the column reference is qualified by a table name or alias in the SQL
+-- an unqualified column in a single-table `SELECT` cannot be resolved to
+the sole table in the `FROM` clause, so the edge comes back with
+`source_resolved=False` (displayed as the cosmetic `UNRESOLVED_TABLE`
+label, never a magic string a real table name could collide with -- see
+AT-D2). Guessing it back to "the one table in scope" would risk
+mis-attributing lineage whenever a resource's compiled SQL happens not to
+reference one of its declared dependencies at all, so
+`extract_column_lineage` deliberately never does that (same "don't
 fabricate an edge to an unresolved reference" rule as everywhere else in
 this module). Every fixture below therefore qualifies its columns, exactly
 as dbt's own compiled SQL commonly does for joins and as this feature is
@@ -204,8 +207,11 @@ class TestStarExpansionIsSkipped:
 
         edges = extract_column_lineage(resource, [_stg_customers_dependency()], "postgres")
 
-        # Consistent with sql_lineage_parser's own documented behaviour: a
-        # star-expanded column is silently dropped rather than guessed at.
+        # sql_lineage_parser itself no longer silently drops a `SELECT *` --
+        # it records honest table-level `TABLE_STAR` evidence (AT-D2). That
+        # evidence still produces no *column-level* edge here: it is not a
+        # column-to-column dependency, so extract_column_lineage filters it
+        # out rather than fabricating one (see its module docstring).
         assert edges == []
 
     def test_mixed_star_and_explicit_columns_only_emits_the_explicit_one(self) -> None:

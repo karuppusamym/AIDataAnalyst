@@ -4865,3 +4865,174 @@ migrations, and tests, per instruction — no changes to Data Product versioning
 has its own, separate `SUPERSEDED`/`RETIRED` pair in the same `semantic_api.py` file, untouched),
 Governed Tool versioning, or Model Route configuration, even though all three share the identical
 "bulk `UPDATE ... SET status=SUPERSEDED`" shape this fix changed for Context Products specifically.
+## 2026-09-01 — AT-D2 (`sql_lineage_parser.py` six defects, reopens LN-2/N2) closed
+
+All six defects the tracker named against `sql_lineage_parser.py` fixed, each with a real test
+proving it — several existing tests encoded the defect as correct and had to be rewritten, not
+just left passing.
+
+### 1. `FILTERED`/`AGGREGATED` assigned per-statement, not per-projection
+
+`_classify_transformation` took a statement-wide `has_aggregation`/`has_filter` pair, so one
+aggregate column in a SELECT list marked every sibling column `AGGREGATED`, and any WHERE clause
+anywhere in the statement typed *every* SELECT-list column `FILTERED` regardless of whether that
+column was itself filtered on — `SELECT col_a FROM t WHERE col_a > 0` typed `col_a`'s value edge
+`FILTERED` instead of `DIRECT`, and a test named (before this fix renamed it)
+test_where_clause_produces_filtered_transformation asserted that inversion as correct. Fixed by
+evaluating `has_aggregation` on each SELECT-list item's own
+expression and dropping WHERE-clause presence from `_classify_transformation` entirely — the two
+facts are now recorded independently. Renamed that test to
+`test_where_clause_does_not_override_a_selected_columns_own_classification` and rewrote its body to
+assert the correct behaviour (`col_a` stays `DIRECT`); added
+`test_aggregation_does_not_mark_a_sibling_non_aggregated_column` to prove the grouping-key case
+(`department` in `SELECT department, COUNT(id) ... GROUP BY department` is `DIRECT`, not
+`AGGREGATED`, while `cnt` still is).
+
+A column referenced only in a WHERE clause — never in the SELECT list — previously produced no
+edge at all (the walker only visited projections). New `_extract_filter_only_edges` reads each
+select's own `.args["where"]` directly (never a recursive `find`, so a WHERE in a UNION sibling
+branch or an unrelated nested subquery can't leak in) and emits a `FILTERED` evidence edge
+targeting the new `FILTER_EVIDENCE_TARGET_COLUMN` marker for any WHERE column that doesn't already
+have a real SELECT-list edge. Proven by `test_filter_only_column_produces_filtered_evidence_not_silence`,
+`test_filter_only_evidence_is_deduplicated`, and
+`test_union_branch_where_clause_does_not_leak_into_sibling_branch`.
+
+### 2. `SELECT *` dropped with a bare `continue`
+
+A star projection (bare `SELECT *` or qualified `alias.*` — the qualified form wasn't even caught
+by the old `isinstance(source_expr, exp.Star)` check, since `alias.*` parses as a `Column` wrapping
+a `Star`, not a bare `Star`) vanished silently, making a star view indistinguishable from a view
+with zero upstreams. New `_extract_star_edges` records honest table-level evidence instead: one
+`TABLE_STAR` edge per source table the star expands over (all tables in the select's immediate
+FROM/JOIN scope for a bare `*`, just the aliased table for `alias.*`), `source_column`/
+`target_column` = `*`, `PARTIAL` confidence — individual columns genuinely cannot be resolved
+without the source table's real column list, and this module is deliberately catalog- and
+database-free, so table-level is the honest ceiling, not a workaround. Falls back to a single
+`LOW`-confidence `UNRESOLVED` edge only when no source table can be identified at all (e.g. a
+non-`FROM` context). Four new tests cover bare star, qualified star, a star over a join (one edge
+per joined table), and star mixed with an explicit column.
+
+LN-5's `dbt_column_lineage.extract_column_lineage` calls `parse_view_lineage` under the hood and
+its contract is specifically column-level `COLUMN_DEPENDS_ON` edges — a `TABLE_STAR` edge
+(`source_column="*"`) doesn't fit that shape, so it's now explicitly filtered out there (alongside
+the new `FILTERED` filter-only-evidence edges, for the same reason: neither is a real
+column-to-column fact). LN-5's own star tests continue to pass unmodified, now for the right
+reason instead of by accident.
+
+### 3. `"<UNKNOWN>"` magic string
+
+Replaced by `LineageEdge.source_resolved: bool` — a real, typed signal, not a string a customer's
+own schema could coincidentally collide with. `source_table` still carries a display value
+(`UNRESOLVED_TABLE = "UNRESOLVED"`, cosmetic only) for readability, but every consumer must check
+`source_resolved`, never string-compare `source_table`.
+`test_a_real_table_actually_named_unresolved_is_still_distinguishable` proves the point directly: a
+resolved edge for a table literally named `"UNRESOLVED"` and a genuinely unresolved edge share the
+same `source_table` string but disagree on `source_resolved`.
+
+### 4. `Confidence.FULL` hard-coded
+
+Every edge now carries confidence computed from what was actually resolved: `FULL` only when the
+source table resolved cleanly to a name; `PARTIAL` for an unresolved reference, filter-only
+evidence, or `SELECT *` table-level evidence (`LOW` only when a star can't be attributed to any
+table at all). `ParseResult.confidence` rolls up from the edges it actually contains rather than a
+blanket "any edges at all -> FULL". A view and a procedure body parsing equally certain SQL now
+agree on confidence (`test_view_and_procedure_parse_of_equally_certain_sql_agree`), and one leaning
+on unresolved/guessed evidence is honestly lower
+(`test_confidence_is_not_hard_coded_full_regardless_of_content`) — without adding an arbitrary
+"procedures always score lower" rule; the difference falls out of what each entry point's SQL
+actually let the parser resolve.
+
+### 5. No unique constraint — re-parsing doubled the graph
+
+Migration `31a73643a697` adds `uq_view_lineage_edge_natural_key` /
+`uq_procedure_lineage_edge_natural_key` on `(datasource_id, source_table, source_column,
+target_table, target_column, transformation_type)` to `view_lineage_edge` /
+`procedure_lineage_edge` — deliberately excluding `sql_hash` so a genuinely unchanged re-parse
+collides with its own prior row instead of accumulating a duplicate. Verified drift-free against a
+live local Postgres 16 via `tests/test_migration_orm_drift.py` (`compare_metadata` diff, zero
+drift).
+
+`view_lineage_api.py`'s persistence path changed from a blind per-edge `session.add` to a new
+`_persist_edges`: delete-then-insert scoped to the target table(s) the new parse actually produced
+edges for (never the whole datasource), so re-parsing view A never touches view B's rows, and a
+failed/empty parse never wipes prior good lineage. `tests/test_view_lineage_api.py` — no test file
+existed for this endpoint before this change — proves an identical re-parse leaves the edge count
+unchanged (not doubled), a re-parse that drops a column removes the now-stale edge, an unrelated
+view's edges survive a re-parse of a different view, and the database itself rejects a literal
+duplicate insert (`IntegrityError`) as defence in depth beneath the application-level dance.
+
+**Known, pre-existing limitation, not introduced here and not fixed:** the endpoint takes only raw
+SQL with no procedure-identity field, so a standalone SELECT inside a procedure body buckets under
+the parser's shared `PROCEDURE_RESULT_TARGET` sentinel target rather than a real table — two
+different procedures that both happen to produce an identical standalone-SELECT edge are
+indistinguishable under that shared bucket, and re-parsing one can replace the other's rows.
+Documented in `_persist_edges`'s docstring. A real fix needs a procedure-identity input to the
+request schema, which is outside AT-D2's scope (`sql_lineage_parser.py`, its migration, its
+tests). `test_procedure_reparse_with_a_standalone_select_does_not_double` proves the constraint
+doesn't crash a re-parse in this shared-bucket case, which is the immediate correctness bar this
+defect asked for.
+
+### 6. `source_table_id`/`target_table_id` never populated
+
+New `_resolve_table_ids` in `view_lineage_api.py` looks up the parser's raw `source_table`/
+`target_table` strings against `MetadataTable` for the datasource (case-insensitive match against
+fully-qualified `catalog.schema.table`, `schema.table`, and bare `table` forms, since the parser's
+own resolution may return any of those three depending on how the SQL qualified the reference) and
+populates both FKs wherever the underlying table exists in the catalog. An unresolved source
+(`source_resolved=False`) is never looked up by name — the raw text could coincidentally match an
+unrelated real table — and the `PROCEDURE_RESULT_TARGET`/star/filter sentinels are excluded from
+target-side lookup for the same reason.
+
+This closes a real, previously-invisible gap: `unified_lineage_api.py::_build_unified_graph`
+(LN-7) already filters `ViewLineageEdge`/`ProcedureLineageEdge` rows to `source_table_id`/
+`target_table_id` both non-NULL before folding them into the unified graph — since neither column
+was ever set, every view/procedure edge parsed through the real endpoint was invisible to unified
+traversal and impact analysis, silently, with nothing failing loudly enough to notice.
+`tests/test_view_lineage_api.py`'s `TestTableIdPopulation` tests prove both FKs populate when the tables
+exist in the catalog, `source_table_id` stays NULL for an honestly-unresolved reference even when
+the table exists, and `target_table_id` stays NULL when the view being defined hasn't been
+catalogued yet — never guessed in any of the three cases.
+
+### One adjacent bug found and fixed in passing
+
+`_extract_from_statement` searched `statement.find(exp.Select)` before falling back to
+`statement.find(exp.Union)`. `find` is a preorder search, so for `CREATE VIEW v AS <select> UNION
+<select>`, it matched one of the UNION's own leaf `Select` branches before the `Union` node
+wrapping them was ever considered — silently truncating the query to just its first branch and
+losing every other branch's edges entirely. The existing
+`test_union_produces_edges_from_both_branches` test didn't catch this (it only asserted `len(edges)
+>= 2`, which the first branch alone already satisfied) — a new test,
+`test_union_branch_where_clause_does_not_leak_into_sibling_branch`, exercises a two-branch UNION
+where only the second branch's edges prove the fix (the branch with no WHERE must produce a
+`DIRECT`, not absent, edge). Fixed by checking `exp.Union` first in both the `CREATE` and `INSERT`
+branches of `_extract_from_statement`. Two lines swapped, same file already under heavy revision
+for the six defects, essentially zero incremental blast radius — not one of the six named defects,
+called out separately here rather than folded silently into the count.
+
+### Verification
+
+`ruff check .` clean. `mypy src` clean (189 files). Full `pytest` suite (foreground, via the
+project's own `.venv`, `PYTHONPATH` pointed at this worktree's `src/` — the venv's editable install
+`.pth` resolves to the primary checkout, not a worktree, so without it every test would have
+silently exercised the *unmodified* primary-checkout copy of `sql_lineage_parser.py` instead of
+this change): exit 0 including `tests/test_migration_orm_drift.py` (real Postgres 16, migration
+applied cleanly on top of every prior revision, zero ORM drift) and `tests/test_doc_claims.py`
+(every doc citation into the renamed/added tests resolves). The migration-drift test is genuinely
+flaky under this sandbox's concurrent multi-session load — it resets its scratch database's
+`public` schema (`DROP SCHEMA ... CASCADE; CREATE SCHEMA public`) by design, and a sibling agent
+session's own run of the same test against the same shared local Postgres instance can drop tables
+out from under a run in flight (`NoSuchTableError` mid-comparison); confirmed by re-running it
+standalone multiple times back to back (2 passes, 1 external-looking failure, then a clean full-suite
+pass with it included) — not a defect in this migration, and pre-existing to this change.
+
+### Scope
+
+`src/aida/sql_lineage_parser.py`, `src/aida/view_lineage_api.py`, `src/aida/dbt_column_lineage.py`
+(LN-5's call site, a small adjustment explicitly permitted by AT-D2's own scope note),
+`src/aida/models.py` (the two new `UniqueConstraint`s), migration `31a73643a697`, and tests
+(`tests/test_sql_lineage_parser.py` rewritten/extended, `tests/test_dbt_column_lineage.py` two
+docstrings/comments updated for accuracy, new `tests/test_view_lineage_api.py`). Tracker rows
+AT-D2, LN-2, LN-5, and N2 (a stale roadmap duplicate of LN-2 that was never flipped when LN-2
+shipped) updated in `03-tracker.md`; `Docs/review-2026-08/atlan-context/03-lineage.md`'s dated
+review of defects (b) and (d) annotated with a "Resolved by AT-D2" note rather than rewritten, to
+keep the historical record honest about what was found and when.
