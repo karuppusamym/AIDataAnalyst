@@ -180,6 +180,14 @@ class Settings(BaseSettings):
     # Default once a day; bounded 5 minutes to 7 days so an operator can tighten or
     # loosen it without a code change but cannot accidentally turn it into a per-tick scan.
     owner_routing_interval_minutes: int = Field(default=1_440, ge=5, le=10_080)
+    # KG-7: scheduled Postgres/Neo4j knowledge-graph reconciliation cadence.
+    # Reconciliation is read-only against both stores and diffs the projector's
+    # own selection criteria against what Neo4j actually holds -- not a
+    # real-time check, so a sub-hourly cadence would only add per-tick,
+    # per-datasource Postgres+Neo4j reads for no earlier drift detection.
+    # Default every 6 hours; bounded 15 minutes to 7 days so an operator can
+    # tighten or loosen it without a code change.
+    graph_reconciliation_interval_minutes: int = Field(default=360, ge=15, le=10_080)
     knowledge_graph_max_nodes: int = Field(default=250, ge=25, le=2_000)
     knowledge_graph_max_edges: int = Field(default=1_000, ge=50, le=10_000)
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)

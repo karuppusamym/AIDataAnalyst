@@ -284,6 +284,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `graph.rebuild.started` / `.completed` | Rebuild | projection, duration_seconds |
 | `retrieval.index_lagging` | Index lag | index, lag_seconds |
 | `retrieval.reindex_completed` | Reindex done | index, duration_seconds |
+| `knowledge_graph.drift_detected.v1` | KG-7 scheduled reconciliation found Postgres/Neo4j drift for a datasource | datasource_id, source, severity, fingerprint, missing_nodes, orphaned_nodes, missing_edges, orphaned_edges |
+| `knowledge_graph.drift_alert_routed.v1` | Drift finding matched a `NotificationRuleRecord` and was routed through DQ-1's engine | datasource_id, notification_id, rule_id, channel, severity, dedup_key |
+| `knowledge_graph.drift_itsm_payload.v1` | Drift alert routed to an ITSM-channel rule | datasource_id, correlation_id (see `notification_routing.format_itsm_payload`) |
 
 ### Audit — topic `atlas.audit.v1`
 
