@@ -58051,6 +58051,304 @@
         "summary": "Create Line Of Business"
       }
     },
+    "/v1/organizations/{organization_id}/metric-conflicts": {
+      "get": {
+        "description": "AT-17 read side -- `stewardship_api.list_glossary_conflicts`, scoped to\n`conflict_type=\"METRIC_FORMULA_COLLISION\"` rows only.",
+        "operationId": "list_metric_formula_collisions_v1_organizations__organization_id__metric_conflicts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Metric Formula Collisions",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/metric-conflicts/detect": {
+      "post": {
+        "description": "AT-17: raise a governance conflict for two *different* published\nmetrics that compute the same thing via the same (or grain-normalized\nsame) formula -- GL-3's own detect-on-demand pattern\n(`stewardship_api.detect_glossary_conflicts`), mirrored for metric\nformulas instead of glossary-term synonyms.\n\nReuses `GlossaryConflict` as-is rather than adding a parallel\nconflict-tracking table: `term_id` is already nullable (checked in\n`aida.models` before writing this), and neither\n`stewardship_service.apply_conflict_resolution` nor\n`reject_conflict_resolution` -- the maker-checker resolution GL-3 built,\nreached identically through `semantic_api.decide_governance_review`'s\nexisting `GLOSSARY_CONFLICT` branch -- reference `term_id` at all. A\nmetric-formula collision is stored with `term_id=None`,\n`conflict_type=\"METRIC_FORMULA_COLLISION\"`, and both metrics' identity\nand formula fields in `position_a`/`position_b`, so \"losing position\nretained\" holds for metrics exactly as it does for glossary terms: a\nresolution never deletes either side's recorded position.\n\nThe comparison itself is `aida.metric_formula_signature`\n(`find_formula_collisions`), a pure DB-free function -- see its\ndocstring for precisely what \"collision\" means here and its honest\nlimit (exact/grain-normalized structural duplication of `(aggregation,\nsource_table_id, measure_column_id, default_time_column_id, grain)`,\nnot general algebraic formula equivalence, which this schema's\nsingle-aggregation metric shape cannot even pose).",
+        "operationId": "detect_metric_formula_collisions_v1_organizations__organization_id__metric_conflicts_detect_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detect Metric Formula Collisions",
+        "tags": [
+          "semantic-governance"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/metric-suggestions": {
       "get": {
         "operationId": "list_metric_suggestion_proposals_v1_organizations__organization_id__metric_suggestions_get",
