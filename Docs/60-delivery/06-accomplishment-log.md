@@ -9102,3 +9102,111 @@ Honest gap: no live Postgres in this sandbox to run the migration for real -- sa
 as CN-1c/CN-2a/DQ-4/QG-5/QG-6/MG-3 above. The offline `--sql` check confirms the migration is
 syntactically correct and produces the intended DDL, not that it applies cleanly against a real,
 populated `unowned_asset_escalation` table.
+
+---
+
+## 2026-09-01 — AT-8 closed: context-path eval suite (pull forward from N17/ST-8)
+
+### What "stored, replayable eval" means here, and the judgment call on module 18
+
+The tracker row's exit criterion is "a stored eval asserts on the resolved context path ...
+and is replayable", explicitly excluding business-value/final-answer expectations
+(INV-6/ADR-0014). Built as a new `tests/context_path_eval/` package plus
+`tests/test_at8_context_path_eval.py` -- **files, not a database table**. An eval case is a
+`ContextPathEvalCase` dataclass in `tests/context_path_eval/cases.py`: it names an input
+scenario (a question, the roles asking it, any tool preference/parameters) and an expected
+context path, never an expected answer. This satisfies "stored" the same way every other test
+fixture in this repository is stored -- committed, versioned, diffable in `git log` -- without a
+bespoke persistence layer; "replayable" is concrete and mechanical: `pytest` re-runs the case
+against a real `GovernedAgentOrchestrator.run()` and re-derives the context path from scratch
+every time, so replaying an old case against today's code is `git checkout <ref>` (or just
+`pytest`, since nothing here depends on wall-clock state) with no server, endpoint, or extra row
+anywhere. **Module 18 (Studio) judgment call, stated explicitly**: no authoring/runner UI surface
+was built. A stored eval file plus a runnable assertion already *is* a stored, replayable eval;
+Studio module ownership names where a future UI would live if stewards ever need to author cases
+without touching Python, not a requirement that one exists for this row's exit criterion to be
+met. `agent_evals.py`'s existing `AgentEvaluationRun`/`POST .../agent-evaluations` mechanism (a
+real DB-table + HTTP eval surface, already live) was deliberately **not** reused or extended: it
+asserts a fixed set of deterministic *safety-control* scenarios (SQL-guard denial, prompt-risk
+denial, tool role-binding) with no database and no real orchestrator run at all -- a different
+axis from "did this real, seeded run resolve the context path we expect." Conflating the two
+would have quietly widened `AgentEvaluationRun`'s contract for a concept it was never built for;
+they stay two separate mechanisms answering two separate questions.
+
+### What is asserted -- context path only, never a value
+
+`tests/context_path_eval/runner.py`'s `derive_context_path` reads four already-existing
+`AgentRun` facts back (never recomputes a live equivalent, the same "capture once, read back
+unchanged" idiom AT-16's `answer_provenance.compose_lineage_provenance` and AT-6's
+`agent_run_replay.resolve_grounding` both use): `plan_evidence.strategy`/
+`selected_tool_version_id`/`tool_decisions` (the governed tool or compiled-plan strategy
+selected), `retrieval_evidence`'s object types/ids (which objects were resolved -- tables,
+business annotations, governed tools), `semantic_version` (the semantic-model-or-fallback pin
+`GovernedAgentOrchestrator.run` computes at RESOLVED), and `status`/`failure_reason` plus
+`plan_evidence.prompt_risk.decision` (the policy decision). `compare_to_expected` diffs those
+against a case's stored expectation field by field and returns named drift strings on mismatch.
+Nothing here reads or asserts on `QueryExecution`, generated SQL text, or any result row.
+
+### Four real eval cases, against real seeded SQLite data, proving the mechanism works
+
+`tests/context_path_eval/scenario.py` seeds one organization/datasource/table with a business
+annotation and one governed tool (`order_lookup`, requiring a `customer_id` parameter no case
+supplies) -- same seeding shape and same "reach RESOLVED/PLANNED without a live SQL warehouse or
+model route" trick `tests/test_at6_context_receipts.py` already established. Four cases in
+`tests/context_path_eval/cases.py`, each proving a different context-path facet:
+
+1. `tool-missing-parameter-reaches-clarification` -- an Analyst who explicitly selects the
+   published tool without its required parameter: strategy `CLARIFICATION`, tool selected,
+   `BUSINESS_ANNOTATION`/`GOVERNED_TOOL`/`TABLE` resolved, `technical-metadata:` semantic
+   fallback pinned (no semantic model published in this scenario), refused with the exact named
+   reason `MISSING_TOOL_PARAMETERS:customer_id`.
+2. `prompt-injection-blocked-before-resolution` -- a deterministic instruction-override phrase:
+   strategy `BLOCKED`, **nothing** resolved (retrieval/planning/the semantic pin never run),
+   proving policy short-circuits ahead of context assembly rather than after it.
+3. `semantic-model-version-pinned-when-published` -- the same request run against a scenario
+   with a published `SemanticModelVersion` v2: pins `semantic-model:<id>:v2` instead of the
+   fallback, and the test additionally asserts the exact pinned string names the real published
+   version, not just "some semantic model."
+4. `role-ineligible-tool-falls-to-model-generation` -- a Viewer asking the identical question
+   over the identical seeded content: the tool is still resolved by retrieval and still recorded
+   REJECTED in `tool_decisions` for a role reason, but the planner selects no tool and falls to
+   `MODEL_GENERATION`, which then fails closed on `MODEL_ROUTE_NOT_CONFIGURED` (no model route
+   configured in tests) -- a different plan strategy than case 1, driven purely by the
+   requester's role.
+
+`test_default_scenario_cases_match_expected_context_path` and
+`test_published_semantic_model_case_matches_expected_context_path` run all four for real and
+hard-assert `result.matched`.
+
+### Replayability proven two ways, including "informational drift, not a hard failure"
+
+`test_replaying_the_same_case_reaches_the_same_context_path` runs case 1 twice against the same
+scenario and asserts the two independently-derived `ContextPath` structs are field-for-field
+identical (two different `AgentRun` rows, same governed answer path).
+`test_replay_reports_structural_drift_when_the_tool_is_unpublished` runs case 1, then withdraws
+the governed tool through its own `status` field (a real governance write, not a direct mutation
+of the first run), then replays the identical case: the second replay's context path legitimately
+changes (retrieval only ever surfaces `PUBLISHED` tool versions, so the tool drops out of
+`resolved_object_types` entirely; the plan falls to `MODEL_GENERATION`; the policy reason changes
+to `MODEL_ROUTE_NOT_CONFIGURED`) and the runner reports every one of those as a named drift
+(`strategy`, `selected_tool_version_id`, `resolved_object_types`, `policy_reason_code`) rather
+than crashing or silently passing -- proving the "reports a structural drift ... informational,
+not necessarily a failure" half of the exit criterion, not just the "matches" half.
+
+### Verification
+
+4 tests, all green: `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_at8_context_path_eval.py -q`. Adjacent suites unaffected:
+`tests/test_at6_context_receipts.py`/`tests/test_agent_orchestrator_retrieval_wiring.py` still
+green (nothing in `agent_orchestrator.py`/`agent_intelligence.py`/`agent_evals.py` was touched --
+this row is additive test infrastructure only). `ruff check` clean on every new file. `mypy src`
+unaffected (the new files live under `tests/`, outside `[tool.mypy] packages = ["aida"]`, so this
+row could not introduce a mypy regression even in principle; `mypy src` itself still shows the
+same pre-existing 44 `"object" not callable" Temporal-decorator errors documented in AT-13's
+entry, none in files this row touched). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. No HTTP route added (test-infrastructure only) so no OpenAPI
+baseline regen and no `ui-next` type regen; no new `event_type=` emitted via `record_outbox` so no
+`tests/test_event_catalog_gate.py` change needed. No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file touched (the hard constraint this row's owner flagged)
+and no Alembic migration -- eval cases are plain versioned Python files, which is also why no DB
+table was needed or considered further once that was clear.
