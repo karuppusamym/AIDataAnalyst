@@ -238,6 +238,25 @@ class Settings(BaseSettings):
     quality_seasonal_thresholds_enabled: bool = False
     quality_seasonal_min_samples: int = Field(default=3, ge=2, le=52)
     quality_seasonal_zscore_threshold: float = Field(default=3.0, ge=1.0, le=10.0)
+    # --- Data quality: month-end seasonality (DQ-6 follow-up) ----------------
+    #
+    # A second, independent, off-by-default seasonal grouping alongside (not
+    # replacing) `quality_seasonal_thresholds_enabled`'s day-of-week baseline above.
+    # A recurring month-end close batch lands on a different weekday every month, so
+    # the day-of-week grouping alone spreads it across several weekday buckets
+    # instead of recognizing it as a pattern. When on, `evaluate_analysis_run` also
+    # hands its already-fetched history to `data_quality.day_of_month_baseline`,
+    # which -- purely, with no DB access of its own -- groups those points by
+    # calendar days-before-month-end (so a 28-day February's last day lines up with
+    # a 31-day March's) and judges a reading that falls within the last
+    # `quality_seasonal_month_end_window_days` days of its month against that
+    # position's own mean/stdev instead. When both this and the day-of-week flag are
+    # on, a reading inside the month-end window prefers this baseline (the more
+    # specific signal for that day); everything else still falls back to the
+    # day-of-week baseline, then to the unchanged rolling-previous comparison,
+    # exactly as before this flag existed.
+    quality_seasonal_month_end_enabled: bool = False
+    quality_seasonal_month_end_window_days: int = Field(default=3, ge=1, le=10)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids

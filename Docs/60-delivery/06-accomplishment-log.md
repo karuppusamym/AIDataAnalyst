@@ -7764,3 +7764,151 @@ tests/` run was still in progress in this sandbox when this entry was written (a
 suite); the targeted subset directly exercising every file this row touched, plus doc-claims and
 lint-imports, is green, matching the standing pattern earlier same-day entries in this log already
 record for the same reason.
+
+---
+
+## 2026-09-01 — DQ-9 closed: month-end seasonal baseline, the DQ-6 follow-up its own "Honest gaps" named
+
+### The gap this closes
+
+DQ-6 shipped a day-of-week `SeasonalBaseline` for the VOLUME_CHANGE control and said so explicitly
+in its own tracker close-out: "broader seasonality (day-of-month, holiday calendars) ... is not
+attempted here -- the data would support it (unbounded, timestamped history), but it is a larger
+follow-up." A day-of-week grouping cannot see a *month-end* pattern: a recurring close-batch spike
+(e.g. a reconciliation load) lands on a different weekday every month, so it is spread across
+several weekday buckets instead of forming a pattern in any one of them.
+
+### The pure function: `data_quality.day_of_month_baseline`
+
+New in `data_quality.py`, same DB-free shape as DQ-6's `day_of_week_baseline` -- a
+`Sequence[tuple[datetime, int]]` of already-observed points plus an `observed_at` timestamp, no DB
+access of its own:
+
+```python
+def _days_before_month_end(observed_at: datetime) -> int:
+    last_day = calendar.monthrange(observed_at.year, observed_at.month)[1]
+    return last_day - observed_at.day
+
+
+def day_of_month_baseline(
+    history: Sequence[tuple[datetime, int]], observed_at: datetime, *, min_samples: int = 3
+) -> DayOfMonthBaseline | None:
+    anchor = _days_before_month_end(observed_at)
+    same_position_values = [float(v) for ts, v in history if _days_before_month_end(ts) == anchor]
+    if len(same_position_values) < min_samples:
+        return None
+    mean = statistics.fmean(same_position_values)
+    stdev = statistics.pstdev(same_position_values) if len(same_position_values) > 1 else 0.0
+    return DayOfMonthBaseline(anchor, mean, stdev, len(same_position_values))
+```
+
+Grouping by `days_before_month_end` (`0` = a month's last calendar day, `1` = the second-to-last,
+...) rather than the raw calendar day number is the point: a 28-day February's last day and a
+31-day March's last day both land at position `0`, so a genuine "last business day of the month"
+close spike lines up across months of different lengths. A raw day-31 match would silently miss
+every February and every 30-day month.
+
+### Wiring: additive alongside DQ-6, not a replacement for it
+
+`evaluate_quality` gained `month_end_seasonality_enabled`/`month_end_window_days` parameters
+(default off / `3`). When a reading falls within the last `month_end_window_days` calendar days of
+its month and has enough same-position history, the month-end baseline decides the VOLUME_CHANGE
+verdict -- it is the more specific signal for that day. Otherwise DQ-6's own day-of-week baseline is
+used when its flag is on, falling back automatically to the unchanged rolling-previous comparison
+exactly as before whenever neither strategy has enough history. `evidence["threshold_strategy"]`
+now records `"SEASONAL_MONTH_END"` alongside DQ-6's existing `"ROLLING_PREVIOUS"`/
+`"SEASONAL_DAY_OF_WEEK"`, so which comparison decided a given verdict stays fully auditable. The
+z-score-or-percent verdict math itself (previously inlined in DQ-6's day-of-week branch) was pulled
+out into a shared `_seasonal_verdict` helper so both strategies run through one tested code path
+instead of two copies of the same logic.
+
+`quality_service.evaluate_analysis_run` reads the *same* bounded 120-row `TableProfile` history
+query DQ-6's flag already issues (`_SEASONALITY_HISTORY_LOOKBACK`), now gated on either seasonal
+flag being on rather than only DQ-6's -- enabling both strategies together costs no second query.
+Wired in behind a new, off-by-default `Settings.quality_seasonal_month_end_enabled` (+
+`quality_seasonal_month_end_window_days`, default 3; `src/atlas/platform/config.py`), deliberately
+reusing DQ-6's existing `quality_seasonal_min_samples`/`quality_seasonal_zscore_threshold` rather
+than adding parallel per-strategy knobs. Kept out of `DataQualityPolicy`/`DataQualityPolicyUpsert`
+for the identical reason DQ-6 gave: that override dict is asserted 1:1 against the Pydantic contract
+in `test_data_quality.py::test_quality_contracts_validate_bounds_and_routes`, and `schemas.py` is
+off-limits for this item. Reaches the same `DataQualityObservation`/`DataQualityIncident` creation
+call site DQ-1/DQ-3/DQ-6 already consume, unchanged.
+
+### Reduced false positives, measured
+
+`tests/test_data_quality_month_end_seasonality.py` (10 tests, pure-function level, no DB): a
+synthetic table with a flat, exact ~3x month-end close spike (the month's last 2 calendar days)
+over 5 months of history (Jan-May 2026, spanning a 31-, 28-, 31-, 30-, and 31-day month). The next 3
+months' close-window entries (Jun/Jul/Aug 2026 -- a 30-, 31-, and 31-day month) are each evaluated
+both ways:
+
+- **Naive rolling-previous baseline: 3/3 (100%) flagged as `VOLUME_CHANGE`** -- every normal
+  close-window entry is a false positive (`volume_change_percent` > 100%, roughly 1000 -> 3000).
+- **Month-end baseline: 0/3 (0%) flagged** -- the exact same 3 entries, judged against each table's
+  own prior month-ends at the same `days_before_month_end` position, produce zero false positives
+  (`seasonal_change_percent == 0.0` against a flat, exact 5-sample history).
+- **True positive preserved, two ways**: a genuine collapse to 50 rows on a normally-3000 close
+  window still trips `VOLUME_CHANGE` (`seasonal_change_percent` > 90%, `CRITICAL`); a separate,
+  hand-computed small-numbers case with real historical spread (mean 100, non-zero stdev) proves the
+  z-score branch independently (`seasonal_zscore` > 3, `CRITICAL`).
+- **Additive, not exclusive**: with both `seasonality_enabled` and `month_end_seasonality_enabled`
+  on in the same call, a month-end-window reading takes `SEASONAL_MONTH_END` while an ordinary
+  mid-month reading in the same run still takes DQ-6's `SEASONAL_DAY_OF_WEEK` -- proving this row's
+  grouping sits alongside DQ-6's rather than displacing it.
+- `day_of_month_baseline` itself is proven to group strictly by month-end position across months of
+  different lengths (a 3-month-end-only mean stays flat, unaffected by a mid-month point mixed into
+  the same history array) and to return `None` -- triggering the automatic fallback -- when fewer
+  than `min_samples` same-position points exist yet, or when a reading falls outside the month-end
+  window entirely.
+
+`tests/test_quality_month_end_wiring.py` (2 tests) proves the identical effect through the real
+`evaluate_analysis_run` call, against a real in-memory sqlite database seeded through the ORM (DQ-6's
+own `test_quality_seasonality_wiring.py` pattern) with 180 real, individually-inserted, timestamped
+`TableProfile` rows:
+
+- **Flag off (default)**: entering a normal month-end close window still opens 1 `VOLUME_CHANGE`
+  incident (`counts["incidents_opened"] == 1`), `DataQualityObservation.evidence["threshold_strategy"]
+  == "ROLLING_PREVIOUS"` -- the rollout is genuinely opt-in.
+- **Flag on** (`monkeypatch.setattr(quality_service, "get_settings", ...)`, DQ-6's own
+  settings-injection pattern), same shape of real persisted history, same normal close-window entry:
+  0 incidents opened (`counts["incidents_opened"] == 0`, `counts["healthy"] == 1`), with the
+  persisted observation's evidence recording `threshold_strategy: "SEASONAL_MONTH_END"` and
+  `seasonal_sample_count >= 3` as the auditable reason no incident exists.
+
+### Tests, lint, scope
+
+`AIDA_ENVIRONMENT=development pytest tests/test_data_quality.py tests/test_data_quality_seasonality.py
+tests/test_quality_seasonality_wiring.py tests/test_data_quality_month_end_seasonality.py
+tests/test_quality_month_end_wiring.py tests/test_quality_coupling.py tests/test_quality_runtime_coupling.py
+tests/test_custom_quality_rules.py tests/test_rt7_quality_trust_ranking.py tests/test_dbt_quality_bridge.py -q`:
+all green (78 tests), including every one of DQ-6's own pre-existing exact-evidence assertions,
+unaffected by the new additive `evidence["threshold_strategy"]` value and the new `Settings` fields.
+`ruff check` and `mypy src` clean on every changed/added file (`data_quality.py`, `quality_service.py`,
+`src/atlas/platform/config.py`, `tests/test_data_quality_month_end_seasonality.py`,
+`tests/test_quality_month_end_wiring.py`).
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched (per this row's own constraint, and DQ-6's before it) -- confirmed unnecessary for the same
+reason DQ-6 established: `TableProfile`'s existing, unpruned, timestamped history already supports
+this grouping, no new persisted state needed.
+
+Found in passing, unrelated to this item: `test_openapi_diff_gate.py`'s committed-baseline check is
+currently red against this worktree's tip. Traced to concurrent, unrelated in-flight edits to
+`src/aida/connectors/bigquery.py`, `src/aida/connectors/oracle.py`, and
+`src/aida/connectors/snowflake.py` from another session sharing this trunk branch -- confirmed via
+`git diff` on those three files: internal catalog-assembly refactoring only (e.g. `bigquery.py`'s
+`_assemble_catalog` no longer filters `routines`/`schema_descriptions` to schemas already present in
+`tables`), zero touches to `schemas.py`, `platform_schemas.py`, or any route registration. Not caused
+by, and not fixed from, this item: regenerating the committed baseline right now would bake that
+other session's in-progress, unreviewed connector changes into a file this item does not own, for a
+staleness this item's own changes do not cause (nothing here touches an HTTP route or a Pydantic
+schema). Left as-is, matching this row's own no-`schemas.py` constraint.
+
+Honest gaps: holiday-calendar exclusion -- the other half of DQ-6's "Honest gaps" note -- is still
+not attempted. Unlike day-of-month, it needs an externally-configured, organization-specific list of
+holiday dates rather than being directly supported by the existing scan-history data alone; that is a
+different kind of scope (new configuration input, not a new grouping over data already there) and was
+deliberately left for a separate pass rather than folded in here. The month-end window (default: the
+last 3 calendar days of a month) is a deliberate, untuned default, not fit to any real production
+close calendar. No live-Postgres verification of the query (already shared with DQ-6, same standing
+sandbox limitation as CN-1c/CN-2a/DQ-4).

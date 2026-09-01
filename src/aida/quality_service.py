@@ -26,6 +26,9 @@ from aida.security import SecurityContext
 # its seasonal history, so the extra query stays cheap regardless of how long a table
 # has been profiled -- roughly 17 weeks of daily scans, comfortably enough same-weekday
 # points for `day_of_week_baseline`'s default `min_samples=3` well within a month.
+# The same history also feeds the DQ-6 follow-up's month-end baseline
+# (`quality_seasonal_month_end_enabled`) below -- both strategies read the one
+# already-fetched list, so enabling both together adds no second query.
 _SEASONALITY_HISTORY_LOOKBACK = 120
 
 
@@ -132,12 +135,14 @@ async def evaluate_analysis_run(
     ).all()
     baseline_by_table = {profile.table_id: profile for profile in baselines}
 
-    # DQ-6: only read the extra day-of-week history when the flag is on, so a tenant
-    # that has not opted in pays no additional query cost at all.
+    # DQ-6 (+ its month-end follow-up): only read the extra scan history when at
+    # least one seasonal strategy is on, so a tenant that has not opted into either
+    # pays no additional query cost at all.
     settings = get_settings()
     seasonality_enabled = bool(settings.quality_seasonal_thresholds_enabled)
+    month_end_seasonality_enabled = bool(settings.quality_seasonal_month_end_enabled)
     row_count_history_by_table: dict[UUID, list[tuple[datetime, int]]] = {}
-    if seasonality_enabled:
+    if seasonality_enabled or month_end_seasonality_enabled:
         history_alias = aliased(TableProfile, baseline_rank)
         history_rows = (
             await session.scalars(
@@ -202,6 +207,8 @@ async def evaluate_analysis_run(
             seasonality_enabled=seasonality_enabled,
             seasonality_min_samples=settings.quality_seasonal_min_samples,
             seasonality_zscore_threshold=settings.quality_seasonal_zscore_threshold,
+            month_end_seasonality_enabled=month_end_seasonality_enabled,
+            month_end_window_days=settings.quality_seasonal_month_end_window_days,
         )
         observation = DataQualityObservation(
             id=uuid4(),
