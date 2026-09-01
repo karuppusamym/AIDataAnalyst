@@ -4629,14 +4629,14 @@ Two corpora are committed as fixtures, matching QG-1's own `tests/fixtures/adver
 
 - `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` — 12 (question, expected
   object, acceptable-rank-bound) cases, run through the *real* live
-  `aida.agent_intelligence.GovernedRetriever.retrieve` (→ `hybrid_retrieve_enhanced`), never a mock
+  `aida.agent_intelligence.GovernedRetriever`'s `retrieve` method (→ `hybrid_retrieve_enhanced`), never a mock
   or a reimplementation. Every expected rank in the corpus was captured empirically (a real run
   against the real code), not hand-guessed — including a couple of deliberately-not-rank-1 cases
   (a lexically-strong governed-tool match legitimately outranking the table a query is "about"),
   because a corpus where every case is a trivial rank-1 hit would not be exercising the fusion
   ranking it claims to benchmark.
 - `tests/fixtures/quality_benchmark_corpus/tool_selection_corpus.json` — 5 cases run through the real
-  `aida.agent_intelligence.GovernedPlanner.plan` (the same tool-first/generation-fallback decision
+  `aida.agent_intelligence.GovernedPlanner`'s `plan` method (the same tool-first/generation-fallback decision
   the live orchestrator's PLANNED state makes): approved-tool selection, role-denial falling back to
   controlled SQL, role-denial requiring `MODEL_GENERATION` when no SQL candidate exists, and the
   equivalent pair when no tool is eligible at all. This needs no live model route — tool-first
@@ -4703,8 +4703,9 @@ never backgrounded, run repeatedly across two rebases onto this fast-moving bran
 clean except two pre-existing failures verified unrelated to this diff and left untouched per this
 item's own scope discipline — `test_au7_behavioural_authz.py::test_the_not_role_gated_route_list_stays_closed`
 (new access-review/governance-review routes an in-flight sibling session hasn't added to the
-allowlist yet) and `test_doc_claims.py`'s stale bare `abac.py` citation on the tracker's own PG-4 row
-(left behind by a same-day "Refresh OpenAPI baseline after ABAC removal" commit from another
+allowlist yet) and `test_doc_claims.py`'s stale bare-filename citation of the now-deleted abac.py
+on the tracker's own PG-4 row (left behind by a same-day "Refresh OpenAPI baseline after ABAC
+removal" commit from another
 session) — neither route gating, ABAC, nor tracker citations are files this item touches. A third,
 genuinely transient failure (`test_migration_orm_drift`'s "multiple head revisions", from a
 concurrent sibling session's in-flight migration) was observed once and resolved itself after that
