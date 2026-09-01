@@ -128,6 +128,24 @@ _NOT_ROLE_GATED_ROUTES: dict[str, str] = {
     "GET /api/v1/organizations/{organization_id}/consumption-lineage/graph": (
         "same as consumption-lineage/by-resource above (CX-4)"
     ),
+    "POST /v1/access-review/entitlements/generate": (
+        "OB-7: deliberately reachable by any authenticated principal with no role "
+        "restriction at all -- self-service in the literal sense, a principal must be "
+        "able to pull their own report without asking an admin. Pulling a report "
+        "on-behalf-of a different principal_id is manually role-checked inside the "
+        "handler against access_review_api._ON_BEHALF_OF_ROLES; see that module's "
+        "docstring"
+    ),
+    "GET /v1/access-review/reports": (
+        "same reasoning as entitlements/generate above (OB-7): self-service by default, "
+        "and listing another principal's reports is manually role-checked inside the "
+        "handler against access_review_api._ON_BEHALF_OF_ROLES"
+    ),
+    "GET /v1/access-review/reports/{report_id}": (
+        "same reasoning as entitlements/generate above (OB-7): a principal may always "
+        "read their own report, and reading another principal's is manually "
+        "role-checked inside the handler against access_review_api._ON_BEHALF_OF_ROLES"
+    ),
 }
 
 

@@ -74,30 +74,45 @@ def _iter_dependants(dependant: Any) -> Iterator[Any]:
         yield from _iter_dependants(sub)
 
 
+_ROLE_GATE_QUALNAMES = frozenset(
+    {
+        "require_roles.<locals>.dependency",
+        # PG-4: a principal holding none of `allowed` directly may still pass on an
+        # active, unexpired delegation, but a principal with neither is refused with
+        # 403 exactly like `require_roles` -- see `security.require_roles_or_delegated`'s
+        # own docstring. It is still a role gate, just one with an extra escape hatch.
+        "require_roles_or_delegated.<locals>.dependency",
+    }
+)
+
+
 def require_roles_gate(
     route: APIRoute,
 ) -> tuple[Callable[..., Awaitable[Any]], tuple[str, ...]] | None:
-    """The `require_roles(...)` dependency callable and its declared role tuple for `route`.
+    """The `require_roles(...)` (or `require_roles_or_delegated(...)`) dependency callable
+    and its declared role tuple for `route`.
 
-    `None` when the route carries no `require_roles` dependency at all (AU-7: a handful of
-    routes -- health/metrics, `/v1/me`, `/mcp`, and two administrative actions that manually
-    role-check inside the handler body so the denial path can be audited before the 403 is
-    raised, see `detokenization_api.py`'s module docstring -- are gated some other way, by
-    design, and are out of scope for a suite about `require_roles` specifically).
+    `None` when the route carries no role-gating dependency at all (AU-7: a handful of
+    routes -- health/metrics, `/v1/me`, `/mcp`, and a few administrative actions that
+    manually role-check inside the handler body so the denial path can be audited before
+    the 403 is raised, see `detokenization_api.py`'s and `access_review_api.py`'s module
+    docstrings -- are gated some other way, by design, and are out of scope for a suite
+    about `require_roles` specifically).
 
-    `require_roles` is a dependency *factory*: `require_roles("PlatformAdmin", ...)` returns a
-    closure over `allowed`, and it is that closure -- not `require_roles` itself -- that FastAPI
-    wires into `route.dependant.dependencies`. The declared role set is therefore not
-    recoverable from `route.endpoint`'s signature or from the source text the way most of this
-    module's other helpers work: it lives in the closure FastAPI already built, in
-    `__closure__`, keyed by the free-variable name in `__code__.co_freevars`. Reading it back
-    this way -- rather than re-parsing the `require_roles(...)` call with `ast` -- is what makes
-    this work for a role set built from an aliased constant (`require_roles(*COMPILER_ROLES)`),
+    `require_roles` (and `require_roles_or_delegated`) are dependency *factories*:
+    `require_roles("PlatformAdmin", ...)` returns a closure over `allowed`, and it is that
+    closure -- not the factory itself -- that FastAPI wires into
+    `route.dependant.dependencies`. The declared role set is therefore not recoverable from
+    `route.endpoint`'s signature or from the source text the way most of this module's
+    other helpers work: it lives in the closure FastAPI already built, in `__closure__`,
+    keyed by the free-variable name in `__code__.co_freevars`. Reading it back this way --
+    rather than re-parsing the `require_roles(...)` call with `ast` -- is what makes this
+    work for a role set built from an aliased constant (`require_roles(*COMPILER_ROLES)`),
     where the AST at the call site names a variable, not a role.
     """
     for dependant in _iter_dependants(route.dependant):
         call = dependant.call
-        if getattr(call, "__qualname__", "") != "require_roles.<locals>.dependency":
+        if getattr(call, "__qualname__", "") not in _ROLE_GATE_QUALNAMES:
             continue
         freevars = call.__code__.co_freevars
         cells = call.__closure__ or ()
