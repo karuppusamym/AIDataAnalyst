@@ -7120,6 +7120,8 @@ the weekly-cycle case this row's exit condition names. No live-Postgres verifica
 (the same standing sandbox limitation CN-1c/CN-2a/DQ-4 already carry). The 120-row-per-table lookback
 bound is a deliberate cost cap, not tuned against a real production history size.
 
+---
+
 ## 2026-09-01 — AT-17 closed: metric-formula collision detection, reusing GL-3's conflict queue as-is
 
 GL-3 detects two *glossary terms* colliding on a shared label. AT-17 is the sibling gap: two
@@ -7237,3 +7239,138 @@ openapi-baseline.json` regenerated (`--accept-baseline`); `ui-next/src/lib/types
 the live schema (`scripts/generate_ui_types.py` reported no diff -- no new Pydantic schema was added,
 only two paths reusing `GlossaryConflictRead`/`Page`).
 
+---
+
+## 2026-09-01 — AT-5 closed: query-history-ranked documentation worklist for stewards
+
+### The gap
+
+Stewards had `list_catalog_rows` (UX-12) for the full undocumented-table set, unranked, and RT-6's
+`usage_popularity` for an *agent's* next-query candidate ranking -- but nothing that answered "which
+undocumented table should a human document first, given how heavily it is actually being used." AT-5
+closes that gap with a steward-facing worklist ranked by real, already-persisted query volume.
+
+### Real volume sources, verified before writing any ranking code
+
+Per the row's own stop condition, both named sources were checked for real per-table granularity
+before anything else was built:
+
+- **`query_gateway.py` / `QueryExecution.referenced_tables`**: one row per executed statement
+  (governed SQL execution), carrying the SQL-qualified table names it touched and a `created_at`.
+  Names, not ids -- resolved to real `MetadataTable.id`s per datasource with
+  `aida.quality_coupling.resolve_table_ids`, the identical technique RT-6's own
+  `aida.retrieval._table_execution_counts` already uses for the identically-shaped problem (a name
+  only resolves unambiguously within one datasource's own catalog). AT-5 reuses the *technique*, not
+  RT-6's private, retrieval-scoped helper itself -- the aggregate needed here (every touched table,
+  not lookup counts for a caller-given set) is a different shape.
+- **`consumption_lineage.py` / `ConsumptionRecord`**: CX-4 rows for `resource_type="metadata_table"`
+  carry `resource_id` as the real `MetadataTable.id` already (set by `mcp_server.py`'s
+  `record_consumption` call at the point a table is read via MCP), plus `consumed_at` -- no name
+  resolution needed, just a grouped aggregate. New `consumption_lineage.get_consumption_by_resource_counts`
+  adds that one grouped `COUNT`/`MAX(consumed_at)` query, ordered and bounded, reusing the same
+  `ix_consumption_record_resource` index `get_consumption_for_resource` already relies on.
+
+Both retain real per-table identity and recency at real granularity -- the stop condition did not
+trigger.
+
+### What "documented" means here: UX-12's determination, reused verbatim
+
+`aida.catalog_read_model._description`'s precedence chain (approved GL-9 readme -> pending draft,
+named as a proposal -> approved business annotation -> connector-sourced comment) is imported and
+called directly, not re-derived. `is_documented = bool(description) and not description_is_proposed`
+-- a table with only a `PENDING_APPROVAL` draft is still "under-described" for this worklist, since
+nothing has actually been approved yet, matching UX-13's own asset-evidence pane's treatment of the
+same state.
+
+### Pure ranking, DB-free (TL-6/CN-7's "every factor inspectable" shape)
+
+`aida.documentation_worklist.rank_documentation_worklist` takes plain `TableQuerySignal` dataclasses
+and returns `(DocumentationWorklistEntry` page`, total)`. Three design choices, stated rather than
+left implicit (as the row's exit criterion required):
+
+- **Documented tables are excluded entirely**, not demoted -- mirrors GL-6's bounded-backlog shape:
+  this *is* the worklist, not a catalog view with a documentation column.
+- **Ties break deterministically** by table name then table id -- proven stable across two calls with
+  the same signals in different input order (`test_tie_break_is_stable_across_repeated_calls`).
+- **Zero-query-volume tables are excluded by default.** The whole point is "ranked by real query
+  volume" -- a table nobody has queried or read has no real signal to rank it *by*; ranking it
+  arbitrarily "last" would dress up a guess as a measurement, and the unranked full undocumented-table
+  set already exists (`list_catalog_rows`). `include_zero_volume=True` opts in; because the sort key
+  is volume descending, opted-in zero-volume rows land after every real-volume row automatically --
+  "included" and "ranked last" are the same outcome, not a special case.
+
+### Where it lives, and why not GL-6
+
+New endpoint `GET /v1/organizations/{organization_id}/stewardship/documentation-worklist`
+(`aida.stewardship_api`), not a "backlog kind" switch bolted onto GL-6's
+`unowned-backlog` endpoint: GL-6 reads a *stateful* `UnownedAssetEscalation` table with its own
+routing/escalation status machine that `route_unowned_asset_backlog` writes to; AT-5 has no such
+state -- every response is computed fresh from `QueryExecution`/`ConsumptionRecord`/documentation
+state on that request. One route sometimes reading a persisted table and sometimes computing an
+aggregate would be two response shapes wearing one signature. `DocumentationWorklistEntryRead` is a
+local `ApiModel` (same "not every response model belongs in `aida.schemas`" reasoning CN-7's
+`ConnectorHealthScoreRead` and ST-05's `policy_native_sync_api`/`sql_validation_api` already
+established), returned inside the existing generic `Page` (`items: list[Any]`) rather than a new
+schema.
+
+**Pagination**: offset/limit via `Page`, GL-6's own bounded-backlog contract -- deliberately not
+CT-2's keyset convention. Keyset pagination continues a page via a `WHERE` predicate over an indexed,
+stored ordering column; `query_volume` is a runtime aggregate recomputed and re-sorted by the pure
+ranking function on every request, so there is no stored column for a keyset cursor to continue
+against. `Page.total` still reports the full ranked-candidate count, independent of `limit`.
+
+**Candidate-set bound**: rather than scoring an org's entire active-table catalog on every request
+(which `list_catalog_rows`'s own 1M-table docstring notes is exactly the scale this platform's
+catalog surfaces are built not to assume), the candidate pool is driven by real activity: the union of
+tables touched within the bounded `QueryExecution` scan (`Settings.agent_retrieval_scan_limit`, RT-6's
+own existing budget, reused rather than a second one introduced) and the top
+`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT` (500, matching GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT`
+bound) tables by consumption count. A table in neither has no real volume signal by construction, so
+it is never fetched -- consistent with the ranking function's own zero-volume-excluded default. Only
+`include_zero_volume=True` reaches for an additional bounded (500) slice of zero-volume active tables.
+
+Authorization matches GL-6's own backlog endpoint (`require_roles(*READ_ROLES)` +
+`enforce_organization`), not `list_catalog_rows`'s additional per-datasource `gate()` call -- GL-6 is
+the closer analog (an org-wide steward backlog view), so its simpler authorization shape is the one
+reused.
+
+### Tests
+
+19 total, no `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic
+migration touched:
+
+- `tests/test_documentation_worklist.py` (12, pure logic, no database): documented-table exclusion
+  regardless of volume; a pending-only proposal still counts as under-described; ranking by combined
+  gateway+consumption volume descending; every ranking factor inspectable on the entry, not just the
+  final rank; deterministic tie-break by name then id, proven stable across differently-ordered input;
+  both zero-volume behaviors (excluded by default, included-and-ranked-last when opted in, including
+  multiple zero-volume tables still tie-breaking deterministically); limit/offset pagination and
+  `total` independent of `limit`; empty input.
+- `tests/test_documentation_worklist_api.py` (7, real endpoint body against an in-memory SQLite
+  database, `test_asset_evidence.py`'s own PostgreSQL-unreachable-in-sandbox rationale): ranks by real
+  gateway execution volume; gateway and consumption volume summed and both individually visible on the
+  entry; only `COMPLETED` executions count (a `REJECTED` execution contributes zero, per real gateway
+  semantics); a documented table excluded despite ten real executions against it; the zero-volume
+  design choice exercised end to end (excluded by default, included and last when opted in); cross-org
+  isolation (a second org's table never appears, even with its own real query history); offset/limit
+  pagination with a stable total.
+
+### Verification
+
+`uv run pytest tests/test_documentation_worklist.py tests/test_documentation_worklist_api.py
+tests/test_glossary_stewardship.py tests/test_glossary_owner_routing.py tests/test_asset_evidence.py
+tests/test_catalog_rows_read_model.py tests/test_consumption_lineage.py -q`: all green (19 new + all
+neighboring stewardship/catalog/consumption suites unaffected). `ruff check` and `uv run mypy src`
+clean (258 source files). `uv run lint-imports`: 8/8 contracts kept. `AIDA_ENVIRONMENT=development
+uv run pytest tests/test_doc_claims.py -q` clean. The new route changed `app.openapi()`:
+`tests/test_openapi_diff_gate.py` caught it, `Docs/90-reference/openapi-baseline.json` regenerated via
+`scripts/openapi_diff.py --accept-baseline` (additive-only, confirmed by `git diff --stat`);
+`ui-next/src/lib/types.ts` regenerated via `scripts/generate_ui_types.py --accept-baseline` with *zero*
+diff -- the endpoint's `response_model=Page` reuses the existing generic schema (`items: list[Any]`),
+so no new named component entered `components.schemas`.
+
+Honest gaps: no live-Postgres verification of the new grouped-aggregate or per-datasource scan queries
+(the same standing sandbox limitation several earlier rows this session already carry). The 500-row
+`DOCUMENTATION_WORKLIST_CANDIDATE_LIMIT` and the reused `agent_retrieval_scan_limit` scan bound are
+deliberate cost caps mirroring existing precedent (GL-6, RT-6), not independently tuned against a real
+production query-history size.
