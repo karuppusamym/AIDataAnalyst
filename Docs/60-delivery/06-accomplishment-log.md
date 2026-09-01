@@ -8688,3 +8688,92 @@ payload carries seed + drawn ids, unsampled items provably untouched). `ruff che
 `test_doc_claims.py` and `test_openapi_diff_gate.py` clean (`Docs/90-reference/openapi-baseline.json`
 and `ui-next/src/lib/types.ts` regenerated for the two new additive routes). No `models.py`/
 `schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+---
+
+## 2026-09-01 — AT-20 closed: lineage evidence export as a signed artifact
+
+"For a bank the artifact is the deliverable — it goes in a BCBS 239 pack. Collibra exports a
+plain diagram; ours is worth more only if we can hand it over." This row composes almost entirely
+from what landed on this branch earlier today: AT-16's pinned-graph-version idiom, AT-19's
+per-edge derivation evidence, and EA.14's unified lineage traversal — reused verbatim, not
+reinvented.
+
+### What shipped
+
+New `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export`
+(`aida/lineage_evidence_export_api.py`), composed by `aida/lineage_evidence_export.py`'s
+`compose_lineage_export_artifact`: point-in-time lineage for one chosen asset (`node_id`) and
+traversal `depth` — diagram-shape node set plus edge set — as one downloadable JSON artifact.
+
+- **Node/edge set**: `unified_lineage_api.build_unified_lineage_graph_payload` (EA.14) for the
+  full per-datasource graph, filtered to the node id set `build_unified_lineage_impact_payload`'s
+  own bounded upstream/downstream traversal reports for the chosen focus node and depth — the
+  same traversal the live `.../impact/{node_id}` route runs for the same asset/depth, not a
+  second depth-bounding algorithm invented for export.
+- **Derivation method per edge**: `UnifiedLineageEdgeRead.edge_source` passed through verbatim
+  (`FOREIGN_KEY`, `SUGGESTED_RELATIONSHIP`, `DBT_DEPENDENCY`, `OPENLINEAGE_ETL`,
+  `VIEW_DEFINITION`, `PROCEDURE_DEFINITION`).
+- **Per-edge transformation reference**: AT-19's `evidence.transformation_reference`/
+  `evidence.redaction_status` on `VIEW_DEFINITION` edges, carried through `evidence` verbatim.
+- **Asserting principal for human edges**: `RelationshipCandidate.reviewed_by` (`models.py`,
+  read-only) — the steward who approved a `SUGGESTED_RELATIONSHIP` candidate through
+  `intelligence_api.decide_relationship_candidate`'s explicit maker-checker endpoint (never
+  automatic; "maker cannot review their own candidate" is enforced there, so `reviewed_by` is
+  never the same principal as `created_by`). This is the only edge kind in the unified graph that
+  is a human assertion rather than a mechanical read of a database constraint, a dbt manifest, an
+  OpenLineage run event, or parsed SQL — every other edge kind's `asserting_principal` is `None`,
+  never fabricated. `build_unified_lineage_graph_payload`'s default `suggestion_status="APPROVED"`
+  means every `SUGGESTED_RELATIONSHIP` edge this export can include already has a non-null
+  `reviewed_by`, but the field is still looked up per edge from `RelationshipCandidate` rather
+  than assumed.
+- **Pinned graph version**: AT-16's exact pin shape and construction algorithm, reused rather
+  than reinvented — `answer_provenance._canonical_json` (sorted-key, whitespace-free JSON, AT-6's
+  own canonicalization) imported and called verbatim, over `{"nodes": ..., "edges": ...}` exactly
+  as AT-16 fingerprints `{"cited_tables": ..., "relationships": ...}`. `graph_version` carries
+  `pinned_at`, `datasource_id`, the exact `traversal` params, and the SHA-256
+  `graph_content_fingerprint`.
+- **Delivery**: `context_compiler_api`'s (EE.9) and UX-7's `Content-Disposition`/
+  `X-Artifact-SHA256` attachment idiom, reused a third time on this branch today rather than a
+  new pattern.
+
+### What "signed" honestly means here
+
+No cryptographic signing or key-management infrastructure exists anywhere on this platform, and
+this row's hard constraints forbid adding one. What ships is **hash-verified integrity**: a
+SHA-256 over the exact bytes returned (`X-Artifact-SHA256`), recomputable by any recipient, plus
+the pinned `graph_content_fingerprint` independently reproducible from the artifact's own
+`nodes`/`edges`. That proves the artifact was not altered between composition and receipt — it is
+tamper-evidence, not non-repudiation, and this module's own docstring says so explicitly rather
+than calling a hash a "signature" it isn't. It is still a real step up from Collibra's "plain
+diagram": a verifiable, resolvable evidence chain — pinned graph state, per-edge derivation
+method, the named human steward accountable for every non-mechanical edge — not a picture.
+
+### Authorization
+
+The export route imports `UNIFIED_LINEAGE_READER_ROLES` and `_load_datasource` directly from
+`unified_lineage_api.py` — the literal same objects the live graph/impact routes depend on, not a
+copy — so it can never silently diverge into a separate or weaker export-only gate. Proved by an
+identity assertion in tests, plus a cross-org-denial parity test and an unknown-node 404 parity
+test against the live `.../impact/{node_id}` route.
+
+### Verification
+
+Six new tests in `tests/test_lineage_evidence_export.py`: content fidelity against the live
+`get_unified_lineage_graph`/`get_unified_lineage_impact` routes (including AT-19 evidence
+passthrough on a `VIEW_DEFINITION` edge), the asserting-principal population (maker != checker on
+the `SUGGESTED_RELATIONSHIP` edge, `None` on `FOREIGN_KEY`/`VIEW_DEFINITION`), permission parity
+(same gate objects; identical cross-org 403 and unknown-node 404), and hash verification at both
+the artifact-bytes layer and the pinned content-fingerprint layer — including determinism: two
+independent exports of an unchanged graph produce byte-identical content apart from `pinned_at`.
+`tests/test_unified_lineage.py`, `tests/test_answer_provenance.py`, and `tests/test_asset_evidence.py`
+re-run clean (no regression in the modules this reuses from). `ruff check`/`mypy src` clean on
+every touched file; `lint-imports` clean; `test_doc_claims.py` green.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration
+touched — the artifact is a plain `dict[str, Any]`, following AT-16's own precedent for a new
+response shape that doesn't need a typed schema. `Docs/90-reference/openapi-baseline.json`
+regenerated (purely additive route) and `test_openapi_diff_gate.py` green; `ui-next` carries no
+generated types keyed off this baseline (checked — no `openapi-typescript`/similar consumer of
+`openapi-baseline.json` exists in `ui-next`), and this row shipped no UI component, so no
+`ui-next` change was needed.
