@@ -630,6 +630,11 @@ def test_cited_aida_dotted_module_resolves(citation: Citation):
         # without requiring the attribute itself to be re-verified by AST (the module
         # existing is enough signal that this is a real, if slightly-loosely-cited, path).
         candidate_part_lists.append(parts[:-1])
+    if len(parts) > 2:
+        # Or a *method on a class* within a module (e.g.
+        # `aida.agent_intelligence.GovernedRetriever.retrieve`) — drop both the method and
+        # the class segment and check the module itself, same reasoning as above.
+        candidate_part_lists.append(parts[:-2])
     for candidate_parts in candidate_part_lists:
         module_file = SRC_ROOT.joinpath(*candidate_parts).with_suffix(".py")
         package_init = SRC_ROOT.joinpath(*candidate_parts, "__init__.py")

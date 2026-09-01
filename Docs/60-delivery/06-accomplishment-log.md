@@ -4629,14 +4629,14 @@ Two corpora are committed as fixtures, matching QG-1's own `tests/fixtures/adver
 
 - `tests/fixtures/quality_benchmark_corpus/retrieval_quality_corpus.json` — 12 (question, expected
   object, acceptable-rank-bound) cases, run through the *real* live
-  `aida.agent_intelligence.GovernedRetriever`'s `retrieve` method (→ `hybrid_retrieve_enhanced`), never a mock
+  `aida.agent_intelligence.GovernedRetriever.retrieve` (→ `hybrid_retrieve_enhanced`), never a mock
   or a reimplementation. Every expected rank in the corpus was captured empirically (a real run
   against the real code), not hand-guessed — including a couple of deliberately-not-rank-1 cases
   (a lexically-strong governed-tool match legitimately outranking the table a query is "about"),
   because a corpus where every case is a trivial rank-1 hit would not be exercising the fusion
   ranking it claims to benchmark.
 - `tests/fixtures/quality_benchmark_corpus/tool_selection_corpus.json` — 5 cases run through the real
-  `aida.agent_intelligence.GovernedPlanner`'s `plan` method (the same tool-first/generation-fallback decision
+  `aida.agent_intelligence.GovernedPlanner.plan` (the same tool-first/generation-fallback decision
   the live orchestrator's PLANNED state makes): approved-tool selection, role-denial falling back to
   controlled SQL, role-denial requiring `MODEL_GENERATION` when no SQL candidate exists, and the
   equivalent pair when no tool is eligible at all. This needs no live model route — tool-first
