@@ -7972,3 +7972,94 @@ touched — nothing here needed one; this was a frontend-only gate on an already
 presentational component. AT-11 itself (the `classification_derived` column, propagation along
 `DECLARED`/`VIEW_DDL`/`EXECUTED_QUERY`/`OPENLINEAGE` edges, review-queue-gated promotion) remains
 entirely unbuilt, as scoped — this entry closes the honesty gap, not the feature.
+
+## 2026-09-01 — N16 closed: negative knowledge surfaced as a context-product section
+
+### What EE.3 already provided
+
+EE.3 (module 06/07, shipped as AI-4) built the queryable "what we decided is not true" surface
+this row asks to reuse: `NegativeAssertionRecord` (`negative_assertion` table, indexed on
+`(organization_id, subject_id)`, `(organization_id, assertion_type)` and
+`(organization_id, suppression_active)`) plus `aida.negative_knowledge`'s `record_negative`,
+`query_negatives`, `search_negatives`, `check_re_proposal` and `auto_lift_on_material_change` —
+rejected relationships/inferences/term conflicts/classifications, keyed by a `subject_id` string,
+with active-suppression re-proposal blocking and a "previously rejected" auto-lift when the
+predicate hash changes materially. This was genuinely queryable, reusable data — no new persisted
+state was needed, and none was added.
+
+### What N16 adds
+
+`aida.negative_knowledge` gained `query_negatives_for_scope(session, organization_id, asset_ids,
+suppression_active_only=True)`: an asset-scoped read over the existing table (no schema change),
+matching a `subject_id` against a set of asset ids either as the bare id or as one of its
+colon-delimited segments (`"table:<id>"`, `"col:<id>:<column>"`, …) — convention-agnostic since no
+production caller populates `subject_id` yet, so this matches whichever shape callers settle on.
+
+`aida.context_compiler.compile_context_product` gained a fifth, optional `negative_knowledge:
+list[ResolvedNegativeAssertion] | None` argument. `ResolvedNegativeAssertion` is a frozen dataclass
+(pre-scoped, pre-serialized — `rejected_at` arrives as an ISO-8601 string, not a `datetime`) so the
+function stays exactly what it already was: a pure transform of its arguments with no DB access and
+no clock read, the same discipline `tables` already followed. The new `negative_knowledge` object
+(`{"count": N, "assertions": [...]}`, list sorted by `(subject_id, assertion_type, rejected_at)` for
+a stable order) is folded into `common` only for the Atlas-native envelope, producing a separate
+`atlas_common` used by MCP/REST/YAML; the plain `common` (unchanged) still goes to OSI, so the
+section cannot leak into any vendor-schema payload through a shared dict.
+
+`aida.context_compiler_api._load_source` (the single place all three compile/download/drift
+endpoints resolve their inputs) now also calls a new `_load_negative_knowledge` helper, which runs
+`query_negatives_for_scope` against `version.organization_id` and `version.table_ids` — the context
+product version's own declared table scope, the same scope its table resolution already uses — and
+maps the DB rows to `ResolvedNegativeAssertion`s before handing them to `compile_context_product`.
+
+### Target selection, and why
+
+MCP, REST and YAML carry the section — the three targets whose payload is Atlas's own
+`context`/`spec` envelope, not a vendor-defined schema. OSI, ODCS, `SNOWFLAKE_SEMANTIC_VIEW` and
+`DATABRICKS_METRIC_VIEW` do not: none of those specs has a field for "what we decided is not true",
+and `validate_compiled_artifact`'s structural checks for those targets assert a fixed required-field
+set for a reason — silently smuggling Atlas-only content into an artifact meant to deploy into a
+vendor's own semantic-layer product would be surprising there, not additive.
+
+### Determinism and scope, proved
+
+`compile_context_product(..., negative_knowledge=[...])` called twice with independently-built
+(not object-identical) `ResolvedNegativeAssertion` lists carrying the same values produces
+byte-identical `content` and `artifact_hash`; called with no `negative_knowledge` argument at all
+produces the same hash as calling it with an explicit empty list, so every pre-existing caller's
+artifact is unaffected in shape (only in the literal bytes, since the key is now always present —
+no test in the repo asserted a specific historical hash, only self-consistency, so this is not a
+breaking change to any contract). `query_negatives_for_scope` and `_load_negative_knowledge` are
+each proven, against a real (in-memory SQLite) database, to return a rejection whose `subject_id`
+references an in-scope table and to omit one whose `subject_id` references a table outside the
+version's `table_ids` — never the organization's full negative-knowledge surface.
+
+### Tests (`tests/test_context_product_negative_knowledge.py`, 8 new tests)
+
+- `test_negative_knowledge_section_is_deterministic` / `test_negative_knowledge_absence_is_also_
+  deterministic` — same rejected-inference state (and the no-knowledge case) compiled twice →
+  identical content and `artifact_hash`.
+- `test_query_negatives_for_scope_excludes_out_of_scope_subject` /
+  `test_query_negatives_for_scope_excludes_lifted_suppression_by_default` — DB-backed scope and
+  suppression-filter proof at the `negative_knowledge.py` layer.
+- `test_load_negative_knowledge_feeds_scoped_rejections_into_compilation` — end-to-end glue proof:
+  an out-of-scope rejection's `subject_id` never appears in the compiled artifact.
+- `test_negative_knowledge_present_only_on_atlas_native_targets` — the section parses out of
+  MCP/REST/YAML and is byte-absent from OSI/ODCS/`SNOWFLAKE_SEMANTIC_VIEW`/
+  `DATABRICKS_METRIC_VIEW`.
+
+### Verification
+
+`ruff check src tests/test_context_product_negative_knowledge.py`: clean. `AIDA_ENVIRONMENT=
+development uv run mypy src`: clean on every file this row touched (`context_compiler.py`,
+`context_compiler_api.py`, `negative_knowledge.py`); the 44 pre-existing `"object" not callable"`
+errors elsewhere (`workflows/activities.py`, `workflows/scheduler.py`, `main.py`, …) are unrelated
+and unchanged by this work. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_context_product_negative_knowledge.py tests/test_negative_knowledge.py
+tests/test_agentic_platform.py tests/test_context_products.py tests/test_doc_claims.py
+tests/test_openapi_diff_gate.py -q`: all pass, nothing broken. No HTTP route was added or its
+signature changed (only the internal `_load_source`/`_load_negative_knowledge` composition and the
+compiled artifact's own content changed), so the OpenAPI schema is unaffected — confirmed by
+`test_openapi_diff_gate.py` passing with no baseline regeneration needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched — `NegativeAssertionRecord` already carried everything this needed.
