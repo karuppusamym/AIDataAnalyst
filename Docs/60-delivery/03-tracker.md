@@ -394,19 +394,21 @@ These do not block product development. They **do** block production release.
 
 ## K. Summary
 
-| Category | P0 | P1 | P2 | Total |
-|---|:--:|:--:|:--:|:--:|
-| Structural foundation | 7 | 3 | 0 | 10 |
-| Connectors and ingestion | 9 | 7 | 0 | 16 |
-| Catalog / profiling / relationships | 2 | 13 | 2 | 17 |
-| Semantics / glossary / lineage / graph | 8 | 19 | 4 | 31 |
-| Quality / retrieval / runtime | 11 | 10 | 3 | 24 |
-| Tools / gateways / governance | 10 | 12 | 2 | 24 |
-| Identity / studio / context / UX / observability | 12 | 16 | 4 | 32 |
-| Testing / performance / certification | 12 | 5 | 1 | 18 |
-| **Total** | **71** | **84** | **16** | **171** |
+**Recounted 2026-09-01** — the table below was stale (last accurate at 171 total rows; the tracker has grown to 220 as rows were added by later sessions, e.g. `ST-11`..`ST-18`, `IN-5a`..`IN-5f`, `AT-D*`, and the counts were never re-derived). Recount method: every row in sections A-H carrying an explicit `P0`/`P1`/`P2` cell, counted programmatically against the file as of this commit — not hand-tallied. "Open" excludes any row whose Status column contains `DONE`.
 
-**The honest read.** 70 P0 items, none assigned, and eight overdue drills. The architecture is well ahead of the operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md` §7. Phase D is not a formality; it is where the product's claims become defensible.
+| Category | P0 | P1 | P2 | Total | Open P0 | Open P1 | Open P2 | DONE |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| Structural foundation | 11 | 7 | 0 | 18 | 2 | 5 | 0 | 11 |
+| Connectors and ingestion | 10 | 12 | 3 | 25 | 6 | 10 | 1 | 8 |
+| Catalog / profiling / relationships | 1 | 15 | 2 | 18 | 1 | 1 | 0 | 16 |
+| Semantics / glossary / lineage / graph | 9 | 18 | 4 | 31 | 2 | 2 | 1 | 26 |
+| Quality / retrieval / runtime | 14 | 9 | 3 | 26 | 2 | 1 | 1 | 22 |
+| Tools / gateways / governance | 14 | 13 | 2 | 29 | 7 | 5 | 0 | 17 |
+| Identity / studio / context / UX / observability | 17 | 21 | 3 | 41 | 4 | 10 | 2 | 25 |
+| Testing / performance / certification | 19 | 9 | 4 | 32 | 8 | 5 | 4 | 15 |
+| **Total** | **95** | **104** | **21** | **220** | **32** | **39** | **9** | **140** |
+
+**The honest read.** 140 of 220 tracked items (64%) are `DONE` with verifiable exit evidence — most of that closed by iterative sessions on `feature/snowflake-dbt-lineage-mcp`, not upfront. What's left skews toward what a sandboxed session structurally cannot close alone: 32 open P0 items are concentrated in live-infrastructure certification (bank OIDC/secret-manager/Oracle-BigQuery-Snowflake-Databricks connectors against real accounts), timed drills (`I. Drill currency` — six still marked **OVERDUE**: projection rebuild, PITR restore, temporal failover, credential rotation, regional failover, break-glass; kill-switch and batch-forced-restart are drilled but only for local/in-process, not a deployed gateway or production Postgres), and 1M-object/1000-source scale benchmarks (Phase D). The architecture is well ahead of the operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md` §7. Phase D is not a formality; it is where the product's claims become defensible.
 
 ## L. Atlan competitive review (2026-08-30)
 
