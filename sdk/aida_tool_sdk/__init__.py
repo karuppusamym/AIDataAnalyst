@@ -53,28 +53,27 @@ existing multi-package-in-one-wheel shape (``src/aida``, ``src/atlas``)
 rather than inventing packaging conventions this task does not need to
 settle.
 
-A known caveat, not introduced by this SDK: ``aida.sql_guard`` (the
-SQL-safety guard) really is dependency-light on its own -- pure ``sqlglot``,
-nothing else. But ``aida.tool_rendering`` and ``aida.schemas`` -- reused here
-for placeholder/rendering logic and for the exact wire-shape models -- import
+Known caveat, resolved 2026-09-01: ``aida.sql_guard`` (the SQL-safety guard)
+always was dependency-light on its own -- pure ``sqlglot``, nothing else.
+``aida.tool_rendering`` and ``aida.schemas`` -- reused here for placeholder/
+rendering logic and for the exact wire-shape models -- still import
 ``aida.models`` -> ``aida.db`` -> ``atlas.platform.db`` for historical
-reasons, which builds a SQLAlchemy async engine (though it does not connect
-to it) and validates an ``AIDA_ENVIRONMENT``-driven ``Settings`` object at
-*import* time. Concretely: importing this SDK outside of a `pytest` process
-currently requires ``AIDA_ENVIRONMENT`` to be set (any of `development`,
-`test`, `staging`, `production` -- matching how the platform itself is
-configured) and the platform's full dependency set installed, even though
-nothing here opens a database connection, calls the network, or reads that
-settings object. That is real coupling worth unwinding in `aida.schemas`/
-`aida.tool_rendering` someday so a public SDK can depend on the parameter
-and rendering logic without the ORM stack behind it -- out of scope for this
-change (`aida/models.py`/`schemas.py` are explicitly read-only for TL-5, and
-untangling that import chain is a bigger refactor of its own). Until then,
-"dependency-light" here means: this package declares no dependencies of its
-own beyond what reusing the real platform code already requires, and its
-purely-local checks never touch the network, a database, or any credential
--- not that importing it is as cheap as a from-scratch reimplementation
-would be. ``httpx`` is the only optional piece: imported lazily, only if
+reasons, but that chain no longer forces an ``AIDA_ENVIRONMENT``-validated
+``Settings`` object or the platform's database driver dependencies (e.g.
+``asyncpg``) to be importable merely to *import* this SDK: `atlas.platform.
+db`'s engine, session-factory, and settings singletons are now built lazily,
+on first real use (``get_engine``/``get_session_factory``, plus a module
+``__getattr__`` for backward-compatible ``engine``/``session_factory``/
+``settings`` attribute access), rather than constructed as a side effect of
+module import. Nothing in this SDK's own code path ever touches any of
+those, so importing it -- with or without `pytest` running, with or without
+`AIDA_ENVIRONMENT` set -- no longer requires the ORM/DB stack, only the
+dependencies its actual checks use (``pydantic``, ``sqlglot``, and
+``httpx`` if submitting). "Dependency-light" here means exactly that: this
+package declares no dependencies of its own beyond what reusing the real
+platform code already requires, and its purely-local checks never touch the
+network, a database, or any credential. ``httpx`` is the only optional
+piece: imported lazily, only if
 :class:`~aida_tool_sdk.client.ToolDraftClient` is actually used to submit.
 """
 

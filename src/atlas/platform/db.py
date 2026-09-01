@@ -11,16 +11,29 @@ them, including modules that have not been extracted yet, so they belong in
 `platform/` rather than in any one module. `aida.models` re-exports both for
 backward compatibility -- every existing `from aida.models import
 TimestampMixin` caller keeps working unchanged.
+
+The engine/session-factory/settings singletons below are built lazily, on
+first real use, rather than at import time: a pure-local consumer that only
+needs `Base`/`TimestampMixin` (or, transitively, a pydantic model / rendering
+helper defined in `aida.models`/`aida.schemas`/`aida.tool_rendering`) must be
+able to import this module without an `AIDA_ENVIRONMENT`-validated `Settings`
+object or the `asyncpg` driver being importable -- see `sdk/aida_tool_sdk`'s
+module docstring for the concrete case this unblocks.
 """
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, MetaData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from atlas.platform.config import get_settings
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -48,21 +61,42 @@ class TimestampMixin:
     )
 
 
-settings = get_settings()
-engine = create_async_engine(
-    settings.database_url,
-    pool_pre_ping=True,
-    pool_size=settings.database_pool_size,
-    max_overflow=settings.database_max_overflow,
-    # INV-6 / ADR-0014: without this, SQLAlchemy appends `[SQL: ...]
-    # [parameters: (...)]` -- real bound values -- to any exception raised
-    # during statement execution, and driver errors routinely quote row
-    # data on top of that. Never disable this.
-    hide_parameters=True,
-)
-session_factory = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+@lru_cache
+def get_engine() -> "AsyncEngine":
+    settings = get_settings()
+    return create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+        pool_size=settings.database_pool_size,
+        max_overflow=settings.database_max_overflow,
+        # INV-6 / ADR-0014: without this, SQLAlchemy appends `[SQL: ...]
+        # [parameters: (...)]` -- real bound values -- to any exception raised
+        # during statement execution, and driver errors routinely quote row
+        # data on top of that. Never disable this.
+        hide_parameters=True,
+    )
+
+
+@lru_cache
+def get_session_factory() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(get_engine(), expire_on_commit=False, class_=AsyncSession)
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    async with session_factory() as session:
+    async with get_session_factory()() as session:
         yield session
+
+
+def __getattr__(name: str) -> object:
+    # Backward-compatible attribute access for callers that still do
+    # `from atlas.platform.db import engine` / `session_factory` / `settings`
+    # as plain module attributes. Resolved lazily on first access instead of
+    # restored as eager module-level assignments, so importing this module
+    # stays free of any DB/settings side effect.
+    if name == "engine":
+        return get_engine()
+    if name == "session_factory":
+        return get_session_factory()
+    if name == "settings":
+        return get_settings()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
