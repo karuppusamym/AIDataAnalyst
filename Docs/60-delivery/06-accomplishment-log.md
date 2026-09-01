@@ -8526,3 +8526,117 @@ test && npm run build`: all green — `npm run test` is 19/19 (15 pre-existing +
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched. No new Python or npm dependency added.
+
+---
+
+## 2026-09-01 — AT-16 closed: provenance block in the answer contract, columns + edge_source + a pinned graph version
+
+### Extending a real (but nearly empty) answer contract, not building from nothing
+
+`AgentRun.plan_evidence` (JSON, `dict[str, Any]` — no schema/migration change needed) is the answer
+contract's own evidence field, already populated with `trust` (EE.5's `trust_scoring.compute_trust_score`)
+and `model_call_evidence`/`query_memory_match` sections. But no `lineage` section existed, and the
+row's complaint was confirmed literally: `agent_orchestrator._checkpoint_explained` resolves the
+answer's cited tables (`quality_coupling.resolve_table_ids` against `QueryExecution.referenced_tables`)
+for exactly one purpose — gating on open CRITICAL quality incidents — and returns early with no lineage
+information at all when there is no open incident, which is the common case. So the pre-existing
+"lineage" surfaced in an answer, in practice, was nothing: bare table names, present only on the
+minority of runs that happened to touch an incident. This is an extension of a real but effectively
+empty contract, not greenfield from nothing — stated honestly per the row's own instruction.
+
+### The fix: `answer_provenance.py`, composed from EA.14/AT-19's existing unified-lineage data
+
+New module `aida.answer_provenance.compose_lineage_provenance`, called once by a new
+`GovernedAgentOrchestrator._compose_lineage_provenance` step in the `EXPLAINED` region of `run()` —
+deliberately *not* folded into `_checkpoint_explained` itself, since that method's early return is
+about the quality-incident gate, not about whether lineage should be composed; the new step resolves
+`answer_table_ids` independently so the lineage block is attached to every answer that cites a
+resolvable table, incident or not. It composes directly from
+`unified_lineage_api.build_unified_lineage_graph_payload` (EA.14's own graph builder, the same one the
+REST route, the domain-federated view, and the native MCP `get_lineage_graph` tool already call) —
+lineage is not re-derived, only filtered and reshaped:
+
+- `cited_tables`: every table the answer's executed SQL referenced, resolved to this datasource's
+  catalog, with the unified graph's qualified name.
+- `queried_columns`: the answer's own parsed columns (`QueryExecution.referenced_columns`, the same
+  `sql_guard.py` evidence already persisted per run), deduplicated and sorted — stated honestly as
+  SQL-parsed and not resolved per-table, since the parser does not always qualify a reference.
+- `relationships`: one entry per unified-lineage edge directly between two cited tables, carrying
+  `edge_source` (the derivation method — `FOREIGN_KEY`/`SUGGESTED_RELATIONSHIP`/`DBT_DEPENDENCY`/
+  `OPENLINEAGE_ETL`/`VIEW_DEFINITION`/`PROCEDURE_DEFINITION`, `unified_lineage.UnifiedLink`'s existing
+  taxonomy reused verbatim, no parallel taxonomy invented), `status`, `confidence`, the specific
+  `source_columns`/`target_columns` involved, and `evidence` passed through verbatim — including
+  AT-19's `transformation_reference`/`redaction_status` on a `VIEW_DEFINITION` edge, unmodified.
+- `graph_version`: the pin (next section).
+
+### The pinned graph version: a new concept, built on this platform's own existing idiom
+
+Read first, as the row instructed: neither `unified_lineage.py` nor `unified_lineage_api.py` has any
+version, snapshot id, or "as of" timestamp concept anywhere. This is honestly new state for this row,
+not a surfaced existing field — but it is not invented from nothing either. It follows AT-6's own
+established idiom for exactly this problem (`AgentRun.grounding_fragment_digests`: a SHA-256 digest per
+grounding fragment, captured once at assembly time, resolved and verified later by
+`agent_run_replay.py`, never recomputed live). `graph_version` applies the same shape to lineage:
+
+```
+{"pinned_at": <UTC ISO-8601, captured once>,
+ "datasource_id": <str>,
+ "traversal": {"node_limit": 300, "edge_limit": 1500, "scope": "DIRECT_EDGES_BETWEEN_CITED_TABLES"},
+ "graph_content_fingerprint": <sha256 hex of the canonical-JSON cited_tables + relationships>}
+```
+
+The fingerprint is the stronger half of the pin: not just "when we asked" but "what we saw" —
+content-addressed and independently reproducible from the same evidence, so a re-derivation against a
+since-changed graph provably diverges from it. Because `compose_lineage_provenance` runs exactly once,
+at answer-completion time, and `GET /v1/agent-runs/{id}` (`aida.api`) returns the persisted
+`AgentRun.plan_evidence` unchanged, the pin is captured, not live-recomputed on every read — the
+determinism test below proves this against a real graph mutation, not just against an unchanged one.
+
+### Tests (`tests/test_answer_provenance.py`, 2 new, driving the real orchestrator end to end)
+
+- `test_lineage_provenance_carries_columns_derivation_and_pinned_version`: a two-table fixture
+  (`settlement_ledger` FK-referencing `party`) joined by a governed tool's SQL; asserts the completed
+  `AgentRun.plan_evidence["lineage"]` block's `cited_tables` carry qualified names (not bare names),
+  `queried_columns` carry the answer's actual selected columns, the one `relationships` entry carries
+  `edge_source == "FOREIGN_KEY"` with real `source_columns`/`target_columns`, and `graph_version` carries
+  a 64-hex-char SHA-256 fingerprint, a timezone-aware `pinned_at`, and the exact traversal bounds used.
+- `test_pinned_graph_version_survives_a_later_graph_change`: runs the same fixture to `COMPLETED`,
+  captures the stored pin, then adds a second real `FOREIGN_KEY` `MetadataConstraint` between the same
+  two tables (a genuine graph mutation), re-fetches the same `AgentRun` row the way the read API does
+  (`session.get`, no recomputation), and asserts the pin is byte-identical to what was captured at
+  completion time. A second half proves the mutation was real and not a no-op: calling
+  `compose_lineage_provenance` live against the now-changed graph, with the same inputs, returns one
+  more relationship and a different fingerprint — so the stored pin's stability is proven against an
+  actually-diverging live value, not an accidentally-unchanged one.
+
+### Verification
+
+`ruff check` clean on `src/aida/answer_provenance.py`, `src/aida/agent_orchestrator.py`,
+`tests/test_answer_provenance.py`. `uv run --extra dev mypy src`: clean on all three touched files;
+the same 44 pre-existing `"object" not callable"` errors elsewhere (`workflows/activities.py`,
+`batch_ingestion.py`, `workflows/scheduler.py`, `main.py`, `profiling_exceptions.py`,
+`custom_quality_rules.py`, `projectors/graph_projector.py`, `graph_reconciliation.py`) are unrelated
+and unchanged — confirmed present on `origin/feature/snowflake-dbt-lineage-mcp` before this change, same
+count (44), same files. `uv run --extra dev lint-imports`: 8/8 contracts kept, none newly touched by
+this change (`answer_provenance.py` imports only `unified_lineage_api`/`config`/`models`, no query
+gateway). `AIDA_ENVIRONMENT=development uv run pytest tests/test_answer_provenance.py
+tests/test_agent_orchestrator_checkpoints.py tests/test_agent_orchestrator_decision_lineage.py
+tests/test_agent_orchestrator_retrieval_wiring.py tests/test_agent_orchestrator_query_memory.py
+tests/test_unified_lineage.py -q`: all green. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched
+— `AgentRun.plan_evidence` was already a free-form JSON column, wide enough to carry the new `lineage`
+section without any of them. No new HTTP route added (the block rides the existing `GET
+/v1/agent-runs/{id}` response, `AgentRunRead.plan_evidence: dict[str, Any]`, itself untouched), so no
+OpenAPI baseline regen or `ui-next` type regen was needed. No new Python or npm dependency added.
+
+**Known limitation, stated honestly**: `queried_columns` is the SQL parser's raw column references
+(`sql_guard.py`'s `exp.Column.sql()`), not resolved per-table — a query with two same-named columns
+across tables cannot be told apart from this list alone; the per-relationship `source_columns`/
+`target_columns` (from the unified-lineage edge itself) are precise, this top-level convenience list is
+not. `relationships` covers only *direct* edges between two cited tables in the unified graph — a
+same-answer table pair connected only via a multi-hop chain (e.g. through an intermediate view) has no
+entry here today; the graph build this reuses is itself bounded (`node_limit`/`edge_limit`, recorded in
+`graph_version.traversal`) per ADR-0010, an existing limitation of `build_unified_lineage_graph_payload`
+inherited here, not introduced by this row.
