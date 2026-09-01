@@ -1811,12 +1811,7 @@ async def route_unowned_asset_backlog(
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated
         ],
         escalated_tier2=[
-<<<<<<< Updated upstream
             UnownedAssetEscalationRead.model_validate(entry) for entry in result.escalated_tier2
-=======
-            UnownedAssetEscalationRead.model_validate(entry)
-            for entry in result.escalated_tier2
->>>>>>> Stashed changes
         ],
         resolved_count=len(result.resolved),
     )

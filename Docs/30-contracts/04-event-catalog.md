@@ -158,11 +158,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `stewardship.coverage_computed.v1` | Coverage snapshot persisted | snapshot_id, scope, overall_score |
 | `stewardship.unowned_asset_routed.v1` | Unowned-asset backlog entry routed to a candidate owner | table_id, candidate_owner |
 | `stewardship.unowned_asset_escalated.v1` | Backlog entry escalated (no owner found/accepted) | table_id |
-<<<<<<< Updated upstream
 | `stewardship.unowned_asset_escalated_tier2.v1` | Backlog entry still unaddressed after tier-1 escalation; opened as an ITSM ticket unconditionally (GL-6) | table_id |
-=======
-| `stewardship.unowned_asset_escalated_tier2.v1` | Backlog entry escalated a second time, still unaddressed a further period past its first escalation; always produces an ITSM payload | table_id |
->>>>>>> Stashed changes
 | `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
 | `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
 

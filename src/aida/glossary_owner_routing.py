@@ -42,13 +42,6 @@ from aida.notification_routing import (
 # notification rule specifies its own `escalation_after_minutes`.
 DEFAULT_ROUTE_AFTER = timedelta(days=7)
 DEFAULT_ESCALATE_AFTER = timedelta(days=14)
-# GL-6 tier 2: an entry still unresolved this long *after its tier-1
-# escalation* (not from first-detected) escalates again, unconditionally
-# through ITSM regardless of what channel tier 1 used -- the single-tier
-# engine has no further tier of its own to fall back to, so tier 2 is a fixed
-# "make sure this becomes an operational ticket" backstop rather than a
-# second configurable notification rule.
-DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=7)
 
 # GL-6 tier 2: an entry still unaddressed a further week after its first
 # escalation (day 21 overall, continuing the 7/14-day progression above)
@@ -323,30 +316,6 @@ def sync_unowned_asset_backlog(
                 )
                 entry.status = "ESCALATED_TIER_2"
                 entry.escalated_tier2_at = now
-                result.escalated_tier2.append(entry)
-                result.itsm_payloads.append(format_itsm_payload(incident))
-
-        if entry.status == "ESCALATED":
-            escalated_at = entry.escalated_at
-            if escalated_at is not None and now - escalated_at >= escalate_tier2_after:
-                incident = _incident_for(
-                    facts,
-                    first_detected_unowned_at=entry.first_detected_unowned_at,
-                    now=now,
-                    escalate_after=escalate_after,
-                    candidate_owner=entry.candidate_owner,
-                )
-                # Re-offer the incident to the same rules -- days, not the
-                # 60-minute dedup window, will have passed, so a rule can
-                # genuinely notify again. The outcome does not gate tier 2's
-                # own guarantee below: unlike tier 1 (which only produces an
-                # ITSM payload when a matched rule's own channel is ITSM),
-                # tier 2 always does, since its point is to reach an
-                # operational queue once the first channel has not resolved
-                # it -- whether or not any rule matches at all.
-                route_notification(incident, engine_rules, seen_dedup_keys=seen_dedup_keys)
-                entry.status = "ESCALATED_TIER_2"
-                entry.escalated_at = now
                 result.escalated_tier2.append(entry)
                 result.itsm_payloads.append(format_itsm_payload(incident))
 

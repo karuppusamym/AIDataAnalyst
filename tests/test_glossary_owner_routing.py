@@ -429,7 +429,6 @@ def test_sync_itsm_channel_produces_the_shared_itsm_payload() -> None:
     assert payload["correlation_id"] == f"unowned-asset:{table_id}"
 
 
-<<<<<<< Updated upstream
 def test_sync_escalates_to_tier2_past_the_second_deadline() -> None:
     """GL-6: an entry still unaddressed long enough after its *tier-1*
     escalation escalates again, unconditionally through ITSM -- regardless of
@@ -438,17 +437,6 @@ def test_sync_escalates_to_tier2_past_the_second_deadline() -> None:
     organization_id = uuid4()
     table_id = uuid4()
     now = datetime.now(UTC)
-=======
-def test_sync_escalates_to_tier2_after_the_second_deadline() -> None:
-    """Tier 2 (GL-6): an ESCALATED entry still unaddressed a further
-    ``escalate_tier2_after`` past its first escalation escalates again --
-    always producing an ITSM payload, since tier 2's point is reaching an
-    operational queue when the first channel did not resolve it."""
-    organization_id = uuid4()
-    table_id = uuid4()
-    now = datetime.now(UTC)
-    rule = _notification_rule(organization_id=organization_id)
->>>>>>> Stashed changes
     existing = UnownedAssetEscalation(
         id=uuid4(),
         organization_id=organization_id,
@@ -456,19 +444,11 @@ def test_sync_escalates_to_tier2_after_the_second_deadline() -> None:
         first_detected_unowned_at=datetime(2000, 1, 1, tzinfo=UTC),
         status="ESCALATED",
         candidate_owner="jane@bank.example",
-<<<<<<< Updated upstream
-=======
-        notification_rule_id=rule.id,
->>>>>>> Stashed changes
         channel="EMAIL",
         recipients=["steward-lead@bank.example"],
         dedup_key="dk-1",
         routed_at=datetime(2000, 1, 1, tzinfo=UTC),
-<<<<<<< Updated upstream
         escalated_at=datetime(2000, 1, 2, tzinfo=UTC),
-=======
-        escalated_at=datetime(2000, 1, 15, tzinfo=UTC),
->>>>>>> Stashed changes
     )
 
     result = sync_unowned_asset_backlog(
@@ -477,7 +457,6 @@ def test_sync_escalates_to_tier2_after_the_second_deadline() -> None:
         existing_entries={table_id: existing},
         table_facts={table_id: _facts(table_id=table_id)},
         ownership_rules=[],
-<<<<<<< Updated upstream
         notification_rules=[],
         now=now,
     )
@@ -487,41 +466,19 @@ def test_sync_escalates_to_tier2_after_the_second_deadline() -> None:
     assert existing.escalated_tier2_at == now
     assert len(result.itsm_payloads) == 1
     assert result.itsm_payloads[0]["correlation_id"] == f"unowned-asset:{table_id}"
-=======
-        notification_rules=[rule],
-        now=now,
-    )
-
-    assert result.escalated == []
-    assert result.escalated_tier2 == [existing]
-    assert existing.status == "ESCALATED_TIER_2"
-    assert existing.escalated_at == now
-    assert len(result.itsm_payloads) == 1
->>>>>>> Stashed changes
 
 
 def test_sync_does_not_escalate_to_tier2_before_the_second_deadline() -> None:
     organization_id = uuid4()
     table_id = uuid4()
     now = datetime.now(UTC)
-<<<<<<< Updated upstream
-=======
-    rule = _notification_rule(organization_id=organization_id)
->>>>>>> Stashed changes
     existing = UnownedAssetEscalation(
         id=uuid4(),
         organization_id=organization_id,
         table_id=table_id,
-<<<<<<< Updated upstream
         first_detected_unowned_at=now - DEFAULT_ROUTE_AFTER - DEFAULT_ESCALATE_AFTER,
         status="ESCALATED",
         candidate_owner="jane@bank.example",
-=======
-        first_detected_unowned_at=now - DEFAULT_ESCALATE_AFTER,
-        status="ESCALATED",
-        candidate_owner="jane@bank.example",
-        notification_rule_id=rule.id,
->>>>>>> Stashed changes
         channel="EMAIL",
         recipients=["steward-lead@bank.example"],
         dedup_key="dk-1",
@@ -535,22 +492,13 @@ def test_sync_does_not_escalate_to_tier2_before_the_second_deadline() -> None:
         existing_entries={table_id: existing},
         table_facts={table_id: _facts(table_id=table_id)},
         ownership_rules=[],
-<<<<<<< Updated upstream
         notification_rules=[],
-=======
-        notification_rules=[rule],
->>>>>>> Stashed changes
         now=now,
     )
 
     assert result.escalated_tier2 == []
     assert existing.status == "ESCALATED"
-<<<<<<< Updated upstream
     assert existing.escalated_tier2_at is None
-    assert result.itsm_payloads == []
-
-
-=======
     assert result.itsm_payloads == []
 
 
@@ -588,7 +536,6 @@ def test_sync_tier2_escalation_produces_itsm_payload_even_without_a_matching_rul
     assert result.itsm_payloads[0]["correlation_id"] == f"unowned-asset:{table_id}"
 
 
->>>>>>> Stashed changes
 # ---------------------------------------------------------------------------
 # API wiring (fake session, in the style of _OwnershipRuleSession /
 # _ConflictDetectionSession above in test_glossary_stewardship.py)
