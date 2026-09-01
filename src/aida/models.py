@@ -1415,6 +1415,70 @@ class DataQualityIncident(Base, TimestampMixin):
     resolution_reason: Mapped[str | None] = mapped_column(String(1000))
 
 
+class QualityRulePack(Base, TimestampMixin):
+    """DQ-4: a named, schedulable group of custom threshold rules.
+
+    Runs on its own cadence (``interval_minutes``), independent of the
+    profiling scan that drives ``DataQualityObservation``/``evaluate_analysis_run``
+    — the point of DQ-4's exit condition, "rules run outside scans".
+    """
+
+    __tablename__ = "quality_rule_pack"
+    __table_args__ = (
+        UniqueConstraint("datasource_id", "name"),
+        Index("ix_quality_rule_pack_org_enabled", "organization_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    interval_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class QualityRule(Base, TimestampMixin):
+    """A single deterministic, value-free threshold check within a rule pack.
+
+    Evaluated against the most recent stored profile snapshot for its table
+    (``TableProfile``/``ColumnProfile``) — never live source data — so a rule
+    pack sweep stays value-free (INV-6) and needs no query-gateway execution.
+    """
+
+    __tablename__ = "quality_rule"
+    __table_args__ = (
+        CheckConstraint(
+            "rule_type IN ('TABLE_ROW_COUNT_MIN', 'TABLE_ROW_COUNT_MAX', 'COLUMN_NULL_RATE_MAX')",
+            name="ck_quality_rule_type",
+        ),
+        Index("ix_quality_rule_pack_enabled", "rule_pack_id", "enabled"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    rule_pack_id: Mapped[UUID] = mapped_column(
+        ForeignKey("quality_rule_pack.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    rule_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    threshold: Mapped[float] = mapped_column(Float, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
 class QueryExecution(Base, TimestampMixin):
     __tablename__ = "query_execution"
     __table_args__ = (

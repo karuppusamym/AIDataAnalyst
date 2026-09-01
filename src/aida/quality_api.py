@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
+from aida.custom_quality_rules import evaluate_rule_pack
 from aida.data_quality import DEFAULT_POLICY
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -18,7 +19,10 @@ from aida.models import (
     DataSource,
     FreshnessObservation,
     FreshnessWatermarkConfig,
+    MetadataColumn,
     MetadataTable,
+    QualityRule,
+    QualityRulePack,
 )
 from aida.quality_service import evaluate_analysis_run
 from aida.schemas import (
@@ -32,6 +36,10 @@ from aida.schemas import (
     FreshnessConfigUpsert,
     FreshnessStatusRead,
     Page,
+    QualityRulePackRead,
+    QualityRulePackUpsert,
+    QualityRuleRead,
+    QualityRuleUpsert,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -615,3 +623,240 @@ async def get_freshness_status(
         threshold_minutes=result.threshold_minutes,
         evidence=result.evidence,
     )
+
+
+# --- DQ-4: Custom quality rule packs --------------------------------------------
+
+
+async def _rule_pack(
+    session: AsyncSession, context: SecurityContext, rule_pack_id: UUID
+) -> QualityRulePack:
+    rule_pack = await session.get(QualityRulePack, rule_pack_id)
+    if rule_pack is None:
+        raise HTTPException(status_code=404, detail="quality rule pack not found")
+    enforce_organization(context, rule_pack.organization_id)
+    return rule_pack
+
+
+@router.post(
+    "/datasources/{datasource_id}/quality-rule-packs",
+    response_model=QualityRulePackRead,
+    status_code=201,
+)
+async def create_rule_pack(
+    datasource_id: UUID,
+    body: QualityRulePackUpsert,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> QualityRulePackRead:
+    source = await _source(session, context, datasource_id)
+    rule_pack = QualityRulePack(
+        organization_id=source.organization_id,
+        datasource_id=source.id,
+        created_by=context.principal_id,
+        **body.model_dump(),
+    )
+    session.add(rule_pack)
+    await session.flush()
+    record_audit(
+        session,
+        context,
+        action="data_quality.rule_pack.create",
+        resource_type="quality_rule_pack",
+        resource_id=str(rule_pack.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"datasource_id": str(source.id), "name": rule_pack.name},
+    )
+    record_outbox(
+        session,
+        organization_id=source.organization_id,
+        aggregate_type="quality_rule_pack",
+        aggregate_id=str(rule_pack.id),
+        event_type="data_quality.rule_pack.created.v1",
+        payload={"datasource_id": str(source.id), "name": rule_pack.name},
+    )
+    await session.commit()
+    await session.refresh(rule_pack)
+    return QualityRulePackRead.model_validate(rule_pack)
+
+
+@router.get("/datasources/{datasource_id}/quality-rule-packs", response_model=Page)
+async def list_rule_packs(
+    datasource_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    await _source(session, context, datasource_id)
+    filters = [QualityRulePack.datasource_id == datasource_id]
+    total = await session.scalar(select(func.count()).select_from(QualityRulePack).where(*filters))
+    rows = (
+        await session.scalars(
+            select(QualityRulePack).where(*filters).order_by(QualityRulePack.name).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[QualityRulePackRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.delete("/quality-rule-packs/{rule_pack_id}", status_code=204)
+async def delete_rule_pack(
+    rule_pack_id: UUID,
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "DataAdmin")),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    rule_pack = await _rule_pack(session, context, rule_pack_id)
+    await session.delete(rule_pack)
+    record_audit(
+        session,
+        context,
+        action="data_quality.rule_pack.delete",
+        resource_type="quality_rule_pack",
+        resource_id=str(rule_pack_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"name": rule_pack.name},
+    )
+    await session.commit()
+
+
+@router.post(
+    "/quality-rule-packs/{rule_pack_id}/rules",
+    response_model=QualityRuleRead,
+    status_code=201,
+)
+async def create_rule(
+    rule_pack_id: UUID,
+    body: QualityRuleUpsert,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> QualityRuleRead:
+    rule_pack = await _rule_pack(session, context, rule_pack_id)
+    table = await session.get(MetadataTable, body.table_id)
+    if table is None or table.datasource_id != rule_pack.datasource_id:
+        raise HTTPException(
+            status_code=422, detail="table is not part of this rule pack's datasource"
+        )
+    if body.rule_type == "COLUMN_NULL_RATE_MAX":
+        if body.column_id is None:
+            raise HTTPException(
+                status_code=422, detail="column_id is required for COLUMN_NULL_RATE_MAX"
+            )
+        column = await session.get(MetadataColumn, body.column_id)
+        if column is None or column.table_id != body.table_id:
+            raise HTTPException(status_code=422, detail="column is not part of the given table")
+    elif body.column_id is not None:
+        raise HTTPException(
+            status_code=422, detail=f"column_id is not applicable to {body.rule_type}"
+        )
+    rule = QualityRule(
+        organization_id=rule_pack.organization_id,
+        rule_pack_id=rule_pack.id,
+        created_by=context.principal_id,
+        **body.model_dump(),
+    )
+    session.add(rule)
+    await session.flush()
+    record_audit(
+        session,
+        context,
+        action="data_quality.rule.create",
+        resource_type="quality_rule",
+        resource_id=str(rule.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"rule_pack_id": str(rule_pack.id), "rule_type": rule.rule_type},
+    )
+    await session.commit()
+    await session.refresh(rule)
+    return QualityRuleRead.model_validate(rule)
+
+
+@router.get("/quality-rule-packs/{rule_pack_id}/rules", response_model=Page)
+async def list_rules(
+    rule_pack_id: UUID,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    await _rule_pack(session, context, rule_pack_id)
+    filters = [QualityRule.rule_pack_id == rule_pack_id]
+    total = await session.scalar(select(func.count()).select_from(QualityRule).where(*filters))
+    rows = (
+        await session.scalars(
+            select(QualityRule).where(*filters).order_by(QualityRule.name).limit(limit).offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[QualityRuleRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
+
+
+@router.delete("/quality-rules/{rule_id}", status_code=204)
+async def delete_rule(
+    rule_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    rule = await session.get(QualityRule, rule_id)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="quality rule not found")
+    enforce_organization(context, rule.organization_id)
+    await session.delete(rule)
+    record_audit(
+        session,
+        context,
+        action="data_quality.rule.delete",
+        resource_type="quality_rule",
+        resource_id=str(rule_id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"rule_pack_id": str(rule.rule_pack_id)},
+    )
+    await session.commit()
+
+
+@router.post("/quality-rule-packs/{rule_pack_id}/evaluate")
+async def evaluate_rule_pack_now(
+    rule_pack_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, int | str]:
+    """On-demand evaluation, independent of the pack's own scheduled cadence --
+    same relationship ``replay_quality_evaluation`` has to the profiling-scan
+    trigger above."""
+    rule_pack = await _rule_pack(session, context, rule_pack_id)
+    rules = (
+        await session.scalars(select(QualityRule).where(QualityRule.rule_pack_id == rule_pack.id))
+    ).all()
+    counts = await evaluate_rule_pack(
+        session, rule_pack=rule_pack, rules=list(rules), context=context
+    )
+    await session.commit()
+    return {"rule_pack_id": str(rule_pack.id), **counts}
