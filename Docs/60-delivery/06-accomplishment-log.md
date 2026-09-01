@@ -4736,8 +4736,8 @@ strictly to `status == "PUBLISHED"`. A version-pinned consumer's next read after
 identical anti-enumeration `"Resource not found or not accessible."` (MCP) / `404` (REST) that an
 entirely unauthorized caller gets — genuinely indistinguishable, exactly as the tracker described.
 `tests/test_context_products.py::test_mcp_resource_query_never_matches_an_unpublished_version` and
-`test_approval_publishes_candidate_and_supersedes_prior_version` (renamed below) already asserted
-this behavior as correct before this change — the defect had test coverage, just no test that it
+the old `..._and_supersedes_prior_version` test (renamed below) already asserted this behavior as
+correct before this change — the defect had test coverage, just no test that it
 was a bug.
 
 ### Part (a): `SUPPORTED` state, a version-scoped support window, and a two-sided retirement signal
