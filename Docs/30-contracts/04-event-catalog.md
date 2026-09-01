@@ -170,6 +170,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `lineage.impact_computed` | Impact computed | node_ref, affected_counts |
 | `bi_artifact.imported.v1` | BI tool metadata (Tableau/Power BI/Looker) imported | artifact_import_id, connection_id, bi_tool, report_count, metric_count |
 | `lineage.consumed.v1` | Unified lineage graph/impact read via a native MCP lineage tool | tool_slug, principal_id, channel |
+| `asset_context.consumed.v1` | Composite `get_asset_context` MCP tool read (AT-13) | tool_slug, principal_id, channel |
 
 ### Quality — topic `atlas.quality.v1` (key: `datasource_id`)
 
