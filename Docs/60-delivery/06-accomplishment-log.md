@@ -5595,3 +5595,58 @@ the actual placeholder rather than "not implemented"); `Docs/60-delivery/03-trac
 `uv run pytest tests/test_doc_claims.py -q` clean after this pass's edits. No
 `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched.
+
+## 2026-09-01 — AT-D5 (`parse_procedure_lineage` docstring/plan honesty) closed
+
+Doc/plan honesty pass, not a code-fix pass, per the row's own instruction to "correct the plan or
+start the work" (N3, procedure-body parsing, stays explicitly out of scope here).
+
+**Checked whether AT-D2 (closed earlier the same day) already resolved this.** It did not.
+AT-D2's six defects were `FILTERED`/`AGGREGATED` per-statement, `SELECT *` dropped, the
+`"<UNKNOWN>"` magic string, hard-coded `Confidence.FULL`, the missing unique constraint, and
+unpopulated `*_table_id` — none of them touch procedure-vs-view differentiation or dynamic-SQL
+handling. Read `src/aida/sql_lineage_parser.py:691-714` directly: `parse_procedure_lineage` and
+`parse_view_lineage` (`:669-688`) are still byte-identical bodies — a dialect check followed by
+`return _parse_sql(sql, dialect)` — so the row's complaint is still accurate today. Also checked
+whether "the plan counts N3 as in progress" (the row's other claim) is still true anywhere live:
+it is not — `tracker.md`'s own N3 row, `review-2026-08/gap/02-gap-diff-and-plan.md`'s N3 row, and
+`review-2026-08/atlan-context/03-lineage.md`'s N3 citation all already say `TODO`/"not started"
+honestly, so that half of the complaint had already been overtaken by other work; only the
+docstring itself still overclaimed.
+
+**Fix:** rewrote `parse_procedure_lineage`'s docstring
+(`src/aida/sql_lineage_parser.py:691-714`) to state plainly that it is `_parse_sql` under a
+procedure-flavoured name, not a procedure-aware parser — no control-flow handling
+(IF/LOOP/CURSOR), no variable/temp-table scope resolution, and no dynamic-SQL detection at all (a
+`CREATE PROCEDURE ... EXECUTE format(...) ...` body's dynamic string is invisible to `sqlglot` and
+silently produces no edge, with nothing flagging the gap) — and points at tracker item N3 for the
+real, unstarted work. `parse_procedure_lineage_endpoint`'s docstring
+(`src/aida/view_lineage_api.py:252-262`) rewritten the same way, cross-referencing the parser
+function's docstring rather than duplicating it. Grepped `Docs/60-delivery/`, `Docs/20-modules/`,
+and module 09's spec (`09-lineage.md`) plus the wider `Docs/review-2026-08/` tree for any other
+place claiming procedure-body/dynamic-SQL capability beyond this: found none — the one dated
+review doc that discusses this defect in depth
+(`review-2026-08/atlan-context/03-lineage.md`, item "e.") already described it accurately and
+was left untouched, and `Docs/20-modules/09-lineage.md`'s own implementation-status note already
+correctly withholds "View and stored-procedure lineage from definitions" from the built list.
+
+Endpoint docstring is embedded in FastAPI's generated OpenAPI `description` field, so
+`Docs/90-reference/openapi-baseline.json` needed regenerating (`AIDA_ENVIRONMENT=development
+PYTHONPATH=src uv run python scripts/openapi_diff.py --accept-baseline`) — a single-line,
+description-text-only diff at the `procedure-lineage/parse` path, confirmed non-breaking by
+`tests/test_openapi_diff_gate.py`.
+
+`tests/test_sql_lineage_parser.py`, `tests/test_view_lineage_api.py`,
+`tests/test_openapi_diff_gate.py`, and `tests/test_doc_claims.py` all pass (`PYTHONPATH=src
+.venv/bin/python -m pytest ...`, this worktree's own venv rather than a globally installed
+`pytest`, per AT-D2's own note on why that matters in a worktree). `ruff check` clean on both
+touched files.
+
+### Scope
+
+`src/aida/sql_lineage_parser.py` (docstring only), `src/aida/view_lineage_api.py` (docstring
+only), `Docs/90-reference/openapi-baseline.json` (regenerated, description-text diff only),
+`Docs/60-delivery/03-tracker.md` (this row). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file and no Alembic migration touched. N3 itself (real procedure-body parsing,
+including dynamic-SQL detection) remains `TODO` and unstarted, deliberately — that is a multi-day
+build the row explicitly excludes from this pass.

@@ -38788,7 +38788,7 @@
     },
     "/v1/datasources/{datasource_id}/procedure-lineage/parse": {
       "post": {
-        "description": "Parse a stored procedure body and extract column-level lineage.\n\nThe SQL is never executed.  Literal values are redacted.  Extracted edges\nare persisted for the datasource.",
+        "description": "Parse SQL text as a flat sequence of DML statements and extract\ncolumn-level lineage. Not procedure-aware: identical parsing to\n`parse_view_lineage_endpoint` above, with no control-flow handling and\nno dynamic-SQL detection (AT-D5; real procedure-body parsing is tracker\nitem N3, not started -- see `parse_procedure_lineage`'s docstring).\n\nThe SQL is never executed.  Literal values are redacted.  Extracted edges\nare persisted for the datasource.",
         "operationId": "parse_procedure_lineage_endpoint_v1_datasources__datasource_id__procedure_lineage_parse_post",
         "parameters": [
           {

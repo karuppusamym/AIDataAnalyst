@@ -255,7 +255,11 @@ async def parse_procedure_lineage_endpoint(
     context: SecurityContext = Depends(require_roles(*_LINEAGE_WRITER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ViewLineageParseResponse:
-    """Parse a stored procedure body and extract column-level lineage.
+    """Parse SQL text as a flat sequence of DML statements and extract
+    column-level lineage. Not procedure-aware: identical parsing to
+    `parse_view_lineage_endpoint` above, with no control-flow handling and
+    no dynamic-SQL detection (AT-D5; real procedure-body parsing is tracker
+    item N3, not started -- see `parse_procedure_lineage`'s docstring).
 
     The SQL is never executed.  Literal values are redacted.  Extracted edges
     are persisted for the datasource.
