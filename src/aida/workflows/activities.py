@@ -312,6 +312,7 @@ async def _get_or_create_column(
             physical_type=discovered.physical_type,
             nullable=discovered.nullable,
             default_expression=discovered.default_expression,
+            source_description=discovered.source_description,
             classification=rule_result.classification,
             classification_source=CLASSIFICATION_SOURCE_RULE,
             fingerprint=column_fingerprint,
@@ -325,6 +326,7 @@ async def _get_or_create_column(
         column.physical_type = discovered.physical_type
         column.nullable = discovered.nullable
         column.default_expression = discovered.default_expression
+        column.source_description = discovered.source_description
         column.fingerprint = column_fingerprint
         # An authoritative external classification (see aida.classification_feed)
         # must never be silently overwritten by rediscovery's rule inference

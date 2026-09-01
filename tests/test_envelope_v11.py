@@ -58,6 +58,7 @@ from aida.models import (
     DataDomain,
     DataSource,
     LineOfBusiness,
+    MetadataColumn,
     Organization,
     Project,
 )
@@ -305,10 +306,12 @@ async def test_envelope_11_persists_every_new_axis(session: AsyncSession) -> Non
     assert counts["routines"] == 1
     assert counts["routine_parameters"] == 1
     assert counts["grants"] == 1
-    # catalog + schema + one described column
-    assert counts["object_descriptions"] == 3
-    # one view + one routine + one parameter + one grant + three descriptions
-    assert counts["created_objects"] == 7
+    # catalog + schema -- the column's description lands directly on
+    # MetadataColumn.source_description (IN-5e), during persist_discovery_snapshot's
+    # 1.0 pass rather than here, so it is not one of this pass's own counts.
+    assert counts["object_descriptions"] == 2
+    # one view + one routine + one parameter + one grant + two descriptions
+    assert counts["created_objects"] == 6
 
     view = await session.scalar(select(MetadataViewDefinition))
     assert view is not None
@@ -343,7 +346,14 @@ async def test_envelope_11_persists_every_new_axis(session: AsyncSession) -> Non
         row.object_type
         for row in await session.scalars(select(MetadataObjectDescription))
     }
-    assert described == {"CATALOG", "SCHEMA", "COLUMN"}
+    assert described == {"CATALOG", "SCHEMA"}
+
+    # IN-5e: the column's description is a real column, not a row here.
+    described_column = await session.scalar(
+        select(MetadataColumn).where(MetadataColumn.name == "account_id")
+    )
+    assert described_column is not None
+    assert described_column.source_description == "surrogate key of the deposit account"
 
 
 async def test_every_11_row_carries_its_tenant_boundary(session: AsyncSession) -> None:
@@ -438,14 +448,14 @@ async def test_reapplying_the_same_envelope_creates_nothing_new(
     first = await _ingest(session, datasource, _envelope())
     second = await _ingest(session, datasource, _envelope())
 
-    assert first["created_objects"] == 7
+    assert first["created_objects"] == 6
     assert second["created_objects"] == 0
     assert second["changed_objects"] == 0
     assert await _count(session, MetadataViewDefinition) == 1
     assert await _count(session, MetadataRoutine) == 1
     assert await _count(session, MetadataRoutineParameter) == 1
     assert await _count(session, MetadataSourceGrant) == 1
-    assert await _count(session, MetadataObjectDescription) == 3
+    assert await _count(session, MetadataObjectDescription) == 2
 
 
 async def test_a_changed_view_definition_is_an_update_not_a_second_row(

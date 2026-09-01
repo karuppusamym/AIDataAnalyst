@@ -162,6 +162,13 @@ class MetadataColumn(Base, TimestampMixin):
     physical_type: Mapped[str] = mapped_column(String(255), nullable=False)
     nullable: Mapped[bool] = mapped_column(Boolean, nullable=False)
     default_expression: Mapped[str | None] = mapped_column(Text)
+    # IN-5e: a source-side column comment, direct on the object -- mirrors
+    # MetadataTable.source_description rather than the row-based
+    # MetadataObjectDescription mechanism the N1 envelope-1.1 workstream used for
+    # catalog/schema/column comments because it could not touch this file at the
+    # time. Tables already got a real column; columns did not, purely because of
+    # who owned models.py that week -- not an architectural reason.
+    source_description: Mapped[str | None] = mapped_column(Text)
     classification: Mapped[str] = mapped_column(String(30), default="UNCLASSIFIED", nullable=False)
     # "RULE" (deterministic name/type inference) or "EXTERNAL_AUTHORITATIVE" (a bank's own
     # classification feed — see aida.classification_feed). Once EXTERNAL_AUTHORITATIVE, rediscovery

@@ -9752,3 +9752,86 @@ test_readiness_recovers_to_up_once_reconnect_succeeds` is a timing-sensitive rec
 that reads as ordinary flakiness under a 6,095-test run with coverage instrumentation active. None are
 coverage-tooling issues and none block this row's own exit criterion. Repo-wide grep for literal
 `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately before the closing push: none found.
+
+---
+
+## 2026-09-01 — IN-5e closed: `source_description` moves from a row to a real column on `metadata_column`
+
+### The gap, exactly as scoped
+
+`metadata_table.source_description` has been a real column since the 1.0 model existed.
+`metadata_column` never got the equivalent -- not for an architectural reason, but because the N1
+workstream that added envelope 1.1's description axis could not touch `models.py` at the time, so
+catalog/schema/column comments all landed in a row-based side table, `metadata_object_description`,
+instead. Tables already had their own column and so were correctly left out of that table's
+`DESCRIBABLE_OBJECT_TYPES`; columns were not, purely because of who owned `models.py` that week.
+
+### What shipped
+
+- `atlas/modules/catalog/models.py`: `MetadataColumn.source_description: Text | None`, same shape as
+  `MetadataTable`'s.
+- Migration `c8fcafc5856a`: backfills the new column from every **ACTIVE** `metadata_object_description`
+  row with `object_type = 'COLUMN'` (a DEPRECATED row is a retracted fact and must not resurrect),
+  deletes those rows entirely (both statuses -- `COLUMN` is no longer a valid `object_type` there going
+  forward), then drops `column_id` and its FK/unique constraint/index, and recreates
+  `object_type_is_describable` (`IN ('CATALOG','SCHEMA')`) and `exactly_one_subject` (two terms, not
+  three) to match. Verified both directions offline (`alembic upgrade`/`downgrade ... --sql`) against a
+  Postgres dialect target -- no live Postgres in this sandbox, same standing limitation shared with
+  every other migration landed today.
+- `envelope_models.py`: `DESCRIBABLE_OBJECT_TYPES` narrowed to `('CATALOG', 'SCHEMA')`; the model
+  docstring updated to say why `column_id` is gone rather than just removing it silently.
+- `workflows/activities.py::_get_or_create_column`: now sets `source_description` on both the create
+  and update branches, exactly mirroring `_get_or_create_table`'s existing two lines. This function is
+  the *shared* column-upsert helper for both native-pull discovery and the 1.0 half of push-envelope
+  ingestion (`persist_discovery_snapshot`, called from `_ingest`-style flows) -- one fix covers both
+  producers.
+- `atlas/modules/catalog/schemas.py::MetadataColumnRead`: gained `source_description: str | None = None`.
+  Left write-only would have just moved today's actual defect (zero consumers in `src/aida` ever read a
+  column's `metadata_object_description` row -- confirmed by grep before touching anything) rather than
+  fixed it.
+
+### A discovery mid-fix: the 1.1-envelope column-description path was already dead code
+
+`ingestion.py::persist_envelope_extensions` (the envelope-1.1-specific pass) had its own
+`object_type="COLUMN"` write path, called *after* `persist_discovery_snapshot`'s 1.0 pass on the same
+`DiscoveredCatalog` tree, per that function's own documented contract ("Must be called after
+`persist_discovery_snapshot` ... on the same catalogs"). Once `_get_or_create_column` (the 1.0 pass)
+started writing `source_description` from the identical `DiscoveredColumn.source_description` field the
+1.1 pass reads, the 1.1 pass's own column branch had nothing left to do -- the fact was already
+persisted, moments earlier, by the time it ran. Verified this rather than assumed it: a first attempt
+left the 1.1-side branch in place with a "write if different" guard, and a fresh
+`test_envelope_11_persists_every_new_axis` run showed `object_descriptions` short by exactly one and
+`created_objects` short by exactly one -- the guard's condition was never true, because the value was
+already identical by the time it ran. Removed the entire now-dead branch (and narrowed
+`_table_carries_extensions` to stop gating table visitation on a check that no longer does anything)
+rather than leave inert code sitting next to a guard that can never fire.
+
+### Tests
+
+`tests/test_envelope_v11.py`: two count assertions updated (`object_descriptions` 3->2,
+`created_objects` 7->6 in two tests -- the column no longer contributes a count to *this* pass, since
+it is fully handled one pass earlier), `described == {"CATALOG","SCHEMA"}` (was `{...,"COLUMN"}`), and a
+new direct assertion that `MetadataColumn.source_description` actually holds
+`"surrogate key of the deposit account"` after a real end-to-end `_ingest()` call -- proving the fact
+still lands somewhere, not just that the old counter stopped counting it.
+
+### Verification
+
+`pytest tests/test_envelope_v11.py tests/test_catalog_pagination.py tests/test_catalog_bulk_actions.py
+tests/test_catalog_bulk_actions_endpoints.py tests/test_inv1_single_authoritative_store.py
+tests/test_inv6_value_freedom.py tests/test_profiling_dag_wiring.py
+tests/test_profiling_exception_policy.py tests/test_connectors.py tests/test_connectors_oracle.py
+tests/test_connectors_snowflake.py tests/test_connectors_bigquery.py`: 240 passed. `ruff check` clean
+on every touched file. `mypy --strict`: 0 new errors (the pre-existing 15 `"object" not callable"`
+Temporal-decorator findings in `activities.py` are present on lines this row's diff never touches,
+confirmed by `git diff`).
+
+Checked and deliberately not committed: `scripts/openapi_diff.py --accept-baseline` produced a 7-line
+diff, but it was the same `ValidationError.ctx`/`.input` pydantic-version drift other rows landed today
+already found and left alone -- confirmed `MetadataColumnRead` isn't even a named component in
+`app.openapi()`'s output at all (`list_columns`'s `CursorPage` response model doesn't register the
+per-item schema class), so this row's own field addition produces no OpenAPI diff whatsoever. Reverted
+the regenerated baseline rather than bake in an unrelated change.
+
+Honest gap: no live Postgres in this sandbox to run the migration for real, same standing limitation as
+every other migration landed on this branch today.

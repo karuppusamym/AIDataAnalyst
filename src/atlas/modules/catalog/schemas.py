@@ -39,6 +39,7 @@ class MetadataColumnRead(ApiModel):
     classification: str
     classification_source: str
     status: str
+    source_description: str | None = None
 
 
 class MetadataConstraintRead(ApiModel):

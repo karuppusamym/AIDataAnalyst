@@ -70,10 +70,13 @@ UNAVAILABLE = "UNAVAILABLE"
 
 AVAILABILITY_STATES = (AVAILABLE, UNAVAILABLE)
 
-#: Object types `MetadataObjectDescription` accepts. `TABLE` is deliberately
-#: absent: `metadata_table.source_description` already owns table comments and is
-#: written by the 1.0 path, and two homes for one fact is how they diverge.
-DESCRIBABLE_OBJECT_TYPES = ("CATALOG", "SCHEMA", "COLUMN")
+#: Object types `MetadataObjectDescription` accepts. `TABLE` and `COLUMN` are
+#: deliberately absent: `metadata_table.source_description` (the 1.0 path) and,
+#: since IN-5e, `metadata_column.source_description` each own their comments
+#: directly, and two homes for one fact is how they diverge. Column comments
+#: lived here only because `models.py` was off-limits to the N1 workstream that
+#: added this table -- IN-5e closed that gap once `models.py` ownership allowed it.
+DESCRIBABLE_OBJECT_TYPES = ("CATALOG", "SCHEMA")
 
 
 class MetadataViewDefinition(Base, TimestampMixin):
@@ -235,11 +238,18 @@ class MetadataRoutineParameter(Base, TimestampMixin):
 class MetadataObjectDescription(Base, TimestampMixin):
     """A description the *source* carries, for an object with nowhere else to put it.
 
-    Catalogs, schemas and columns have no description column in `models.py` and
-    this workstream may not add one, so their comments land here. Exactly one of
-    the three foreign keys is set, enforced by a check constraint rather than by
-    a bare polymorphic `object_id`, so a deleted column takes its description
-    with it instead of leaving a row pointing at nothing.
+    Catalogs and schemas have no description column in `models.py`, so their
+    comments land here. Exactly one of the two foreign keys is set, enforced by
+    a check constraint rather than by a bare polymorphic `object_id`, so a
+    deleted schema takes its description with it instead of leaving a row
+    pointing at nothing.
+
+    IN-5e (2026-09-01): a third foreign key, `column_id`, used to live here for
+    the same off-limits-`models.py` reason `metadata_table.source_description`
+    already didn't apply to columns. That gap has since closed --
+    `metadata_column.source_description` is now a real column, populated by a
+    migration backfill from this table's own `object_type = 'COLUMN'` rows
+    before they were deleted. `COLUMN` is no longer a valid `object_type` here.
 
     Source descriptions are *evidence*, never authority: a steward-authored or
     model-proposed description lives in the enrichment tables and outranks this.
@@ -249,15 +259,13 @@ class MetadataObjectDescription(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("catalog_id"),
         UniqueConstraint("schema_id"),
-        UniqueConstraint("column_id"),
         CheckConstraint(
-            "object_type IN ('CATALOG', 'SCHEMA', 'COLUMN')",
+            "object_type IN ('CATALOG', 'SCHEMA')",
             name="object_type_is_describable",
         ),
         CheckConstraint(
             "(CASE WHEN catalog_id IS NULL THEN 0 ELSE 1 END) "
-            "+ (CASE WHEN schema_id IS NULL THEN 0 ELSE 1 END) "
-            "+ (CASE WHEN column_id IS NULL THEN 0 ELSE 1 END) = 1",
+            "+ (CASE WHEN schema_id IS NULL THEN 0 ELSE 1 END) = 1",
             name="exactly_one_subject",
         ),
         Index("ix_metadata_object_description_org_status", "organization_id", "status"),
@@ -276,9 +284,6 @@ class MetadataObjectDescription(Base, TimestampMixin):
     )
     schema_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("metadata_schema.id", ondelete="CASCADE"), index=True
-    )
-    column_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
     )
     description: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
