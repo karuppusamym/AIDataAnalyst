@@ -8414,3 +8414,115 @@ and `mypy` clean on both touched src files (`mcp_server.py`, `unified_lineage_ap
 `tests/test_unified_lineage.py` (21 passed), `tests/test_mcp_server.py`, `tests/test_view_lineage_api.py`
 all green together; `AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py -q` passes (clean,
 only its usual skips).
+
+---
+
+## 2026-09-01 — UX-7 closed: evidence permalinks and export, permission-aware
+
+### The permalink half was already (mostly) there
+
+UX-13's `GET /v1/metadata/tables/{table_id}/evidence` (`src/aida/asset_evidence_api.py`) was already
+a genuine permalink at the API level: a durable URL keyed only on `table_id`, no request body, no
+session-only state — two independently-authorized callers hitting the same URL get the same
+re-derived (never cached) evidence back, and an unauthorized caller gets the same 403 either way.
+That part needed no new backend work.
+
+The real gap was one layer up, in `ui-next`'s `EvidencePane`/`CatalogScreen`. The pane accepted a
+full `CatalogRowRead` object, sourced as `rows.find(r => r.id === selectedId)` against whatever page
+the catalog grid had currently loaded for the current `q`/`type`/`cert` filters. `?asset=<id>` in the
+URL looked like a shareable permalink, but for any table outside the recipient's current
+filter/page — the overwhelmingly common case for a colleague opening a link cold — `selected` resolved
+to `null` and the pane silently rendered "Select an asset" instead of the evidence. The URL was
+shareable in form only; it did not reliably resolve.
+
+Fix (`ui-next/src/components/EvidencePane.tsx`, `ui-next/src/screens/CatalogScreen.tsx`):
+`EvidencePane` now takes `tableId: string | null` as its actual resolution key — fetched straight
+from `fetchAssetEvidence(tableId)` against the gated endpoint, independent of whether `rows` happens
+to contain a matching row. `row` becomes optional, cosmetic-only progressive enhancement (nicer
+datasource/schema/glossary-term chrome when the grid already has it loaded); the header falls back to
+`evidence.table_name` (already on the wire per `AssetEvidenceRead`) when it doesn't, with an explicit
+"Opened from a permalink" note so the two paths are visually distinguishable. This is the same
+`?asset=` query-string convention UX-11 already established for this SPA (which has no client-side
+router — `App.tsx`'s `view` is component state, not a path) rather than a fabricated
+`/catalog/tables/{id}/evidence` path route with nothing to back it; the fix is that the existing
+convention now actually resolves regardless of load state, which is what "durable, server-resolvable
+permalink" requires of the client, not a new URL shape. A second, pre-existing gap this same change
+fixed: the pane's fetch `.catch` unconditionally set `evidence = null` on any non-abort error,
+including a real 403 — silently indistinguishable from "still loading" or "no evidence." It now
+renders an explicit `role="alert"` denial ("You are not authorized to view this evidence.") on a 403,
+fed straight from the same `ApiError` the gated fetch raises — never a locally-cached or embedded
+bypass, and never a silent empty state a viewer could mistake for "nothing here" rather than "you may
+not see this."
+
+### Export: JSON, not PDF
+
+`GET /v1/metadata/tables/{table_id}/evidence/export`, the new route in `asset_evidence_api.py`,
+follows `context_compiler_api.download_context_compilation`'s (EE.9) established attachment idiom
+verbatim: a `Content-Disposition: attachment; filename="table-{id}-evidence.json"` header and an
+`X-Artifact-SHA256` header over the exact response bytes, so a steward or auditor can verify what they
+attached to a ticket or audit record is what the platform actually composed.
+
+Format is JSON, not PDF: `pyproject.toml` pins no PDF-generation library (no reportlab, weasyprint,
+fpdf2, or xhtml2pdf; `grep -in "pdf"` over it returns nothing) and this row's hard constraint is not
+to add a new dependency when a dependency-free format is an honest deliverable. JSON is that format
+here specifically because it is `AssetEvidenceRead.model_dump_json(indent=2)` — the exact same wire
+shape `GET .../evidence` already returns — serialized with zero intermediate formatting step. A
+Markdown or hand-built PDF rendering would need its own claim-to-text mapping that could silently
+drift from `compose_asset_evidence`'s actual output over time; JSON cannot drift because nothing
+stands between the composed object and the response body.
+
+### The export reuses the SAME gate, not a separate or weaker one
+
+Both routes now share one `_authorize_table_read(table_id, context, session, settings)` helper — the
+literal function object, not a re-implementation — which does the 404 table lookup,
+`enforce_organization`, and the identical `gate(action="READ_METADATA", resource_type="datasource",
+resource_id=str(datasource.id), datasource_id=datasource.id)` call UX-12's `list_catalog_rows` and
+UX-13's live evidence route already use. `export_asset_evidence` then calls
+`compose_asset_evidence(session, table)` — the exact same function `get_asset_evidence` calls, not a
+re-derivation — and serializes whatever it returns.
+
+`tests/test_asset_evidence.py` adds two new sections (17 tests total in the file now, up from 11):
+
+- **Export content fidelity** — `test_export_content_matches_the_live_evidence_endpoints_output`
+  seeds a real open incident, calls both `get_asset_evidence` and `export_asset_evidence` against the
+  same session, and asserts the exported JSON equals the live endpoint's `model_dump_json()` output
+  field-for-field (`generated_at` excluded from comparison since neither call takes a frozen `now`,
+  so two real calls compose at two different instants) — including a non-empty `items` list, so the
+  round-trip is proven on real composed data, not just an empty scaffold. A second test covers the
+  no-evidence case. Both also verify `X-Artifact-SHA256` is the real SHA-256 of the response body.
+- **Permission-awareness, proved not asserted** —
+  `test_export_denies_a_foreign_organization_identically_to_the_live_endpoint` runs both routes
+  against a cross-org context and asserts both 403; more directly,
+  `test_export_and_live_endpoint_are_denied_by_the_same_policy_gate_identically` monkeypatches the
+  *one* `aida.asset_evidence_api.gate` reference both routes import, calls both `get_asset_evidence`
+  and `export_asset_evidence`, and asserts both raise 403 with the identical `"policy_denied"` reason
+  code — proving there is exactly one gate reference in play, not two independently-configured ones
+  that happen to agree today. `test_export_missing_table_is_404` and
+  `test_export_allowed_gate_still_returns_a_downloadable_artifact` round out the shape.
+
+`ui-next/src/components/EvidencePane.test.tsx` (new, 4 tests) proves the client-side half of the same
+"deep-links resolve independent of load state, and denial surfaces" story end to end at the component
+level: idle-with-no-`tableId` calls no fetch; a `tableId` with `row=null` (the deep-link case) still
+fetches by id and renders the evidence, with the "Opened from a permalink" chrome and the header
+sourced from `evidence.table_name`; a `403 ApiError` renders the explicit `role="alert"` denial and
+never the idle "Select an asset" state; and changing `tableId` alone (same `row=null`) re-fetches.
+
+### Verification
+
+`ruff check` clean on `src/aida/asset_evidence_api.py` and `tests/test_asset_evidence.py`.
+`AIDA_ENVIRONMENT=development uv run mypy src`: clean on both touched Python files; the same 44
+pre-existing `"object" not callable"` errors elsewhere (`workflows/activities.py`, `batch_ingestion.py`,
+`workflows/scheduler.py`, `main.py`) are unrelated and unchanged, confirmed by `grep -c` against the
+pre-change baseline. `AIDA_ENVIRONMENT=development uv run pytest tests/test_asset_evidence.py -q`:
+17 passed. A new HTTP route was added (`.../evidence/export`), so `Docs/90-reference/
+openapi-baseline.json` was regenerated via `scripts/openapi_diff.py --accept-baseline` — purely
+additive (one new path, no schema change) — and `tests/test_openapi_diff_gate.py` (25 tests) passes
+against it. `scripts/generate_ui_types.py` reported `ui-next/src/lib/types.ts` already matches (no
+new component schema was introduced; the export route returns a raw `Response`, not a
+`response_model`), so no regeneration was needed there. `cd ui-next && npm run typecheck && npm run
+test && npm run build`: all green — `npm run test` is 19/19 (15 pre-existing + the 4 new
+`EvidencePane.test.tsx` cases). `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py
+-q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. No new Python or npm dependency added.
