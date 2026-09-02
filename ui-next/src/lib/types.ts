@@ -1764,6 +1764,36 @@ export interface DbtProjectRead {
   updated_at: string;
 }
 
+/** One edge from the procedure-aware parser (N3) -- richer than */
+export interface DeepProcedureLineageEdgeRead {
+  source_table: string;
+  source_column: string;
+  target_table: string;
+  target_column: string;
+  transformation_type: string;
+  confidence: string;
+  dialect: string;
+  source_resolved: boolean;
+  statement_ordinal: number;
+  is_write: boolean;
+  is_intermediate: boolean;
+  control_flow_context?: string | null;
+  unparsed_reason?: string | null;
+  via_temp_table?: string | null;
+}
+
+export interface DeepProcedureLineageParseResponse {
+  edges: DeepProcedureLineageEdgeRead[];
+  statement_count: number;
+  confidence: string;
+  dialect: string;
+  sql_hash: string;
+  errors?: string[];
+  is_fully_parsed: boolean;
+  is_read_only: boolean;
+  persisted_edge_count?: number;
+}
+
 export interface DelegationCreate {
   delegate_principal_id: string;
   delegated_roles: string[];
@@ -3208,6 +3238,22 @@ export interface PortfolioUsageRead {
   governed_tool_executions: number;
 }
 
+/** One row of the AT-22 parser capability matrix -- see */
+export interface ProcedureCapabilityConstructRead {
+  construct_name: string;
+  view_parser_status: string;
+  procedure_parser_status: string;
+  evidence: string;
+}
+
+/** AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`, */
+export interface ProcedureCapabilityMatrixRead {
+  generated_at: string;
+  dialects: string[];
+  constructs: ProcedureCapabilityConstructRead[];
+  unparsed_reasons: string[];
+}
+
 export interface ProcedureLineageEdgeRead {
   id: string;
   organization_id: string;
@@ -3226,6 +3272,17 @@ export interface ProcedureLineageEdgeRead {
   sql_hash: string;
   created_at: string;
   updated_at: string;
+}
+
+/** N12: request a deterministically-rendered procedure-to-tool draft. */
+export interface ProcedureToolBlueprintRequest {
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: string;
+  semantic_model_version_id?: string | null;
+  routine_id: string;
+  allowed_roles: string[];
 }
 
 export interface ProfilingExceptionDecisionRequest {

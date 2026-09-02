@@ -67,6 +67,7 @@ from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
     envelope_models,
     graph_store,
     models,
+    procedure_lineage_models,
 )
 from aida.db import Base
 from atlas.platform.config import get_settings

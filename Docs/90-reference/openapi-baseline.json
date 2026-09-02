@@ -10563,6 +10563,163 @@
         "title": "DbtProjectRead",
         "type": "object"
       },
+      "DeepProcedureLineageEdgeRead": {
+        "additionalProperties": false,
+        "description": "One edge from the procedure-aware parser (N3) -- richer than\n`LineageEdgeRead`/`ProcedureLineageEdgeRead`: carries the statement it\ncame from, whether that statement was a write, whether either side is an\nintermediate (temp table/variable) local to the procedure body, and,\nfor a construct the parser could not resolve, the named reason why\n(never a silently dropped statement -- see `aida.procedure_lineage`'s\nmodule docstring).",
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "control_flow_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Control Flow Context"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "is_intermediate": {
+            "title": "Is Intermediate",
+            "type": "boolean"
+          },
+          "is_write": {
+            "title": "Is Write",
+            "type": "boolean"
+          },
+          "source_column": {
+            "title": "Source Column",
+            "type": "string"
+          },
+          "source_resolved": {
+            "title": "Source Resolved",
+            "type": "boolean"
+          },
+          "source_table": {
+            "title": "Source Table",
+            "type": "string"
+          },
+          "statement_ordinal": {
+            "title": "Statement Ordinal",
+            "type": "integer"
+          },
+          "target_column": {
+            "title": "Target Column",
+            "type": "string"
+          },
+          "target_table": {
+            "title": "Target Table",
+            "type": "string"
+          },
+          "transformation_type": {
+            "title": "Transformation Type",
+            "type": "string"
+          },
+          "unparsed_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unparsed Reason"
+          },
+          "via_temp_table": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Via Temp Table"
+          }
+        },
+        "required": [
+          "source_table",
+          "source_column",
+          "target_table",
+          "target_column",
+          "transformation_type",
+          "confidence",
+          "dialect",
+          "source_resolved",
+          "statement_ordinal",
+          "is_write",
+          "is_intermediate"
+        ],
+        "title": "DeepProcedureLineageEdgeRead",
+        "type": "object"
+      },
+      "DeepProcedureLineageParseResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "title": "Confidence",
+            "type": "string"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/DeepProcedureLineageEdgeRead"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "is_fully_parsed": {
+            "title": "Is Fully Parsed",
+            "type": "boolean"
+          },
+          "is_read_only": {
+            "title": "Is Read Only",
+            "type": "boolean"
+          },
+          "persisted_edge_count": {
+            "default": 0,
+            "title": "Persisted Edge Count",
+            "type": "integer"
+          },
+          "sql_hash": {
+            "title": "Sql Hash",
+            "type": "string"
+          },
+          "statement_count": {
+            "title": "Statement Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "edges",
+          "statement_count",
+          "confidence",
+          "dialect",
+          "sql_hash",
+          "is_fully_parsed",
+          "is_read_only"
+        ],
+        "title": "DeepProcedureLineageParseResponse",
+        "type": "object"
+      },
       "DelegationCreate": {
         "additionalProperties": false,
         "properties": {
@@ -19218,6 +19375,75 @@
         "title": "PortfolioUsageRead",
         "type": "object"
       },
+      "ProcedureCapabilityConstructRead": {
+        "additionalProperties": false,
+        "description": "One row of the AT-22 parser capability matrix -- see\n`aida.procedure_capability_matrix`'s module docstring for how every\nfield here is derived from the parsers' own dispatch code, not\nhand-typed. `construct_name`, not `construct` -- the latter shadows\npydantic `BaseModel.construct`.",
+        "properties": {
+          "construct_name": {
+            "title": "Construct Name",
+            "type": "string"
+          },
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "procedure_parser_status": {
+            "title": "Procedure Parser Status",
+            "type": "string"
+          },
+          "view_parser_status": {
+            "title": "View Parser Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "construct_name",
+          "view_parser_status",
+          "procedure_parser_status",
+          "evidence"
+        ],
+        "title": "ProcedureCapabilityConstructRead",
+        "type": "object"
+      },
+      "ProcedureCapabilityMatrixRead": {
+        "additionalProperties": false,
+        "description": "AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`,\ngenerated at request time from `sql_lineage_parser.py`'s and\n`procedure_lineage.py`'s own dispatch code -- the same source\n`scripts/generate_procedure_capability_matrix.py` uses to publish\n`Docs/90-reference/procedure-lineage-capability-matrix.md`, so the\npublished page is verifiably backed by a live, callable source rather\nthan only a one-off script.",
+        "properties": {
+          "constructs": {
+            "items": {
+              "$ref": "#/components/schemas/ProcedureCapabilityConstructRead"
+            },
+            "title": "Constructs",
+            "type": "array"
+          },
+          "dialects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dialects",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "unparsed_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unparsed Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "dialects",
+          "constructs",
+          "unparsed_reasons"
+        ],
+        "title": "ProcedureCapabilityMatrixRead",
+        "type": "object"
+      },
       "ProcedureLineageEdgeRead": {
         "additionalProperties": false,
         "properties": {
@@ -19347,6 +19573,63 @@
           "updated_at"
         ],
         "title": "ProcedureLineageEdgeRead",
+        "type": "object"
+      },
+      "ProcedureToolBlueprintRequest": {
+        "additionalProperties": false,
+        "description": "N12: request a deterministically-rendered procedure-to-tool draft.\nMirrors N11's `ViewToolBlueprintRequest` fields exactly, replacing\n`table_id` with `routine_id` naming the `MetadataRoutine`.",
+        "properties": {
+          "allowed_roles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Roles",
+            "type": "array"
+          },
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "routine_id": {
+            "format": "uuid",
+            "title": "Routine Id",
+            "type": "string"
+          },
+          "semantic_model_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Semantic Model Version Id"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "name",
+          "description",
+          "datasource_id",
+          "routine_id",
+          "allowed_roles"
+        ],
+        "title": "ProcedureToolBlueprintRequest",
         "type": "object"
       },
       "ProfilingExceptionDecisionRequest": {
@@ -42637,6 +42920,310 @@
         "summary": "Parse Procedure Lineage Endpoint",
         "tags": [
           "view-lineage"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/procedures/{routine_id}/lineage": {
+      "get": {
+        "operationId": "list_deep_procedure_lineage_v1_datasources__datasource_id__procedures__routine_id__lineage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "maximum": 2000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeepProcedureLineageEdgeRead"
+                  },
+                  "title": "Response List Deep Procedure Lineage V1 Datasources  Datasource Id  Procedures  Routine Id  Lineage Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Deep Procedure Lineage",
+        "tags": [
+          "procedure-lineage"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/procedures/{routine_id}/lineage/parse": {
+      "post": {
+        "description": "N3: procedure-aware column-level lineage extraction for one captured\n`MetadataRoutine`. Refuses (422) rather than guesses when the routine's\nown body is missing, withheld, unparsed, or quarantined -- see\n`require_eligible_routine_body`. The SQL is never executed.",
+        "operationId": "parse_deep_procedure_lineage_endpoint_v1_datasources__datasource_id__procedures__routine_id__lineage_parse_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeepProcedureLineageParseResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Parse Deep Procedure Lineage Endpoint",
+        "tags": [
+          "procedure-lineage"
         ]
       }
     },
@@ -70257,6 +70844,125 @@
         ]
       }
     },
+    "/v1/procedure-lineage/capability-matrix": {
+      "get": {
+        "description": "AT-22: serve the parser capability matrix live, generated from\n`sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code\nat request time (`aida.procedure_capability_matrix.build_capability_matrix`)\n-- the same source `scripts/generate_procedure_capability_matrix.py`\nuses to publish `Docs/90-reference/procedure-lineage-capability-matrix.md`,\nso that published page is verifiably backed by a live, callable source,\nnot only a one-off script. Not datasource-scoped (dialect/construct\nsupport is a property of the parser code itself, not of any one\ncustomer's data), so no `datasource_id`/tenancy check applies here --\n`context` is still required so an unauthenticated caller cannot reach it.",
+        "operationId": "get_procedure_lineage_capability_matrix_v1_procedure_lineage_capability_matrix_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcedureCapabilityMatrixRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Procedure Lineage Capability Matrix",
+        "tags": [
+          "procedure-lineage"
+        ]
+      }
+    },
     "/v1/profiling-exception-policies/{policy_id}/decision": {
       "post": {
         "operationId": "decide_profiling_exception_policy_v1_profiling_exception_policies__policy_id__decision_post",
@@ -72664,6 +73370,145 @@
         "summary": "Create Semantic Model Version",
         "tags": [
           "semantic-governance"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/tool-blueprints/from-procedure": {
+      "post": {
+        "description": "N12: procedure -> tool (\"tool generator C\"). Eligible ONLY when N3's\nparse *proves* `routine_id` read-only -- fully parsed (zero UNPARSED\nstatements: a construct this parser gave up on is never mistaken for\n\"no write found\"), zero INSERT/UPDATE/DELETE/MERGE/CREATE statements,\nand exactly one terminal result SELECT. Refuses (422) naming the exact\nreason otherwise. See `procedure_tool_blueprint.py`'s module docstring\nfor why the generated SQL is the procedure's own reconstructed result\nstatement (not a fresh query, unlike N11) and why a literal anywhere in\nit also refuses generation outright.",
+        "operationId": "create_procedure_tool_blueprint_v1_projects__project_id__tool_blueprints_from_procedure_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProcedureToolBlueprintRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GovernedToolVersionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Procedure Tool Blueprint",
+        "tags": [
+          "procedure-tool-blueprint"
         ]
       }
     },
