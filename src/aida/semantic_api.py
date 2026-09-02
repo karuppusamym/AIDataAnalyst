@@ -22,6 +22,7 @@ from aida.asset_description_service import (
     apply_asset_description_draft,
     reject_asset_description_draft,
 )
+from aida.classification_propagation import apply_classification_promotion
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -2083,6 +2084,15 @@ async def _apply_governance_review_decision(
             "published_metric_version_id": published_metric_version_id,
             "review_id": str(review.id),
         }
+    elif review.object_type == "COLUMN_CLASSIFICATION_PROMOTION":
+        # AT-11: promoting a lineage-derived classification to the asserted
+        # (policy-enforced) value. The apply function re-checks the raise-only
+        # guard and appends the derived provenance as ClassificationEvidence;
+        # the maker != checker / PENDING-only guards above already ran, so no
+        # derived value reaches assertion without an independent decision.
+        event_type, aggregate_type, aggregate_id, payload = await apply_classification_promotion(
+            session, review, decision=decision, context=context, now=now
+        )
     else:
         raise HTTPException(status_code=422, detail="unsupported governance object type")
     return event_type, aggregate_type, aggregate_id, payload

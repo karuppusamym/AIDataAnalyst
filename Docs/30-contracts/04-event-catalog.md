@@ -88,6 +88,10 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `batch.chunk_received` | Chunk accepted | batch_id, chunk_number, checksum |
 | `batch.finalized` | Manifest sealed and submitted | batch_id, workflow_id |
 | `batch.failed` | Batch failed | batch_id, reason_code, chunks_processed |
+| `metadata.ingestion.batch.paused.v1` | Operator paused a running batch (IN-2) | batch_id, datasource_id, previous_status |
+| `metadata.ingestion.batch.cancelled.v1` | Operator cancelled a non-terminal batch (IN-2) | batch_id, datasource_id, previous_status |
+| `metadata.ingestion.batch.resumed.v1` | Operator resumed a paused batch; fresh run re-queued (IN-2) | batch_id, run_id, datasource_id |
+| `metadata.ingestion.batch.replayed.v1` | Operator replayed a terminal batch; fresh run re-queued (IN-2) | batch_id, run_id, datasource_id |
 | `fleet.admission_rejected` | Source at capacity | datasource_id, queue_depth |
 | `fleet.backpressure_engaged` | Downstream saturation | scope, signal |
 
@@ -111,6 +115,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `profile.completed` | Table profiled | table_id, run_id, statistics_summary |
 | `profile.failed` | Profiling failed | table_id, run_id, reason_code |
 | `classification.assigned` | Column classified | column_id, classification, confidence, rule_version |
+| `classification.derived.promoted.v1` | AT-11: a lineage-derived column classification was promoted to the asserted (policy-enforced) value after an independent review approval | derived_classification_id, column_id, classification, review_id |
+| `classification.derived.promotion_rejected.v1` | AT-11: a reviewer rejected promoting a lineage-derived column classification to the asserted value | derived_classification_id, column_id, classification, review_id |
 | `key.inferred` | Key inferred | table_id, columns, confidence |
 | `composite_key_candidate.decided.v1` | Checker approved or rejected a composite-key candidate | candidate_id, status |
 | `analysis_run.started` / `.completed` / `.cancelled` | Run lifecycle | run_id, scope, counts |
@@ -196,6 +202,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
 | `data_quality.rule_pack.created.v1` | DQ-4: a custom quality rule pack created | datasource_id, name |
 | `data_quality.custom_rule_pack.evaluated.v1` | DQ-4: a rule pack's own-cadence sweep evaluated all its rules | rule_pack_id, datasource_id, rules_evaluated, skipped_no_data, incidents_opened, incidents_resolved |
+| `data_quality.external_signal.ingested.v1` | DQ-8: a third-party detector (Monte Carlo, Anomalo, ...) quality signal was ingested and reconciled into the incident lifecycle | signal_id, datasource_id, table_id, detector_vendor, detector_native_id, severity, signal_status, incident_id, incident_opened, incident_resolved |
 | `contract.violations_detected` | Runtime data contract evaluation found violations | contract_id, violation_count, enforcement_action |
 
 ### Runtime — topic `atlas.execution.v1` (key: `organization_id`)

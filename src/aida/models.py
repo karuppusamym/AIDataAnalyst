@@ -232,6 +232,79 @@ class ClassificationEvidence(Base):
     )
 
 
+class ColumnDerivedClassification(Base):
+    """AT-11: a column's *derived* classification -- one propagated to it along
+    data lineage from a more-sensitive upstream column -- kept in its own table,
+    strictly separate from the *asserted* classification that lives on
+    ``MetadataColumn.classification`` (a steward decision, or an authoritative
+    external feed; see ``aida.classification_feed``).
+
+    The separation is the whole point of the row: for us a classification is an
+    ABAC enforcement input, not a display label, so a value the graph *inferred*
+    must never silently become a value a policy *enforces on*. A derived value
+    only becomes asserted by going through the shared maker-checker review queue
+    (a ``GovernanceReview`` of object type ``COLUMN_CLASSIFICATION_PROMOTION`` --
+    see ``aida.classification_propagation``); nothing else may copy
+    ``classification`` onto the ``MetadataColumn``.
+
+    Evidence is first-class and queryable: ``edge_chain`` is the ordered list of
+    lineage edges the classification travelled (origin -> this column), and
+    ``graph_version`` is the fingerprint of the lineage graph the propagation ran
+    over, so "why is this column derived-PII, and along which edges" is always
+    answerable. Propagation is raise-only and follows only authoritative edge
+    kinds (never inferred ``INFLUENCES`` edges) -- both enforced in
+    ``aida.classification_propagation``, not here.
+
+    ``is_current`` marks the row that reflects the latest propagation pass for a
+    column, mirroring ``ClassificationEvidence``'s append-only ledger shape.
+    """
+
+    __tablename__ = "column_derived_classification"
+    __table_args__ = (
+        Index(
+            "ix_column_derived_classification_column_current", "column_id", "is_current"
+        ),
+        CheckConstraint(
+            "status IN ('DERIVED', 'PROMOTION_PENDING', 'PROMOTED', 'PROMOTION_REJECTED')",
+            name="ck_column_derived_classification_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    # The upstream column whose asserted classification propagated here. SET NULL
+    # rather than CASCADE: losing the origin column must not silently delete the
+    # evidence that a downstream column was raised because of it.
+    origin_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    origin_classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Ordered edges the classification travelled (origin -> this column), each a
+    # value-free descriptor: {source_id, target_id, kind, edge_ref}.
+    edge_chain: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    graph_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DERIVED", nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # The COLUMN_CLASSIFICATION_PROMOTION GovernanceReview that promotes (or
+    # rejected) this derived value. Plain id, no FK: the review lives in a
+    # different module's table and the coupling is deliberately loose.
+    review_id: Mapped[UUID | None] = mapped_column(index=True)
+    promoted_by: Mapped[str | None] = mapped_column(String(255))
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class AnalysisRun(Base, TimestampMixin):
     __tablename__ = "analysis_run"
     __table_args__ = (Index("ix_analysis_run_org_status", "organization_id", "status"),)
@@ -675,6 +748,12 @@ class DataQualityIncident(Base, TimestampMixin):
     anomaly_type: Mapped[str] = mapped_column(String(50), nullable=False)
     severity: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="OPEN", nullable=False)
+    # DQ-8: origin discriminator. "INTERNAL" for Atlas's own deterministic
+    # detectors (volume/null-rate/schema, custom rule packs, dbt bridge);
+    # "EXTERNAL" for incidents reconciled from a third-party detector signal
+    # (Monte Carlo, Anomalo, ...) via the external-signal ingest endpoint, so
+    # externally-sourced and internally-computed signals are never conflated.
+    source: Mapped[str] = mapped_column(String(30), default="INTERNAL", nullable=False)
     summary: Mapped[str] = mapped_column(String(500), nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -3713,6 +3792,70 @@ class FreshnessObservation(Base):
     )
     watermark_value: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
+class ExternalQualitySignal(Base):
+    """DQ-8: an immutable, normalized quality signal ingested from a third-party
+    detector (Monte Carlo, Anomalo, ...).
+
+    Atlas deliberately does not compete on detection science (module 11 §4); this
+    is the "open framework" seam that lets best-of-breed detectors feed the same
+    incident lifecycle Atlas's own controls use, while staying *distinguishable*
+    from internally-computed signals -- both by living in this dedicated table and
+    by the ``DataQualityIncident.source == "EXTERNAL"`` marker the reconciliation
+    stamps on the incident it opens/reopens/resolves.
+
+    Value-free (INV-6/ADR-0014): this row stores only detector metadata, refs and
+    a normalized severity/state -- never source row values. ``details`` is an
+    opaque, caller-supplied metadata blob and is validated at the API boundary to
+    carry no raw business values.
+
+    Idempotent on ``(organization_id, detector_vendor, detector_native_id,
+    observed_at)``: re-delivering the same detector event (at-least-once webhooks)
+    returns the already-stored signal instead of duplicating it or re-opening the
+    incident a second time.
+    """
+
+    __tablename__ = "external_quality_signal"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "detector_vendor",
+            "detector_native_id",
+            "observed_at",
+            name="uq_external_quality_signal_dedup",
+        ),
+        Index("ix_external_quality_signal_source_created", "datasource_id", "created_at"),
+        Index("ix_external_quality_signal_org_vendor", "organization_id", "detector_vendor"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
+    )
+    incident_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_quality_incident.id", ondelete="SET NULL"), index=True
+    )
+    detector_vendor: Mapped[str] = mapped_column(String(50), nullable=False)
+    detector_native_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(30), nullable=False)
+    signal_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
 

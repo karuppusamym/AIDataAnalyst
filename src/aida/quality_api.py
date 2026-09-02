@@ -10,6 +10,7 @@ from aida.custom_quality_rules import evaluate_rule_pack
 from aida.data_quality import DEFAULT_POLICY
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.external_quality_signals import ingest_external_signal
 from aida.freshness import WatermarkConfig, evaluate_freshness
 from aida.models import (
     AnalysisRun,
@@ -17,6 +18,7 @@ from aida.models import (
     DataQualityObservation,
     DataQualityPolicy,
     DataSource,
+    ExternalQualitySignal,
     FreshnessObservation,
     FreshnessWatermarkConfig,
     MetadataColumn,
@@ -32,6 +34,9 @@ from aida.schemas import (
     DataQualityPolicyRead,
     DataQualityPolicyUpsert,
     DataQualitySummaryRead,
+    ExternalQualitySignalIngest,
+    ExternalQualitySignalIngestResult,
+    ExternalQualitySignalRead,
     FreshnessConfigRead,
     FreshnessConfigUpsert,
     FreshnessStatusRead,
@@ -860,3 +865,92 @@ async def evaluate_rule_pack_now(
     )
     await session.commit()
     return {"rule_pack_id": str(rule_pack.id), **counts}
+
+
+# --- DQ-8: open framework for third-party detector signals ----------------------
+
+
+@router.post(
+    "/datasources/{datasource_id}/quality/external-signals",
+    response_model=ExternalQualitySignalIngestResult,
+    status_code=201,
+)
+async def ingest_external_quality_signal(
+    datasource_id: UUID,
+    body: ExternalQualitySignalIngest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward", "Operations")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> ExternalQualitySignalIngestResult:
+    """Ingest a normalized quality signal from a third-party detector
+    (Monte Carlo, Anomalo, ...) and reconcile it into the durable incident
+    lifecycle, kept distinguishable from internally-computed signals
+    (``source="EXTERNAL"``). Idempotent on (vendor, native id, observed_at)."""
+    source = await _source(session, context, datasource_id)
+    table = await session.get(MetadataTable, body.table_id)
+    if table is None or table.datasource_id != source.id:
+        raise HTTPException(status_code=422, detail="table is not part of this datasource")
+    if body.column_id is not None:
+        column = await session.get(MetadataColumn, body.column_id)
+        if column is None or column.table_id != body.table_id:
+            raise HTTPException(status_code=422, detail="column is not part of the given table")
+    outcome = await ingest_external_signal(
+        session,
+        organization_id=source.organization_id,
+        datasource_id=source.id,
+        envelope=body,
+        context=context,
+    )
+    await session.commit()
+    await session.refresh(outcome.signal)
+    return ExternalQualitySignalIngestResult(
+        signal=ExternalQualitySignalRead.model_validate(outcome.signal),
+        deduplicated=outcome.deduplicated,
+        incident_opened=outcome.incident_opened,
+        incident_resolved=outcome.incident_resolved,
+    )
+
+
+@router.get(
+    "/datasources/{datasource_id}/quality/external-signals",
+    response_model=Page,
+)
+async def list_external_quality_signals(
+    datasource_id: UUID,
+    detector_vendor: str | None = Query(default=None, max_length=50),
+    table_id: UUID | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    await _source(session, context, datasource_id)
+    filters = [ExternalQualitySignal.datasource_id == datasource_id]
+    if detector_vendor:
+        normalized_vendor = "_".join(detector_vendor.strip().upper().split())
+        filters.append(ExternalQualitySignal.detector_vendor == normalized_vendor)
+    if table_id:
+        filters.append(ExternalQualitySignal.table_id == table_id)
+    total = await session.scalar(
+        select(func.count()).select_from(ExternalQualitySignal).where(*filters)
+    )
+    rows = (
+        await session.scalars(
+            select(ExternalQualitySignal)
+            .where(*filters)
+            .order_by(ExternalQualitySignal.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[ExternalQualitySignalRead.model_validate(row) for row in rows],
+        limit=limit,
+        offset=offset,
+        total=total or 0,
+    )
