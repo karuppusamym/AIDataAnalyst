@@ -1,6 +1,9 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  BusinessMapEdgeRead,
+  BusinessMapNodeRead,
+  BusinessMapRead,
   DataSourceRead,
   EvidenceItemRead,
   GovernanceDecisionRequest,
@@ -9,6 +12,7 @@ import type {
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
+  MetadataBusinessAnnotationRead,
   ReviewQueueProposalRead,
   ReviewQueueRead,
   StudioChangeItemRead,
@@ -27,6 +31,8 @@ import type {
   QualityState,
 } from "./ui-types";
 import type {
+  BusinessAnnotationsQuery,
+  BusinessMapQuery,
   CatalogQuery,
   LineageImpactQuery,
   MarketplaceQuery,
@@ -832,5 +838,274 @@ export async function makeFixtureLineageImpact(
     node_limit: _query.nodeLimit ?? 200,
     upstream_truncated: false,
     downstream_truncated: false,
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16 fixtures — Business meaning. Same standing as everything above: a
+   stand-in for `npm run dev`/`npm run test` with no backend running, shaped
+   exactly like `list_business_annotations`/`get_table_business_annotation`/
+   `get_business_map` (`semantic_intelligence_api.py`) really return. All
+   eight rows live under the one fixture datasource (`ds_snowflake_prod`,
+   above); a couple of table ids (`t_orders_raw`, `t_revenue_agg`) are shared
+   with the lineage-impact fixture on purpose, so a table's business meaning
+   and its lineage tell one consistent fixture-mode story rather than two
+   unrelated ones.
+--------------------------------------------------------------------------- */
+
+const BIZ_ORG = "00000000-0000-0000-0000-000000000001";
+const BIZ_DS = "ds_snowflake_prod";
+
+const BIZ_DOMAINS = {
+  fin: { id: "dom_fin", key: "finance", name: "Finance" },
+  risk: { id: "dom_risk", key: "risk", name: "Risk" },
+  retail: { id: "dom_retail", key: "retail", name: "Retail" },
+} as const;
+
+const BIZ_ENTITIES = {
+  fin_customer: { id: "ent_fin_customer", key: "customer", name: "Customer", domain: BIZ_DOMAINS.fin },
+  fin_account: { id: "ent_fin_account", key: "account", name: "Account", domain: BIZ_DOMAINS.fin },
+  fin_transaction: { id: "ent_fin_transaction", key: "transaction", name: "Transaction", domain: BIZ_DOMAINS.fin },
+  risk_exposure: { id: "ent_risk_exposure", key: "exposure", name: "Counterparty Exposure", domain: BIZ_DOMAINS.risk },
+  risk_limit: { id: "ent_risk_limit", key: "limit", name: "Credit Limit", domain: BIZ_DOMAINS.risk },
+  retail_order: { id: "ent_retail_order", key: "order", name: "Order", domain: BIZ_DOMAINS.retail },
+} as const;
+
+function bizAnnotation(
+  tableId: string,
+  schemaName: string,
+  tableName: string,
+  entity: (typeof BIZ_ENTITIES)[keyof typeof BIZ_ENTITIES],
+  fields: Pick<
+    MetadataBusinessAnnotationRead,
+    | "business_name"
+    | "business_description"
+    | "table_role"
+    | "grain_statement"
+    | "synonyms"
+    | "suggested_questions"
+    | "tags"
+    | "confidence"
+    | "approved_by"
+    | "approved_at"
+  >,
+): MetadataBusinessAnnotationRead {
+  return {
+    id: `ann_${tableId}`,
+    organization_id: BIZ_ORG,
+    datasource_id: BIZ_DS,
+    table_id: tableId,
+    schema_name: schemaName,
+    table_name: tableName,
+    domain_id: entity.domain.id,
+    domain_key: entity.domain.key,
+    domain_name: entity.domain.name,
+    entity_id: entity.id,
+    entity_key: entity.key,
+    entity_name: entity.name,
+    source_proposal_id: `prop_${tableId}`,
+    version: 1,
+    created_at: "2026-08-01T00:00:00Z",
+    updated_at: fields.approved_at,
+    ...fields,
+  };
+}
+
+const BUSINESS_ANNOTATION_FIXTURES: MetadataBusinessAnnotationRead[] = [
+  bizAnnotation("t_customer_dim", "core", "customer_dim", BIZ_ENTITIES.fin_customer, {
+    business_name: "Customer",
+    business_description: "One row per customer the organization has a banking relationship with.",
+    table_role: "DIMENSION",
+    grain_statement: "One row per customer_id.",
+    synonyms: ["client", "account holder"],
+    suggested_questions: ["How many active customers do we have?", "Which customers opened an account this quarter?"],
+    tags: ["pii", "core"],
+    confidence: 0.93,
+    approved_by: "priya@tenant.example",
+    approved_at: "2026-08-14T00:00:00Z",
+  }),
+  bizAnnotation("t_account_dim", "core", "account_dim", BIZ_ENTITIES.fin_account, {
+    business_name: "Account",
+    business_description: "One row per open or closed deposit account.",
+    table_role: "DIMENSION",
+    grain_statement: "One row per account_id.",
+    synonyms: ["deposit account"],
+    suggested_questions: ["How many accounts were closed last month?"],
+    tags: ["core"],
+    confidence: 0.9,
+    approved_by: "priya@tenant.example",
+    approved_at: "2026-08-14T00:00:00Z",
+  }),
+  bizAnnotation("t_transaction_fact", "mart", "transaction_fact", BIZ_ENTITIES.fin_transaction, {
+    business_name: "Transaction",
+    business_description: "One row per posted ledger transaction, debit or credit.",
+    table_role: "FACT",
+    grain_statement: "One row per transaction_id.",
+    synonyms: ["posting", "ledger entry"],
+    suggested_questions: ["What is the average transaction value by product?"],
+    tags: ["core", "finance"],
+    confidence: 0.88,
+    approved_by: "priya@tenant.example",
+    approved_at: "2026-08-15T00:00:00Z",
+  }),
+  bizAnnotation("t_revenue_agg", "mart", "revenue_agg", BIZ_ENTITIES.fin_transaction, {
+    business_name: "Net revenue, daily",
+    business_description: "Net revenue aggregated per line of business per day, intercompany transfers excluded.",
+    table_role: "FACT_AGGREGATE",
+    grain_statement: "One row per line_of_business per day.",
+    synonyms: ["daily revenue", "topline"],
+    suggested_questions: ["What was net revenue for Retail last quarter?"],
+    tags: ["finance", "certified"],
+    confidence: 0.95,
+    approved_by: "priya@tenant.example",
+    approved_at: "2026-08-20T00:00:00Z",
+  }),
+  bizAnnotation("t_exposure_snapshot", "risk", "exposure_snapshot", BIZ_ENTITIES.risk_exposure, {
+    business_name: "Counterparty exposure",
+    business_description: "Daily snapshot of exposure at default per counterparty.",
+    table_role: "FACT_SNAPSHOT",
+    grain_statement: "One row per counterparty_id per snapshot_date.",
+    synonyms: ["exposure at default", "EAD"],
+    suggested_questions: ["Which counterparties exceed their credit limit today?"],
+    tags: ["risk", "restricted"],
+    confidence: 0.91,
+    approved_by: "risk-lead@tenant.example",
+    approved_at: "2026-08-18T00:00:00Z",
+  }),
+  bizAnnotation("t_limit_dim", "risk", "limit_dim", BIZ_ENTITIES.risk_limit, {
+    business_name: "Credit limit",
+    business_description: "One row per credit limit assigned to a counterparty, current and historical.",
+    table_role: "DIMENSION",
+    grain_statement: "One row per limit_id.",
+    synonyms: ["credit line"],
+    suggested_questions: ["Which counterparties had their limit reduced this month?"],
+    tags: ["risk"],
+    confidence: 0.86,
+    approved_by: "risk-lead@tenant.example",
+    approved_at: "2026-08-18T00:00:00Z",
+  }),
+  bizAnnotation("t_orders_raw", "raw", "orders_raw", BIZ_ENTITIES.retail_order, {
+    business_name: "Order",
+    business_description: "One row per customer order as captured at checkout, before fulfillment.",
+    table_role: "FACT",
+    grain_statement: "One row per order_id.",
+    synonyms: ["purchase", "checkout"],
+    suggested_questions: ["How many orders were placed yesterday?"],
+    tags: ["retail"],
+    confidence: 0.82,
+    approved_by: "retail-owner@tenant.example",
+    approved_at: "2026-08-19T00:00:00Z",
+  }),
+  bizAnnotation("t_customer360", "mart", "customer_360", BIZ_ENTITIES.retail_order, {
+    business_name: "Customer 360 (retail)",
+    business_description: "Curated, order-centric view of a retail customer's activity across channels.",
+    table_role: "MART",
+    grain_statement: "One row per customer_id.",
+    synonyms: ["customer profile"],
+    suggested_questions: ["Which customers have the highest lifetime order value?"],
+    tags: ["retail", "certified"],
+    confidence: 0.89,
+    approved_by: "retail-owner@tenant.example",
+    approved_at: "2026-08-21T00:00:00Z",
+  }),
+];
+
+function matchesBusinessAnnotationQuery(
+  a: MetadataBusinessAnnotationRead,
+  datasourceId: string,
+): boolean {
+  return a.datasource_id === datasourceId;
+}
+
+/** `GET /v1/datasources/{id}/business-annotations`. Offset/limit paged, no
+ *  server-side free-text filter -- mirrors the real route's own contract
+ *  exactly (see this function's twin in `api.ts`). */
+export async function makeFixtureBusinessAnnotations(
+  query: BusinessAnnotationsQuery,
+): Promise<PageOf<MetadataBusinessAnnotationRead>> {
+  await wait(90);
+  const items = BUSINESS_ANNOTATION_FIXTURES.filter((a) =>
+    matchesBusinessAnnotationQuery(a, query.datasourceId),
+  );
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `GET /v1/metadata/tables/{table_id}/business-annotation`. Resolves by
+ *  table id alone -- same permalink contract as the real endpoint, and as
+ *  `makeFixtureEvidence` gives `fetchAssetEvidence`. Throws (never returns
+ *  `null`) for an unknown table id, matching the real endpoint's 404. */
+export async function makeFixtureTableBusinessAnnotation(
+  tableId: string,
+): Promise<MetadataBusinessAnnotationRead> {
+  await wait(70);
+  const found = BUSINESS_ANNOTATION_FIXTURES.find((a) => a.table_id === tableId);
+  if (!found) throw new Error("approved business annotation not found");
+  return found;
+}
+
+/** `GET /v1/organizations/{id}/business-map`. Builds the same domain/entity/
+ *  table node-and-edge shape `get_business_map` computes from the real
+ *  `MetadataBusinessAnnotation` + `MetadataConstraint` rows -- including one
+ *  real-shaped cross-domain edge (risk's exposure snapshot references fin's
+ *  account dimension), the same kind of edge the real endpoint derives from
+ *  an actual foreign key that crosses a `BusinessDomain` boundary. */
+export async function makeFixtureBusinessMap(_query: BusinessMapQuery): Promise<BusinessMapRead> {
+  await wait(100);
+  const nodes = new Map<string, BusinessMapNodeRead>();
+  const edges = new Map<string, BusinessMapEdgeRead>();
+
+  for (const a of BUSINESS_ANNOTATION_FIXTURES) {
+    const domainNode = `domain:${a.domain_id}`;
+    const entityNode = `entity:${a.entity_id}`;
+    const tableNode = `table:${a.table_id}`;
+    nodes.set(domainNode, {
+      id: domainNode, node_type: "DOMAIN", label: a.domain_name, parent_id: null,
+      metadata: { domain_key: a.domain_key },
+    });
+    nodes.set(entityNode, {
+      id: entityNode, node_type: "ENTITY", label: a.entity_name, parent_id: domainNode,
+      metadata: { entity_key: a.entity_key },
+    });
+    nodes.set(tableNode, {
+      id: tableNode, node_type: "TABLE", label: `${a.schema_name}.${a.table_name}`, parent_id: entityNode,
+      metadata: { datasource_id: a.datasource_id, table_role: a.table_role, grain: a.grain_statement },
+    });
+    edges.set(`contains:${a.domain_id}:${a.entity_id}`, {
+      id: `contains:${a.domain_id}:${a.entity_id}`, edge_type: "DOMAIN_CONTAINS_ENTITY",
+      source_node_id: domainNode, target_node_id: entityNode, evidence: { status: "APPROVED" },
+    });
+    edges.set(`represents:${a.entity_id}:${a.table_id}`, {
+      id: `represents:${a.entity_id}:${a.table_id}`, edge_type: "ENTITY_REPRESENTED_BY_TABLE",
+      source_node_id: entityNode, target_node_id: tableNode, evidence: { annotation_version: a.version },
+    });
+  }
+
+  edges.set("cross-domain:fk_exposure_account", {
+    id: "cross-domain:fk_exposure_account",
+    edge_type: "CROSS_DOMAIN_FOREIGN_KEY",
+    source_node_id: "table:t_exposure_snapshot",
+    target_node_id: "table:t_account_dim",
+    evidence: {
+      constraint_id: "fk_exposure_account",
+      source_domain: BIZ_DOMAINS.risk.key,
+      target_domain: BIZ_DOMAINS.fin.key,
+      source_columns: ["account_id"],
+      target_columns: ["account_id"],
+    },
+  });
+
+  const nodeValues = [...nodes.values()];
+  const edgeValues = [...edges.values()];
+  return {
+    organization_id: BIZ_ORG,
+    nodes: nodeValues,
+    edges: edgeValues,
+    domain_count: nodeValues.filter((n) => n.node_type === "DOMAIN").length,
+    entity_count: nodeValues.filter((n) => n.node_type === "ENTITY").length,
+    table_count: nodeValues.filter((n) => n.node_type === "TABLE").length,
+    cross_domain_edge_count: edgeValues.filter((e) => e.edge_type === "CROSS_DOMAIN_FOREIGN_KEY").length,
+    truncated: false,
   };
 }

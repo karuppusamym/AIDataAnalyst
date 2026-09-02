@@ -1,12 +1,14 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  BusinessMapRead,
   DataSourceRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
+  MetadataBusinessAnnotationRead,
   ReviewQueueRead,
   StudioChangeItemRead,
   StudioChangeSetRead,
@@ -22,6 +24,8 @@ import type {
   PageOf,
 } from "./ui-types";
 import {
+  makeFixtureBusinessAnnotations,
+  makeFixtureBusinessMap,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
@@ -38,6 +42,7 @@ import {
   makeFixtureStudioDiff,
   makeFixtureStudioImpact,
   makeFixtureSubmitStudioChangeSet,
+  makeFixtureTableBusinessAnnotation,
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -427,6 +432,88 @@ export async function fetchLineageImpact(
   params.set("node_limit", String(query.nodeLimit ?? 200));
   return get<UnifiedLineageImpactRead>(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Business meaning — datasource-scoped browse of approved business
+   annotations, plus an org-wide taxonomy view (business-map).
+
+   Both real, already-merged routes (`semantic_intelligence_api.py`):
+     - `list_business_annotations` joins `MetadataBusinessAnnotation` to its
+       current (AT-6, append-only-versioned) `MetadataBusinessAnnotationVersion`
+       plus table/schema/domain/entity — the per-datasource browse this
+       screen's list is built on.
+     - `get_table_business_annotation` resolves the same shape by `table_id`
+       alone, decoupled from any particular loaded page — the evidence pane's
+       actual permalink target, the same role `fetchAssetEvidence` plays for
+       `EvidencePane`.
+     - `get_business_map` is the org-wide domain/entity/table graph, a real
+       traversal (cross-domain edges come from actual `MetadataConstraint`
+       foreign keys, not invented) — the "supporting view" tab.
+--------------------------------------------------------------------------- */
+
+export interface BusinessAnnotationsQuery {
+  datasourceId: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{id}/business-annotations`. Declares
+ *  `response_model=Page` un-parameterized (see `ui-types.ts`'s `PageOf`
+ *  banner) -- offset/limit paged like the route itself (no cursor, and no
+ *  server-side free-text filter: the route takes only `limit`/`offset`, so
+ *  `BusinessMeaningScreen` filters its already-loaded page client-side). */
+export async function fetchBusinessAnnotations(
+  query: BusinessAnnotationsQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<MetadataBusinessAnnotationRead>> {
+  if (USE_FIXTURES) return makeFixtureBusinessAnnotations(query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<MetadataBusinessAnnotationRead>>(
+    `/v1/datasources/${query.datasourceId}/business-annotations?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/metadata/tables/{table_id}/business-annotation` — resolves by
+ *  table id alone, exactly like `fetchAssetEvidence` does for `EvidencePane`:
+ *  a durable permalink target that does not depend on the caller's current
+ *  datasource filter or loaded page happening to contain this table. 404s
+ *  when the table has no *approved* annotation (`MetadataBusinessAnnotation`
+ *  content is append-only versioned per AT-6; this always resolves the
+ *  current version). */
+export async function fetchTableBusinessAnnotation(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<MetadataBusinessAnnotationRead> {
+  if (USE_FIXTURES) return makeFixtureTableBusinessAnnotation(tableId);
+  return get<MetadataBusinessAnnotationRead>(
+    `/v1/metadata/tables/${tableId}/business-annotation`,
+    signal,
+  );
+}
+
+export interface BusinessMapQuery {
+  organizationId: string;
+  limit?: number;
+}
+
+/** `GET /v1/organizations/{id}/business-map` — the secondary, org-wide tab:
+ *  every approved domain/entity/table node plus real cross-domain foreign-key
+ *  edges (`MetadataConstraint`), not a per-datasource slice. */
+export async function fetchBusinessMap(
+  query: BusinessMapQuery,
+  signal?: AbortSignal,
+): Promise<BusinessMapRead> {
+  if (USE_FIXTURES) return makeFixtureBusinessMap(query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 500));
+  return get<BusinessMapRead>(
+    `/v1/organizations/${query.organizationId}/business-map?${params}`,
     signal,
   );
 }
