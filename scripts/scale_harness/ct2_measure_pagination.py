@@ -197,7 +197,15 @@ def _context(org_id: UUID) -> SecurityContext:
 
 
 async def _measure_list_tables(
-    session, *, datasource: DataSource, context: SecurityContext, settings, page_size: int, depths: list[int], window: int, offset_repeats: int
+    session,
+    *,
+    datasource: DataSource,
+    context: SecurityContext,
+    settings,
+    page_size: int,
+    depths: list[int],
+    window: int,
+    offset_repeats: int,
 ) -> list[DepthResult]:
     max_depth = max(depths)
     hops: list[HopTiming] = []
@@ -218,7 +226,9 @@ async def _measure_list_tables(
             settings=settings,
         )
         elapsed_ms = (time.perf_counter() - started) * 1000
-        hops.append(HopTiming(page_number=page_number, elapsed_ms=elapsed_ms, row_count=len(page.items)))
+        hops.append(
+            HopTiming(page_number=page_number, elapsed_ms=elapsed_ms, row_count=len(page.items))
+        )
         if page_number in depths or page_number % 5_000 == 0:
             print(f"  page {page_number:>7}: {elapsed_ms:8.2f} ms ({len(page.items)} rows)")
         if page.next_cursor is None:
@@ -375,7 +385,7 @@ async def _run(args: argparse.Namespace) -> None:
             ],
             "list_columns": column_result,
         }
-        with open(args.json_out, "w", encoding="utf-8") as fh:
+        with open(args.json_out, "w", encoding="utf-8") as fh:  # noqa: ASYNC230
             json.dump(payload, fh, indent=2)
         print(f"\nraw results written to {args.json_out}")
 
