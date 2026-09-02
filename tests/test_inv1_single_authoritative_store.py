@@ -161,19 +161,26 @@ def test_request_path_graph_access_is_read_only_and_closed() -> None:
 
     The list is closed rather than pattern-matched so that a new module reaching
     into Neo4j is a reviewable change. Every entry degrades to (or is checked
-    against) the authoritative store by design: `api.get_graph_summary` reconciles
-    the graph's counts against PostgreSQL before returning them,
-    `lineage_graph_store.read_bounded_impact` returns `None` on any graph failure
-    so the caller recomputes from PostgreSQL, and `graph_reconciliation` (KG-7) is
-    not request-path at all -- it is the scheduled job that reads Neo4j purely to
-    diff it against what PostgreSQL says should be there and alert on the
-    difference; PostgreSQL's selection is never overridden by what it finds.
+    against) the authoritative store by design: `graph_store.Neo4jGraphStore`
+    (C7 / ADR-0020's 2026-08-30 amendment, Group J) is the one place both
+    `api.get_graph_summary` (reconciled against PostgreSQL counts in the same
+    handler) and `unified_lineage_api.build_unified_lineage_impact_payload`
+    (falls through to a PostgreSQL traversal on any graph miss or failure) now
+    read Neo4j through -- previously inline in `api.py` and
+    `lineage_graph_store.py` respectively, moved so every Cypher statement on
+    the request-path read surface lives in one auditable module. And
+    `graph_reconciliation` (KG-7) is not request-path at all -- it is the
+    scheduled job that reads Neo4j purely to diff it against what PostgreSQL
+    says should be there and alert on the difference; PostgreSQL's selection
+    is never overridden by what it finds.
     """
     permitted_readers = {
-        "api.py": "graph summary, reconciled against PostgreSQL counts in the same handler",
-        "lineage_graph_store.py": (
-            "bounded lineage impact; returns None on any graph error so PostgreSQL "
-            "remains the fallback authority"
+        "graph_store.py": (
+            "the graph-store port's neo4j adapter (C7 / ADR-0020 amendment): "
+            "lineage impact falls through to a PostgreSQL traversal on any "
+            "miss (aida.unified_lineage_api.build_unified_lineage_impact_payload), "
+            "and graph summary is reconciled against PostgreSQL counts in the "
+            "same handler (aida.api.get_graph_summary)"
         ),
         "graph_reconciliation.py": (
             "KG-7 scheduled drift reconciliation; reads Neo4j only to diff it "
