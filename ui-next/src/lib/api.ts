@@ -1,13 +1,17 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  ConsumerFooterRead,
   DataSourceRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
+  ProjectRead,
   ReviewQueueRead,
+  SemanticMetricVersionRead,
+  SemanticModelVersionRead,
   StudioChangeItemRead,
   StudioChangeSetRead,
   StudioDiffRead,
@@ -30,9 +34,14 @@ import {
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
+  makeFixtureOrgProjects,
   makeFixtureRefusals,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
+  makeFixtureSemanticMetricConsumers,
+  makeFixtureSemanticMetricVersions,
+  makeFixtureSemanticModelConsumers,
+  makeFixtureSemanticModelVersions,
   makeFixtureStudioChangeSetItems,
   makeFixtureStudioChangeSets,
   makeFixtureStudioDiff,
@@ -427,6 +436,98 @@ export async function fetchLineageImpact(
   params.set("node_limit", String(query.nodeLimit ?? 200));
   return get<UnifiedLineageImpactRead>(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Semantics (UX-15/UX-16, `semantics` nav id) — `SemanticsScreen`'s own
+   endpoints. See that screen's file-top comment for the honest scope: there
+   is no org-wide "browse every published semantic model" endpoint, so this
+   is a project picker (`fetchOrgProjects`, the real
+   `GET /v1/organizations/{id}/projects`) feeding project-scoped model/metric
+   lists — the same composition shape `fetchOrgDatasources` above already
+   uses to bridge a display name to an id `unified-lineage` needs.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{id}/projects` (`operational_api.py::list_organization_projects`)
+ *  — real, already-merged, and NOT the org-wide semantic-model browse this
+ *  screen would ideally have; it lists projects so a project can be picked,
+ *  one call away from the project-scoped semantic-model-versions list below. */
+export async function fetchOrgProjects(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<ProjectRead>> {
+  if (USE_FIXTURES) return makeFixtureOrgProjects();
+  return get<PageOf<ProjectRead>>(
+    `/v1/organizations/${organizationId}/projects?limit=500`,
+    signal,
+  );
+}
+
+export interface SemanticPageQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/projects/{id}/semantic-model-versions` (`semantic_api.py::list_semantic_model_versions`)
+ *  — project-scoped, not org-wide (see this file's Semantics banner comment). */
+export async function fetchSemanticModelVersions(
+  projectId: string,
+  opts: SemanticPageQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<SemanticModelVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureSemanticModelVersions(projectId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<SemanticModelVersionRead>>(
+    `/v1/projects/${projectId}/semantic-model-versions?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-model-versions/{id}/metrics` (`semantic_api.py::list_metric_versions`)
+ *  — every metric version defined on one semantic model version. */
+export async function fetchSemanticMetricVersions(
+  modelVersionId: string,
+  opts: SemanticPageQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<SemanticMetricVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureSemanticMetricVersions(modelVersionId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<SemanticMetricVersionRead>>(
+    `/v1/semantic-model-versions/${modelVersionId}/metrics?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-model-versions/{id}/consumers` (UX-18, `semantic_api.py::
+ *  get_semantic_model_version_consumers`) — who/what currently consumes this
+ *  exact model version, from CX-4 consumption lineage. */
+export async function fetchSemanticModelConsumers(
+  modelVersionId: string,
+  signal?: AbortSignal,
+): Promise<ConsumerFooterRead> {
+  if (USE_FIXTURES) return makeFixtureSemanticModelConsumers(modelVersionId);
+  return get<ConsumerFooterRead>(
+    `/v1/semantic-model-versions/${modelVersionId}/consumers`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-metric-versions/{id}/consumers` (UX-18, `semantic_api.py::
+ *  get_semantic_metric_version_consumers`) — same composition as the model
+ *  consumer footer above, scoped to one metric version. */
+export async function fetchSemanticMetricConsumers(
+  metricVersionId: string,
+  signal?: AbortSignal,
+): Promise<ConsumerFooterRead> {
+  if (USE_FIXTURES) return makeFixtureSemanticMetricConsumers(metricVersionId);
+  return get<ConsumerFooterRead>(
+    `/v1/semantic-metric-versions/${metricVersionId}/consumers`,
     signal,
   );
 }

@@ -1,6 +1,7 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  ConsumerFooterRead,
   DataSourceRead,
   EvidenceItemRead,
   GovernanceDecisionRequest,
@@ -9,8 +10,11 @@ import type {
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
+  ProjectRead,
   ReviewQueueProposalRead,
   ReviewQueueRead,
+  SemanticMetricVersionRead,
+  SemanticModelVersionRead,
   StudioChangeItemRead,
   StudioChangeSetRead,
   StudioDiffRead,
@@ -31,6 +35,7 @@ import type {
   LineageImpactQuery,
   MarketplaceQuery,
   ReviewQueueQuery,
+  SemanticPageQuery,
   StudioChangeSetQuery,
 } from "./api";
 
@@ -833,4 +838,203 @@ export async function makeFixtureLineageImpact(
     upstream_truncated: false,
     downstream_truncated: false,
   };
+}
+
+/* ---------------------------------------------------------------------------
+   Semantics (UX-15/UX-16) — project picker -> project-scoped semantic model
+   versions -> their metric versions -> UX-18's consumer footer. `proj_core`
+   below shares its id with `FIXTURE_DATASOURCES[0].project_id` above so the
+   two fixture worlds agree with each other, the same way the real project id
+   would tie a datasource and a semantic model together in production.
+--------------------------------------------------------------------------- */
+
+const FIXTURE_PROJECTS: ProjectRead[] = [
+  {
+    id: "proj_core", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_fin", data_domain_id: "dom_fin",
+    name: "Core Finance", slug: "core-finance", status: "ACTIVE",
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
+  },
+  {
+    id: "proj_retail", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_retail", data_domain_id: "dom_retail",
+    name: "Retail Analytics", slug: "retail-analytics", status: "ACTIVE",
+    created_at: "2026-02-01T00:00:00Z", updated_at: "2026-08-15T00:00:00Z",
+  },
+];
+
+const FIXTURE_MODELS: Record<string, SemanticModelVersionRead[]> = {
+  proj_core: [
+    {
+      id: "smv_core_3", organization_id: "00000000-0000-0000-0000-000000000001", project_id: "proj_core",
+      version: 3, name: "Core Finance Semantic Model",
+      change_summary: "Add exposure-at-default dimension",
+      status: "PUBLISHED", created_by: "priya@tenant.example", approved_by: "fin-steward@tenant.example",
+      approved_at: "2026-08-20T10:00:00Z", published_at: "2026-08-20T10:05:00Z",
+      based_on_version_id: "smv_core_2", created_at: "2026-08-18T09:00:00Z", updated_at: "2026-08-20T10:05:00Z",
+    },
+    {
+      id: "smv_core_4", organization_id: "00000000-0000-0000-0000-000000000001", project_id: "proj_core",
+      version: 4, name: "Core Finance Semantic Model",
+      change_summary: "Draft: exclude intercompany transfers from net revenue",
+      status: "DRAFT", created_by: "priya@tenant.example", approved_by: null, approved_at: null,
+      published_at: null, based_on_version_id: "smv_core_3",
+      created_at: "2026-08-28T09:00:00Z", updated_at: "2026-08-28T09:00:00Z",
+    },
+  ],
+  proj_retail: [
+    {
+      id: "smv_retail_1", organization_id: "00000000-0000-0000-0000-000000000001", project_id: "proj_retail",
+      version: 1, name: "Retail Customer 360 Semantic Model",
+      change_summary: "Initial published model",
+      status: "PUBLISHED", created_by: "retail-owner@tenant.example",
+      approved_by: "retail-steward@tenant.example",
+      approved_at: "2026-07-01T10:00:00Z", published_at: "2026-07-01T10:05:00Z",
+      based_on_version_id: null, created_at: "2026-06-28T09:00:00Z", updated_at: "2026-07-01T10:05:00Z",
+    },
+  ],
+};
+
+const FIXTURE_METRICS: Record<string, SemanticMetricVersionRead[]> = {
+  smv_core_3: [
+    {
+      id: "smtv_net_revenue_1", semantic_model_version_id: "smv_core_3", metric_id: "sm_net_revenue",
+      metric_slug: "net_revenue", metric_name: "Net Revenue", version: 1, status: "PUBLISHED",
+      description: "Total revenue net of intercompany transfers and reversals.",
+      aggregation: "SUM", grain: "daily", source_table_id: "t_ledger_entry",
+      measure_column_id: "col_amount", default_time_column_id: "col_posted_at",
+      allowed_dimension_column_ids: ["col_lob", "col_domain"],
+      fingerprint: "fp_net_revenue_1", created_by: "priya@tenant.example",
+      created_at: "2026-08-18T09:10:00Z",
+    },
+    {
+      id: "smtv_ead_1", semantic_model_version_id: "smv_core_3", metric_id: "sm_ead",
+      metric_slug: "exposure_at_default", metric_name: "Exposure at Default", version: 1, status: "PUBLISHED",
+      description: "Sum of outstanding exposure at default across active positions.",
+      aggregation: "SUM", grain: "daily", source_table_id: "t_position",
+      measure_column_id: "col_exposure", default_time_column_id: "col_as_of_date",
+      allowed_dimension_column_ids: ["col_counterparty", "col_instrument"],
+      fingerprint: "fp_ead_1", created_by: "priya@tenant.example", created_at: "2026-08-19T09:10:00Z",
+    },
+  ],
+  smv_core_4: [],
+  smv_retail_1: [
+    {
+      id: "smtv_ltv_1", semantic_model_version_id: "smv_retail_1", metric_id: "sm_ltv",
+      metric_slug: "customer_ltv", metric_name: "Customer Lifetime Value", version: 1, status: "PUBLISHED",
+      description: "Projected lifetime value per customer, trailing 24 months of orders.",
+      aggregation: "AVG", grain: "monthly", source_table_id: "t_customer",
+      measure_column_id: "col_ltv", default_time_column_id: "col_snapshot_month",
+      allowed_dimension_column_ids: ["col_segment"],
+      fingerprint: "fp_ltv_1", created_by: "retail-owner@tenant.example",
+      created_at: "2026-06-28T09:10:00Z",
+    },
+  ],
+};
+
+const FIXTURE_MODEL_CONSUMERS: Record<string, ConsumerFooterRead> = {
+  smv_core_3: {
+    resource_type: "semantic_model_version", resource_id: "smv_core_3", version: 3,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 482,
+    consumers: [
+      { consumer_id: "agent:revenue_analyst", consumer_type: "AGENT", channel: "MCP_TOOL", consumption_count: 310, last_consumed_at: "2026-09-01T14:00:00Z" },
+      { consumer_id: "context_product:customer360", consumer_type: "CONTEXT_PRODUCT", channel: "CONTEXT_PRODUCT", consumption_count: 172, last_consumed_at: "2026-08-31T09:00:00Z" },
+    ],
+    total_consumers: 2,
+  },
+  smv_core_4: {
+    resource_type: "semantic_model_version", resource_id: "smv_core_4", version: 4,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 0, consumers: [], total_consumers: 0,
+  },
+  smv_retail_1: {
+    resource_type: "semantic_model_version", resource_id: "smv_retail_1", version: 1,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 205,
+    consumers: [
+      { consumer_id: "agent:retail_reporter", consumer_type: "AGENT", channel: "MCP_TOOL", consumption_count: 205, last_consumed_at: "2026-09-01T08:30:00Z" },
+    ],
+    total_consumers: 1,
+  },
+};
+
+const FIXTURE_METRIC_CONSUMERS: Record<string, ConsumerFooterRead> = {
+  smtv_net_revenue_1: {
+    resource_type: "semantic_metric_version", resource_id: "smtv_net_revenue_1", version: 1,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 96,
+    consumers: [
+      { consumer_id: "agent:revenue_analyst", consumer_type: "AGENT", channel: "MCP_TOOL", consumption_count: 96, last_consumed_at: "2026-09-01T14:02:00Z" },
+    ],
+    total_consumers: 1,
+  },
+  smtv_ead_1: {
+    resource_type: "semantic_metric_version", resource_id: "smtv_ead_1", version: 1,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 40,
+    consumers: [
+      { consumer_id: "agent:risk_analyst", consumer_type: "AGENT", channel: "MCP_TOOL", consumption_count: 40, last_consumed_at: "2026-08-30T11:00:00Z" },
+    ],
+    total_consumers: 1,
+  },
+  smtv_ltv_1: {
+    resource_type: "semantic_metric_version", resource_id: "smtv_ltv_1", version: 1,
+    generated_at: "2026-09-01T00:00:00Z", total_consumption_events: 58,
+    consumers: [
+      { consumer_id: "agent:retail_reporter", consumer_type: "AGENT", channel: "MCP_TOOL", consumption_count: 58, last_consumed_at: "2026-09-01T08:31:00Z" },
+    ],
+    total_consumers: 1,
+  },
+};
+
+/** `GET /v1/organizations/{id}/projects` (`operational_api.py::list_organization_projects`). */
+export async function makeFixtureOrgProjects(): Promise<PageOf<ProjectRead>> {
+  await wait(60);
+  return { items: FIXTURE_PROJECTS, limit: 500, offset: 0, total: FIXTURE_PROJECTS.length };
+}
+
+/** `GET /v1/projects/{id}/semantic-model-versions`. */
+export async function makeFixtureSemanticModelVersions(
+  projectId: string,
+  opts: SemanticPageQuery,
+): Promise<PageOf<SemanticModelVersionRead>> {
+  await wait(80);
+  const items = FIXTURE_MODELS[projectId] ?? [];
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `GET /v1/semantic-model-versions/{id}/metrics`. */
+export async function makeFixtureSemanticMetricVersions(
+  modelVersionId: string,
+  opts: SemanticPageQuery,
+): Promise<PageOf<SemanticMetricVersionRead>> {
+  await wait(70);
+  const items = FIXTURE_METRICS[modelVersionId] ?? [];
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `GET /v1/semantic-model-versions/{id}/consumers` (UX-18). */
+export async function makeFixtureSemanticModelConsumers(
+  modelVersionId: string,
+): Promise<ConsumerFooterRead> {
+  await wait(70);
+  return (
+    FIXTURE_MODEL_CONSUMERS[modelVersionId] ?? {
+      resource_type: "semantic_model_version", resource_id: modelVersionId, version: null,
+      generated_at: new Date().toISOString(), total_consumption_events: 0, consumers: [], total_consumers: 0,
+    }
+  );
+}
+
+/** `GET /v1/semantic-metric-versions/{id}/consumers` (UX-18). */
+export async function makeFixtureSemanticMetricConsumers(
+  metricVersionId: string,
+): Promise<ConsumerFooterRead> {
+  await wait(70);
+  return (
+    FIXTURE_METRIC_CONSUMERS[metricVersionId] ?? {
+      resource_type: "semantic_metric_version", resource_id: metricVersionId, version: null,
+      generated_at: new Date().toISOString(), total_consumption_events: 0, consumers: [], total_consumers: 0,
+    }
+  );
 }
