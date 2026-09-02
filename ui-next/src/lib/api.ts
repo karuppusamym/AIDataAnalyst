@@ -2,6 +2,11 @@ import type {
   AiDecisionRead,
   AnalysisRunRead,
   AssetEvidenceRead,
+  BusinessMapRead,
+  ConsumerFooterRead,
+  DataQualityIncidentRead,
+  DataQualityIncidentTransition,
+  DataQualitySummaryRead,
   DataSourceRead,
   FleetSummaryRead,
   GovernanceDecisionRequest,
@@ -9,9 +14,13 @@ import type {
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
+  MetadataBusinessAnnotationRead,
   MetadataIngestionBatchRead,
   OutboxEventRead,
+  ProjectRead,
   ReviewQueueRead,
+  SemanticMetricVersionRead,
+  SemanticModelVersionRead,
   StudioChangeItemRead,
   StudioChangeSetRead,
   StudioDiffRead,
@@ -19,6 +28,7 @@ import type {
   UnifiedLineageImpactRead,
 } from "./types";
 import type {
+  AuditEventRead,
   CatalogRowRead,
   CursorPage,
   MarketplaceProductRead,
@@ -27,6 +37,9 @@ import type {
 } from "./ui-types";
 import {
   makeFixtureAnalysisRuns,
+  makeFixtureAuditEvents,
+  makeFixtureBusinessAnnotations,
+  makeFixtureBusinessMap,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
@@ -37,16 +50,25 @@ import {
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
+  makeFixtureOrgProjects,
   makeFixtureOutboxEvents,
+  makeFixtureQualityIncidents,
+  makeFixtureQualitySummary,
   makeFixtureRefusals,
   makeFixtureRequeueOutboxEvent,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
+  makeFixtureSemanticMetricConsumers,
+  makeFixtureSemanticMetricVersions,
+  makeFixtureSemanticModelConsumers,
+  makeFixtureSemanticModelVersions,
   makeFixtureStudioChangeSetItems,
   makeFixtureStudioChangeSets,
   makeFixtureStudioDiff,
   makeFixtureStudioImpact,
   makeFixtureSubmitStudioChangeSet,
+  makeFixtureTableBusinessAnnotation,
+  makeFixtureTransitionQualityIncident,
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -440,6 +462,7 @@ export async function fetchLineageImpact(
   );
 }
 
+
 /* ---------------------------------------------------------------------------
    UX-16: Operations. Composed from four org-wide, already-merged
    `operational_api.py` routes -- fleet-summary, analysis-runs, outbox-events
@@ -549,6 +572,447 @@ export async function fetchIngestionBatches(
   params.set("offset", String(opts.offset ?? 0));
   return get<PageOf<MetadataIngestionBatchRead>>(
     `/v1/datasources/${datasourceId}/metadata-ingestion-batches?${params}`,
+    signal,
+  );
+}
+/* ---------------------------------------------------------------------------
+   Quality — UX-15/UX-16, `QualityScreen`.
+
+   Both real, already-merged routes (`quality_api.py`), gated by `USE_FIXTURES`
+   the same way as every call above. `list_quality_incidents` and
+   `quality_summary` are scoped per datasource, matching UX-20's
+   `fetchLineageImpact` above rather than `fetchCatalogRows`'s organization
+   scoping.
+--------------------------------------------------------------------------- */
+
+export interface QualityIncidentsQuery {
+  /** `null`/omitted means "every status" — the endpoint's own default when
+   *  `status` is left off the query string entirely (unlike
+   *  `fetchReviewQueue`'s explicit-empty-string convention, this endpoint has
+   *  no server-side default status to override, so simply omitting the param
+   *  is the correct "all statuses" request here). */
+  status?: string | null;
+  severity?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{id}/quality-summary` (`quality_api.py::quality_summary`)
+ *  — the dashboard tiles: observed/table counts, open/critical incident
+ *  counts, the datasource's rolled-up average quality score, and the
+ *  metadata-scan freshness state. */
+export async function fetchQualitySummary(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DataQualitySummaryRead> {
+  if (USE_FIXTURES) return makeFixtureQualitySummary(datasourceId);
+  return get<DataQualitySummaryRead>(
+    `/v1/datasources/${datasourceId}/quality-summary`,
+    signal,
+  );
+}
+
+/** `GET /v1/datasources/{id}/quality-incidents` (`quality_api.py::list_quality_incidents`)
+ *  — the primary incidents list, filterable by `status`/`severity`. */
+export async function fetchQualityIncidents(
+  datasourceId: string,
+  query: QualityIncidentsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DataQualityIncidentRead>> {
+  if (USE_FIXTURES) return makeFixtureQualityIncidents(datasourceId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.severity) params.set("severity", query.severity);
+  params.set("limit", String(query.limit ?? 200));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<DataQualityIncidentRead>>(
+    `/v1/datasources/${datasourceId}/quality-incidents?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/quality-incidents/{id}/transition` (`quality_api.py::transition_quality_incident`)
+ *  — acknowledge or resolve an open incident. The endpoint requires a
+ *  non-empty (>=3 char) `reason` on both transitions and refuses (409) to
+ *  transition an incident that is already RESOLVED. */
+export async function transitionQualityIncident(
+  incidentId: string,
+  body: DataQualityIncidentTransition,
+  signal?: AbortSignal,
+): Promise<DataQualityIncidentRead> {
+  if (USE_FIXTURES) return makeFixtureTransitionQualityIncident(incidentId, body);
+  return postJson<DataQualityIncidentRead>(
+    `/v1/quality-incidents/${incidentId}/transition`,
+    body,
+    signal,
+  );
+}
+/* ---------------------------------------------------------------------------
+   UX-16: Business meaning — datasource-scoped browse of approved business
+   annotations, plus an org-wide taxonomy view (business-map).
+
+   Both real, already-merged routes (`semantic_intelligence_api.py`):
+     - `list_business_annotations` joins `MetadataBusinessAnnotation` to its
+       current (AT-6, append-only-versioned) `MetadataBusinessAnnotationVersion`
+       plus table/schema/domain/entity — the per-datasource browse this
+       screen's list is built on.
+     - `get_table_business_annotation` resolves the same shape by `table_id`
+       alone, decoupled from any particular loaded page — the evidence pane's
+       actual permalink target, the same role `fetchAssetEvidence` plays for
+       `EvidencePane`.
+     - `get_business_map` is the org-wide domain/entity/table graph, a real
+       traversal (cross-domain edges come from actual `MetadataConstraint`
+       foreign keys, not invented) — the "supporting view" tab.
+--------------------------------------------------------------------------- */
+
+export interface BusinessAnnotationsQuery {
+  datasourceId: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{id}/business-annotations`. Declares
+ *  `response_model=Page` un-parameterized (see `ui-types.ts`'s `PageOf`
+ *  banner) -- offset/limit paged like the route itself (no cursor, and no
+ *  server-side free-text filter: the route takes only `limit`/`offset`, so
+ *  `BusinessMeaningScreen` filters its already-loaded page client-side). */
+export async function fetchBusinessAnnotations(
+  query: BusinessAnnotationsQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<MetadataBusinessAnnotationRead>> {
+  if (USE_FIXTURES) return makeFixtureBusinessAnnotations(query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<MetadataBusinessAnnotationRead>>(
+    `/v1/datasources/${query.datasourceId}/business-annotations?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/metadata/tables/{table_id}/business-annotation` — resolves by
+ *  table id alone, exactly like `fetchAssetEvidence` does for `EvidencePane`:
+ *  a durable permalink target that does not depend on the caller's current
+ *  datasource filter or loaded page happening to contain this table. 404s
+ *  when the table has no *approved* annotation (`MetadataBusinessAnnotation`
+ *  content is append-only versioned per AT-6; this always resolves the
+ *  current version). */
+export async function fetchTableBusinessAnnotation(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<MetadataBusinessAnnotationRead> {
+  if (USE_FIXTURES) return makeFixtureTableBusinessAnnotation(tableId);
+  return get<MetadataBusinessAnnotationRead>(
+    `/v1/metadata/tables/${tableId}/business-annotation`,
+    signal,
+  );
+}
+
+export interface BusinessMapQuery {
+  organizationId: string;
+  limit?: number;
+}
+
+/** `GET /v1/organizations/{id}/business-map` — the secondary, org-wide tab:
+ *  every approved domain/entity/table node plus real cross-domain foreign-key
+ *  edges (`MetadataConstraint`), not a per-datasource slice. */
+export async function fetchBusinessMap(
+  query: BusinessMapQuery,
+  signal?: AbortSignal,
+): Promise<BusinessMapRead> {
+  if (USE_FIXTURES) return makeFixtureBusinessMap(query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 500));
+  return get<BusinessMapRead>(
+    `/v1/organizations/${query.organizationId}/business-map?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Semantics (UX-15/UX-16, `semantics` nav id) — `SemanticsScreen`'s own
+   endpoints. See that screen's file-top comment for the honest scope: there
+   is no org-wide "browse every published semantic model" endpoint, so this
+   is a project picker (`fetchOrgProjects`, the real
+   `GET /v1/organizations/{id}/projects`) feeding project-scoped model/metric
+   lists — the same composition shape `fetchOrgDatasources` above already
+   uses to bridge a display name to an id `unified-lineage` needs.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{id}/projects` (`operational_api.py::list_organization_projects`)
+ *  — real, already-merged, and NOT the org-wide semantic-model browse this
+ *  screen would ideally have; it lists projects so a project can be picked,
+ *  one call away from the project-scoped semantic-model-versions list below. */
+export async function fetchOrgProjects(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<ProjectRead>> {
+  if (USE_FIXTURES) return makeFixtureOrgProjects();
+  return get<PageOf<ProjectRead>>(
+    `/v1/organizations/${organizationId}/projects?limit=500`,
+    signal,
+  );
+}
+
+export interface SemanticPageQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/projects/{id}/semantic-model-versions` (`semantic_api.py::list_semantic_model_versions`)
+ *  — project-scoped, not org-wide (see this file's Semantics banner comment). */
+export async function fetchSemanticModelVersions(
+  projectId: string,
+  opts: SemanticPageQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<SemanticModelVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureSemanticModelVersions(projectId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<SemanticModelVersionRead>>(
+    `/v1/projects/${projectId}/semantic-model-versions?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-model-versions/{id}/metrics` (`semantic_api.py::list_metric_versions`)
+ *  — every metric version defined on one semantic model version. */
+export async function fetchSemanticMetricVersions(
+  modelVersionId: string,
+  opts: SemanticPageQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<SemanticMetricVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureSemanticMetricVersions(modelVersionId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<SemanticMetricVersionRead>>(
+    `/v1/semantic-model-versions/${modelVersionId}/metrics?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-model-versions/{id}/consumers` (UX-18, `semantic_api.py::
+ *  get_semantic_model_version_consumers`) — who/what currently consumes this
+ *  exact model version, from CX-4 consumption lineage. */
+export async function fetchSemanticModelConsumers(
+  modelVersionId: string,
+  signal?: AbortSignal,
+): Promise<ConsumerFooterRead> {
+  if (USE_FIXTURES) return makeFixtureSemanticModelConsumers(modelVersionId);
+  return get<ConsumerFooterRead>(
+    `/v1/semantic-model-versions/${modelVersionId}/consumers`,
+    signal,
+  );
+}
+
+/** `GET /v1/semantic-metric-versions/{id}/consumers` (UX-18, `semantic_api.py::
+ *  get_semantic_metric_version_consumers`) — same composition as the model
+ *  consumer footer above, scoped to one metric version. */
+export async function fetchSemanticMetricConsumers(
+  metricVersionId: string,
+  signal?: AbortSignal,
+): Promise<ConsumerFooterRead> {
+  if (USE_FIXTURES) return makeFixtureSemanticMetricConsumers(metricVersionId);
+  return get<ConsumerFooterRead>(
+    `/v1/semantic-metric-versions/${metricVersionId}/consumers`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses
+   `fetchOrgDatasources` above for the fleet list (see that function's own
+   comment for the `DataSourceRead`/`DataSourceSummaryRead` shape note this
+   screen also relies on -- `credential_reference` is typed but not actually
+   present on this endpoint's wire response; this screen never reads it). The
+   only new call this screen needs is per-source health.
+--------------------------------------------------------------------------- */
+
+import type { ConnectorHealthScoreRead } from "./types";
+import { makeFixtureDatasourceHealth } from "./fixtures";
+
+/** `GET /v1/datasources/{datasource_id}/health` (`operational_api.py::get_datasource_health`,
+ *  `:266`) — a composite, explainable 0-100 score over the connector's recent
+ *  run history (`aida.connector_health.compute_connector_health`): run success
+ *  rate, staleness, failure streak, profiling coverage and datasource
+ *  enablement, each its own weighted factor with a human-readable `reason` and
+ *  `evidence`, plus any `blockers` (e.g. `NO_RUN_HISTORY`, `DATASOURCE_DISABLED`,
+ *  `REPEATED_FAILURES`) explaining why the status is what it is. */
+export async function fetchDatasourceHealth(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<ConnectorHealthScoreRead> {
+  if (USE_FIXTURES) return makeFixtureDatasourceHealth(datasourceId);
+  return get<ConnectorHealthScoreRead>(`/v1/datasources/${datasourceId}/health`, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Relationships — the review queue for N4's impact-ordered,
+   diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
+   plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
+   calibration summary. Added here as a clearly-delimited block rather than
+   folded into the imports/exports above, so this screen's additions are easy
+   to find and to lift out cleanly if this file is ever split per screen.
+--------------------------------------------------------------------------- */
+
+import type {
+  RelationshipCandidateBulkDecisionRequest,
+  RelationshipCandidateBulkDecisionResultRead,
+  RelationshipCandidateCalibrationRead,
+  RelationshipCandidateDecision,
+  RelationshipCandidateRead,
+  RelationshipCandidateReviewQueueRead,
+} from "./types";
+import {
+  makeFixtureBulkDecideRelationshipCandidates,
+  makeFixtureDecideRelationshipCandidate,
+  makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidateReviewQueue,
+} from "./fixtures";
+
+export interface RelationshipCandidateReviewQueueQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{datasourceId}/relationship-candidates/review-queue`
+ *  (N4, `get_relationship_candidate_review_queue` — `intelligence_api.py`) —
+ *  PENDING relationship candidates for one datasource, sorted by real
+ *  computed lineage impact (EA.14's bounded traversal), each carrying an
+ *  SM-7 "nothing → this edge" diff and an AT-15 per-signal confidence
+ *  breakdown. Supersedes the raw, confidence-sorted
+ *  `GET .../relationship-candidates` list for a reviewer triaging a
+ *  backlog — read-only; deciding a candidate goes through the two functions
+ *  below. */
+export async function fetchRelationshipCandidateReviewQueue(
+  datasourceId: string,
+  query: RelationshipCandidateReviewQueueQuery = {},
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateReviewQueueRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateReviewQueue(datasourceId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<RelationshipCandidateReviewQueueRead>(
+    `/v1/datasources/${datasourceId}/relationship-candidates/review-queue?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/{candidateId}/decision` — maker-checker
+ *  approve/reject of one PENDING candidate. A REJECT with no `reason` is
+ *  rejected server-side (`RelationshipCandidateDecision.require_reason`);
+ *  callers should collect a reason before calling this the same way
+ *  `decideGovernanceReview` above expects one. */
+export async function decideRelationshipCandidate(
+  candidateId: string,
+  body: RelationshipCandidateDecision,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateRead> {
+  if (USE_FIXTURES) return makeFixtureDecideRelationshipCandidate(candidateId, body);
+  return postJson<RelationshipCandidateRead>(
+    `/v1/relationship-candidates/${candidateId}/decision`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/bulk-decision` (RL-6) — decides up to
+ *  500 PENDING candidates by explicit id list in one call; a rule violation
+ *  on one candidate marks that candidate FAILED in the response and the
+ *  rest still proceed (partial success), never aborting the whole batch. */
+export async function bulkDecideRelationshipCandidates(
+  body: RelationshipCandidateBulkDecisionRequest,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateBulkDecisionResultRead> {
+  if (USE_FIXTURES) return makeFixtureBulkDecideRelationshipCandidates(body);
+  return postJson<RelationshipCandidateBulkDecisionResultRead>(
+    `/v1/relationship-candidates/bulk-decision`,
+    body,
+    signal,
+  );
+}
+
+/** `GET /v1/relationship-candidates/confidence-calibration` (RL-7) — this
+ *  organization's own observed steward-approval rate per confidence bucket,
+ *  from its real decision history (never a published external calibration
+ *  curve — see the endpoint's own `methodology_note`, echoed verbatim in the
+ *  response). Optional secondary info for a calibration summary tile;
+ *  `datasourceId: null` reports the org-wide history. */
+export async function fetchRelationshipCandidateCalibration(
+  datasourceId: string | null,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateCalibrationRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateCalibration(datasourceId);
+  const params = new URLSearchParams();
+  if (datasourceId) params.set("datasource_id", datasourceId);
+  return get<RelationshipCandidateCalibrationRead>(
+    `/v1/relationship-candidates/confidence-calibration?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Audit ledger — org-wide, no datasource picker.
+--------------------------------------------------------------------------- */
+
+export interface AuditEventQuery {
+  organizationId: string;
+  action?: string;
+  resourceType?: string;
+  correlationId?: string;
+  /** ISO 8601 datetime, MUST carry a timezone offset (e.g. end in `Z` or
+   *  `+05:30`) — `list_audit_events` (`operational_api.py:336`) 422s a naive
+   *  datetime rather than guessing what timezone it was meant in. Checked
+   *  client-side below so a naive-looking value never reaches the wire. */
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+const TZ_AWARE_ISO = /(Z|[+-]\d{2}:?\d{2})$/i;
+
+function assertTimezoneAware(label: "since" | "until", value: string): void {
+  if (!TZ_AWARE_ISO.test(value)) {
+    throw new Error(
+      `${label} must be a timezone-aware ISO datetime (e.g. end with "Z"), got "${value}"`,
+    );
+  }
+}
+
+/** `GET /v1/organizations/{organization_id}/audit-events` (UX-16,
+ *  `list_audit_events`, `operational_api.py:336`) — every `AuditEvent` the
+ *  org has recorded, filterable by `action`/`resource_type`/`correlation_id`/
+ *  `since`/`until` and paginated by `limit`/`offset` (NOT a cursor — this
+ *  route's own signature, unlike `fetchCatalogRows`'s keyset one). Gated
+ *  server-side behind `PlatformAdmin`/`OrganizationAdmin`/`Auditor`/
+ *  `Operations` (the route's own `require_roles`); an unauthorized caller
+ *  gets the same 403 any other gated call in this file surfaces. */
+export async function fetchAuditEvents(
+  query: AuditEventQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<AuditEventRead>> {
+  if (query.since) assertTimezoneAware("since", query.since);
+  if (query.until) assertTimezoneAware("until", query.until);
+  if (USE_FIXTURES) return makeFixtureAuditEvents(query);
+
+  const params = new URLSearchParams();
+  if (query.action) params.set("action", query.action);
+  if (query.resourceType) params.set("resource_type", query.resourceType);
+  if (query.correlationId) params.set("correlation_id", query.correlationId);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+
+  return get<PageOf<AuditEventRead>>(
+    `/v1/organizations/${query.organizationId}/audit-events?${params}`,
+    signal,
+  );
+}
     signal,
   );
 }

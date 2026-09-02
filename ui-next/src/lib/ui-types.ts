@@ -123,6 +123,30 @@ export interface PageOf<T> {
   total: number;
 }
 
+/** `AuditEventRead` -- `src/atlas/modules/observability_audit/schemas.py:47`,
+ *  re-exported through `aida.schemas`. `GET
+ *  /v1/organizations/{organization_id}/audit-events` (`list_audit_events`,
+ *  `src/aida/operational_api.py:336`) declares `response_model=Page`
+ *  un-parameterized -- the same reachability gap this file's banner documents
+ *  for `CatalogRowRead`/`MetadataTableRead`/`PageOf`'s own comment, so
+ *  `AuditEventRead` is hand-written here rather than pulled from
+ *  ./types.ts. Note `id` is `int` on the wire (schemas.py), not a UUID like
+ *  most of this app's other `*Read` ids. */
+export interface AuditEventRead {
+  id: number;
+  organization_id: string | null;
+  principal_id: string;
+  principal_type: string;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  outcome: string;
+  correlation_id: string;
+  source_ip: string | null;
+  details: Record<string, unknown>;
+  occurred_at: string;
+}
+
 /** `MarketplaceProductRead` -- `platform_schemas.py:170`. Extends
  *  `DataProductVersionRead` (./types.ts, reachable) with the three CX-9
  *  ranking/access fields `search_marketplace` (`product_marketplace_api.py`)
