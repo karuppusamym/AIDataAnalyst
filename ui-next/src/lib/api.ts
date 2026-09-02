@@ -1013,6 +1013,3 @@ export async function fetchAuditEvents(
     signal,
   );
 }
-    signal,
-  );
-}
