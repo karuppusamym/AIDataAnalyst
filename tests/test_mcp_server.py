@@ -866,7 +866,7 @@ async def test_leak_resolve_entity_denied_caller_cannot_distinguish_existing_fro
     assert session_for_missing_entity.get_called is False
 
 
-async def test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity(
+async def test_leak_get_transformation_detail_denied_caller_cannot_distinguish_existing_from_missing_entity(  # noqa: E501
     monkeypatch: object,
 ) -> None:
     caller = SecurityContext(
