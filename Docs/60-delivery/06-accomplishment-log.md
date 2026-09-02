@@ -9953,3 +9953,156 @@ clean.
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately
 before the closing push: none found.
+
+## 2026-09-02 — N17 closed: exemplar store (context-path half), promoted exemplars as a context-product section
+
+### Scope
+
+Per `Docs/review-2026-08/atlan-context/01-context-studio.md` ("Split N17"): the context-path
+regression half only — mine exemplars from confirmed-correct runs and BI/query history, assert on
+resolved objects + versions + selected tool + policy decision, gate change-set submission. The
+answer-delta half (checking whether returned *values* are still correct) stays out of scope —
+INV-6/ADR-0014 forbid asserting business-value expectations, the same reasoning AT-8's own cases
+and TS-3's earlier sentinel-scan work already applied.
+
+### What "confirmed" actually means in this codebase's data
+
+Investigated `ai_decision_lineage.py` and `consumption_lineage.py` before writing anything, per the
+row's own instruction not to invent a new confirmation flag. `AiDecisionRecord`
+(`ai_decision_lineage.py`) records *why* the system made a choice, not whether a human later
+confirmed the outcome was correct — not the signal. The real signal turned out to live one layer
+over, in `intelligence_api.py`/`query_memory.py`: `QueryFeedback` is a human rating a specific
+`AgentRun` ("HELPFUL" or not); `QueryMemoryEvidence.status` reaches `"ELIGIBLE"` only once positive
+feedback exists and no negative feedback is outstanding (`query_memory.py`'s own docstring:
+"Negative feedback already suppresses reuse before this module ever runs"). That is this codebase's
+one existing, human-confirmed "this run was correct" signal, and `promote_confirmed_agent_run`
+(`src/aida/exemplar_store.py`) uses it directly. `consumption_lineage.
+get_consumption_by_resource_counts` supplies the second named source, "BI/query history": a
+heavily-reused governed-tool pairing is evidence of trustworthiness even without an explicit human
+confirmation. It is wired in as a *prioritization* signal (`rank_candidates_by_consumption`) over
+the already-confirmed candidate pool — which confirmed run to promote first when a corpus cap means
+not every confirmed candidate gets kept — not a second, independent promotion path: there is no
+`AgentRun` behind a bare consumption count to derive a context path from, so promoting from
+frequency alone would have nothing to promote.
+
+### The deeper constraint this surfaced: a mined exemplar can never carry a live-replayable question
+
+`AgentRun`'s own docstring states raw user questions are intentionally not persisted (only
+`question_hash`). Checking further: `AgentRun` also never persists the requester's roles, the tool
+they asked for, or the tool-call parameters supplied — all either redacted or never written at all.
+So a `CONFIRMED_RUN` exemplar can only ever carry the *output* side of a case (the resolved context
+path) — never the *input* side (question/roles/preferred_tool_slug/tool_parameters) AT-8's own
+`run_eval_case` needs to literally re-drive the orchestrator. This is not a gap the implementation
+works around; it is the same value-freedom `AgentRun` already enforces on itself, one layer further
+than just the final answer — and it directly shaped the design: `ExemplarCase.question` is `str |
+None`, `None` for every `CONFIRMED_RUN` exemplar, populated only for a `STEWARD_AUTHORED` one (a
+human writes the question directly, the same act of authorship AT-8's own hand-authored `cases.py`
+already performs, just tagged with this module's provenance instead of being a bare
+`ContextPathEvalCase`). `ExemplarCase.is_replayable` names this condition explicitly.
+
+### Storage: investigated and deliberately not a new table
+
+`NegativeAssertionRecord` (N16's reuse target) already existed as a *dedicated* table before N16
+touched it; no equivalent dedicated "exemplar" table existed to reuse the same way, and no existing
+generic JSON field on another table (`AiDecisionRecord.evidence`, `ConsumptionRecord.details`,
+`GovernanceReview.decision_reason`) fit the shape without either misusing an unrelated table's
+semantics or (for `decision_reason`) not even being JSON. But a further check — grepping every
+write to `AgentRun.plan_evidence`/`retrieval_evidence`/`semantic_version`/`status`/`failure_reason`
+— found that nothing outside `GovernedAgentOrchestrator.run` ever writes any of those fields: an
+`AgentRun` is written exactly once. That makes the pair (a `COMPLETED` `AgentRun`, its `ELIGIBLE`
+`QueryMemoryEvidence` row) *already* immutable, already-persisted evidence that a question was
+asked, answered, and confirmed — exactly N16's own "no new persisted state was needed" precedent,
+applied to a different existing pair of tables instead of one. So `promote_confirmed_agent_run`
+computes a deterministic, content-addressed `ExemplarCase` (same `artifact_hash` on every call
+against the same immutable pair — `test_promotion_is_deterministic` proves this) with **no new
+table, column, or migration** — the hard constraint this row carries. `STEWARD_AUTHORED` exemplars,
+having no DB row to project from, are plain frozen dataclasses built once
+(`steward_authored_exemplar`) the same way AT-8's own `cases.py` entries are, and belong wherever
+reviewed content already lives in this repo (git, next to `tests/context_path_eval/cases.py` — not
+inside it, since a mined/promoted corpus and hand-curated regression fixtures are different kinds
+of content even when they share a shape; kept as a separate module,
+`tests/context_path_eval/exemplars.py`, that imports `cases.py`'s types rather than being merged
+into it).
+
+### What shipped
+
+- `src/aida/context_path.py` (new): `ContextPath`/`derive_context_path` relocated out of
+  `tests/context_path_eval/runner.py` so production code (`exemplar_store.py`) can share AT-8's
+  exact derivation instead of re-implementing an equivalent reader of `AgentRun` state a second
+  time. `runner.py` re-exports both names unchanged — no behavior change, confirmed by AT-8's own
+  4 tests still passing verbatim.
+- `src/aida/exemplar_store.py` (new): `ExemplarCase`, `find_confirmed_agent_runs`,
+  `promote_confirmed_agent_run`, `steward_authored_exemplar`, `compare_exemplar_to_current`,
+  `rank_candidates_by_consumption`. Promotion refuses non-`ELIGIBLE` evidence and evidence that
+  does not belong to the given run, rather than silently promoting weaker evidence.
+- `src/aida/context_compiler.py` / `context_compiler_api.py`: `exemplars[]` wired into
+  `compile_context_product` mirroring N16's `negative_knowledge[]` section exactly —
+  `ResolvedExemplar` (pre-scoped, pre-serialized, so compilation stays pure), a new
+  `_load_exemplars` helper alongside `_load_negative_knowledge` in `_load_source`, rendered only
+  into MCP/REST/YAML (`_EXEMPLAR_TARGETS`, same value as `_NEGATIVE_KNOWLEDGE_TARGETS`, kept as its
+  own name so any future divergence stays a one-line change), deterministic `artifact_hash`.
+  `_load_exemplars` scans the organization's confirmed-run candidates (bounded, S5) and filters in
+  Python by whether any resolved `TABLE` object falls inside the version's `table_ids` — unlike
+  `NegativeAssertionRecord.subject_id`, an `AgentRun`'s resolved objects live inside its own
+  `retrieval_evidence` JSON, so there is no DB column to filter on directly, the same "no column to
+  query on" situation `aida.studio_eval`'s mining passes already handle the same way.
+- `tests/context_path_eval/exemplars.py` (new): `exemplar_to_eval_case` converts a replayable
+  exemplar losslessly into AT-8's `ContextPathEvalCase`; `replay_steward_exemplar` drives it
+  through AT-8's own `run_eval_case` against a live orchestrator run — the literal "gate change-set
+  submission is achievable" proof the row's benchmark-suite half asks for.
+  `replay_confirmed_exemplar`/`compare_exemplar_to_current` give a `CONFIRMED_RUN` exemplar's
+  replay instead: re-derive the context path from the same immutable `AgentRun` row right now and
+  diff against the frozen snapshot, mirroring `agent_run_replay.py`'s (AT-6) "verify the digest
+  still matches" idiom rather than a live re-run it has no question to drive.
+
+### What is a documented next step, not done in this pass
+
+Wiring exemplar replay into a literal CI/submission gate (the way `studio_eval.py`'s
+`check_eval_regressions` already gates a Studio change-set submission on its own mined
+`StudioEvalQuestion` corpus) is not done here — this row proves the replay mechanism itself works
+end to end (`test_steward_authored_exemplar_replays_through_at8_runner`), which is what "gate
+change-set submission is achievable" asks for; hooking a scheduled promotion pass and an actual gate
+check into `studio_api.py`'s submission flow is future work.
+
+### Tests (27 new, all passing)
+
+`tests/test_exemplar_store.py` (17 tests): `find_confirmed_agent_runs` returns only `ELIGIBLE`
+evidence; `promote_confirmed_agent_run` produces the correct `ExemplarCase` from real seeded state
+and is deterministic; refuses a non-confirmed run and mismatched evidence; a steward-authored
+exemplar is replayable and deterministic; `exemplar_to_eval_case` refuses a non-replayable exemplar;
+a steward-authored exemplar replays through AT-8's real `run_eval_case` against a live orchestrator
+run; a confirmed-run exemplar replays as stored-vs-current consistency and reports no drift against
+its own source run; `compare_exemplar_to_current` reports named field-level drift on a genuine
+mismatch (pure unit test, no DB); consumption-based ranking prioritizes heavier reuse; a regression
+guard that the AT-8 relocation kept `runner.ContextPath`/`derive_context_path` importable at the
+same identity.
+
+`tests/test_context_product_exemplars.py` (5 tests, mirroring `test_context_product_negative_
+knowledge.py`'s own shape exactly): section determinism (present and absent); `_load_exemplars`
+excludes an out-of-scope table and a non-`ELIGIBLE` (unconfirmed) run; end-to-end glue from DB state
+into a compiled artifact; the section appears only in MCP/REST/YAML and is byte-absent from
+OSI/ODCS/`SNOWFLAKE_SEMANTIC_VIEW`/`DATABRICKS_METRIC_VIEW`.
+
+### Verification
+
+`ruff check` clean on every touched/new file (`src/aida/context_path.py`, `exemplar_store.py`,
+`context_compiler.py`, `context_compiler_api.py`, `tests/context_path_eval/runner.py`,
+`tests/context_path_eval/exemplars.py`, the two new test files). `AIDA_ENVIRONMENT=development uv
+run --extra dev mypy src`: clean on every file this row touched; the same 44 pre-existing `"object"
+not callable"` errors N16's entry already documented (`workflows/activities.py`,
+`workflows/scheduler.py`, `main.py`, …) are unrelated and unchanged by this work.
+`lint-imports` (import-linter, all 8 contracts): kept. `AIDA_ENVIRONMENT=development uv run --extra
+dev pytest tests/test_exemplar_store.py tests/test_context_product_exemplars.py tests/
+test_at8_context_path_eval.py tests/test_context_product_negative_knowledge.py tests/
+test_query_memory.py tests/test_agent_orchestrator_retrieval_wiring.py tests/
+test_at6_context_receipts.py tests/test_doc_claims.py -q`: all pass. No HTTP route was added or its
+signature changed (only `_load_source`'s internal composition and the compiled artifact's own
+content), so `tests/test_openapi_diff_gate.py` passes with no baseline regeneration needed. No new
+`event_type=` was introduced (nothing in this row calls `record_outbox`), so `tests/
+test_event_catalog_gate.py` passes with no `04-event-catalog.md` change needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately
+before the closing push: none found (the handful of `=======`-shaped hits are decorative
+module-docstring underlines of a different length, e.g. `negative_knowledge.py`/`retrieval.py`,
+confirmed by exact-length grep, not real merge markers).
