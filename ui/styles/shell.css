@@ -54,8 +54,38 @@ p { line-height: 1.6; }
 .environment strong { color: #465169; }
 .environment small { color: #929aac; }
 .persona-switcher { padding: 0; }
-.persona-switcher label { color: #8d95a6; }
+.persona-switcher label { color: #8d95a6; display: flex; align-items: center; gap: 5px; }
 .persona-switcher select { min-height: 34px; border-color: var(--line); color: #445067; background: #f8f9fc; }
+.dev-only-tag { color: #9c6418; font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+/* UX-1: read-only persona readout shown when a real OIDC identity is
+   active -- see persona-nav.js's applyPersonaMode(). */
+.persona-readonly { display: grid; gap: 2px; }
+.persona-readonly span { color: #8d95a6; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.persona-readonly strong { color: var(--ink); font-size: 12px; }
+.persona-readonly small { color: #929aac; font-size: 9px; }
+
+/* UX-4: bulk selection checkbox + card row, and the bulk-actions toolbar
+   that appears once at least one asset is selected. */
+.asset-row { display: flex; align-items: flex-start; gap: 0; }
+.asset-select-box { display: flex; align-items: center; padding: 16px 0 16px 12px; }
+.asset-select-box input { width: 15px; height: 15px; accent-color: var(--blue); cursor: pointer; }
+.asset-row .asset-card { flex: 1; min-width: 0; }
+.catalog-bulk-toolbar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin-bottom: 10px; border: 1px solid var(--blue-soft); border-radius: 8px; background: var(--blue-soft); }
+.catalog-bulk-toolbar .bulk-count { font-size: 10px; font-weight: 700; color: var(--blue-dark); }
+.catalog-bulk-toolbar .bulk-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* UX-4: bulk operation progress inside the bulk action dialog, reusing the
+   existing .progress bar (base.css). */
+.bulk-field-group { display: grid; gap: 10px; margin-bottom: 12px; }
+.bulk-progress { margin: 10px 0; }
+.bulk-progress p { margin: 6px 0 0; font-size: 9px; color: var(--muted); }
+
+/* UX-7: evidence tab groups, each claim carrying its traceable source. */
+.evidence-group { margin-bottom: 14px; }
+.evidence-group h3 { margin: 0 0 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.evidence-claim-row { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.evidence-claim-row p { margin: 0; font-size: 11px; }
+.evidence-claim-row .secondary-cell { display: block; margin-top: 3px; }
 
 main { padding: 0 28px 56px; }
 .topbar { position: sticky; top: 4px; z-index: 40; height: 66px; margin: 0 -28px 30px; padding: 0 28px; border-bottom: 1px solid rgba(224, 228, 237, .9); background: rgba(247, 248, 251, .88); backdrop-filter: blur(16px); }

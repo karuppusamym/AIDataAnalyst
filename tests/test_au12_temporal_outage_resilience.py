@@ -65,6 +65,25 @@ class _FlakyThenOkTemporalClient:
         return object()  # sentinel standing in for a real, connected Client
 
 
+class _ImmediatelyFailingDbSession:
+    """Stands in for the async context manager `session_factory()` returns:
+    fails `__aenter__` immediately rather than attempting a real connection
+    to `settings.database_url` (which nothing in this test environment is
+    listening on). Without this, `/health/ready`'s real `SELECT 1` probe
+    blocks for however long this environment's TCP connect actually takes
+    to fail -- long enough, on some runners, that the background Temporal
+    reconnect loop (polling every `temporal_reconnect_interval_seconds`)
+    wins the race and flips `temporal` to UP before the *first*,
+    supposedly-still-down readiness check even returns.
+    """
+
+    async def __aenter__(self) -> "_ImmediatelyFailingDbSession":
+        raise ConnectionError("db unreachable (test)")
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
 @pytest.fixture(autouse=True)
 def _fast_temporal_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test here fully controls its own fake `Client.connect`, so the
@@ -139,6 +158,7 @@ def test_readiness_recovers_to_up_once_reconnect_succeeds(
     monkeypatch.setattr(main_module.settings, "temporal_enabled", True)
     monkeypatch.setattr(main_module.settings, "temporal_reconnect_interval_seconds", 0.05)
     monkeypatch.setattr(main_module, "Client", _FlakyThenOkTemporalClient())
+    monkeypatch.setattr(main_module, "session_factory", _ImmediatelyFailingDbSession)
 
     with TestClient(main_module.app) as client:
         # Startup hit the (first, failing) call -- degraded on entry.
