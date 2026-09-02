@@ -48,6 +48,7 @@ UI_ROOT = REPO_ROOT / "ui"
 GRAPH_ENGINE = UI_ROOT / "scripts" / "graph-engine.js"
 CLUSTERING_TEST = UI_ROOT / "scripts" / "graph-engine.clustering.test.mjs"
 UNIFIED_LINEAGE_API = REPO_ROOT / "src" / "aida" / "unified_lineage_api.py"
+NODE_BIN = shutil.which("node")
 INTELLIGENCE_API = REPO_ROOT / "src" / "aida" / "intelligence_api.py"
 
 
@@ -55,7 +56,9 @@ def test_graph_engine_exports_the_pure_clustering_function_for_direct_testing() 
     script = GRAPH_ENGINE.read_text(encoding="utf-8")
     assert "window.AtlasUI.computeClusterView = computeClusterView;" in script
     assert "window.AtlasUI.defaultClusterKey = defaultClusterKey;" in script
-    assert "window.AtlasUI.DEFAULT_CLUSTER_ZOOM_THRESHOLD = DEFAULT_CLUSTER_ZOOM_THRESHOLD;" in script
+    assert (
+        "window.AtlasUI.DEFAULT_CLUSTER_ZOOM_THRESHOLD = DEFAULT_CLUSTER_ZOOM_THRESHOLD;" in script
+    )
     assert "window.AtlasUI.DEFAULT_CLUSTER_MIN_SIZE = DEFAULT_CLUSTER_MIN_SIZE;" in script
     assert "DEFAULT_CLUSTER_ZOOM_THRESHOLD = 0.45" in script
     assert "DEFAULT_CLUSTER_MIN_SIZE = 3" in script
@@ -115,17 +118,21 @@ def test_api_boundary_is_untouched() -> None:
     intelligence_src = INTELLIGENCE_API.read_text(encoding="utf-8")
     for forbidden in ("cluster", "clustering", "level_of_detail", "level-of-detail", "lod"):
         assert forbidden not in unified_lineage_src.lower(), (
-            f"unified_lineage_api.py must not gain clustering-related server logic (found {forbidden!r}) -- "
-            "KG-3 is a pure client-side rendering decision"
+            f"unified_lineage_api.py must not gain clustering-related server logic "
+            f"(found {forbidden!r}) -- KG-3 is a pure client-side rendering decision"
         )
-    assert "get_knowledge_graph" in intelligence_src  # sanity: still the same function name/route present
+    # sanity: still the same function name/route present
+    assert "get_knowledge_graph" in intelligence_src
     for forbidden in ("cluster_node", "clustering", "level_of_detail"):
         assert forbidden not in intelligence_src.lower(), (
-            f"intelligence_api.py::get_knowledge_graph must not gain clustering-related server logic (found {forbidden!r})"
+            f"intelligence_api.py::get_knowledge_graph must not gain clustering-related "
+            f"server logic (found {forbidden!r})"
         )
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the KG-3 clustering proof")
+@pytest.mark.skipif(
+    NODE_BIN is None, reason="node is required to execute the KG-3 clustering proof"
+)
 def test_clustering_reduces_rendered_elements_and_expansion_recovers_all_nodes() -> None:
     """Actually executes computeClusterView (no mocking) against a synthetic
     4,000-node graph (unified_lineage_api.py's own full-graph node_limit
@@ -136,8 +143,9 @@ def test_clustering_reduces_rendered_elements_and_expansion_recovers_all_nodes()
     selected node both stay individual; and a cluster costs exactly one
     LN-8 windowing slot regardless of how many real nodes it represents.
     """
-    completed = subprocess.run(
-        ["node", str(CLUSTERING_TEST)],
+    assert NODE_BIN is not None  # narrows for mypy; skipif above already guarantees this
+    completed = subprocess.run(  # noqa: S603 -- fixed script path, resolved trusted node binary
+        [NODE_BIN, str(CLUSTERING_TEST)],
         cwd=str(UI_ROOT),
         capture_output=True,
         text=True,

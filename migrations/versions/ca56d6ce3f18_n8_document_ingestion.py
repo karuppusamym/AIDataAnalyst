@@ -37,7 +37,9 @@ def upgrade() -> None:
         sa.Column("uploaded_by", sa.String(length=255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
-        sa.CheckConstraint("media_type IN ('CSV')", name=op.f("ck_document_media_type_is_supported")),
+        sa.CheckConstraint(
+            "media_type IN ('CSV')", name=op.f("ck_document_media_type_is_supported")
+        ),
         sa.ForeignKeyConstraint(
             ["organization_id"],
             ["organization.id"],
@@ -214,7 +216,10 @@ def upgrade() -> None:
         op.f("ix_document_claim_subject_id"), "document_claim", ["subject_id"], unique=False
     )
     op.create_index(
-        "ix_document_claim_org_status", "document_claim", ["organization_id", "status"], unique=False
+        "ix_document_claim_org_status",
+        "document_claim",
+        ["organization_id", "status"],
+        unique=False,
     )
 
 

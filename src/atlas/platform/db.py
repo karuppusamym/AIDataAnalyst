@@ -35,6 +35,18 @@ from atlas.platform.config import get_settings
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
 
+    from atlas.platform.config import Settings
+
+    # Type-only declarations (no runtime assignment -- this branch never
+    # executes) so mypy resolves the real type of these lazily-provided
+    # module attributes instead of __getattr__'s return annotation
+    # (`object`), which otherwise makes every `engine`/`session_factory`/
+    # `settings` call site across the codebase an "object not callable"
+    # error. `__getattr__` below still supplies the actual value at runtime.
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+    settings: Settings
+
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
     "uq": "uq_%(table_name)s_%(column_0_name)s",
