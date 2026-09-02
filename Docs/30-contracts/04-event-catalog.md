@@ -200,9 +200,12 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `quality.incident_auto_recovered` | Signal normalized | incident_id |
 | `quality.sla_breached` | SLA missed | sla_id, table_id |
 | `data_quality.freshness_config.changed.v1` | Watermark freshness config created or updated for a table | datasource_id, table_id, watermark_column |
+| `data_quality.freshness_config.approved.v1` | DQ-2: a maker-checker approval activated a table's freshness watermark config (moves it out of PENDING_APPROVAL) | datasource_id, table_id |
 | `data_quality.rule_pack.created.v1` | DQ-4: a custom quality rule pack created | datasource_id, name |
 | `data_quality.custom_rule_pack.evaluated.v1` | DQ-4: a rule pack's own-cadence sweep evaluated all its rules | rule_pack_id, datasource_id, rules_evaluated, skipped_no_data, incidents_opened, incidents_resolved |
 | `data_quality.external_signal.ingested.v1` | DQ-8: a third-party detector (Monte Carlo, Anomalo, ...) quality signal was ingested and reconciled into the incident lifecycle | signal_id, datasource_id, table_id, detector_vendor, detector_native_id, severity, signal_status, incident_id, incident_opened, incident_resolved |
+| `data_quality.incident.notification_routed.v1` | DQ-1: a newly-opened/reopened quality incident matched at least one notification rule and produced `NotificationEventRecord`(s) | incident_id, severity, events_routed, channels |
+| `data_quality.incident.itsm_payload.v1` | DQ-1: an ITSM-channel notification match produced a formatted incident payload; also records the real webhook emitter's outcome | short_description, description, urgency, impact, correlation_id, webhook_status, webhook_error |
 | `contract.violations_detected` | Runtime data contract evaluation found violations | contract_id, violation_count, enforcement_action |
 
 ### Runtime — topic `atlas.execution.v1` (key: `organization_id`)

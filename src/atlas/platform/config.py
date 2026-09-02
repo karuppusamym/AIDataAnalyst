@@ -350,6 +350,20 @@ class Settings(BaseSettings):
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None
     entitlement_timeout_seconds: int = Field(default=10, ge=1, le=60)
+
+    # --- GROUP C (DQ-1): ITSM webhook emitter for routed quality incidents.
+    # Off by default (`dq_itsm_webhook_enabled=False`) so an unconfigured
+    # deployment's behaviour is unchanged -- a quality incident is still
+    # routed and persisted (`NotificationEventRecord`) even with the emitter
+    # disabled, it just stays in status PENDING rather than attempting an
+    # outbound call. The actual ITSM system (ServiceNow/Jira/...) is an infra
+    # concern; this is a generic, configurable webhook target that receives
+    # `notification_routing.format_itsm_payload`'s JSON body, mirroring
+    # `entitlement_webhook_url`'s shape.
+    dq_itsm_webhook_enabled: bool = False
+    dq_itsm_webhook_url: str | None = None
+    dq_itsm_webhook_token: SecretStr | None = None
+    dq_itsm_webhook_timeout_seconds: int = Field(default=10, ge=1, le=60)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)
