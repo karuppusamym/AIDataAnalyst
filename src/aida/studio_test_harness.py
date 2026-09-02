@@ -14,7 +14,13 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from aida.studio import ChangeItem, ChangeSet, TestResult, validate_parameter_contract
+from aida.studio import (
+    ChangeItem,
+    ChangeSet,
+    TestResult,
+    validate_context_product_contract,
+    validate_parameter_contract,
+)
 
 
 @dataclass
@@ -165,30 +171,24 @@ def _validate_context_product_item(
     item: ChangeItem,
     fixture: TestFixture | None,
 ) -> TestResult:
-    """Validate a context product change item."""
-    failures: list[str] = []
+    """Validate a context product change item (ST-A7).
+
+    Reuses ``validate_context_product_contract``, which parses the snapshot as
+    a real ``ContextProductDefinition`` (module 19's own pydantic contract)
+    instead of a hand-rolled dict-shape check -- the same "reuse the real
+    domain schema" pattern ST-A4's ``_validate_tool_item`` established for
+    TOOL items via ``ToolParameterDefinition``.
+    """
     evidence: dict[str, Any] = {"object_type": "CONTEXT_PRODUCT", "object_id": item.object_id}
-
-    if item.operation == "DELETE":
-        evidence["validation"] = "delete_accepted"
-        return TestResult(passed=True, failures=[], evidence=evidence)
-
-    snapshot = item.after_snapshot
-    if snapshot is None:
-        failures.append("context product definition missing: no after_snapshot provided")
-        return TestResult(passed=False, failures=failures, evidence=evidence)
-
-    required_fields = ["name", "description", "purpose", "allowed_consumer_roles"]
-    for f in required_fields:
-        if f not in snapshot:
-            failures.append(f"missing required context product field: {f}")
-
-    roles = snapshot.get("allowed_consumer_roles", [])
-    if isinstance(roles, list) and len(roles) == 0:
-        failures.append("context product must have at least one allowed consumer role")
-
-    evidence["validation"] = "passed" if not failures else "failed"
-    return TestResult(passed=len(failures) == 0, failures=failures, evidence=evidence)
+    contract = validate_context_product_contract(
+        operation=item.operation,
+        object_id=item.object_id,
+        snapshot=item.after_snapshot,
+    )
+    evidence["validation"] = "passed" if contract.valid else "failed"
+    if contract.definition is not None:
+        evidence["definition"] = contract.definition
+    return TestResult(passed=contract.valid, failures=contract.errors, evidence=evidence)
 
 
 _VALIDATORS = {

@@ -3870,6 +3870,36 @@ export interface StudioConflict {
   current_value: unknown;
 }
 
+/** One `StudioContextProductMaterialization` row -- the durable link from */
+export interface StudioContextProductMaterializationRead {
+  id: string;
+  organization_id: string;
+  change_set_id: string;
+  change_item_id: string;
+  operation: string;
+  context_product_id: string;
+  context_product_version_id: string;
+  governance_review_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Stateless shape-validation request for a CONTEXT_PRODUCT change-set */
+export interface StudioContextProductValidateRequest {
+  operation: "CREATE" | "UPDATE" | "DELETE";
+  object_id: string;
+  snapshot?: Record<string, unknown> | null;
+}
+
+export interface StudioContextProductValidateResult {
+  valid: boolean;
+  errors: string[];
+  definition?: Record<string, unknown> | null;
+  product_key?: string | null;
+  project_id?: string | null;
+}
+
 export interface StudioDiffRead {
   change_set_id: string;
   items: Record<string, unknown>[];

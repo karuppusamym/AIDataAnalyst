@@ -3597,3 +3597,47 @@ class GlobalSearchResponse(ApiModel):
     fusion_method: str
     vector_enabled: bool
     graph_enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP H: ST-A7 context product builder ---
+# ---------------------------------------------------------------------------
+
+
+class StudioContextProductValidateRequest(ApiModel):
+    """Stateless shape-validation request for a CONTEXT_PRODUCT change-set
+    item, mirroring `StudioParameterContractValidateRequest` (ST-A4). Lets an
+    author validate a draft context product definition incrementally, without
+    an existing change set or change item -- the exact same check the
+    CONTEXT_PRODUCT item's own test gate runs (`_validate_context_product_item`
+    -> `validate_context_product_contract`, `studio.py`)."""
+
+    operation: Literal["CREATE", "UPDATE", "DELETE"]
+    object_id: str = Field(min_length=1, max_length=100)
+    snapshot: dict[str, Any] | None = None
+
+
+class StudioContextProductValidateResult(ApiModel):
+    valid: bool
+    errors: list[str]
+    definition: dict[str, Any] | None = None
+    product_key: str | None = None
+    project_id: str | None = None
+
+
+class StudioContextProductMaterializationRead(ApiModel):
+    """One `StudioContextProductMaterialization` row -- the durable link from
+    a CONTEXT_PRODUCT change-set item to the real `ContextProduct`/
+    `ContextProductVersion`/`GovernanceReview` it produced on submission."""
+
+    id: UUID
+    organization_id: UUID
+    change_set_id: UUID
+    change_item_id: UUID
+    operation: str
+    context_product_id: UUID
+    context_product_version_id: UUID
+    governance_review_id: UUID
+    created_by: str
+    created_at: datetime
+    updated_at: datetime

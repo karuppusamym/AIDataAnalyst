@@ -74,6 +74,10 @@ _READ_ONLY_POST_ROUTES: dict[str, str] = {
         "validates a caller-supplied tool parameter contract (ST-A4) and returns "
         "the report; takes no session and persists nothing"
     ),
+    "POST /v1/studio/context-products/validate": (
+        "validates a caller-supplied context product change-item shape (ST-A7) and "
+        "returns the report; takes no session and persists nothing"
+    ),
 }
 
 # Read endpoints whose only write is the idempotent creation of a per-organization

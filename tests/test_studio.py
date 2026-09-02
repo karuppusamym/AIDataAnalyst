@@ -418,14 +418,31 @@ class TestHarnessTerm:
 
 
 class TestHarnessContextProduct:
+    """ST-A7: `_validate_context_product_item` now parses the snapshot as a
+    real `ContextProductDefinition` (module 19's own pydantic contract) via
+    `validate_context_product_contract`, instead of a hand-rolled
+    name/description/purpose/allowed_consumer_roles dict-shape check -- the
+    same "reuse the real domain schema" upgrade ST-A4 made for TOOL items.
+    See `tests/test_studio_context_product.py` for full ST-A7 coverage
+    (contract validation, materialization, and the module-19 maker-checker
+    round trip); these cases just prove the harness dispatch itself still
+    works for CONTEXT_PRODUCT after that upgrade.
+    """
+
     def test_valid_context_product_passes(self) -> None:
         item = _make_item(
             object_type="CONTEXT_PRODUCT",
+            object_id="sales-dashboard",
             operation="CREATE",
             after_snapshot={
+                "product_key": "sales-dashboard",
+                "project_id": str(uuid4()),
                 "name": "Sales Dashboard",
                 "description": "Provides sales metrics",
-                "purpose": "Enable real-time sales monitoring",
+                "purpose": "Enable real-time sales monitoring for the field team",
+                "owner_type": "GROUP",
+                "owner_principal": "sales-stewards",
+                "table_ids": [str(uuid4())],
                 "allowed_consumer_roles": ["Analyst", "Manager"],
             },
         )
@@ -435,21 +452,27 @@ class TestHarnessContextProduct:
     def test_empty_consumer_roles_fails(self) -> None:
         item = _make_item(
             object_type="CONTEXT_PRODUCT",
+            object_id="sales-dashboard",
             operation="CREATE",
             after_snapshot={
+                "product_key": "sales-dashboard",
+                "project_id": str(uuid4()),
                 "name": "Sales Dashboard",
                 "description": "desc",
-                "purpose": "purpose",
+                "purpose": "Enable real-time sales monitoring for the field team",
+                "owner_type": "GROUP",
+                "owner_principal": "sales-stewards",
+                "table_ids": [str(uuid4())],
                 "allowed_consumer_roles": [],
             },
         )
         result = run_test(item)
         assert result.passed is False
-        assert any("consumer role" in f for f in result.failures)
 
     def test_missing_fields_fails(self) -> None:
         item = _make_item(
             object_type="CONTEXT_PRODUCT",
+            object_id="sales-dashboard",
             operation="CREATE",
             after_snapshot={"name": "Sales Dashboard"},
         )
@@ -457,9 +480,18 @@ class TestHarnessContextProduct:
         assert result.passed is False
 
     def test_delete_context_product_passes(self) -> None:
-        item = _make_item(object_type="CONTEXT_PRODUCT", operation="DELETE")
+        item = _make_item(
+            object_type="CONTEXT_PRODUCT", object_id=str(uuid4()), operation="DELETE"
+        )
         result = run_test(item)
         assert result.passed is True
+
+    def test_delete_with_non_uuid_object_id_fails(self) -> None:
+        item = _make_item(
+            object_type="CONTEXT_PRODUCT", object_id="not-a-uuid", operation="DELETE"
+        )
+        result = run_test(item)
+        assert result.passed is False
 
 
 class TestHarnessUnknownType:
