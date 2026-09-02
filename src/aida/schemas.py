@@ -3559,3 +3559,41 @@ class AssetCertificationRead(ApiModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP A: retrieval (RT-5 / RT-9 global-search endpoint) ---
+# ---------------------------------------------------------------------------
+
+
+class GlobalSearchHitRead(ApiModel):
+    """One ranked hit from ``GET /v1/organizations/{organization_id}/global-search``
+    (RT-5's API half, RT-9's genuine cross-source retrieval).
+
+    ``evidence`` is the *real* per-signal fusion breakdown
+    (``aida.retrieval.hybrid_retrieve_enhanced``'s output for the datasource
+    this hit came from) -- lexical/vector/graph/quality_trust/usage_popularity,
+    whichever signals actually fired -- not a synthesized summary. Every
+    ranking factor stays inspectable (RT-3).
+    """
+
+    object_type: str
+    object_id: str
+    display_name: str
+    score: float
+    datasource_id: UUID
+    reason_codes: list[str]
+    evidence: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+class GlobalSearchResponse(ApiModel):
+    """Response for ``GET /v1/organizations/{organization_id}/global-search``."""
+
+    items: list[GlobalSearchHitRead]
+    total: int
+    datasource_count: int
+    limit: int
+    fusion_method: str
+    vector_enabled: bool
+    graph_enabled: bool

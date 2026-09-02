@@ -11919,6 +11919,110 @@
         "title": "GeneratePackRequest",
         "type": "object"
       },
+      "GlobalSearchHitRead": {
+        "additionalProperties": false,
+        "description": "One ranked hit from ``GET /v1/organizations/{organization_id}/global-search``\n(RT-5's API half, RT-9's genuine cross-source retrieval).\n\n``evidence`` is the *real* per-signal fusion breakdown\n(``aida.retrieval.hybrid_retrieve_enhanced``'s output for the datasource\nthis hit came from) -- lexical/vector/graph/quality_trust/usage_popularity,\nwhichever signals actually fired -- not a synthesized summary. Every\nranking factor stays inspectable (RT-3).",
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "display_name": {
+            "title": "Display Name",
+            "type": "string"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "title": "Evidence",
+            "type": "object"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "object_id": {
+            "title": "Object Id",
+            "type": "string"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reason Codes",
+            "type": "array"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          }
+        },
+        "required": [
+          "object_type",
+          "object_id",
+          "display_name",
+          "score",
+          "datasource_id",
+          "reason_codes",
+          "evidence",
+          "metadata"
+        ],
+        "title": "GlobalSearchHitRead",
+        "type": "object"
+      },
+      "GlobalSearchResponse": {
+        "additionalProperties": false,
+        "description": "Response for ``GET /v1/organizations/{organization_id}/global-search``.",
+        "properties": {
+          "datasource_count": {
+            "title": "Datasource Count",
+            "type": "integer"
+          },
+          "fusion_method": {
+            "title": "Fusion Method",
+            "type": "string"
+          },
+          "graph_enabled": {
+            "title": "Graph Enabled",
+            "type": "boolean"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GlobalSearchHitRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          },
+          "vector_enabled": {
+            "title": "Vector Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "datasource_count",
+          "limit",
+          "fusion_method",
+          "vector_enabled",
+          "graph_enabled"
+        ],
+        "title": "GlobalSearchResponse",
+        "type": "object"
+      },
       "GlossaryCategoryCreate": {
         "additionalProperties": false,
         "properties": {
@@ -61647,6 +61751,235 @@
         "summary": "Fleet Summary",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}/global-search": {
+      "get": {
+        "description": "RT-9: one query, genuinely spanning every datasource in scope, ranked\nby the same lexical + vector + graph + quality/usage fusion pipeline\n`hybrid_retrieve_enhanced` uses within one datasource (RT-1/RT-2/RT-3).\n\nPolicy filtering happens before any ranking runs: `enforce_organization`\ngates the whole call, and the candidate datasource set itself is always\na query scoped to `organization_id` (narrowed further by `project_id`/\n`datasource_ids` when supplied) -- never a caller-supplied source list\ntaken on faith.",
+        "operationId": "global_semantic_search_v1_organizations__organization_id__global_search_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Search query",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "description": "Search query",
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Optional project filter",
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional project filter",
+              "title": "Project Id"
+            }
+          },
+          {
+            "description": "Optional explicit datasource scope",
+            "in": "query",
+            "name": "datasource_ids",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "format": "uuid",
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional explicit datasource scope",
+              "title": "Datasource Ids"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fusion_method",
+            "required": false,
+            "schema": {
+              "default": "rrf",
+              "enum": [
+                "rrf",
+                "weighted_linear"
+              ],
+              "title": "Fusion Method",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_vector",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Include Vector",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_graph",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Include Graph",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GlobalSearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Global Semantic Search",
+        "tags": [
+          "semantic-governance"
         ]
       }
     },

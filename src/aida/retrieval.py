@@ -61,6 +61,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
@@ -74,6 +75,7 @@ from aida.models import (
     BusinessEntity,
     DataSource,
     DbtArtifactImport,
+    DbtLineageEdge,
     DbtProject,
     DbtResource,
     GlossaryTerm,
@@ -191,6 +193,47 @@ class HybridRetrievalHit:
             "reason_codes": self.reason_codes,
             "metadata": self.metadata,
         }
+
+
+# ---------------------------------------------------------------------------
+# Shared dbt-project helpers
+# ---------------------------------------------------------------------------
+
+
+async def _latest_dbt_artifact_import_ids(
+    session: AsyncSession, *, datasource: DataSource
+) -> list[UUID]:
+    """The most recent `DbtArtifactImport` id per ACTIVE `DbtProject` bound to
+    ``datasource``. Factored out of `hybrid_retrieve`'s stage-5 dbt-resource
+    block (RT-2) so `hybrid_retrieve_enhanced`'s graph stage can resolve the
+    same "latest snapshot per project" scope for dbt `depends_on` edges
+    without a second, drifting copy of this resolution logic.
+    """
+    dbt_project_ids = list(
+        await session.scalars(
+            select(DbtProject.id).where(
+                DbtProject.datasource_id == datasource.id,
+                DbtProject.organization_id == datasource.organization_id,
+                DbtProject.status == "ACTIVE",
+            )
+        )
+    )
+    if not dbt_project_ids:
+        return []
+    artifact_rows = (
+        await session.scalars(
+            select(DbtArtifactImport)
+            .where(DbtArtifactImport.dbt_project_id.in_(dbt_project_ids))
+            .order_by(DbtArtifactImport.dbt_project_id, DbtArtifactImport.created_at.desc())
+        )
+    ).all()
+    seen_projects: set[UUID] = set()
+    latest_artifact_ids: list[UUID] = []
+    for artifact in artifact_rows:
+        if artifact.dbt_project_id not in seen_projects:
+            latest_artifact_ids.append(artifact.id)
+            seen_projects.add(artifact.dbt_project_id)
+    return latest_artifact_ids
 
 
 # ---------------------------------------------------------------------------
@@ -447,77 +490,54 @@ async def hybrid_retrieve(
                 )
 
     # 5. dbt resources
-    dbt_project_ids = list(
-        await session.scalars(
-            select(DbtProject.id).where(
-                DbtProject.datasource_id == datasource.id,
-                DbtProject.organization_id == datasource.organization_id,
-                DbtProject.status == "ACTIVE",
-            )
-        )
-    )
-    if dbt_project_ids:
-        artifact_rows = (
+    latest_artifact_ids = await _latest_dbt_artifact_import_ids(session, datasource=datasource)
+    if latest_artifact_ids:
+        dbt_rows = (
             await session.scalars(
-                select(DbtArtifactImport)
-                .where(DbtArtifactImport.dbt_project_id.in_(dbt_project_ids))
-                .order_by(DbtArtifactImport.dbt_project_id, DbtArtifactImport.created_at.desc())
+                select(DbtResource)
+                .where(DbtResource.artifact_import_id.in_(latest_artifact_ids))
+                .limit(scan_limit)
             )
         ).all()
-        seen_projects: set[UUID] = set()
-        latest_artifact_ids: list[UUID] = []
-        for artifact in artifact_rows:
-            if artifact.dbt_project_id not in seen_projects:
-                latest_artifact_ids.append(artifact.id)
-                seen_projects.add(artifact.dbt_project_id)
-
-        if latest_artifact_ids:
-            dbt_rows = (
-                await session.scalars(
-                    select(DbtResource)
-                    .where(DbtResource.artifact_import_id.in_(latest_artifact_ids))
-                    .limit(scan_limit)
-                )
-            ).all()
-            for dbt_resource in dbt_rows:
-                col_desc_text = (
-                    " ".join(dbt_resource.column_descriptions.values())
-                    if dbt_resource.column_descriptions
-                    else ""
-                )
-                candidate_text = " ".join(
-                    filter(None, [
-                        dbt_resource.name,
-                        dbt_resource.description,
-                        dbt_resource.original_file_path,
-                        col_desc_text,
-                    ])
-                )
-                bm25 = _bm25_score(query_tokens, candidate_text)
-                exact = _exact_phrase_bonus(question, candidate_text)
-                score = round(min(1.0, bm25 + exact), 4)
-                if score > 0:
-                    hit_id = f"DBT_RESOURCE:{dbt_resource.id}"
-                    if hit_id not in seen_ids:
-                        seen_ids.add(hit_id)
-                        hits.append(
-                            HybridRetrievalHit(
-                                object_type="DBT_RESOURCE",
-                                object_id=str(dbt_resource.id),
-                                display_name=dbt_resource.name,     # correct field
-                                score=score,
-                                reason_codes=["BM25_DBT_RESOURCE"],
-                                metadata={
-                                    "dbt_resource_id": str(dbt_resource.id),
-                                    "resource_type": dbt_resource.resource_type,
-                                    "table_id": (
-                                        str(dbt_resource.matched_table_id)
-                                        if dbt_resource.matched_table_id
-                                        else None
-                                    ),
-                                },
-                            )
+        for dbt_resource in dbt_rows:
+            col_desc_text = (
+                " ".join(dbt_resource.column_descriptions.values())
+                if dbt_resource.column_descriptions
+                else ""
+            )
+            candidate_text = " ".join(
+                filter(None, [
+                    dbt_resource.name,
+                    dbt_resource.description,
+                    dbt_resource.original_file_path,
+                    col_desc_text,
+                ])
+            )
+            bm25 = _bm25_score(query_tokens, candidate_text)
+            exact = _exact_phrase_bonus(question, candidate_text)
+            score = round(min(1.0, bm25 + exact), 4)
+            if score > 0:
+                hit_id = f"DBT_RESOURCE:{dbt_resource.id}"
+                if hit_id not in seen_ids:
+                    seen_ids.add(hit_id)
+                    hits.append(
+                        HybridRetrievalHit(
+                            object_type="DBT_RESOURCE",
+                            object_id=str(dbt_resource.id),
+                            display_name=dbt_resource.name,     # correct field
+                            score=score,
+                            reason_codes=["BM25_DBT_RESOURCE"],
+                            metadata={
+                                "dbt_resource_id": str(dbt_resource.id),
+                                "resource_type": dbt_resource.resource_type,
+                                "table_id": (
+                                    str(dbt_resource.matched_table_id)
+                                    if dbt_resource.matched_table_id
+                                    else None
+                                ),
+                            },
                         )
+                    )
 
     # 6. Semantic metrics (SM-2: a bound, ACTIVE glossary term's definition and
     #    synonyms are folded into the metric's retrievable text, so the binding
@@ -898,10 +918,13 @@ async def hybrid_retrieve_enhanced(
     # only depth 0 (the seeds themselves, which `expand_graph` doesn't even emit as
     # hits) -- expansion *past* what lexical/vector already found is the entire point
     # of RT-2, so the edge source has to be real governed metadata, not a placeholder.
-    # `MetadataConstraint` foreign keys are exactly that: already-approved,
-    # datasource-scoped table-to-table relationships requiring no further governance
-    # to read. dbt `depends_on` / tool `referenced_tables` edges would extend this
-    # further and are a documented follow-up (03-tracker.md RT-2), not required here.
+    # Three real, already-governed edge sources feed the graph: `MetadataConstraint`
+    # foreign keys (already-approved, datasource-scoped table-to-table relationships),
+    # dbt `DEPENDS_ON` `DbtLineageEdge` rows resolved to their matched tables (the
+    # `03-tracker.md` RT-2 follow-up -- a real dbt manifest dependency a table's FKs
+    # never capture, e.g. a staging model with no declared constraint), and a
+    # candidate `GOVERNED_TOOL` hit's own declared `referenced_tables` (so a table
+    # reachable only through a governed tool's SQL, not a raw FK, still expands).
     if include_graph and lexical_hits:
         kg = KnowledgeGraph()
         for hit in lexical_hits:
@@ -969,6 +992,122 @@ async def hybrid_retrieve_enhanced(
                 target_id=target_node_id,
                 edge_type="FOREIGN_KEY",
             ))
+
+        # RT-2 follow-up: dbt `DEPENDS_ON` edges, resolved through each side's
+        # `matched_table_id`. Only the latest artifact snapshot per ACTIVE dbt
+        # project is read (same scope `hybrid_retrieve`'s dbt-resource stage
+        # uses), and only edges where BOTH ends resolved to a real, ACTIVE
+        # `MetadataTable` are added -- an unmatched dbt node (no `matched_table_id`)
+        # contributes no graph edge here, it just isn't a table-level relationship
+        # yet.
+        dbt_artifact_ids = await _latest_dbt_artifact_import_ids(session, datasource=datasource)
+        if dbt_artifact_ids:
+            source_resource = aliased(DbtResource)
+            target_resource = aliased(DbtResource)
+            dbt_edge_rows = (
+                await session.execute(
+                    select(source_resource, target_resource)
+                    .select_from(DbtLineageEdge)
+                    .join(
+                        source_resource,
+                        source_resource.id == DbtLineageEdge.source_resource_id,
+                    )
+                    .join(
+                        target_resource,
+                        target_resource.id == DbtLineageEdge.target_resource_id,
+                    )
+                    .where(
+                        DbtLineageEdge.artifact_import_id.in_(dbt_artifact_ids),
+                        DbtLineageEdge.organization_id == org_id,
+                        DbtLineageEdge.edge_type == "DEPENDS_ON",
+                        source_resource.matched_table_id.is_not(None),
+                        target_resource.matched_table_id.is_not(None),
+                    )
+                    .limit(settings.agent_retrieval_scan_limit)
+                )
+            ).all()
+            dbt_table_ids = {
+                table_id
+                for source, target in dbt_edge_rows
+                for table_id in (source.matched_table_id, target.matched_table_id)
+            }
+            dbt_tables: dict[UUID, MetadataTable] = {}
+            if dbt_table_ids:
+                dbt_tables = {
+                    table.id: table
+                    for table in (
+                        await session.scalars(
+                            select(MetadataTable).where(
+                                MetadataTable.id.in_(dbt_table_ids),
+                                MetadataTable.status == "ACTIVE",
+                            )
+                        )
+                    ).all()
+                }
+            for source, target in dbt_edge_rows:
+                source_table = dbt_tables.get(source.matched_table_id)
+                target_table = dbt_tables.get(target.matched_table_id)
+                if source_table is None or target_table is None:
+                    continue
+                source_node_id = f"TABLE:{source_table.id}"
+                target_node_id = f"TABLE:{target_table.id}"
+                if kg.get_node(source_node_id) is None:
+                    kg.add_node(GraphNode(
+                        node_id=source_node_id,
+                        node_type="TABLE",
+                        display_name=source_table.name,
+                        organization_id=org_id,
+                        datasource_id=datasource.id,
+                    ))
+                if kg.get_node(target_node_id) is None:
+                    kg.add_node(GraphNode(
+                        node_id=target_node_id,
+                        node_type="TABLE",
+                        display_name=target_table.name,
+                        organization_id=org_id,
+                        datasource_id=datasource.id,
+                    ))
+                kg.add_edge(GraphEdge(
+                    source_id=source_node_id,
+                    target_id=target_node_id,
+                    edge_type="DBT_DEPENDS_ON",
+                ))
+
+        # RT-2 follow-up: a `GOVERNED_TOOL` candidate's own declared
+        # `referenced_tables` (already-published tool metadata, no further
+        # approval needed to read) become TOOL -> TABLE edges, so a table a
+        # governed tool queries -- but that has no FK/dbt relationship to
+        # anything already surfaced -- is still reachable by expansion.
+        tool_hits = [h for h in lexical_hits if h.object_type == "GOVERNED_TOOL"]
+        graph_tool_name_pool = {
+            name
+            for hit in tool_hits
+            for name in (hit.metadata.get("referenced_tables") or [])
+        }
+        if graph_tool_name_pool:
+            tool_table_ids = await resolve_table_ids(
+                session, datasource=datasource, table_names=sorted(graph_tool_name_pool)
+            )
+            for hit in tool_hits:
+                tool_node_id = f"{hit.object_type}:{hit.object_id}"
+                for name in hit.metadata.get("referenced_tables") or []:
+                    table_id = tool_table_ids.get(name)
+                    if table_id is None:
+                        continue
+                    target_node_id = f"TABLE:{table_id}"
+                    if kg.get_node(target_node_id) is None:
+                        kg.add_node(GraphNode(
+                            node_id=target_node_id,
+                            node_type="TABLE",
+                            display_name=name,
+                            organization_id=org_id,
+                            datasource_id=datasource.id,
+                        ))
+                    kg.add_edge(GraphEdge(
+                        source_id=tool_node_id,
+                        target_id=target_node_id,
+                        edge_type="TOOL_REFERENCES_TABLE",
+                    ))
 
         seed_ids = [f"{h.object_type}:{h.object_id}" for h in lexical_hits[:10]]
         graph_hits = expand_graph(
@@ -1151,3 +1290,79 @@ async def hybrid_retrieve_enhanced(
         )
 
     return result_hits
+
+
+# ---------------------------------------------------------------------------
+# GROUP A: RT-9 cross-source retrieval + RT-5 global-search support
+# ---------------------------------------------------------------------------
+
+
+async def hybrid_retrieve_cross_source(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    datasources: list[DataSource],
+    question: str,
+    settings: Settings,
+    fusion_method: str = "rrf",
+    include_vector: bool = True,
+    include_graph: bool = True,
+    max_hops: int = 2,
+    limit: int | None = None,
+) -> list[HybridRetrievalHit]:
+    """RT-9: one query, genuinely spanning every datasource in ``datasources``.
+
+    Before this function, `hybrid_retrieve`/`hybrid_retrieve_enhanced` both took
+    a single `DataSource` and scoped every candidate query to it -- real hybrid
+    (lexical + vector + graph + fusion) retrieval never crossed a datasource
+    boundary, only the separate, lexical-only `search_api.py::global_search`
+    surface did (03-tracker.md RT-9's own honesty note: "the cross-*source*
+    half remains a separate ... surface, not this one"). This closes that
+    specific gap for the hybrid pipeline.
+
+    Approach, stated plainly: each datasource's candidates are independently
+    policy-scoped and fused by `hybrid_retrieve_enhanced` (unchanged -- FK/dbt
+    graph edges and business annotations never cross a datasource's own
+    boundary regardless), then the per-datasource fused results are merged and
+    re-sorted by their already-computed `final_score`. This is a merge-and-sort
+    over independently-fused rankings, not a second joint RRF pass across the
+    combined candidate pool -- because every datasource run uses the same
+    `fusion_method`/weights (RRF's rank-based score or the weighted-linear sum,
+    both computed the same way regardless of pool size), so the resulting
+    scores are on a comparable scale. Doing a true joint fusion would require
+    running every signal (lexical scan, embedding batch, graph BFS) against
+    the union of all datasources' candidates in one pass, which is a larger
+    restructuring than this row's scope covers -- named here rather than
+    silently presented as identical to a joint pass.
+
+    Every hit keeps its full per-datasource `retrieval_evidence` (RT-3:
+    every ranking factor stays inspectable) plus the originating
+    `datasource_id`, so a caller can always tell which source a result came
+    from and exactly why it ranked where it did.
+    """
+    if not datasources:
+        return []
+
+    per_source_limit = limit or settings.agent_retrieval_limit
+    merged: list[HybridRetrievalHit] = []
+    for ds in datasources:
+        # Sequential, not `asyncio.gather`: all datasources share one
+        # `AsyncSession`, which is not safe for concurrent use across
+        # coroutines.
+        source_hits = await hybrid_retrieve_enhanced(
+            session,
+            datasource=ds,
+            question=question,
+            settings=settings,
+            organization_id=organization_id,
+            fusion_method=fusion_method,
+            include_vector=include_vector,
+            include_graph=include_graph,
+            max_hops=max_hops,
+        )
+        for hit in source_hits:
+            hit.metadata = {**hit.metadata, "datasource_id": str(ds.id)}
+            merged.append(hit)
+
+    merged.sort(key=lambda h: h.score, reverse=True)
+    return merged[:per_source_limit]
