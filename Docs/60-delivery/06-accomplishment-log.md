@@ -10639,3 +10639,182 @@ Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in
 pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
 rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
 failure.
+
+## 2026-09-02 — Group K (AT-9 + AT-12): scope-aware definitions with refusal on ambiguity, semantic mining of warehouse query history
+
+Wave-2 parallel work, branch `feat/atlas-semantic-trust` off `feature/snowflake-dbt-lineage-mcp` at
+`fa501c0`. Sibling groups (I/J/L) worked concurrently on shared files under the same integration; this
+entry's edits to shared files (`models.py`, `semantic_api.py`, `agent_orchestrator.py`) were kept
+append-only/additive and narrowly scoped, per the parallel plan's contract.
+
+### AT-9 — scope-aware term/metric definitions and refusal on ambiguity
+
+`glossary_term` uniqueness widens from `(organization_id, term_key)` to `(organization_id, term_key,
+business_node_id)` (`models.py:1903`) -- a nullable `business_node_id` (ADR-0018's business graph)
+stands in for an enterprise-wide default, so two independently governed definitions of the same
+term_key can coexist, each scoped to a different business node. A bank cannot agree one definition of
+"exposure" across Risk and Retail Banking; before this, the schema structurally forbade the platform
+from holding both.
+
+**The NULL-uniqueness trap, and how it's closed.** Postgres unique constraints treat every NULL as
+distinct, so a bare 3-column constraint would let more than one `business_node_id IS NULL`
+(enterprise-default) row coexist for the same term_key -- silently reopening exactly the ambiguity this
+row exists to close. Two constraints instead: the composite `uq_glossary_term_org_key_node` covers
+every node-scoped pair, and a partial-unique index (`uq_glossary_term_org_key_enterprise_default`,
+`postgresql_where`/`sqlite_where` -- mirroring `ContextProductVersion`'s own
+`uq_context_product_version_one_published`, so the in-memory SQLite test harness enforces the identical
+rule Postgres will) caps the enterprise-default slot at exactly one row. Migration
+`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py` drops the prior 2-column constraint by *column
+signature*, not by a hardcoded name -- it was declared without an explicit `name=` at creation
+(`ab31d7e4c920_glossary_asset_documentation.py`), so its real name in a live database is whatever
+Postgres's own default-naming convention assigned, not the ORM's `NAMING_CONVENTION` (which only
+applies when SQLAlchemy compiles DDL through `Base.metadata`, never through Alembic's unbound
+`op.create_table`) -- a `DO $$ ... $$` block finds it by its `(organization_id, term_key)` column set
+via `information_schema` and drops whatever it's actually called.
+
+**Resolution: most-specific-wins over N9's own business-graph primitives, not a new traversal.**
+`semantic_inference.resolve_scoped_glossary_term` (`semantic_inference.py:731`) resolves one term_key
+against the *asking context* -- the datasource being queried, via `business_graph.classification_scope`
+(the datasource's assigned business nodes plus their ancestors) -- and picks the most specific
+applicable definition using `business_graph.ancestor_closure` (`_most_specific_business_node_ids`,
+`semantic_inference.py:698`) to determine which candidate node is a strict ancestor of another, never a
+new recursive-CTE walk of its own. Three real outcomes, not two: `RESOLVED` (a single node-scoped
+definition beats the enterprise default; a descendant node's definition beats an ancestor node's),
+`AMBIGUOUS` (two node-scoped definitions where neither node is an ancestor of the other -- the
+datasource is scoped to two unrelated business nodes, each with its own definition), and `NOT_FOUND`
+(nothing applies to this scope at all -- not an error). `format_ambiguous_definition_refusal` renders an
+`AMBIGUOUS` resolution as the message an agent run refuses with: both definitions, both owners, by
+business node.
+
+**Wired into the real grounded-question path, not a parallel check.** `retrieval.hybrid_retrieve`
+(read-only, unmodified) already surfaces a `GLOSSARY_TERM` retrieval hit carrying `metadata["term_key"]`
+whenever a term has an `ACTIVE` binding to a real semantic object; `agent_orchestrator._check_definition_ambiguity`
+(`agent_orchestrator.py:147`) runs `resolve_scoped_glossary_term` against every distinct term_key one
+run's own retrieval evidence surfaced, right after grounding-fragment digests are computed inside
+`GovernedAgentOrchestrator.run()` (`agent_orchestrator.py:508`). On `AMBIGUOUS` it persists the run
+`REJECTED` with reason `AMBIGUOUS_DEFINITION` (the same `_persist_rejection` path every other refusal in
+this orchestrator uses, so a `REFUSAL` `AiDecisionRecord` is recorded identically) and raises the
+*existing* `AgentClarificationRequired` -- already caught by `POST
+/datasources/{datasource_id}/agent-analyses` (`api.py:2933`, calling `orchestrator.run()` at
+`api.py:2950`) and mapped to HTTP 409, so the refusal needed zero route or schema changes.
+
+Verified end-to-end against real seeded data, not mocked: `tests/test_at9_scoped_definitions.py` (9
+tests). `test_orchestrator_refuses_on_ambiguous_definition` seeds two sibling `BusinessNode`s (Risk,
+Retail Banking), a datasource assigned to *both* via real `BusinessAssignment` rows, two `GlossaryTerm`
+rows (`term_key='exposure'`) each scoped to one node and each bound to a real `SemanticMetric` via an
+`ACTIVE` `TermSemanticBinding` (required for `retrieval.hybrid_retrieve` to surface either as a
+`GLOSSARY_TERM` hit at all), then runs a real `GovernedAgentOrchestrator.run()` and asserts the raised
+message names both owners, the persisted run is `REJECTED`/`AMBIGUOUS_DEFINITION`, and exactly one
+`REFUSAL` record exists. `test_orchestrator_does_not_refuse_when_scope_disambiguates` proves the
+identical setup, scoped to one node only, never trips the ambiguity refusal (the run still raises
+`AgentClarificationRequired`, but for the unrelated missing-tool-parameter reason -- the same
+scaffolding trick `test_at6_context_receipts.py` uses to reach `RESOLVED` without a real SQL warehouse
+or model route). Direct-unit tests cover `NOT_FOUND`, enterprise-default fallback, and most-specific-wins
+across a real parent/child `BusinessNode` pair.
+
+**Honest gaps.** No HTTP endpoint lets a steward set `business_node_id` on a term yet --
+`GlossaryTermCreate` (`schemas.py:1541`) and the existing glossary CRUD routes are untouched, so scoping
+a term today is a direct DB write, not an API call; adding that field is a natural, low-risk follow-up,
+left out here specifically to minimize collision surface with `glossary_api.py`/`schemas.py` while other
+Wave-2 groups and `ST-05`/`06`/`07` work concurrently. The ambiguity check only considers terms the
+question's own retrieval evidence already surfaced (a `GLOSSARY_TERM` hit requires a bound semantic
+object), not a full-vocabulary scan of every governed term against the question text.
+
+### AT-12 — semantic mining of warehouse query history
+
+New `src/aida/query_history_miner.py`. Mines *value-free* query-log structure -- which tables joined on
+which columns, which columns a query grouped by, which columns it filtered on -- into bounded candidates
+that land in the existing maker-checker review queue, never auto-authoritative. Per INV-6/AT-C3, a
+filter *value* must never reach a candidate or its evidence, only the filter *column*.
+
+**Extraction is provably value-free, not just documented as such.** `extract_query_structure` parses one
+query's SQL text with `sqlglot` and walks only `exp.Column`/`exp.Table`/`exp.Join`/aggregate-function
+nodes; every `exp.Literal` node a filter predicate carries (the actual value someone searched for) is
+walked past and never read into the returned `QueryStructure`. `test_extract_query_structure_never_captures_literal_values`
+seeds a query with `WHERE o.status = 'COMPLETED' AND o.amount > 100` and asserts neither literal appears
+anywhere in the extracted structure's own `repr` -- a real proof, not an assertion about intent. An
+unparseable statement degrades to `None` rather than a guessed structure, mirroring
+`sql_lineage_parser.py`'s own posture exactly.
+
+**Two candidate shapes, one reused unmodified, one genuinely new after checking the existing model
+couldn't represent it.** Join candidates reuse `RelationshipCandidate` verbatim -- a new
+`detection_rule=QUERY_LOG_JOIN_V1` is the only new vocabulary, so the *existing* `decide_relationship_candidate`
+endpoint already reviews them, no new schema or route. Metric candidates needed a real check first:
+`SemanticMetricProposal` (SM-4) requires a `source_annotation_id` pointing at an approved business
+annotation and carries NL-description-quality scores (accuracy/clarity/style/completeness) that simply
+do not apply to a candidate whose only evidence is "this aggregation-over-grain shape recurred N times
+in the query log" -- reusing it would misrepresent provenance. `QueryHistoryMetricCandidate`
+(`models.py:4629`, same migration as AT-9) is the clearly-scoped new type the tracker row anticipated,
+landing in the platform's *other* existing maker-checker queue -- `GovernanceReview`, object_type
+`QUERY_HISTORY_METRIC_CANDIDATE` -- dispatched from `semantic_api._apply_governance_review_decision`
+(`semantic_api.py:2101`) exactly the way AT-11's `COLUMN_CLASSIFICATION_PROMOTION` branch already is.
+`apply_query_history_metric_candidate_decision` (`query_history_miner.py:706`) publishes a real
+`SemanticMetric` + `PUBLISHED SemanticMetricVersion` only on an independent APPROVE (mirrors
+`metric_suggestion_service.apply_metric_suggestion_proposal`'s own auto-created-model-version shape);
+REJECT publishes nothing and retains the candidate as negative evidence, matching every other
+reject-and-retain convention on this platform.
+
+**AT-C2 lane 3, enforced in code, not just asserted.** Every candidate's confidence comes from
+`_lane3_confidence`, which cannot exceed `QUERY_HISTORY_CONFIDENCE_CAP = 0.70` for any occurrence count
+-- swept from 0 to 1,000,000 occurrences in `test_lane3_confidence_never_exceeds_the_cap`. Nothing this
+module creates is ever `APPROVED` at creation time (`test_mined_candidates_are_never_auto_approved`
+checks every row of both types after a real mining run).
+
+**Bounded on two axes, not merely ranked.** `QUERY_HISTORY_MIN_OCCURRENCES = 3` drops a shape seen once
+or twice as noise *before* ranking even considers it; `QUERY_HISTORY_MAX_JOIN_CANDIDATES = 50` /
+`QUERY_HISTORY_MAX_METRIC_CANDIDATES = 25` cap the occurrence-ranked survivors actually landed per
+mining run -- the same rank-then-cap shape `generate_composite_relationship_candidates` (RL-3) already
+uses, not an invented scheme. Re-mining an identical log is idempotent: dedups against existing
+`RelationshipCandidate` pairs (both directions), the AT-C3 negative-knowledge suppression list (reused
+verbatim via `relationship_candidate_review.load_suppressed_relationship_predicate_hashes` --
+`compute_predicate_hash`/`relationship_candidate_negative_predicate` checked both ways so a rejected
+edge can't sneak back in reversed), and existing `QueryHistoryMetricCandidate` shapes by
+`(table, measure_column, aggregation, grain_fingerprint)`.
+
+Tests: `tests/test_at12_query_history_mining.py`, 15 tests -- pure coverage of extraction, frequency
+mining, bounding, and the confidence cap; real in-memory-SQLite seeded data (two tables, real columns,
+real FK-shaped join) for the DB-facing mining pass and the full governance-decision round trip
+(approve publishes a real metric version with the right `source_table_id`/`measure_column_id`/
+`allowed_dimension_column_ids`; reject publishes nothing; deciding an already-decided candidate
+conflicts with a 409).
+
+**Per `Docs/review-2026-08/atlan-context/00-decisions.md` §4, still explicitly not a lineage source.** An
+approved join candidate renders exactly like every other `RelationshipCandidate` -- a
+`SUGGESTED_RELATIONSHIP`-tier candidate in the unified lineage graph -- never an asserted
+`DECLARED`/`VIEW_DDL`-tier edge.
+
+**Honest gaps, and why AT-D3's capability flags were deliberately left alone.** No connector implements
+`get_query_history()` -- this module takes an already-materialized `WarehouseQueryLogEntry` sequence as
+input, connector-agnostic by design, so mining itself is real and tested end-to-end against that input
+contract, but nothing yet calls a live warehouse's `ACCOUNT_USAGE.QUERY_HISTORY` (Snowflake) or
+`system.query.history` (Databricks) to produce it. Per AT-D3's own instruction ("no connector's
+`query_history` capability flag should flip back to advertised-and-consumed until this is real and
+certified"), both flags are checked and left exactly as AT-D3 left them: `query_history=False` in both
+`connectors/snowflake.py:775` and `connectors/databricks.py:328` -- flipping either was explicitly out
+of scope for this pass and was not done. No HTTP endpoint triggers a mining run yet either (the natural
+follow-up mirrors `discover_relationship_candidates`'s own admin-triggered-scan shape); the mining
+function is tested by direct call instead, the same convention `test_at11_classification_propagation.py`
+uses for `_apply_governance_review_decision`, deliberately to avoid a new route/schema/OpenAPI-baseline
+surface while `ST-05`/`06`/`07` split `api.py`/`schemas.py` concurrently. Per INV-9, this entry does not
+claim query-history mining is live against any real connector -- only that the mining/candidate/review
+mechanism itself is real, tested, and ready to receive real query-log rows the moment a connector
+produces them.
+
+### Verification
+
+`ruff check .`: clean across the repo. `mypy src` (the actual gate -- `[tool.mypy]` scopes to
+`packages = ["aida"]`, tests are not part of the strict-mypy surface): 287 source files, zero issues.
+`lint-imports`: 8/8 contracts kept, no new violation (`aida.semantic_inference` stays out of the
+`C4/ST-11` forbidden-`query_gateway` list -- its new `business_graph` import carries no such
+dependency, confirmed by direct import). Exactly one new Alembic revision
+(`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py`), branching cleanly off the single prior head
+(`7e6460d905fe`) -- `alembic heads` shows one head. `Base.metadata.create_all` against an in-memory
+SQLite engine succeeds with both new models registered, confirming the ORM side of the schema change is
+internally consistent (no live Postgres in this sandbox to run the real migration against, the same
+standing limitation every other migration on this branch already carries).
+
+`tests/test_at9_scoped_definitions.py` (9) and `tests/test_at12_query_history_mining.py` (15): both
+files pass in full on the first real run after fixing test-scaffolding issues caught along the way (a
+`MetadataColumn.fingerprint` NOT NULL omission; a wrong expected value in a hand-constructed
+`JoinColumnPair` test fixture that skipped the normalization `extract_query_structure` itself performs).
+Full-suite regression run in progress at the time of this entry; see the PR for its final result.
