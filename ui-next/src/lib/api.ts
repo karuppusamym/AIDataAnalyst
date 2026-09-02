@@ -15,6 +15,7 @@ import type {
   UnifiedLineageImpactRead,
 } from "./types";
 import type {
+  AuditEventRead,
   CatalogRowRead,
   CursorPage,
   MarketplaceProductRead,
@@ -22,6 +23,7 @@ import type {
   PageOf,
 } from "./ui-types";
 import {
+  makeFixtureAuditEvents,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
@@ -427,6 +429,66 @@ export async function fetchLineageImpact(
   params.set("node_limit", String(query.nodeLimit ?? 200));
   return get<UnifiedLineageImpactRead>(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Audit ledger — org-wide, no datasource picker.
+--------------------------------------------------------------------------- */
+
+export interface AuditEventQuery {
+  organizationId: string;
+  action?: string;
+  resourceType?: string;
+  correlationId?: string;
+  /** ISO 8601 datetime, MUST carry a timezone offset (e.g. end in `Z` or
+   *  `+05:30`) — `list_audit_events` (`operational_api.py:336`) 422s a naive
+   *  datetime rather than guessing what timezone it was meant in. Checked
+   *  client-side below so a naive-looking value never reaches the wire. */
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+const TZ_AWARE_ISO = /(Z|[+-]\d{2}:?\d{2})$/i;
+
+function assertTimezoneAware(label: "since" | "until", value: string): void {
+  if (!TZ_AWARE_ISO.test(value)) {
+    throw new Error(
+      `${label} must be a timezone-aware ISO datetime (e.g. end with "Z"), got "${value}"`,
+    );
+  }
+}
+
+/** `GET /v1/organizations/{organization_id}/audit-events` (UX-16,
+ *  `list_audit_events`, `operational_api.py:336`) — every `AuditEvent` the
+ *  org has recorded, filterable by `action`/`resource_type`/`correlation_id`/
+ *  `since`/`until` and paginated by `limit`/`offset` (NOT a cursor — this
+ *  route's own signature, unlike `fetchCatalogRows`'s keyset one). Gated
+ *  server-side behind `PlatformAdmin`/`OrganizationAdmin`/`Auditor`/
+ *  `Operations` (the route's own `require_roles`); an unauthorized caller
+ *  gets the same 403 any other gated call in this file surfaces. */
+export async function fetchAuditEvents(
+  query: AuditEventQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<AuditEventRead>> {
+  if (query.since) assertTimezoneAware("since", query.since);
+  if (query.until) assertTimezoneAware("until", query.until);
+  if (USE_FIXTURES) return makeFixtureAuditEvents(query);
+
+  const params = new URLSearchParams();
+  if (query.action) params.set("action", query.action);
+  if (query.resourceType) params.set("resource_type", query.resourceType);
+  if (query.correlationId) params.set("correlation_id", query.correlationId);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+
+  return get<PageOf<AuditEventRead>>(
+    `/v1/organizations/${query.organizationId}/audit-events?${params}`,
     signal,
   );
 }
