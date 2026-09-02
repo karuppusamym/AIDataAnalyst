@@ -6407,7 +6407,8 @@ and INV-1's closed `permitted_readers` allowlist
 (`tests/test_inv1_single_authoritative_store.py::test_request_path_graph_access_is_read_only_and_closed`)
 does not distinguish request-path from scheduled-background Neo4j readers by directory alone
 outside the `projectors/` package, so `graph_reconciliation.py` needed a reviewed entry — added
-with the same justification style as the existing `api.py`/`lineage_graph_store.py` rows: this
+with the same justification style as the existing `api.py`/lineage_graph_store.py
+(since consolidated into `graph_store.py`, tracker C7) rows: this
 module reads Neo4j only to diff it against PostgreSQL's own selection and alert on disagreement,
 never to answer a request or override PostgreSQL.
 
@@ -10897,3 +10898,429 @@ changes; `scripts/generate_ui_types.py` (no flag, the same check-only invocation
 now reports "matches the current OpenAPI schema" with exit 0. `tests/test_reachability_gate.py` (5/5) and
 `tests/test_openapi_diff_gate.py` (24/24) both green. `ruff check`/`mypy src` (292 files, `--strict`)
 clean; `lint-imports` still 8/8 kept.
+## 2026-09-02 — Group K (AT-9 + AT-12): scope-aware definitions with refusal on ambiguity, semantic mining of warehouse query history
+
+Wave-2 parallel work, branch `feat/atlas-semantic-trust` off `feature/snowflake-dbt-lineage-mcp` at
+`fa501c0`. Sibling groups (I/J/L) worked concurrently on shared files under the same integration; this
+entry's edits to shared files (`models.py`, `semantic_api.py`, `agent_orchestrator.py`) were kept
+append-only/additive and narrowly scoped, per the parallel plan's contract.
+
+### AT-9 — scope-aware term/metric definitions and refusal on ambiguity
+
+`glossary_term` uniqueness widens from `(organization_id, term_key)` to `(organization_id, term_key,
+business_node_id)` (`models.py:1903`) -- a nullable `business_node_id` (ADR-0018's business graph)
+stands in for an enterprise-wide default, so two independently governed definitions of the same
+term_key can coexist, each scoped to a different business node. A bank cannot agree one definition of
+"exposure" across Risk and Retail Banking; before this, the schema structurally forbade the platform
+from holding both.
+
+**The NULL-uniqueness trap, and how it's closed.** Postgres unique constraints treat every NULL as
+distinct, so a bare 3-column constraint would let more than one `business_node_id IS NULL`
+(enterprise-default) row coexist for the same term_key -- silently reopening exactly the ambiguity this
+row exists to close. Two constraints instead: the composite `uq_glossary_term_org_key_node` covers
+every node-scoped pair, and a partial-unique index (`uq_glossary_term_org_key_enterprise_default`,
+`postgresql_where`/`sqlite_where` -- mirroring `ContextProductVersion`'s own
+`uq_context_product_version_one_published`, so the in-memory SQLite test harness enforces the identical
+rule Postgres will) caps the enterprise-default slot at exactly one row. Migration
+`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py` drops the prior 2-column constraint by *column
+signature*, not by a hardcoded name -- it was declared without an explicit `name=` at creation
+(`ab31d7e4c920_glossary_asset_documentation.py`), so its real name in a live database is whatever
+Postgres's own default-naming convention assigned, not the ORM's `NAMING_CONVENTION` (which only
+applies when SQLAlchemy compiles DDL through `Base.metadata`, never through Alembic's unbound
+`op.create_table`) -- a `DO $$ ... $$` block finds it by its `(organization_id, term_key)` column set
+via `information_schema` and drops whatever it's actually called.
+
+**Resolution: most-specific-wins over N9's own business-graph primitives, not a new traversal.**
+`semantic_inference.resolve_scoped_glossary_term` (`semantic_inference.py:731`) resolves one term_key
+against the *asking context* -- the datasource being queried, via `business_graph.classification_scope`
+(the datasource's assigned business nodes plus their ancestors) -- and picks the most specific
+applicable definition using `business_graph.ancestor_closure` (`_most_specific_business_node_ids`,
+`semantic_inference.py:698`) to determine which candidate node is a strict ancestor of another, never a
+new recursive-CTE walk of its own. Three real outcomes, not two: `RESOLVED` (a single node-scoped
+definition beats the enterprise default; a descendant node's definition beats an ancestor node's),
+`AMBIGUOUS` (two node-scoped definitions where neither node is an ancestor of the other -- the
+datasource is scoped to two unrelated business nodes, each with its own definition), and `NOT_FOUND`
+(nothing applies to this scope at all -- not an error). `format_ambiguous_definition_refusal` renders an
+`AMBIGUOUS` resolution as the message an agent run refuses with: both definitions, both owners, by
+business node.
+
+**Wired into the real grounded-question path, not a parallel check.** `retrieval.hybrid_retrieve`
+(read-only, unmodified) already surfaces a `GLOSSARY_TERM` retrieval hit carrying `metadata["term_key"]`
+whenever a term has an `ACTIVE` binding to a real semantic object; `agent_orchestrator._check_definition_ambiguity`
+(`agent_orchestrator.py:147`) runs `resolve_scoped_glossary_term` against every distinct term_key one
+run's own retrieval evidence surfaced, right after grounding-fragment digests are computed inside
+`GovernedAgentOrchestrator.run()` (`agent_orchestrator.py:508`). On `AMBIGUOUS` it persists the run
+`REJECTED` with reason `AMBIGUOUS_DEFINITION` (the same `_persist_rejection` path every other refusal in
+this orchestrator uses, so a `REFUSAL` `AiDecisionRecord` is recorded identically) and raises the
+*existing* `AgentClarificationRequired` -- already caught by `POST
+/datasources/{datasource_id}/agent-analyses` (`api.py:2933`, calling `orchestrator.run()` at
+`api.py:2950`) and mapped to HTTP 409, so the refusal needed zero route or schema changes.
+
+Verified end-to-end against real seeded data, not mocked: `tests/test_at9_scoped_definitions.py` (9
+tests). `test_orchestrator_refuses_on_ambiguous_definition` seeds two sibling `BusinessNode`s (Risk,
+Retail Banking), a datasource assigned to *both* via real `BusinessAssignment` rows, two `GlossaryTerm`
+rows (`term_key='exposure'`) each scoped to one node and each bound to a real `SemanticMetric` via an
+`ACTIVE` `TermSemanticBinding` (required for `retrieval.hybrid_retrieve` to surface either as a
+`GLOSSARY_TERM` hit at all), then runs a real `GovernedAgentOrchestrator.run()` and asserts the raised
+message names both owners, the persisted run is `REJECTED`/`AMBIGUOUS_DEFINITION`, and exactly one
+`REFUSAL` record exists. `test_orchestrator_does_not_refuse_when_scope_disambiguates` proves the
+identical setup, scoped to one node only, never trips the ambiguity refusal (the run still raises
+`AgentClarificationRequired`, but for the unrelated missing-tool-parameter reason -- the same
+scaffolding trick `test_at6_context_receipts.py` uses to reach `RESOLVED` without a real SQL warehouse
+or model route). Direct-unit tests cover `NOT_FOUND`, enterprise-default fallback, and most-specific-wins
+across a real parent/child `BusinessNode` pair.
+
+**Honest gaps.** No HTTP endpoint lets a steward set `business_node_id` on a term yet --
+`GlossaryTermCreate` (`schemas.py:1541`) and the existing glossary CRUD routes are untouched, so scoping
+a term today is a direct DB write, not an API call; adding that field is a natural, low-risk follow-up,
+left out here specifically to minimize collision surface with `glossary_api.py`/`schemas.py` while other
+Wave-2 groups and `ST-05`/`06`/`07` work concurrently. The ambiguity check only considers terms the
+question's own retrieval evidence already surfaced (a `GLOSSARY_TERM` hit requires a bound semantic
+object), not a full-vocabulary scan of every governed term against the question text.
+
+### AT-12 — semantic mining of warehouse query history
+
+New `src/aida/query_history_miner.py`. Mines *value-free* query-log structure -- which tables joined on
+which columns, which columns a query grouped by, which columns it filtered on -- into bounded candidates
+that land in the existing maker-checker review queue, never auto-authoritative. Per INV-6/AT-C3, a
+filter *value* must never reach a candidate or its evidence, only the filter *column*.
+
+**Extraction is provably value-free, not just documented as such.** `extract_query_structure` parses one
+query's SQL text with `sqlglot` and walks only `exp.Column`/`exp.Table`/`exp.Join`/aggregate-function
+nodes; every `exp.Literal` node a filter predicate carries (the actual value someone searched for) is
+walked past and never read into the returned `QueryStructure`. `test_extract_query_structure_never_captures_literal_values`
+seeds a query with `WHERE o.status = 'COMPLETED' AND o.amount > 100` and asserts neither literal appears
+anywhere in the extracted structure's own `repr` -- a real proof, not an assertion about intent. An
+unparseable statement degrades to `None` rather than a guessed structure, mirroring
+`sql_lineage_parser.py`'s own posture exactly.
+
+**Two candidate shapes, one reused unmodified, one genuinely new after checking the existing model
+couldn't represent it.** Join candidates reuse `RelationshipCandidate` verbatim -- a new
+`detection_rule=QUERY_LOG_JOIN_V1` is the only new vocabulary, so the *existing* `decide_relationship_candidate`
+endpoint already reviews them, no new schema or route. Metric candidates needed a real check first:
+`SemanticMetricProposal` (SM-4) requires a `source_annotation_id` pointing at an approved business
+annotation and carries NL-description-quality scores (accuracy/clarity/style/completeness) that simply
+do not apply to a candidate whose only evidence is "this aggregation-over-grain shape recurred N times
+in the query log" -- reusing it would misrepresent provenance. `QueryHistoryMetricCandidate`
+(`models.py:4629`, same migration as AT-9) is the clearly-scoped new type the tracker row anticipated,
+landing in the platform's *other* existing maker-checker queue -- `GovernanceReview`, object_type
+`QUERY_HISTORY_METRIC_CANDIDATE` -- dispatched from `semantic_api._apply_governance_review_decision`
+(`semantic_api.py:2101`) exactly the way AT-11's `COLUMN_CLASSIFICATION_PROMOTION` branch already is.
+`apply_query_history_metric_candidate_decision` (`query_history_miner.py:706`) publishes a real
+`SemanticMetric` + `PUBLISHED SemanticMetricVersion` only on an independent APPROVE (mirrors
+`metric_suggestion_service.apply_metric_suggestion_proposal`'s own auto-created-model-version shape);
+REJECT publishes nothing and retains the candidate as negative evidence, matching every other
+reject-and-retain convention on this platform.
+
+**AT-C2 lane 3, enforced in code, not just asserted.** Every candidate's confidence comes from
+`_lane3_confidence`, which cannot exceed `QUERY_HISTORY_CONFIDENCE_CAP = 0.70` for any occurrence count
+-- swept from 0 to 1,000,000 occurrences in `test_lane3_confidence_never_exceeds_the_cap`. Nothing this
+module creates is ever `APPROVED` at creation time (`test_mined_candidates_are_never_auto_approved`
+checks every row of both types after a real mining run).
+
+**Bounded on two axes, not merely ranked.** `QUERY_HISTORY_MIN_OCCURRENCES = 3` drops a shape seen once
+or twice as noise *before* ranking even considers it; `QUERY_HISTORY_MAX_JOIN_CANDIDATES = 50` /
+`QUERY_HISTORY_MAX_METRIC_CANDIDATES = 25` cap the occurrence-ranked survivors actually landed per
+mining run -- the same rank-then-cap shape `generate_composite_relationship_candidates` (RL-3) already
+uses, not an invented scheme. Re-mining an identical log is idempotent: dedups against existing
+`RelationshipCandidate` pairs (both directions), the AT-C3 negative-knowledge suppression list (reused
+verbatim via `relationship_candidate_review.load_suppressed_relationship_predicate_hashes` --
+`compute_predicate_hash`/`relationship_candidate_negative_predicate` checked both ways so a rejected
+edge can't sneak back in reversed), and existing `QueryHistoryMetricCandidate` shapes by
+`(table, measure_column, aggregation, grain_fingerprint)`.
+
+Tests: `tests/test_at12_query_history_mining.py`, 15 tests -- pure coverage of extraction, frequency
+mining, bounding, and the confidence cap; real in-memory-SQLite seeded data (two tables, real columns,
+real FK-shaped join) for the DB-facing mining pass and the full governance-decision round trip
+(approve publishes a real metric version with the right `source_table_id`/`measure_column_id`/
+`allowed_dimension_column_ids`; reject publishes nothing; deciding an already-decided candidate
+conflicts with a 409).
+
+**Per `Docs/review-2026-08/atlan-context/00-decisions.md` §4, still explicitly not a lineage source.** An
+approved join candidate renders exactly like every other `RelationshipCandidate` -- a
+`SUGGESTED_RELATIONSHIP`-tier candidate in the unified lineage graph -- never an asserted
+`DECLARED`/`VIEW_DDL`-tier edge.
+
+**Honest gaps, and why AT-D3's capability flags were deliberately left alone.** No connector implements
+`get_query_history()` -- this module takes an already-materialized `WarehouseQueryLogEntry` sequence as
+input, connector-agnostic by design, so mining itself is real and tested end-to-end against that input
+contract, but nothing yet calls a live warehouse's `ACCOUNT_USAGE.QUERY_HISTORY` (Snowflake) or
+`system.query.history` (Databricks) to produce it. Per AT-D3's own instruction ("no connector's
+`query_history` capability flag should flip back to advertised-and-consumed until this is real and
+certified"), both flags are checked and left exactly as AT-D3 left them: `query_history=False` in both
+`connectors/snowflake.py:775` and `connectors/databricks.py:328` -- flipping either was explicitly out
+of scope for this pass and was not done. No HTTP endpoint triggers a mining run yet either (the natural
+follow-up mirrors `discover_relationship_candidates`'s own admin-triggered-scan shape); the mining
+function is tested by direct call instead, the same convention `test_at11_classification_propagation.py`
+uses for `_apply_governance_review_decision`, deliberately to avoid a new route/schema/OpenAPI-baseline
+surface while `ST-05`/`06`/`07` split `api.py`/`schemas.py` concurrently. Per INV-9, this entry does not
+claim query-history mining is live against any real connector -- only that the mining/candidate/review
+mechanism itself is real, tested, and ready to receive real query-log rows the moment a connector
+produces them.
+
+### Verification
+
+`ruff check .`: clean across the repo. `mypy src` (the actual gate -- `[tool.mypy]` scopes to
+`packages = ["aida"]`, tests are not part of the strict-mypy surface): 287 source files, zero issues.
+`lint-imports`: 8/8 contracts kept, no new violation (`aida.semantic_inference` stays out of the
+`C4/ST-11` forbidden-`query_gateway` list -- its new `business_graph` import carries no such
+dependency, confirmed by direct import). Exactly one new Alembic revision
+(`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py`), branching cleanly off the single prior head
+(`7e6460d905fe`) -- `alembic heads` shows one head. `Base.metadata.create_all` against an in-memory
+SQLite engine succeeds with both new models registered, confirming the ORM side of the schema change is
+internally consistent (no live Postgres in this sandbox to run the real migration against, the same
+standing limitation every other migration on this branch already carries).
+
+`tests/test_at9_scoped_definitions.py` (9) and `tests/test_at12_query_history_mining.py` (15): both
+files pass in full on the first real run after fixing test-scaffolding issues caught along the way (a
+`MetadataColumn.fingerprint` NOT NULL omission; a wrong expected value in a hand-constructed
+`JoinColumnPair` test fixture that skipped the normalization `extract_query_structure` itself performs).
+Full-suite regression run in progress at the time of this entry; see the PR for its final result.
+## 2026-09-02 — C7 closed: graph store as a configurable per-organization port (ADR-0020 amendment)
+
+Atlas Wave-2, Group J, run in parallel with three sibling sessions (Groups I/K/L) integrated separately
+later -- scope was deliberately confined to new files plus narrowly-scoped additive edits to the three
+Neo4j call-sites the ADR names, to keep collision surface with the concurrent ST-05/06/07 `models.py`/
+`schemas.py`/`api.py` split to a minimum.
+
+### The port, copying `vector_store.py`'s shape exactly, as instructed
+
+`src/aida/graph_store.py` is new: `GraphStorePort` (abstract `lineage_impact`/`graph_summary`), three
+adapters -- `PostgresGraphStore` (default, certified), `Neo4jGraphStore` (uncertified per INV-9),
+`DisabledGraphStore` (explicit `GraphStoreUnavailable` refusal, never a silent empty answer) -- and
+`build_graph_store`, the resolving factory. `PostgresGraphStore.lineage_impact` is not a second
+implementation of lineage traversal: it is handed `aida.unified_lineage_api._build_unified_graph` as an
+injected `build_snapshot` dependency and runs `aida.unified_lineage.traverse` over the result, the exact
+machinery the endpoint's own Postgres fallback already used. `graph_summary` is genuinely new SQL --
+seven `COUNT` queries against the relational catalog tables, including `sensitive_columns` (reusing the
+existing `aida.classification.SENSITIVE_CLASSES` leaf constant) and `foreign_key_relationships`, neither
+of which the Postgres side had ever computed before (only the Neo4j side had).
+
+### Two of the three named call-sites rewired; the third module deleted, not shimmed
+
+The ADR names three modules that read Neo4j today: `api.py`, lineage_graph_store.py,
+`unified_lineage_api.py`. `api.py::get_graph_summary` and `unified_lineage_api.py::build_unified_lineage_impact_payload`
+now resolve a backend through `resolve_graph_store_backend` and call the port instead of constructing a
+Neo4j driver inline. lineage_graph_store.py itself is **deleted**, not kept as a backward-compatible
+shim: once its one caller (`unified_lineage_api.py`) moved to the port directly, `tests/test_reachability_gate.py`
+caught it as unreachable from any of the five real entry points with zero remaining callers -- exactly
+the failure mode that gate exists to catch (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`'s "code
+that passes its own unit tests with zero live callers") -- and the gate's own stated remedy is delete or
+wire in, not shim around. `pyproject.toml`'s C4/ST-11 import-linter contract updated to name
+`aida.graph_store` in place of the now-nonexistent aida.lineage_graph_store.
+
+`graph_reconciliation.py` (KG-7) is deliberately **not** rewired, despite also reading Neo4j: its entire
+job is diffing Neo4j against PostgreSQL directly to detect projection drift, which a switchable
+single-backend port would make meaningless the moment an organization's setting is `disabled` or
+`postgres`. The ADR's own module list already agrees -- it names three modules, not four.
+
+### A per-organization admin setting that never touches the contested files
+
+`GraphStoreOrganizationSetting` (migration `8396592b30e0_graph_store_organization_setting.py`) is a new,
+standalone table -- `organization_id` unique, `backend` CHECK-constrained to the three valid values --
+declared in `graph_store.py` itself rather than in `models.py`, the same collision-avoidance pattern
+`aida.envelope_models` already established for exactly this situation (a new table landing while
+`models.py` is mid-split). `models.py` is untouched; `migrations/env.py` and
+`tests/test_migration_orm_drift.py` each gained one import (`graph_store` alongside the existing
+`envelope_models`) so Alembic autogenerate/drift detection sees the table -- the same registration
+mechanism `envelope_models` already uses, extended rather than reinvented. No REST admin endpoint was
+added: `api.py` is mid-split under ST-05/06/07, and `get_/set_organization_graph_store_backend` are fully
+functional called directly against the table, the same state `ensure_organization_integration_policy`
+was in before its own endpoint existed.
+
+INV-9 gates `neo4j` twice, not once: an organization can request it, but `resolve_graph_store_backend`
+only actually serves it when the pre-existing process-wide `lineage_neo4j_read_enabled` flag (default
+`false`) is also on -- a request alone is not the same as an operator having certified the backend.
+
+### The conformance suite found a real bug
+
+`tests/test_graph_store_conformance.py` is two layers, so the harness is exercised even without a live
+Neo4j (none is reachable in this sandbox -- no Docker daemon, confirmed by trying). Layer one drives the
+comparison assertion (`_assert_impact_reads_match`) directly against hand-built results, proving it both
+accepts identical output and catches a real divergence (node ordering, truncation disagreement) --
+runnable and run with no database at all. Layer two seeds an identical fixture (a 3-table `a -> b -> c`
+foreign-key chain, fixed UUIDs) into a real SQLite-backed `PostgresGraphStore` and, when reachable, a real
+Neo4j seeded with the exact node/edge property shape `aida.projectors.graph_projector` actually writes,
+then asserts byte-identical `UnifiedLineageImpactRead` results including cap/truncation behaviour under a
+tight `node_limit`. It skips cleanly with a stated reason when Neo4j is unreachable, mirroring
+`tests/test_migration_orm_drift.py`'s own probe-and-skip pattern for PostgreSQL.
+
+Building it surfaced a real, previously-unnoticed bug: `Neo4jGraphStore.lineage_impact`'s UPSTREAM/
+DOWNSTREAM Cypher pattern assignment was inverted relative to `PostgresGraphStore`'s traversal direction
+(and `aida.unified_lineage.UnifiedLink`'s own documented dependent -> dependency edge convention). Traced
+by hand against `aida.projectors.graph_projector`'s real edge-writing code rather than run live (no Neo4j
+reachable here), and fixed in the same pass with an inline comment recording the discovery. Nothing had
+ever run the `neo4j` adapter against a real database to catch this -- precisely the failure mode INV-9
+predicts for an uncertified backend, and precisely the value a conformance suite that actually gets built
+is supposed to have.
+
+### INV-1: proven, not assumed
+
+`tests/test_graph_store_inv1_isolation.py` is two proofs. Static: a breadth-first search over every real
+`import`/`from` statement under `src/` shows `aida.authorization_gate` and `aida.business_graph` cannot
+reach `aida.graph_store` transitively -- not a hand-maintained allowlist, and not merely "doesn't import
+it today"; a future indirect import anywhere in either module's dependency chain fails this test
+immediately. Behavioural: a real `GraphStoreOrganizationSetting` row is seeded alongside the same
+fixtures `gate()` and `rollup()` read (an ENFORCE workspace with a real access rule; a `BusinessNode`
+with real `BusinessAssignment` rows), set to each of the three backends in turn, and both an authorization
+allow, an authorization denial, and a classification roll-up count are asserted byte-identical across all
+three -- proving the setting is inert to these two decisions even when a row for the same organization
+exists in the same database, not merely unimported.
+
+### Verification
+
+35 new/updated tests passed, 2 skipped (both requiring a live Neo4j, stated reason, no fake green):
+`tests/test_graph_store.py` (19, real SQLite -- FK-chain traversal, depth cap, sensitive-column counting,
+the migration's own `CHECK` constraint, per-org setting upsert/resolve, the INV-9 operator-flag gate),
+`tests/test_graph_store_conformance.py` (5, 2 skip), `tests/test_graph_store_inv1_isolation.py` (6),
+`tests/test_graph_summary.py` (7, rewritten in place for the new call path -- same CURRENT/LAGGING/
+NOT_PROJECTED/503 coverage it always had, plus 2 new backend-selection cases). `tests/test_inv1_single_authoritative_store.py`'s
+closed `permitted_readers` list updated to name `graph_store.py` in place of `api.py`/lineage_graph_store.py.
+Full suite green; `ruff check .`, `mypy src sdk/aida_tool_sdk`, `lint-imports` (8 contracts kept, 0
+broken) all clean; exactly one Alembic head (`8396592b30e0`). `Docs/90-reference/openapi-baseline.json`
+regenerated (`get_graph_summary`'s new docstring became its OpenAPI `description` -- purely additive,
+confirmed via `git diff`); `ui-next/src/lib/types.ts` unaffected (`scripts/generate_ui_types.py` confirms
+no schema-shape change); `test_doc_claims.py`/`test_event_catalog_gate.py` (no new `event_type=`) green.
+Five Docs citations of the now-deleted lineage_graph_store.py filename corrected so `test_doc_claims.py`
+keeps resolving every citation to a real file; ADR-0020 gets a 2026-09-02 implementation-status addendum.
+
+Honest gaps, unchanged from the ADR's own accounting: Neo4j does not run in CI, and E5 (the projection
+rebuild drill) has not run -- both were explicitly out of scope for this pass per the parallel-plan
+instruction, and the `neo4j` backend ships advertised as uncertified rather than as though it were
+equally proven, per INV-9. No REST admin endpoint for the per-organization setting exists yet, to avoid
+adding to `api.py`'s collision surface during ST-05/06/07 -- the setting is fully functional at the data
+layer today and an endpoint is a small, natural follow-up once that split lands.
+
+## 2026-09-02 — UX-15/UX-20/UX-8 closed: ui-next migration (review queue, marketplace, lineage
+refusals, Studio change sets, narrated lineage, persona onboarding)
+
+Atlas Wave-2 Group L. `ui-next/`-only (no `src/aida` edit) -- CT-2/UX-11's catalog-screen virtualization
+work, confirmed IN PROGRESS in a sibling session, was left untouched (checked before starting: neither
+`CatalogScreen.tsx` nor `CatalogTable.tsx` has any diff in this branch).
+
+### UX-15: four screens onto the new shell, each on live, already-merged endpoints
+
+Every screen below adopts the Catalog pattern in full: URL-held filter/selection state, one abortable
+request in flight per view, a virtualized list, and an evidence-pane analog (permalinkable via a URL
+param). New `ui-next/src/components/VirtualList.tsx` generalizes `CatalogTable`'s fixed-38px-row
+virtualization to variable-height cards (`@tanstack/react-virtual`'s `measureElement`) rather than each
+screen reinventing windowing.
+
+- **Review queue** (`ReviewQueueScreen.tsx`) rewired off `fetchReviewBatch` (a fixture standing in for a
+  read model that had not shipped) onto the real `GET /v1/governance/reviews/queue` (UX-17, landed
+  2026-09-01) and `POST /v1/governance/reviews/{id}/decision`. Forced an honest redesign: the old
+  "applied automatically" tile had nothing real behind it -- `GovernanceReview.status` is only ever
+  PENDING/APPROVED/REJECTED (confirmed against `models.py`, and against UX-19's own accomplishment-log
+  note that no proposal type in this codebase has a confidence-gated auto-apply branch) -- so the tiles
+  are now the three statuses the real model actually reports. `ProposalCard.tsx`/`Proposal` (the prior
+  fixture-shaped shell primitive) is left in the tree unused by this screen rather than deleted or forced
+  to carry a shape the live API cannot back -- its own docstring already frames it as a shared primitive,
+  not screen-owned. AT-D4's `PropagationLog` gate (`VITE_ENABLE_PROPAGATION_LOG`, default off) is
+  untouched; its three original tests were carried forward with the same intent, still passing.
+- **Marketplace** (new `MarketplaceScreen.tsx`) against CX-9's real `GET /v1/marketplace/products`
+  (`product_marketplace_api.py::search_marketplace`, personalized/catalog ranking) and
+  `POST /v1/marketplace/products/{version_id}/access-requests`. `domain_affinity`/`role_affinity` are
+  surfaced as an honest "why this order," never hidden reordering. `MarketplaceProductRead` is
+  hand-written in `ui-types.ts` for the same reason `CatalogRowRead` already is there: its route declares
+  `response_model=Page` un-parameterized, so FastAPI's schema walker never names the subclass. A new
+  `PageOf<T>` type documents and narrows every endpoint in this row with that same generic-`Page` gap
+  (marketplace search, `list_refusals`, `list_organization_datasources`).
+- **Lineage refusal view** (new `LineageRefusalScreen.tsx`) -- not a re-skin of anything. Checked
+  directly: the legacy shell (`ui/app.js`) has no refusal-specific view at all, no "refus" string anywhere
+  in it. This is the first real surface for LN-3's `GET /v1/ai-decisions/refusals` /
+  `GET /v1/ai-decisions/{run_id}`, honestly scoped to that endpoint's own `PlatformAdmin`/`DataAdmin`-only
+  gate (unchanged) -- a narrower role gets the same 403 `ErrorState` any other gated call renders.
+- **Studio change sets** (new `StudioChangeSetsScreen.tsx`) -- the first ui-next surface for module 19's
+  real authoring API (`studio_api.py`, ST-A7 already landed at this branch's base commit). Lists via
+  `GET /v1/studio/change-sets`; a selected change set's detail pane loads `.../items`, `.../diff` and
+  `.../impact` together; submission calls the real test-gated (ST-A7) / eval-regression-gated (ST-A8)
+  `POST .../submit` -- a 409 from that gate renders the endpoint's own detail string verbatim, proven by a
+  test that asserts no client-side status change happens on failure.
+
+Every migrated screen's `App.tsx` `NAV` entry is `ready: true` with its `legacy` pill removed
+(`refusals`/`studio` are new entries with no prior legacy placeholder to remove).
+
+### UX-20: narrated lineage traversal as the primary lineage surface
+
+New `ui-next/src/screens/NarratedLineageScreen.tsx` replaces the legacy stub behind the "lineage" nav
+entry, built against the real, already-merged `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`
+(`unified_lineage_api.py::build_unified_lineage_impact_payload` -- the same traversal
+`atlas__get_lineage_impact` serves over MCP). Flow: pick a datasource
+(`GET /v1/organizations/{id}/datasources`, resolving the id `CatalogRowRead` doesn't carry), search for
+the asset in question (reuses `fetchCatalogRows`, client-filtered to the chosen datasource's name), then
+the real impact call runs. Every hop's evidence is real, server-computed data -- `depth` and
+`contributing_edge_sources` read directly off `UnifiedLineageImpactNodeRead` -- rendered as one
+plain-language sentence per hop, never invented narration text. "Streams" is client-side pacing (140ms
+per hop) over the already-fetched, already-bounded response; hops reveal upstream-farthest-to-focus then
+focus-to-downstream-farthest, so the sequence reads as a walked path.
+
+Honest scope line on the DAG half: LN-8's Cytoscape-based virtualized canvas renderer
+(`ui/scripts/graph-engine.js`) stays exactly where it is in the legacy shell -- UX-16 (retiring `ui/`) has
+not happened, and re-implementing that real, already-shipped, already-tested large-DAG renderer inside
+this row would duplicate rather than migrate it. `ui-next`'s own "Graph (supporting view)" tab is a
+lightweight depth-swimlane layout over the SAME impact response the narration reads (real node placement
+by real `depth`), not a fabricated diagram -- but it does not draw connecting edges between hops the way a
+true DAG would. The ordered, explicit narration is what satisfies "highlights the path" for this row, not
+the swimlane. `NarratedLineageScreen.test.tsx` (3 tests) proves the graph tab is reachable but not the
+default/entry view, and that the impact endpoint is never called before a node is chosen.
+
+### UX-8: guided onboarding per persona
+
+New `ui-next/src/components/OnboardingWizard.tsx`, wired as the shell's "Get started" nav entry (now the
+default landing view) and branching on the SAME `Persona` set module 21 §5 already establishes
+(`Analyst`/`Steward`/`Reviewer`/`Operator`/`Auditor`) -- no new backend persona/role concept invented.
+Checked directly for a role/persona-specific "what should a new principal of this persona do first" model
+anywhere in `src/aida` before writing anything: none exists (`persona_api.py`/`security.py` define *who* a
+principal is, never a first-steps checklist for one), so the five checklists are UI-owned content,
+hand-written from what each persona's real screens in this shell do -- not fetched, not fabricated as
+server-curated. Every item points at a real `App.tsx` nav id and is honest about migration state: a
+still-legacy target (Operator's Sources/Operations, Auditor's Audit ledger) renders the same `legacy` pill
+the nav itself uses. Progress (`atlas.onboarding.<persona>.done`) is `localStorage`-only, scoped per
+persona, and degrades safely for a viewer whose browser blocks storage -- there is no backend field for
+onboarding completion, and adding one is outside this ui-next-only item's scope.
+
+### A real, previously-latent test-infrastructure gap found and fixed along the way
+
+Making these screens render under jsdom surfaced a bug that had simply never been exercised: none of
+UX-11/UX-14's prior work included a `CatalogScreen.test.tsx`, so `CatalogTable`'s `useVirtualizer` call had
+never actually been render-tested. `@tanstack/virtual-core`'s `observeElementRect` measures the scroll
+container with a synchronous `element.getBoundingClientRect()` on mount, before the existing no-op
+`ResizeObserver` stub in `test/setup.ts` ever gets a chance to fire -- and jsdom always reports a
+zero-sized box, overriding any `initialRect` estimate. A virtualizer at a permanently zero-height viewport
+renders zero rows regardless of `items.length`. Fixed once, centrally, in `ui-next/src/test/setup.ts`
+(stubs `getBoundingClientRect` to a plausible nonzero box when jsdom reports all-zero), benefiting every
+current and future virtualized screen's tests, `CatalogTable` included.
+
+### Tests
+
+27 new tests: five new files -- `MarketplaceScreen.test.tsx` (5), `LineageRefusalScreen.test.tsx` (4),
+`StudioChangeSetsScreen.test.tsx` (4), `NarratedLineageScreen.test.tsx` (3),
+`OnboardingWizard.test.tsx` (6, component-level) -- plus `ReviewQueueScreen.test.tsx` grown from 3 to 8
+(+5). Suite total: 19 baseline + 27 = 46. Every test mocks the `../lib/api` boundary (matching `EvidencePane.test.tsx`/`App.test.tsx`'s established
+pattern) with real payload shapes and asserts the exact endpoint/params reached, not superficial
+snapshots -- e.g. the marketplace test asserts `sort: "personalized"` reaches the real call by default and
+that a classification-filter change re-fetches with the new value; the Studio test asserts a real 409
+test-gate failure surfaces verbatim with no client-side status mutation.
+
+### Verification
+
+`cd ui-next && npm run typecheck && npm run test && npm run build` all green: 0 typecheck errors, 46/46
+tests passing across 9 test files, `tsc -b && vite build` clean (`dist/assets/index-*.js` 231KB / 71KB
+gzip). This package has no `lint` script (`package.json` scripts are exactly `dev`/`build`/`preview`/
+`typecheck`/`test`) so there is no separate lint gate to run. No `Docs/90-reference/openapi-baseline.json`
+regeneration needed -- every endpoint this row consumes was already reachable (or, for the three
+`response_model=Page`-unparameterized routes, already had its item schema reachable via another route)
+before this session started; `ui-next/src/lib/types.ts` was not touched.
+
+### Honest gaps / follow-ups for other groups
+
+- **UX-16** ("Retire `ui/`") is still open: `sources`, `operations`, `audit`, `semantics`, `meaning`,
+  `relationships`, `quality` and `analyst` remain legacy-served stubs in the nav -- out of this row's
+  scope (UX-15 named four specific screens; those four are the ones migrated).
+- **UX-20's graph view** is a lightweight depth-swimlane layout, not a full interactive DAG with drawn
+  edges -- see the honest-scope note above. If a future row wants a true supporting DAG inside `ui-next`
+  itself (rather than continuing to defer to the legacy `ui/` canvas until UX-16), that is new work, not
+  a gap in what this row claims.
+- No backend endpoint had to be stubbed or mocked for any of UX-15/UX-20/UX-8 -- every call in this
+  session's diff hits a route that already existed, unchanged, on `feature/snowflake-dbt-lineage-mcp` at
+  this branch's base commit (`fa501c0`).

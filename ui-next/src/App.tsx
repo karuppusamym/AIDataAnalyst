@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { CatalogScreen } from "./screens/CatalogScreen";
 import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
+import { MarketplaceScreen } from "./screens/MarketplaceScreen";
+import { LineageRefusalScreen } from "./screens/LineageRefusalScreen";
+import { StudioChangeSetsScreen } from "./screens/StudioChangeSetsScreen";
+import { NarratedLineageScreen } from "./screens/NarratedLineageScreen";
 import { PersonaNav } from "./components/PersonaNav";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { fetchMe } from "./lib/api";
 import type { MeRead } from "./lib/types";
 import { asIdentityProvider, asPersona } from "./lib/ui-types";
@@ -27,23 +32,25 @@ import "./App.css";
 --------------------------------------------------------------------------- */
 
 const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
-  { id: "home", label: "Overview", group: "Work" },
+  { id: "home", label: "Get started", group: "Work", ready: true },
   { id: "analyst", label: "Ask", group: "Work" },
   { id: "catalog", label: "Catalog", group: "Discover", ready: true },
-  { id: "marketplace", label: "Marketplace", group: "Discover" },
+  { id: "marketplace", label: "Marketplace", group: "Discover", ready: true },
   { id: "relationships", label: "Relationships", group: "Discover" },
-  { id: "lineage", label: "Lineage", group: "Understand" },
+  { id: "lineage", label: "Lineage", group: "Understand", ready: true },
   { id: "semantics", label: "Semantics", group: "Understand" },
   { id: "meaning", label: "Business meaning", group: "Understand" },
   { id: "governance", label: "Review queue", group: "Govern", ready: true },
+  { id: "studio", label: "Studio change sets", group: "Govern", ready: true },
   { id: "quality", label: "Quality", group: "Govern" },
+  { id: "refusals", label: "Lineage refusals", group: "Govern", ready: true },
   { id: "audit", label: "Audit ledger", group: "Govern" },
   { id: "sources", label: "Sources", group: "Operate" },
   { id: "operations", label: "Operations", group: "Operate" },
 ];
 
 export default function App() {
-  const [view, setView] = useState("catalog");
+  const [view, setView] = useState("home");
   const [me, setMe] = useState<MeRead | null>(null);
   // The dev switcher's own choice. Irrelevant, and never read, once `me` reports
   // OIDC -- PersonaNav ignores `onPersonaChange` in that mode -- but kept as
@@ -101,10 +108,20 @@ export default function App() {
       </nav>
 
       <main className="smain">
-        {view === "catalog" ? (
+        {view === "home" ? (
+          <OnboardingWizard persona={persona} onNavigate={setView} />
+        ) : view === "catalog" ? (
           <CatalogScreen />
         ) : view === "governance" ? (
           <ReviewQueueScreen />
+        ) : view === "marketplace" ? (
+          <MarketplaceScreen />
+        ) : view === "refusals" ? (
+          <LineageRefusalScreen />
+        ) : view === "studio" ? (
+          <StudioChangeSetsScreen />
+        ) : view === "lineage" ? (
+          <NarratedLineageScreen />
         ) : (
           <div className="stub">
             <h1>{current?.label}</h1>

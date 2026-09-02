@@ -31,7 +31,7 @@ it (see `mcp_server.py::_view_definition_transformation_detail`).
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -42,8 +42,14 @@ from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
 from aida.envelope_models import MetadataViewDefinition
+from aida.graph_store import (
+    GraphStoreUnavailable,
+    PostgresGraphStore,
+    SnapshotBuilder,
+    build_graph_store,
+    resolve_graph_store_backend,
+)
 from aida.lineage_cache import get_lineage_cache
-from aida.lineage_graph_store import load_projected_lineage_impact
 from aida.models import (
     DataDomain,
     DataSource,
@@ -66,12 +72,11 @@ from aida.schemas import (
     DomainLineageGraphRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
-    UnifiedLineageImpactNodeRead,
     UnifiedLineageImpactRead,
     UnifiedLineageNodeRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
-from aida.unified_lineage import TraversalResult, UnifiedLink, traverse
+from aida.unified_lineage import UnifiedLink
 
 router = APIRouter(prefix="/v1", tags=["unified-lineage"])
 
@@ -1038,6 +1043,21 @@ async def build_unified_lineage_impact_payload(
     for why this is split out. Raises `LineageNodeNotFoundError` -- not
     `HTTPException` -- so both callers can translate it into their own
     transport's error shape.
+
+    Backend selection (C7 / ADR-0020 amendment): `aida.graph_store` is the
+    port. `postgres` -- the default, and what runs when `settings` is `None`
+    (e.g. `aida.lineage_evidence_export`'s offline callers) -- traverses the
+    same relational lineage tables `_build_unified_graph` always has, via
+    `PostgresGraphStore`. A `neo4j`-configured organization is tried first as
+    an accelerated read and, on any miss or backend failure, falls through to
+    the same Postgres traversal rather than surfacing an error -- Postgres
+    remains the fallback authority regardless of what is configured (INV-1).
+    A `disabled` organization is treated the same way: `DisabledGraphStore`
+    refuses immediately, which is caught here and treated as a miss, so this
+    function's six other call sites (`mcp_server`, `tool_impact`,
+    `relationship_candidate_review`, `lineage_evidence_export`, ...) never
+    have to learn a new exception -- `LineageNodeNotFoundError` remains the
+    only one this function raises.
     """
 
     cache_key = (
@@ -1049,87 +1069,42 @@ async def build_unified_lineage_impact_payload(
         if cached is not None:
             return UnifiedLineageImpactRead.model_validate(cached)
 
-    if settings is not None and settings.lineage_neo4j_read_enabled:
-        projected = await load_projected_lineage_impact(
-            settings,
-            datasource,
-            node_id,
-            depth=depth,
-            node_limit=node_limit,
-        )
-        if projected is not None:
-            if settings.lineage_cache_enabled:
-                await get_lineage_cache(settings.redis_url).set(
-                    cache_key,
-                    projected.model_dump(mode="json"),
-                    settings.lineage_cache_ttl_seconds,
+    if settings is not None:
+        backend = await resolve_graph_store_backend(session, datasource.organization_id, settings)
+        if backend != "postgres":
+            accelerated = build_graph_store(backend, settings)
+            try:
+                projected = await accelerated.lineage_impact(
+                    session, datasource, node_id, depth=depth, node_limit=node_limit
                 )
-            return projected
+            except GraphStoreUnavailable:
+                projected = None
+            if projected is not None:
+                if settings.lineage_cache_enabled:
+                    await get_lineage_cache(settings.redis_url).set(
+                        cache_key,
+                        projected.model_dump(mode="json"),
+                        settings.lineage_cache_ttl_seconds,
+                    )
+                return projected
 
-    graph = await _build_unified_graph(
-        session,
-        datasource,
-        node_limit=2_000,
-        edge_limit=10_000,
-        suggestion_status="APPROVED",
+    # `_build_unified_graph`'s return type (`_UnifiedGraph`) structurally satisfies
+    # `graph_store.LineageGraphSnapshot` -- proven directly in
+    # `tests/test_graph_store.py` -- but mypy does not resolve that through a
+    # Callable-to-Protocol return-type check when the Protocol's own members are
+    # themselves generic (`Mapping[str, GraphNodeInfo]`); a plain value of the same
+    # type checks fine, only the *function type* comparison does not. The `cast` is
+    # exactly that known gap, not a real type hole.
+    postgres_store = PostgresGraphStore(
+        build_snapshot=cast(SnapshotBuilder, _build_unified_graph)
     )
-    focus = graph.nodes.get(node_id)
-    if focus is None:
+    result = await postgres_store.lineage_impact(
+        session, datasource, node_id, depth=depth, node_limit=node_limit
+    )
+    if result is None:
         raise LineageNodeNotFoundError(
             f"lineage node '{node_id}' not found in this datasource's graph"
         )
-
-    upstream = traverse(
-        seed=node_id,
-        links=graph.links,
-        direction="REFERENCES",
-        max_depth=depth,
-        node_limit=node_limit,
-    )
-    downstream = traverse(
-        seed=node_id,
-        links=graph.links,
-        direction="REFERENCED_BY",
-        max_depth=depth,
-        node_limit=node_limit,
-    )
-
-    def _rows(result: TraversalResult) -> list[UnifiedLineageImpactNodeRead]:
-        rows = []
-        for candidate_id, candidate_depth in sorted(
-            result.node_depths.items(), key=lambda item: (item[1], item[0])
-        ):
-            if candidate_id == node_id:
-                continue
-            info = graph.nodes.get(candidate_id)
-            if info is None:
-                continue
-            rows.append(
-                UnifiedLineageImpactNodeRead(
-                    node_id=candidate_id,
-                    node_kind=info.node_kind,
-                    label=info.label,
-                    qualified_name=info.qualified_name,
-                    depth=candidate_depth,
-                    contributing_edge_sources=sorted(
-                        result.contributing_edge_sources.get(candidate_id, frozenset())
-                    ),
-                )
-            )
-        return rows
-
-    result = UnifiedLineageImpactRead(
-        datasource_id=datasource.id,
-        focus_node_id=node_id,
-        focus_node_kind=focus.node_kind,
-        focus_label=focus.qualified_name,
-        upstream=_rows(upstream),
-        downstream=_rows(downstream),
-        requested_depth=depth,
-        node_limit=node_limit,
-        upstream_truncated=upstream.truncated,
-        downstream_truncated=downstream.truncated,
-    )
     if settings is not None and settings.lineage_cache_enabled:
         await get_lineage_cache(settings.redis_url).set(
             cache_key,

@@ -11,7 +11,7 @@
 > | Store | Today |
 > |---|---|
 > | PostgreSQL | **Built.** Authoritative, 34 Alembic revisions, single schema |
-> | Neo4j | **Built.** `neo4j==5.28.2` dependency, service in `compose.yaml`, `src/aida/lineage_graph_store.py` and `projectors/graph_projector.py`. Note `gap/02` row C7/D1 proposes dropping it |
+> | Neo4j | **Built.** `neo4j==5.28.2` dependency, service in `compose.yaml`, `src/aida/graph_store.py` (formerly lineage_graph_store.py) and `projectors/graph_projector.py`. Note: ADR-0020's 2026-08-30 amendment decided to keep it as a per-organization setting rather than drop it (tracker C7) |
 > | Kafka | **Built** (Redpanda locally). `aiokafka==0.14.0`, `projectors/outbox_publisher.py`. One topic, not eight — see `07-event-and-messaging-model.md` §6. `gap/02` row C8/D2 proposes deferring it |
 > | Redis | **Built.** `redis==6.4.0`; MCP budgets and locks |
 > | pgvector | **Extension only.** `infra/postgres/init.sql` runs `CREATE EXTENSION IF NOT EXISTS vector` and the image is `pgvector/pgvector:pg17`, but **no embedding column exists** in any model or migration and nothing writes or reads a vector. `src/aida/retrieval.py` is BM25-style lexical scoring, and its own comment says pgvector arrives "in Phase 2 when the embedding column is added". Tracked as `N5` |

@@ -1,0 +1,28 @@
+.csscreen{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px}
+.csscreen__head{flex:none}
+.csscreen__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.csscreen__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
+
+.csscreen__filters{display:flex;align-items:flex-end;gap:12px;flex:none}
+.csscreen__filters .field{width:160px}
+
+.csscreen__main{display:flex;gap:14px;flex:1;min-height:0}
+.csscreen__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+
+.csrow{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface)}
+.csrow--sel{outline:2px solid var(--accent);outline-offset:-1px}
+.csrow__click{all:unset;display:block;width:100%;box-sizing:border-box;padding:12px 14px;cursor:pointer}
+.csrow__badges{display:flex;gap:5px;margin-bottom:6px}
+.csrow__title{font-size:14px;font-weight:600;margin:0;letter-spacing:-.008em}
+.csrow__meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:6px;display:flex;gap:6px}
+
+.cs__pre{font-family:var(--mono);font-size:10.5px;background:var(--sunk);border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:8px;overflow-x:auto;max-height:220px;overflow-y:auto;margin:0}
+.cs__none{font-size:12px;color:var(--ink-3);margin:0}
+.cs__submiterr{width:100%;color:var(--bad);font-size:12px}
+
+@media (max-width:1100px){
+  .csscreen{height:auto;min-height:100%}
+  .csscreen__main{flex-direction:column;min-height:0}
+  .csscreen__main .vlist{height:56vh;flex:none}
+  .evp{width:auto;max-height:none}
+}

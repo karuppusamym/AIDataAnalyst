@@ -1901,8 +1901,47 @@ class GlossaryCategory(Base, TimestampMixin):
 
 
 class GlossaryTerm(Base, TimestampMixin):
+    # --------------------------------------------------------------------- #
+    # Group K / AT-9: scope-aware term uniqueness.
+    #
+    # Uniqueness used to be a bare `(organization_id, term_key)` pair -- a
+    # bank cannot govern one definition of "exposure" across Retail Banking
+    # and Risk, so that shape structurally forbade the thing AT-9 exists to
+    # allow: two independently governed definitions of the same term, each
+    # scoped to a different node on the business graph (`business_node`,
+    # ADR-0018's classification axis; N9's recursive CTE walk / closure
+    # table), with a nullable enterprise-wide default when `business_node_id`
+    # is NULL. Most-specific-wins resolution over that scope, and refusal
+    # when two node-scoped definitions are equally applicable and neither is
+    # an ancestor of the other, live in `semantic_inference.resolve_scoped_glossary_term`.
+    #
+    # Postgres unique constraints treat NULL as distinct per row, so a plain
+    # 3-column `UniqueConstraint` would let multiple enterprise-default rows
+    # (`business_node_id IS NULL`) coexist for the same term_key -- silently
+    # reopening the ambiguity this row exists to close. Two constraints
+    # instead: the composite one below covers every node-scoped pair, and a
+    # partial-unique index (mirroring `ContextProductVersion`'s
+    # `uq_context_product_version_one_published`, `postgresql_where` +
+    # `sqlite_where` so the in-memory SQLite test harness enforces the same
+    # rule) caps the enterprise default at exactly one row per term_key.
+    # --------------------------------------------------------------------- #
     __tablename__ = "glossary_term"
-    __table_args__ = (UniqueConstraint("organization_id", "term_key"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "term_key",
+            "business_node_id",
+            name="uq_glossary_term_org_key_node",
+        ),
+        Index(
+            "uq_glossary_term_org_key_enterprise_default",
+            "organization_id",
+            "term_key",
+            unique=True,
+            postgresql_where=text("business_node_id IS NULL"),
+            sqlite_where=text("business_node_id IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -1911,6 +1950,12 @@ class GlossaryTerm(Base, TimestampMixin):
     term_key: Mapped[str] = mapped_column(String(100), nullable=False)
     category_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("glossary_category.id", ondelete="SET NULL"), index=True
+    )
+    # Group K / AT-9: the business-graph node this definition is scoped to,
+    # NULL for the enterprise-wide default. See the class docstring block
+    # above for the uniqueness shape this participates in.
+    business_node_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("business_node.id", ondelete="SET NULL"), nullable=True, index=True
     )
     lifecycle_status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     deprecated_by: Mapped[str | None] = mapped_column(String(255))
@@ -4543,6 +4588,86 @@ class SemanticMetricProposal(Base, TimestampMixin):
     overall_score: Mapped[float] = mapped_column(Float, nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
+    )
+    published_metric_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("semantic_metric_version.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# Group K / AT-12: semantic mining of warehouse query history.
+#
+# A candidate metric mined from value-free query-log structure (an
+# aggregation over a measure column, grouped by a set of grain columns, seen
+# repeatedly across the query log) has no `SemanticMetricProposal`-shaped
+# evidence -- that model requires a `source_annotation_id` pointing at an
+# approved `MetadataBusinessAnnotation` (SM-4's evidence source) and carries
+# NL-description-quality scores (accuracy/clarity/style/completeness) that do
+# not apply to a candidate whose only evidence is "this shape recurred N
+# times in the query log". Reusing it would misrepresent provenance, so this
+# is the "clearly-scoped new candidate type" the AT-12 tracker row
+# anticipates when the existing model can't represent a metric candidate.
+#
+# Lands in the SAME unified maker-checker queue every other model-judgement
+# candidate on this platform uses (`GovernanceReview`, object_type
+# `QUERY_HISTORY_METRIC_CANDIDATE`) rather than a parallel one -- see
+# `aida.query_history_miner.submit_query_history_metric_candidate` /
+# `apply_query_history_metric_candidate_decision`, dispatched from
+# `semantic_api._apply_governance_review_decision` exactly the way AT-11's
+# `COLUMN_CLASSIFICATION_PROMOTION` branch is. AT-C2 lane 3 (model
+# judgements are proposal-only under a 0.70 confidence cap, maker != checker)
+# applies: `confidence` here is enforced <= `QUERY_HISTORY_CONFIDENCE_CAP` in
+# `query_history_miner.py`, never asserted directly.
+# ---------------------------------------------------------------------------
+
+
+class QueryHistoryMetricCandidate(Base, TimestampMixin):
+    __tablename__ = "query_history_metric_candidate"
+    __table_args__ = (
+        UniqueConstraint(
+            "table_id",
+            "measure_column_id",
+            "aggregation",
+            "grain_fingerprint",
+            name="uq_query_history_metric_candidate_shape",
+        ),
+        Index("ix_query_history_metric_candidate_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    measure_column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    aggregation: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Grain columns are stored as an ordered list of `MetadataColumn` id
+    # strings (mirrors `SemanticMetricVersion.allowed_dimension_column_ids`);
+    # `grain_fingerprint` is a stable hash of that ordered list so the unique
+    # constraint above can key on it without a JSON-in-unique-constraint
+    # dependency (see `query_history_miner.grain_fingerprint`).
+    grain_column_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    grain_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    detection_rule: Mapped[str] = mapped_column(String(100), nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
     governance_review_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("governance_review.id", ondelete="SET NULL"), unique=True
     )

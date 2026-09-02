@@ -40528,6 +40528,7 @@
     },
     "/v1/datasources/{datasource_id}/graph-summary": {
       "get": {
+        "description": "Reconciles the configured graph store's projection against PostgreSQL's\nauthoritative counts (C7 / ADR-0020 amendment, Group J: the backend is now\na per-organization setting, resolved through `aida.graph_store`, rather\nthan always Neo4j). A `disabled` organization gets an explicit 503, not a\nzeroed or degraded summary (INV-4).",
         "operationId": "get_graph_summary_v1_datasources__datasource_id__graph_summary_get",
         "parameters": [
           {

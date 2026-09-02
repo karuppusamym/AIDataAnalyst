@@ -5,7 +5,6 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from neo4j import AsyncGraphDatabase
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -47,6 +46,7 @@ from aida.db import get_session
 from aida.domain_service import ensure_default_domain, resolve_domain
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
+from aida.graph_store import GraphStoreUnavailable, build_graph_store, resolve_graph_store_backend
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
@@ -2701,47 +2701,26 @@ async def get_graph_summary(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> GraphSummaryRead:
+    """Reconciles the configured graph store's projection against PostgreSQL's
+    authoritative counts (C7 / ADR-0020 amendment, Group J: the backend is now
+    a per-organization setting, resolved through `aida.graph_store`, rather
+    than always Neo4j). A `disabled` organization gets an explicit 503, not a
+    zeroed or degraded summary (INV-4)."""
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
-    driver = AsyncGraphDatabase.driver(
-        settings.neo4j_uri,
-        auth=(settings.neo4j_user, settings.neo4j_password),
-    )
-    try:
-        record = await driver.execute_query(
-            """
-            MATCH (catalog:Catalog {
-              datasource_id: $datasource_id,
-              organization_id: $organization_id
-            })
-            OPTIONAL MATCH (catalog)-[:HAS_SCHEMA]->(schema:Schema)
-            OPTIONAL MATCH (schema)-[:HAS_TABLE]->(table:Table)
-            OPTIONAL MATCH (table)-[:HAS_COLUMN]->(column:Column)
-            OPTIONAL MATCH (table)-[:HAS_CONSTRAINT]->(constraint:Constraint)
-            OPTIONAL MATCH (constraint)-[reference:REFERENCES]->(:Table)
-            RETURN count(DISTINCT catalog) AS catalogs,
-                   count(DISTINCT schema) AS schemas,
-                   count(DISTINCT table) AS tables,
-                   count(DISTINCT column) AS columns,
-                   count(DISTINCT CASE
-                     WHEN column.classification IN ['PII', 'PCI', 'PHI', 'SECRET', 'CONFIDENTIAL']
-                     THEN column
-                   END) AS sensitive_columns
-                   ,count(DISTINCT constraint) AS constraints
-                   ,count(DISTINCT reference) AS foreign_key_relationships
-            """,
-            datasource_id=str(datasource.id),
-            organization_id=str(datasource.organization_id),
-            database_="neo4j",
+
+    backend = await resolve_graph_store_backend(session, datasource.organization_id, settings)
+    if backend == "disabled":
+        raise HTTPException(
+            status_code=503, detail="graph store disabled for this organization"
         )
-        summary = record.records[0]
-    except Exception as exc:
+    try:
+        summary = await build_graph_store(backend, settings).graph_summary(session, datasource)
+    except GraphStoreUnavailable as exc:
         raise HTTPException(status_code=503, detail="metadata graph unavailable") from exc
-    finally:
-        await driver.close()
-    catalogs = int(summary["catalogs"])
+    catalogs = summary.catalogs
     authoritative = {
         "catalogs": int(
             await session.scalar(
@@ -2788,10 +2767,10 @@ async def get_graph_summary(
     }
     projected = {
         "catalogs": catalogs,
-        "schemas": int(summary["schemas"]),
-        "tables": int(summary["tables"]),
-        "columns": int(summary["columns"]),
-        "constraints": int(summary["constraints"]),
+        "schemas": summary.schemas,
+        "tables": summary.tables,
+        "columns": summary.columns,
+        "constraints": summary.constraints,
     }
     projection_lag = {name: max(authoritative[name] - projected[name], 0) for name in authoritative}
     if not catalogs:
@@ -2806,9 +2785,9 @@ async def get_graph_summary(
         schemas=projected["schemas"],
         tables=projected["tables"],
         columns=projected["columns"],
-        sensitive_columns=int(summary["sensitive_columns"]),
+        sensitive_columns=summary.sensitive_columns,
         constraints=projected["constraints"],
-        foreign_key_relationships=int(summary["foreign_key_relationships"]),
+        foreign_key_relationships=summary.foreign_key_relationships,
         projection_status=projection_status,
         projection_lag=projection_lag,
     )
