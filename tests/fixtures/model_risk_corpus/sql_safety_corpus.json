@@ -1,0 +1,96 @@
+{
+  "description": "AG-3/MG-5 bank model-risk SQL-safety accuracy corpus. Bank-domain read queries and bank-domain attack attempts (wire transfers, AML alerts, KYC status, loan applications, account balances), each run through the real aida.sql_guard.SqlGuard.validate() -- the same guard the live query-execution gateway uses. This is deliberately a small accuracy sanity check in a bank vocabulary, not a duplicate of QG-1's already-exhaustive per-dialect adversarial corpus (tests/fixtures/adversarial_sql_corpus/); 'safe' cases must be ALLOW (valid=True) and 'unsafe' cases must be DENY (valid=False, zero bypasses).",
+  "cases": [
+    {
+      "id": "sql-safe-01",
+      "category": "safe_read",
+      "kind": "safe",
+      "dialect": "postgres",
+      "sql": "SELECT account_id, balance FROM retail.account_balance WHERE branch_id = 42 LIMIT 100"
+    },
+    {
+      "id": "sql-safe-02",
+      "category": "safe_read",
+      "kind": "safe",
+      "dialect": "postgres",
+      "sql": "SELECT alert_id, status FROM aml.fraud_alerts WHERE opened_at > '2026-01-01' LIMIT 200"
+    },
+    {
+      "id": "sql-safe-03",
+      "category": "safe_read",
+      "kind": "safe",
+      "dialect": "tsql",
+      "sql": "SELECT TOP 50 application_id, decision FROM lending.loan_applications WHERE status = 'PENDING'"
+    },
+    {
+      "id": "sql-safe-04",
+      "category": "safe_read",
+      "kind": "safe",
+      "dialect": "snowflake",
+      "sql": "SELECT wire_id, amount FROM payments.wire_transfer WHERE currency = 'USD' LIMIT 100"
+    },
+    {
+      "id": "sql-safe-05",
+      "category": "safe_join",
+      "kind": "safe",
+      "dialect": "postgres",
+      "sql": "SELECT c.customer_id, k.kyc_status FROM retail.customer c JOIN compliance.kyc_status k ON c.customer_id = k.customer_id LIMIT 100"
+    },
+    {
+      "id": "sql-unsafe-mutation-01",
+      "category": "mutating_statement",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "UPDATE retail.account_balance SET balance = balance + 10000 WHERE account_id = 55",
+      "expected_violation_substring": "MUTATING_OR_ADMIN_STATEMENT_FORBIDDEN"
+    },
+    {
+      "id": "sql-unsafe-mutation-02",
+      "category": "mutating_statement",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "DELETE FROM aml.fraud_alerts WHERE alert_id = 901",
+      "expected_violation_substring": "MUTATING_OR_ADMIN_STATEMENT_FORBIDDEN"
+    },
+    {
+      "id": "sql-unsafe-wildcard-01",
+      "category": "wildcard_projection",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "SELECT * FROM compliance.kyc_status",
+      "expected_violation_substring": "SELECT_WILDCARD_FORBIDDEN"
+    },
+    {
+      "id": "sql-unsafe-stacked-01",
+      "category": "stacked_statement",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "SELECT wire_id FROM payments.wire_transfer; DROP TABLE payments.wire_transfer;",
+      "expected_violation_substring": "EXACTLY_ONE_STATEMENT_REQUIRED"
+    },
+    {
+      "id": "sql-unsafe-ddl-01",
+      "category": "ddl_statement",
+      "kind": "unsafe",
+      "dialect": "tsql",
+      "sql": "DROP TABLE lending.loan_applications",
+      "expected_violation_substring": "MUTATING_OR_ADMIN_STATEMENT_FORBIDDEN"
+    },
+    {
+      "id": "sql-unsafe-tautological-join-01",
+      "category": "unbounded_join",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "SELECT c.customer_id FROM retail.customer c JOIN compliance.kyc_status k ON 1=1",
+      "expected_violation_substring": "CROSS_OR_UNBOUNDED_JOIN_FORBIDDEN"
+    },
+    {
+      "id": "sql-unsafe-locking-read-01",
+      "category": "locking_read",
+      "kind": "unsafe",
+      "dialect": "postgres",
+      "sql": "SELECT account_id, balance FROM retail.account_balance WHERE account_id = 55 FOR UPDATE",
+      "expected_violation_substring": "LOCKING_READ_FORBIDDEN"
+    }
+  ]
+}

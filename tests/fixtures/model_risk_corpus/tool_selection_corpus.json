@@ -1,0 +1,209 @@
+{
+  "description": "AG-3/MG-5 bank model-risk tool-selection accuracy corpus. Synthetic bank governed-tool retrieval hits (wire-transfer lookup, KYC status check, AML alert review) driven through the real aida.agent_intelligence.GovernedPlanner.plan() -- the same PLANNED-state decision the live orchestrator makes -- with no database needed, since plan() takes already-scored RetrievalHit objects directly. Covers role-binding, the match-score threshold, missing required parameters, an explicit preferred-tool override, and multi-tool ranking order, so an accuracy regression in any of those real decision paths is caught, not just the single-tool happy path.",
+  "cases": [
+    {
+      "id": "tool-select-01-role-eligible-selected",
+      "category": "role_binding",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111101",
+          "display_name": "Wire Transfer Lookup",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111101"
+    },
+    {
+      "id": "tool-select-02-role-denied-falls-to-development-sql",
+      "category": "role_binding",
+      "roles": ["Guest"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111101",
+          "display_name": "Wire Transfer Lookup",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "DEVELOPMENT_SQL",
+      "expected_tool_id": null
+    },
+    {
+      "id": "tool-select-03-role-denied-no-candidate-sql-falls-to-model-generation",
+      "category": "role_binding",
+      "roles": ["Guest"],
+      "candidate_sql_available": false,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111101",
+          "display_name": "Wire Transfer Lookup",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "MODEL_GENERATION",
+      "expected_tool_id": null
+    },
+    {
+      "id": "tool-select-04-platform-admin-overrides-role-binding",
+      "category": "role_binding",
+      "roles": ["PlatformAdmin"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111102",
+          "display_name": "AML Alert Review",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111102"
+    },
+    {
+      "id": "tool-select-05-below-match-threshold-falls-to-development-sql",
+      "category": "match_threshold",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111103",
+          "display_name": "KYC Status Check",
+          "score": 0.3,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "DEVELOPMENT_SQL",
+      "expected_tool_id": null
+    },
+    {
+      "id": "tool-select-06-missing-required-parameter-no-candidate-sql-reaches-clarification",
+      "category": "required_parameters",
+      "roles": ["Analyst"],
+      "candidate_sql_available": false,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111101",
+          "display_name": "Wire Transfer Lookup",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": ["account_id"]
+        }
+      ],
+      "expected_strategy": "CLARIFICATION",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111101"
+    },
+    {
+      "id": "tool-select-07-required-parameter-supplied-selected",
+      "category": "required_parameters",
+      "roles": ["Analyst"],
+      "candidate_sql_available": false,
+      "tool_parameters": {"account_id": "AC-9001"},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111101",
+          "display_name": "Wire Transfer Lookup",
+          "score": 0.9,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": ["account_id"]
+        }
+      ],
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111101"
+    },
+    {
+      "id": "tool-select-08-higher-ranked-eligible-tool-wins",
+      "category": "multi_tool_ranking",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111102",
+          "display_name": "AML Alert Review",
+          "score": 0.95,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        },
+        {
+          "object_id": "11111111-1111-1111-1111-111111111103",
+          "display_name": "KYC Status Check",
+          "score": 0.6,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111102"
+    },
+    {
+      "id": "tool-select-09-all-candidates-role-denied-falls-to-model-generation",
+      "category": "role_binding",
+      "roles": ["Guest"],
+      "candidate_sql_available": false,
+      "tool_parameters": {},
+      "preferred_tool_version_id": null,
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111102",
+          "display_name": "AML Alert Review",
+          "score": 0.95,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        },
+        {
+          "object_id": "11111111-1111-1111-1111-111111111103",
+          "display_name": "KYC Status Check",
+          "score": 0.6,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "MODEL_GENERATION",
+      "expected_tool_id": null
+    },
+    {
+      "id": "tool-select-10-explicit-preferred-tool-overrides-low-score",
+      "category": "preferred_tool_override",
+      "roles": ["Analyst"],
+      "candidate_sql_available": true,
+      "tool_parameters": {},
+      "preferred_tool_version_id": "11111111-1111-1111-1111-111111111103",
+      "tool_hits": [
+        {
+          "object_id": "11111111-1111-1111-1111-111111111103",
+          "display_name": "KYC Status Check",
+          "score": 0.2,
+          "allowed_roles": ["Analyst"],
+          "required_parameters": []
+        }
+      ],
+      "expected_strategy": "GOVERNED_TOOL",
+      "expected_tool_id": "11111111-1111-1111-1111-111111111103"
+    }
+  ]
+}
