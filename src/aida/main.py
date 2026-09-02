@@ -57,6 +57,7 @@ from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.persona_api import router as persona_router
+from aida.playbooks_api import router as playbooks_router
 from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
@@ -332,6 +333,7 @@ app.include_router(token_revocation_router)
 app.include_router(detokenization_router)
 app.include_router(delegation_router)
 app.include_router(persona_router)
+app.include_router(playbooks_router)
 app.include_router(asset_description_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)

@@ -4186,6 +4186,64 @@ class CatalogBulkActionRun(Base, TimestampMixin):
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+class MetadataPlaybook(Base, TimestampMixin):
+    """AT-1: a saved, scheduled bulk-metadata action -- a filter, a CT-1 action
+    (TAG/CLASSIFY/OWN/CERTIFY), and a schedule, run automatically by the fleet
+    scheduler rather than a bespoke one (this row's own exit condition).
+
+    Matches at or below `auto_apply_max_items` are applied immediately through
+    the exact same single-item cores CT-1's synchronous endpoints use
+    (`aida.catalog_bulk_actions.apply_*_item`), recorded as a
+    `CatalogBulkActionRun` with `selection_mode="PLAYBOOK_AUTO"`. A match count
+    above that threshold is not applied directly -- it is queued as a
+    `BulkStewardshipOperation` behind a `GovernanceReview`, mirroring GL-2's
+    (auto-apply is safe at small scale) and GL-5's (review at larger blast
+    radius) precedent for exactly this kind of scale-dependent risk. `describe`
+    is a named action in this row's own exit text but has no existing CT-1
+    single-item core to reuse yet -- honestly out of scope for this pass; see
+    the tracker row's own note.
+    """
+
+    __tablename__ = "metadata_playbook"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name"),
+        Index("ix_metadata_playbook_org_enabled", "organization_id", "enabled"),
+        CheckConstraint(
+            "action IN ('TAG', 'CLASSIFY', 'OWN', 'CERTIFY')",
+            name="action_is_supported",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    match_field: Mapped[str] = mapped_column(String(20), default="TABLE_NAME", nullable=False)
+    match_pattern: Mapped[str] = mapped_column(String(255), nullable=False)
+    # CLASSIFY only -- which columns of each matched table to reclassify.
+    # Unused (left NULL) by TAG/OWN/CERTIFY, which act on the whole table.
+    column_name_pattern: Mapped[str | None] = mapped_column(String(255))
+    # Action-specific fields CT-1's own per-action request shape already
+    # defines (tag_key/tag_value, classification, owner_type/owner_principal,
+    # rationale/expires_after_days) -- validated against that shape at create
+    # time (`playbooks_api.py`), not by a database constraint, the same
+    # division of responsibility `NotificationRuleRecord.conditions` already
+    # has between its own JSON column and the engine that reads it.
+    action_parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    schedule_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # <= this many matches: applied immediately. > this many: queued for
+    # governance review instead. Zero means "always review, never auto-apply."
+    auto_apply_max_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 # ---------------------------------------------------------------------------
 # SM-2: Glossary term binding to semantic objects
 # ---------------------------------------------------------------------------

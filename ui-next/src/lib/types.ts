@@ -2892,6 +2892,56 @@ export interface PlanStepCreate {
   expected_cost?: number;
 }
 
+export interface PlaybookCreate {
+  name: string;
+  action: "TAG" | "CLASSIFY" | "OWN" | "CERTIFY";
+  datasource_id: string;
+  match_field?: "TABLE_NAME" | "SCHEMA_NAME" | "QUALIFIED_NAME";
+  match_pattern: string;
+  column_name_pattern?: string | null;
+  action_parameters: Record<string, unknown>;
+  schedule_interval_minutes: number;
+  auto_apply_max_items?: number;
+  enabled?: boolean;
+}
+
+export interface PlaybookRead {
+  id: string;
+  organization_id: string;
+  name: string;
+  action: string;
+  datasource_id: string;
+  match_field: string;
+  match_pattern: string;
+  column_name_pattern: string | null;
+  action_parameters: Record<string, unknown>;
+  schedule_interval_minutes: number;
+  auto_apply_max_items: number;
+  enabled: boolean;
+  created_by: string;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaybookRunResultRead {
+  playbook_id: string;
+  matched_count: number;
+  outcome: string;
+  bulk_action_run_id: string | null;
+  bulk_stewardship_operation_id: string | null;
+  governance_review_id: string | null;
+}
+
+export interface PlaybookUpdate {
+  match_pattern?: string | null;
+  column_name_pattern?: string | null;
+  action_parameters?: Record<string, unknown> | null;
+  schedule_interval_minutes?: number | null;
+  auto_apply_max_items?: number | null;
+  enabled?: boolean | null;
+}
+
 export interface PolicyNativeSyncRequestCreate {
   schema_name: string;
   table_name: string;
@@ -4134,8 +4184,6 @@ export interface ValidationError {
   loc: (string | number)[];
   msg: string;
   type: string;
-  input?: unknown;
-  ctx?: Record<string, unknown>;
 }
 
 export interface ValidationIssueRead {

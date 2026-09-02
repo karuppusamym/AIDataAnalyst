@@ -10106,3 +10106,165 @@ touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict marke
 before the closing push: none found (the handful of `=======`-shaped hits are decorative
 module-docstring underlines of a different length, e.g. `negative_knowledge.py`/`retrieval.py`,
 confirmed by exact-length grep, not real merge markers).
+
+---
+
+## 2026-09-01 — AT-1 closed: saved, scheduled bulk-metadata "playbook" objects on top of CT-1
+
+A genuinely new feature, not a tracker-consistency closure or a bugfix: a `MetadataPlaybook` persists a
+filter (a datasource + a table-name pattern, optionally narrowed further by a column-name pattern for
+CLASSIFY), one of CT-1's four bulk actions (TAG/CLASSIFY/OWN/CERTIFY), and a schedule. The existing fleet
+scheduler (`aida.workflows.scheduler`, run by Temporal -- the "existing Temporal scheduler" this row's
+exit text names, not a new one) sweeps every enabled, due playbook, and a manual `POST
+/v1/playbooks/{id}/run` triggers the same evaluation out of cycle.
+
+### Design: reuse over invention
+
+Evaluating a playbook resolves its filter against the live catalog using CT-1's own filter matcher
+(`match_tables_by_filter`/`match_columns_by_pattern`), then branches on match count against the
+playbook's own `auto_apply_max_items` (default 0 -- safe by default, an operator must opt in to
+auto-apply at all):
+
+- at or below the threshold, it applies immediately through CT-1's own single-item cores
+  (`apply_tag_item`/`apply_classify_item`/`apply_own_item`/`apply_certify_item` in
+  `catalog_bulk_actions.py`) -- the exact functions the synchronous `/tables/bulk-*` endpoints call per
+  item -- recorded as a `CatalogBulkActionRun` with `selection_mode="PLAYBOOK_AUTO"`;
+- above it, the action is queued behind a `GovernanceReview` as a `BulkStewardshipOperation`, for a
+  checker to approve or reject through the existing generic dispatch in
+  `semantic_api.py::_apply_governance_review_decision` (untouched -- its `BULK_STEWARDSHIP_OPERATION`
+  branch already dispatches on `operation_type` generically).
+
+This mirrors GL-2 (rule-based ownership auto-applies at small scale) and GL-5 (certification goes
+through review at scale) rather than inventing a third governance shape -- scale-dependent risk already
+has a precedent on this platform, named explicitly in this row's own exit text
+("confidence-threshold auto-apply branch mirroring GL-2/GL-5").
+
+`OWN` and `CERTIFY` already had operation types in `stewardship_service.py::apply_bulk_operation`
+(`ASSIGN_OWNERSHIP`, `CERTIFY_ASSET`, from GL-2/GL-5/GL-7) -- zero new code needed there. `TAG` and
+`CLASSIFY` did not; added as two new `elif` branches reusing `apply_tag_item`/`apply_classify_item`, the
+same cores the new auto-apply path uses, so a queued-then-approved playbook action and an
+auto-applied one go through identical single-item logic either way.
+
+CERTIFY's playbook config stores a *relative* `expires_after_days` (a schedule that fires repeatedly
+should always certify a fresh window from whenever it actually runs), resolved to an absolute
+`expires_at` right before either applying or queuing -- `apply_bulk_operation`'s existing `CERTIFY_ASSET`
+branch already expects an absolute ISO timestamp in `parameters["expires_at"]`, unchanged.
+
+### Honest scope cut: `describe`
+
+This row's exit text names five actions ("tag/classify/own/certify/describe"). `describe` has no
+existing CT-1 single-item core to reuse -- writing a table's description is a different mechanism
+(module 04's steward-authored description tables), not something this row's own scope extends to.
+Documented as a deliberate gap on `MetadataPlaybook`'s own docstring rather than silently dropped; the
+tracker row's exit condition is now written to say `TAG/CLASSIFY/OWN/CERTIFY -- describe scoped out, see
+log` instead of quietly claiming all five.
+
+### New files / models
+
+- `src/aida/models.py`: `MetadataPlaybook` (org + datasource FKs, `action` CHECK-constrained to the four
+  supported values, `match_field`/`match_pattern`/`column_name_pattern`, `action_parameters` JSON,
+  `schedule_interval_minutes`, `auto_apply_max_items`, `enabled`, `last_run_at`). Unlike GL-6/DQ-4/KG-7's
+  in-process last-run-time dicts (no existing column to persist to when those rows were built), this
+  table owns a real `last_run_at` column from the start, so a scheduler restart re-sweeps nothing early.
+- `migrations/versions/62341fa9f017_at1_metadata_playbook.py`: creates `metadata_playbook`. Verified both
+  directions offline (`alembic upgrade`/`downgrade c8fcafc5856a:62341fa9f017 --sql`) against a Postgres
+  dialect target -- no live Postgres in this sandbox, same standing limitation as every other migration
+  landed on this branch. `alembic heads` confirms a single head.
+- `src/aida/playbooks.py` (new): the evaluation/execution engine --
+  `resolve_playbook_matches`/`evaluate_and_run_playbook`/`_auto_apply`/`_queue_for_review`, plus
+  `playbook_due`/`run_due_playbooks_pass` for the scheduler sweep (mirroring
+  `custom_quality_rules.run_due_rule_packs`'s shape and fault-isolation, module-owns-its-sweep like that
+  row).
+- `src/aida/playbooks_api.py` (new): REST CRUD (`POST/GET /v1/organizations/{organization_id}/playbooks`,
+  `GET/PATCH/DELETE /v1/playbooks/{playbook_id}`) plus `POST /v1/playbooks/{playbook_id}/run` for a
+  manual out-of-cycle trigger. Deliberately its **own** file with locally-scoped Pydantic schemas
+  (`PlaybookCreate`/`PlaybookUpdate`/`PlaybookRead`), rather than adding to the shared, hot
+  `aida.api`/`aida.schemas` modules under heavy concurrent edit on this branch -- this row's exit
+  condition does not require touching either, and a new feature that can avoid a collision-prone shared
+  file should. `action_parameters` is validated per-action at create/update time (right shape for
+  TAG/CLASSIFY/OWN/CERTIFY) so a bad playbook fails at creation, not at its first scheduled run.
+- `src/aida/workflows/scheduler.py`: one new import, one new call
+  (`await run_due_playbooks_pass(now=now)`) inside `run_scheduler_iteration`, alongside the existing
+  `run_owner_routing_pass`/`run_custom_rule_pack_pass`/`run_graph_reconciliation_scheduler_pass` calls.
+  No other line in this file touched.
+- `src/aida/stewardship_service.py`: two new `elif` branches (`TAG`, `CLASSIFY`) in
+  `apply_bulk_operation`, immediately before the existing `REASSIGN_LEAVER` branch.
+- `src/aida/main.py`: one import + one `app.include_router(playbooks_router)`, placed in the existing
+  alphabetical import order (`ruff`'s isort catches placement drift; caught and fixed one on the first
+  pass).
+- `Docs/30-contracts/04-event-catalog.md`: documented the one genuinely new event type this row
+  introduces, `metadata.playbook.created.v1`. (`catalog.asset_tag.applied.v1` /
+  `catalog.column.classified.v1`, reused as-is from CT-1's existing `_CATALOG_BULK_ACTION_EVENT_TYPES` in
+  `api.py`, are already undocumented there -- a pre-existing gap predating this row, confirmed by grep;
+  not fixed here as out-of-scope unrelated work, same discipline this branch has followed all day.)
+
+### A real mypy bug caught and fixed while writing `playbooks.py`
+
+`_apply_one_item`'s TAG and OWN branches both originally bound their result to a variable named `row`;
+mypy `--strict` correctly flagged `Incompatible types in assignment (expression has type
+"OwnershipAssignment", variable has type "AssetTag")` -- it narrows a name's type from its first
+assignment across the whole function body, not per-branch. Renamed to `tag`/`assignment` respectively.
+Caught by routine verification, not by a test failure; no behavior was ever wrong, but the annotation
+would have quietly rotted the moment either branch's return type changed.
+
+### Tests
+
+New file `tests/test_playbooks.py`, 16 tests, real-sqlite-engine pattern (matching
+`test_catalog_bulk_actions_endpoints.py` -- `resolve_playbook_matches`/`evaluate_and_run_playbook` issue
+real queries and need real flush-generated ids, so a hand-simulated session would not exercise the actual
+code path):
+
+- `playbook_due`: never-run / before-interval / after-interval, as pure functions.
+- `resolve_playbook_matches`: table-name pattern filtering, and CLASSIFY's further narrowing to matching
+  columns within matched tables.
+- `evaluate_and_run_playbook`: no-match still advances `last_run_at` (so a permanently-unmatched playbook
+  is not re-evaluated every scheduler tick); TAG auto-applies under threshold and persists real
+  `AssetTag` rows plus a `CatalogBulkActionRun`; TAG queues a `GovernanceReview` +
+  `BulkStewardshipOperation` over threshold with no `AssetTag` rows created yet; CERTIFY's relative
+  `expires_after_days` resolves to the correct absolute `expires_at` on the persisted
+  `AssetCertification` (a naive-vs-aware datetime mismatch from sqlite's storage caught and fixed in the
+  test itself, not the production code -- sqlite drops tzinfo on round-trip, same class of quirk this
+  branch has hit before).
+- REST layer, calling the route functions directly in-process (same convention as
+  `test_catalog_bulk_actions_endpoints.py`): endpoint registration via `app.openapi()`, duplicate-name
+  409, cross-organization 403, per-action `action_parameters` shape validation (a first draft of this
+  test wrongly expected default-`auto_apply_max_items=0` to auto-apply -- fixed the test, not the code;
+  0 is the correct safe-by-default value), full create/list/get/update/delete round trip including a 422
+  on an update that would leave `action_parameters` invalid for the playbook's action, and manual-run
+  auto-apply plus its 409 on a disabled playbook.
+
+### Verification
+
+`ruff check --fix` clean on every new/touched file (two real findings: an unquoted-annotation
+`UP037` in `playbooks_api.py`, and the isort-order violation in `scheduler.py`'s new import -- both
+auto-fixed and re-verified). `mypy --strict` clean on `playbooks.py`, `playbooks_api.py`, `models.py`,
+`stewardship_service.py`, `main.py`, and `scheduler.py` **beyond** a pre-existing, already-present-on-
+`HEAD` `"object" not callable"` finding at every `session_factory()` call site across the whole codebase
+(confirmed by running `mypy --strict` against the unmodified `HEAD` copy of `scheduler.py` and against
+`custom_quality_rules.py`, an untouched file -- both show the identical finding at their own
+`session_factory()` calls; it is `aida.db`'s lazy `__getattr__`-based re-export of `session_factory`
+losing its static type, not anything this row introduces).
+
+`pytest tests/test_playbooks.py`: 16 passed. Full regression sweep, zero failures: `pytest
+tests/test_bulk_governance_decisions.py tests/test_glossary_stewardship.py
+tests/test_leaver_reassignment.py tests/test_catalog_bulk_actions.py
+tests/test_catalog_bulk_actions_endpoints.py tests/test_playbooks.py tests/test_fleet_scheduling.py` --
+90 passed. `AIDA_ENVIRONMENT=development python -c "from aida.main import app"` imports cleanly, 385
+routes (was 382 before this row's three new endpoints).
+
+`scripts/openapi_diff.py` (no flag): three new paths reported as additive `info`-level changes, zero
+breaking changes. Unlike IN-5e earlier today (where the baseline diff was reverted because the row's own
+change produced no OpenAPI diff at all), `test_openapi_diff_gate.py::test_committed_baseline_matches_
+current_app_openapi_output` asserts an *exact* match against `app.openapi()` -- this row's three new
+endpoints make the baseline genuinely, unavoidably stale, so `--accept-baseline` was run and both
+`Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` were regenerated and committed.
+The regeneration also swept up the same pre-existing `ValidationError.ctx`/`.input` pydantic-version
+schema drift flagged (and left alone) by several other rows landed on this branch today -- but this time
+there was no way to separate it from a change this row's own new gate compliance genuinely requires, so
+it rides along rather than being reverted. Confirmed `test_openapi_diff_gate.py` (24 tests) is green
+against the regenerated baseline.
+
+Honest gap: `test_event_catalog_gate.py` fails in this sandbox on an unrelated `UnicodeDecodeError`
+(cp1252 decode of a `PG-5` edition-entitlement source file that contains a non-cp1252 byte) that predates
+and is untouched by this row -- confirmed by running the same gate against `HEAD` before this row's
+changes; not attempted here, same standing environment limitation other rows have hit and left alone.

@@ -26,6 +26,7 @@ from aida.models import (
     ScanPolicy,
     UnownedAssetEscalation,
 )
+from aida.playbooks import run_due_playbooks_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
 from aida.stewardship_api import (
@@ -609,6 +610,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_owner_routing_pass(settings, now=now)
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
+    await run_due_playbooks_pass(now=now)
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.
