@@ -10639,3 +10639,137 @@ Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in
 pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
 rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
 failure.
+
+## 2026-09-02 — UX-15/UX-20/UX-8 closed: ui-next migration (review queue, marketplace, lineage
+refusals, Studio change sets, narrated lineage, persona onboarding)
+
+Atlas Wave-2 Group L. `ui-next/`-only (no `src/aida` edit) -- CT-2/UX-11's catalog-screen virtualization
+work, confirmed IN PROGRESS in a sibling session, was left untouched (checked before starting: neither
+`CatalogScreen.tsx` nor `CatalogTable.tsx` has any diff in this branch).
+
+### UX-15: four screens onto the new shell, each on live, already-merged endpoints
+
+Every screen below adopts the Catalog pattern in full: URL-held filter/selection state, one abortable
+request in flight per view, a virtualized list, and an evidence-pane analog (permalinkable via a URL
+param). New `ui-next/src/components/VirtualList.tsx` generalizes `CatalogTable`'s fixed-38px-row
+virtualization to variable-height cards (`@tanstack/react-virtual`'s `measureElement`) rather than each
+screen reinventing windowing.
+
+- **Review queue** (`ReviewQueueScreen.tsx`) rewired off `fetchReviewBatch` (a fixture standing in for a
+  read model that had not shipped) onto the real `GET /v1/governance/reviews/queue` (UX-17, landed
+  2026-09-01) and `POST /v1/governance/reviews/{id}/decision`. Forced an honest redesign: the old
+  "applied automatically" tile had nothing real behind it -- `GovernanceReview.status` is only ever
+  PENDING/APPROVED/REJECTED (confirmed against `models.py`, and against UX-19's own accomplishment-log
+  note that no proposal type in this codebase has a confidence-gated auto-apply branch) -- so the tiles
+  are now the three statuses the real model actually reports. `ProposalCard.tsx`/`Proposal` (the prior
+  fixture-shaped shell primitive) is left in the tree unused by this screen rather than deleted or forced
+  to carry a shape the live API cannot back -- its own docstring already frames it as a shared primitive,
+  not screen-owned. AT-D4's `PropagationLog` gate (`VITE_ENABLE_PROPAGATION_LOG`, default off) is
+  untouched; its three original tests were carried forward with the same intent, still passing.
+- **Marketplace** (new `MarketplaceScreen.tsx`) against CX-9's real `GET /v1/marketplace/products`
+  (`product_marketplace_api.py::search_marketplace`, personalized/catalog ranking) and
+  `POST /v1/marketplace/products/{version_id}/access-requests`. `domain_affinity`/`role_affinity` are
+  surfaced as an honest "why this order," never hidden reordering. `MarketplaceProductRead` is
+  hand-written in `ui-types.ts` for the same reason `CatalogRowRead` already is there: its route declares
+  `response_model=Page` un-parameterized, so FastAPI's schema walker never names the subclass. A new
+  `PageOf<T>` type documents and narrows every endpoint in this row with that same generic-`Page` gap
+  (marketplace search, `list_refusals`, `list_organization_datasources`).
+- **Lineage refusal view** (new `LineageRefusalScreen.tsx`) -- not a re-skin of anything. Checked
+  directly: the legacy shell (`ui/app.js`) has no refusal-specific view at all, no "refus" string anywhere
+  in it. This is the first real surface for LN-3's `GET /v1/ai-decisions/refusals` /
+  `GET /v1/ai-decisions/{run_id}`, honestly scoped to that endpoint's own `PlatformAdmin`/`DataAdmin`-only
+  gate (unchanged) -- a narrower role gets the same 403 `ErrorState` any other gated call renders.
+- **Studio change sets** (new `StudioChangeSetsScreen.tsx`) -- the first ui-next surface for module 19's
+  real authoring API (`studio_api.py`, ST-A7 already landed at this branch's base commit). Lists via
+  `GET /v1/studio/change-sets`; a selected change set's detail pane loads `.../items`, `.../diff` and
+  `.../impact` together; submission calls the real test-gated (ST-A7) / eval-regression-gated (ST-A8)
+  `POST .../submit` -- a 409 from that gate renders the endpoint's own detail string verbatim, proven by a
+  test that asserts no client-side status change happens on failure.
+
+Every migrated screen's `App.tsx` `NAV` entry is `ready: true` with its `legacy` pill removed
+(`refusals`/`studio` are new entries with no prior legacy placeholder to remove).
+
+### UX-20: narrated lineage traversal as the primary lineage surface
+
+New `ui-next/src/screens/NarratedLineageScreen.tsx` replaces the legacy stub behind the "lineage" nav
+entry, built against the real, already-merged `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`
+(`unified_lineage_api.py::build_unified_lineage_impact_payload` -- the same traversal
+`atlas__get_lineage_impact` serves over MCP). Flow: pick a datasource
+(`GET /v1/organizations/{id}/datasources`, resolving the id `CatalogRowRead` doesn't carry), search for
+the asset in question (reuses `fetchCatalogRows`, client-filtered to the chosen datasource's name), then
+the real impact call runs. Every hop's evidence is real, server-computed data -- `depth` and
+`contributing_edge_sources` read directly off `UnifiedLineageImpactNodeRead` -- rendered as one
+plain-language sentence per hop, never invented narration text. "Streams" is client-side pacing (140ms
+per hop) over the already-fetched, already-bounded response; hops reveal upstream-farthest-to-focus then
+focus-to-downstream-farthest, so the sequence reads as a walked path.
+
+Honest scope line on the DAG half: LN-8's Cytoscape-based virtualized canvas renderer
+(`ui/scripts/graph-engine.js`) stays exactly where it is in the legacy shell -- UX-16 (retiring `ui/`) has
+not happened, and re-implementing that real, already-shipped, already-tested large-DAG renderer inside
+this row would duplicate rather than migrate it. `ui-next`'s own "Graph (supporting view)" tab is a
+lightweight depth-swimlane layout over the SAME impact response the narration reads (real node placement
+by real `depth`), not a fabricated diagram -- but it does not draw connecting edges between hops the way a
+true DAG would. The ordered, explicit narration is what satisfies "highlights the path" for this row, not
+the swimlane. `NarratedLineageScreen.test.tsx` (3 tests) proves the graph tab is reachable but not the
+default/entry view, and that the impact endpoint is never called before a node is chosen.
+
+### UX-8: guided onboarding per persona
+
+New `ui-next/src/components/OnboardingWizard.tsx`, wired as the shell's "Get started" nav entry (now the
+default landing view) and branching on the SAME `Persona` set module 21 §5 already establishes
+(`Analyst`/`Steward`/`Reviewer`/`Operator`/`Auditor`) -- no new backend persona/role concept invented.
+Checked directly for a role/persona-specific "what should a new principal of this persona do first" model
+anywhere in `src/aida` before writing anything: none exists (`persona_api.py`/`security.py` define *who* a
+principal is, never a first-steps checklist for one), so the five checklists are UI-owned content,
+hand-written from what each persona's real screens in this shell do -- not fetched, not fabricated as
+server-curated. Every item points at a real `App.tsx` nav id and is honest about migration state: a
+still-legacy target (Operator's Sources/Operations, Auditor's Audit ledger) renders the same `legacy` pill
+the nav itself uses. Progress (`atlas.onboarding.<persona>.done`) is `localStorage`-only, scoped per
+persona, and degrades safely for a viewer whose browser blocks storage -- there is no backend field for
+onboarding completion, and adding one is outside this ui-next-only item's scope.
+
+### A real, previously-latent test-infrastructure gap found and fixed along the way
+
+Making these screens render under jsdom surfaced a bug that had simply never been exercised: none of
+UX-11/UX-14's prior work included a `CatalogScreen.test.tsx`, so `CatalogTable`'s `useVirtualizer` call had
+never actually been render-tested. `@tanstack/virtual-core`'s `observeElementRect` measures the scroll
+container with a synchronous `element.getBoundingClientRect()` on mount, before the existing no-op
+`ResizeObserver` stub in `test/setup.ts` ever gets a chance to fire -- and jsdom always reports a
+zero-sized box, overriding any `initialRect` estimate. A virtualizer at a permanently zero-height viewport
+renders zero rows regardless of `items.length`. Fixed once, centrally, in `ui-next/src/test/setup.ts`
+(stubs `getBoundingClientRect` to a plausible nonzero box when jsdom reports all-zero), benefiting every
+current and future virtualized screen's tests, `CatalogTable` included.
+
+### Tests
+
+27 new tests: five new files -- `MarketplaceScreen.test.tsx` (5), `LineageRefusalScreen.test.tsx` (4),
+`StudioChangeSetsScreen.test.tsx` (4), `NarratedLineageScreen.test.tsx` (3),
+`OnboardingWizard.test.tsx` (6, component-level) -- plus `ReviewQueueScreen.test.tsx` grown from 3 to 8
+(+5). Suite total: 19 baseline + 27 = 46. Every test mocks the `../lib/api` boundary (matching `EvidencePane.test.tsx`/`App.test.tsx`'s established
+pattern) with real payload shapes and asserts the exact endpoint/params reached, not superficial
+snapshots -- e.g. the marketplace test asserts `sort: "personalized"` reaches the real call by default and
+that a classification-filter change re-fetches with the new value; the Studio test asserts a real 409
+test-gate failure surfaces verbatim with no client-side status mutation.
+
+### Verification
+
+`cd ui-next && npm run typecheck && npm run test && npm run build` all green: 0 typecheck errors, 46/46
+tests passing across 9 test files, `tsc -b && vite build` clean (`dist/assets/index-*.js` 231KB / 71KB
+gzip). This package has no `lint` script (`package.json` scripts are exactly `dev`/`build`/`preview`/
+`typecheck`/`test`) so there is no separate lint gate to run. No `Docs/90-reference/openapi-baseline.json`
+regeneration needed -- every endpoint this row consumes was already reachable (or, for the three
+`response_model=Page`-unparameterized routes, already had its item schema reachable via another route)
+before this session started; `ui-next/src/lib/types.ts` was not touched.
+
+### Honest gaps / follow-ups for other groups
+
+- **UX-16** ("Retire `ui/`") is still open: `sources`, `operations`, `audit`, `semantics`, `meaning`,
+  `relationships`, `quality` and `analyst` remain legacy-served stubs in the nav -- out of this row's
+  scope (UX-15 named four specific screens; those four are the ones migrated).
+- **UX-20's graph view** is a lightweight depth-swimlane layout, not a full interactive DAG with drawn
+  edges -- see the honest-scope note above. If a future row wants a true supporting DAG inside `ui-next`
+  itself (rather than continuing to defer to the legacy `ui/` canvas until UX-16), that is new work, not
+  a gap in what this row claims.
+- No backend endpoint had to be stubbed or mocked for any of UX-15/UX-20/UX-8 -- every call in this
+  session's diff hits a route that already existed, unchanged, on `feature/snowflake-dbt-lineage-mcp` at
+  this branch's base commit (`fa501c0`).
