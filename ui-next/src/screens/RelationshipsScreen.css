@@ -1,0 +1,69 @@
+.rel{display:flex;flex-direction:column;min-height:0;height:100%;padding:22px 24px;gap:14px}
+.rel__load{color:var(--ink-3);font-size:13px;padding:20px 0}
+.rel__head{flex:none}
+.rel__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.rel__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:72ch}
+
+.rel__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.rel__filters .field:nth-child(1){width:260px}
+.rel__spacer{flex:1}
+.rel__bulk{display:flex;align-items:center;gap:8px}
+
+.rel__tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;flex:none}
+@media (max-width:760px){.rel__tiles{grid-template-columns:1fr}}
+.tile{border:1px solid var(--line);border-top-width:3px;border-radius:var(--radius);background:var(--surface);padding:13px 15px;position:relative}
+.tile--ok{border-top-color:var(--ok)}
+.tile--info{border-top-color:var(--info)}
+.tile--warn{border-top-color:var(--warn)}
+.tile__n{font-size:26px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.tile--ok .tile__n{color:var(--ok)}
+.tile--info .tile__n{color:var(--info)}
+.tile--warn .tile__n{color:var(--warn)}
+.tile__l{font-size:12.5px;color:var(--ink-3);margin-top:2px}
+
+.rel__main{display:flex;flex-direction:column;flex:1;min-height:220px;gap:8px}
+.rel__all{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);flex:none}
+.tnum{font-variant-numeric:tabular-nums}
+.rel__dserr{color:var(--bad);font-size:12px;margin:0}
+
+/* Candidate card — mirrors ProposalCard.css's `.prop*` shape, kept as its
+   own class prefix rather than reused verbatim: this card's diff has no
+   "before" (a candidate is always "nothing -> this edge") and carries an
+   AT-15 signal breakdown ProposalCard has no concept of. */
+.rcard{border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:var(--radius);background:var(--surface);overflow:hidden;display:flex;flex-direction:column}
+.rcard--focused{outline:2px solid var(--accent);outline-offset:-1px}
+.rcard__head{display:flex;align-items:flex-start;gap:12px;padding:13px 15px 11px}
+.rcard__check{margin-top:3px;flex:none}
+.rcard__lead{min-width:0;flex:1}
+.rcard__badges{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px}
+.rcard__title{all:unset;cursor:pointer;font-size:14px;font-weight:600;letter-spacing:-.008em;display:block;font-family:var(--mono);word-break:break-word}
+.rcard__title:hover{text-decoration:underline}
+
+.conf{display:flex;align-items:center;gap:7px;flex:none}
+.conf__bar{width:64px;height:5px;border-radius:3px;background:var(--sunk);overflow:hidden;display:block}
+.conf__fill{display:block;height:100%;border-radius:3px}
+.conf__fill--ok{background:var(--ok)}
+.conf__fill--warn{background:var(--warn)}
+.conf__fill--bad{background:var(--bad)}
+.conf__n{font-family:var(--mono);font-size:11.5px;color:var(--ink-2);font-variant-numeric:tabular-nums;min-width:34px;text-align:right}
+
+.rcard__signals{display:flex;flex-direction:column;gap:4px;margin:0 15px 10px;padding:8px 10px;border:1px solid var(--line-soft);border-radius:var(--radius-sm);background:var(--sunk)}
+.sig{display:grid;grid-template-columns:150px 1fr 60px;align-items:center;gap:8px;font-size:11px}
+.sig__n{color:var(--ink-2);text-transform:capitalize}
+.sig__bar{height:5px;border-radius:3px;background:var(--line-soft);overflow:hidden}
+.sig__fill{display:block;height:100%;border-radius:3px;background:var(--accent)}
+.sig__v{color:var(--ink-3);text-align:right}
+@media (max-width:560px){.sig{grid-template-columns:110px 1fr 50px}}
+
+.rcard__act{display:flex;align-items:center;gap:8px;padding:13px 15px;margin-top:2px;border-top:1px solid var(--line-soft);background:var(--sunk)}
+
+/* Reuses ProposalCard.css/ReviewQueueScreen.css's `.dl*` diff-line idiom for
+   the evidence panel's field list — every entry here is `added` (a
+   candidate has no published predecessor), so no removed/changed variant is
+   needed. */
+.rel__diff{margin:0;border:1px solid var(--line-soft);border-radius:var(--radius-sm);overflow-x:auto;background:var(--sunk)}
+.dl{display:flex;gap:8px;font-family:var(--mono);font-size:11.5px;line-height:1.85;padding:0 9px;white-space:pre-wrap}
+.dl__g{flex:none;width:8px;color:var(--ok)}
+
+.rel__evidence{position:fixed;right:24px;bottom:24px;top:auto;max-height:70vh;z-index:5;box-shadow:0 8px 28px rgba(0,0,0,.18)}
+@media (max-width:900px){.rel__evidence{position:static;width:auto;max-height:none;box-shadow:none;margin-top:14px}}

@@ -430,3 +430,109 @@ export async function fetchLineageImpact(
     signal,
   );
 }
+
+/* ---------------------------------------------------------------------------
+   UX-16: Relationships — the review queue for N4's impact-ordered,
+   diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
+   plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
+   calibration summary. Added here as a clearly-delimited block rather than
+   folded into the imports/exports above, so this screen's additions are easy
+   to find and to lift out cleanly if this file is ever split per screen.
+--------------------------------------------------------------------------- */
+
+import type {
+  RelationshipCandidateBulkDecisionRequest,
+  RelationshipCandidateBulkDecisionResultRead,
+  RelationshipCandidateCalibrationRead,
+  RelationshipCandidateDecision,
+  RelationshipCandidateRead,
+  RelationshipCandidateReviewQueueRead,
+} from "./types";
+import {
+  makeFixtureBulkDecideRelationshipCandidates,
+  makeFixtureDecideRelationshipCandidate,
+  makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidateReviewQueue,
+} from "./fixtures";
+
+export interface RelationshipCandidateReviewQueueQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{datasourceId}/relationship-candidates/review-queue`
+ *  (N4, `get_relationship_candidate_review_queue` — `intelligence_api.py`) —
+ *  PENDING relationship candidates for one datasource, sorted by real
+ *  computed lineage impact (EA.14's bounded traversal), each carrying an
+ *  SM-7 "nothing → this edge" diff and an AT-15 per-signal confidence
+ *  breakdown. Supersedes the raw, confidence-sorted
+ *  `GET .../relationship-candidates` list for a reviewer triaging a
+ *  backlog — read-only; deciding a candidate goes through the two functions
+ *  below. */
+export async function fetchRelationshipCandidateReviewQueue(
+  datasourceId: string,
+  query: RelationshipCandidateReviewQueueQuery = {},
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateReviewQueueRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateReviewQueue(datasourceId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<RelationshipCandidateReviewQueueRead>(
+    `/v1/datasources/${datasourceId}/relationship-candidates/review-queue?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/{candidateId}/decision` — maker-checker
+ *  approve/reject of one PENDING candidate. A REJECT with no `reason` is
+ *  rejected server-side (`RelationshipCandidateDecision.require_reason`);
+ *  callers should collect a reason before calling this the same way
+ *  `decideGovernanceReview` above expects one. */
+export async function decideRelationshipCandidate(
+  candidateId: string,
+  body: RelationshipCandidateDecision,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateRead> {
+  if (USE_FIXTURES) return makeFixtureDecideRelationshipCandidate(candidateId, body);
+  return postJson<RelationshipCandidateRead>(
+    `/v1/relationship-candidates/${candidateId}/decision`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/bulk-decision` (RL-6) — decides up to
+ *  500 PENDING candidates by explicit id list in one call; a rule violation
+ *  on one candidate marks that candidate FAILED in the response and the
+ *  rest still proceed (partial success), never aborting the whole batch. */
+export async function bulkDecideRelationshipCandidates(
+  body: RelationshipCandidateBulkDecisionRequest,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateBulkDecisionResultRead> {
+  if (USE_FIXTURES) return makeFixtureBulkDecideRelationshipCandidates(body);
+  return postJson<RelationshipCandidateBulkDecisionResultRead>(
+    `/v1/relationship-candidates/bulk-decision`,
+    body,
+    signal,
+  );
+}
+
+/** `GET /v1/relationship-candidates/confidence-calibration` (RL-7) — this
+ *  organization's own observed steward-approval rate per confidence bucket,
+ *  from its real decision history (never a published external calibration
+ *  curve — see the endpoint's own `methodology_note`, echoed verbatim in the
+ *  response). Optional secondary info for a calibration summary tile;
+ *  `datasourceId: null` reports the org-wide history. */
+export async function fetchRelationshipCandidateCalibration(
+  datasourceId: string | null,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateCalibrationRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateCalibration(datasourceId);
+  const params = new URLSearchParams();
+  if (datasourceId) params.set("datasource_id", datasourceId);
+  return get<RelationshipCandidateCalibrationRead>(
+    `/v1/relationship-candidates/confidence-calibration?${params}`,
+    signal,
+  );
+}
