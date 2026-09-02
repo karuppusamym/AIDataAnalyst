@@ -1904,6 +1904,7 @@ class UnownedAssetEscalationRead(ApiModel):
     dedup_key: str | None
     routed_at: datetime | None
     escalated_at: datetime | None
+    escalated_tier2_at: datetime | None
     resolved_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -1919,6 +1920,7 @@ class UnownedAssetBacklogRouteResult(ApiModel):
     organization_id: UUID
     routed: list[UnownedAssetEscalationRead]
     escalated: list[UnownedAssetEscalationRead]
+    escalated_tier2: list[UnownedAssetEscalationRead]
     resolved_count: int
 
 
@@ -2272,6 +2274,10 @@ class DataQualityIncidentRead(ApiModel):
     anomaly_type: str
     severity: str
     status: str
+    # DQ-8: "INTERNAL" for Atlas's own detectors, "EXTERNAL" for incidents
+    # reconciled from a third-party detector signal. Defaulted so historical
+    # rows and internal detectors deserialize unchanged.
+    source: str = "INTERNAL"
     summary: str
     evidence: dict[str, Any]
     occurrence_count: int
@@ -2289,6 +2295,93 @@ class DataQualityIncidentRead(ApiModel):
 class DataQualityIncidentTransition(ApiModel):
     status: Literal["ACKNOWLEDGED", "RESOLVED"]
     reason: str = Field(min_length=3, max_length=1000)
+
+
+# --- DQ-8: external detector signal ingest --------------------------------------
+
+# A conservative allow-list of scalar JSON leaf types for the opaque ``details``
+# blob. INV-6/ADR-0014: the control plane never stores source *row values*; a
+# third-party detector's payload is metadata (thresholds, monitor names, rates,
+# counts, links) and is accepted as such, but this bounds what a caller can smuggle
+# in and keeps the blob free-form without becoming a value sink.
+_EXTERNAL_SIGNAL_DETAILS_MAX_KEYS = 50
+
+
+class ExternalQualitySignalIngest(ApiModel):
+    """Normalized inbound envelope for a third-party detector quality signal.
+
+    The caller (or a thin per-vendor adapter) normalizes the detector's native
+    payload into this shape: vendor, the Atlas asset it targets, a normalized
+    severity and open/resolved state, the detector's own rule/monitor id, when it
+    was observed, and an opaque metadata ``details`` blob.
+    """
+
+    detector_vendor: str = Field(min_length=2, max_length=50)
+    detector_native_id: str = Field(min_length=1, max_length=255)
+    table_id: UUID
+    column_id: UUID | None = None
+    severity: Literal["CRITICAL", "WARNING", "INFO"]
+    # Normalized lifecycle state: OPEN drives incident open/reopen, RESOLVED
+    # auto-resolves the matching incident. A vendor's richer native state can be
+    # retained in ``details`` but must be normalized to one of these two here.
+    signal_status: Literal["OPEN", "RESOLVED"]
+    summary: str = Field(min_length=1, max_length=500)
+    observed_at: datetime
+    details: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("detector_vendor")
+    @classmethod
+    def _normalize_vendor(cls, value: str) -> str:
+        # Canonicalize to an upper-snake token (e.g. "Monte Carlo" -> "MONTE_CARLO")
+        # so the same vendor is one namespace regardless of caller casing/spacing.
+        token = "_".join(value.strip().upper().split())
+        if not token:
+            raise ValueError("detector_vendor must not be blank")
+        return token
+
+    @field_validator("details")
+    @classmethod
+    def _validate_details(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(value) > _EXTERNAL_SIGNAL_DETAILS_MAX_KEYS:
+            raise ValueError(
+                f"details may carry at most {_EXTERNAL_SIGNAL_DETAILS_MAX_KEYS} keys"
+            )
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError("details keys must be strings")
+            if isinstance(item, dict | list):
+                raise ValueError(
+                    "details must be a flat metadata map of scalar values; nested "
+                    "objects/arrays are rejected to keep the control plane value-free (INV-6)"
+                )
+        return value
+
+
+class ExternalQualitySignalRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    datasource_id: UUID
+    table_id: UUID
+    column_id: UUID | None
+    incident_id: UUID | None
+    detector_vendor: str
+    detector_native_id: str
+    severity: str
+    signal_status: str
+    summary: str
+    observed_at: datetime
+    details: dict[str, Any]
+    created_by: str
+    created_at: datetime
+
+
+class ExternalQualitySignalIngestResult(ApiModel):
+    signal: ExternalQualitySignalRead
+    # True when this delivery matched an already-stored signal on
+    # (vendor, native id, observed_at) and no new incident work was done.
+    deduplicated: bool
+    incident_opened: bool
+    incident_resolved: bool
 
 
 class DataQualitySummaryRead(ApiModel):
@@ -2461,6 +2554,26 @@ class ContextProductScopeRead(ApiModel):
     cross_domain: bool
     table_count: int
     unresolved_table_ids: list[UUID]
+
+
+class ContextProductConsumerBindingCreate(ApiModel):
+    """AT-7(b): pin `consumer_principal_id` (the path parameter) to this
+    version. Deliberately a single explicit version reference, not a
+    percentage/weight -- the tracker declines blind A/B splits."""
+
+    bound_version_id: UUID
+
+
+class ContextProductConsumerBindingRead(ApiModel):
+    id: UUID
+    organization_id: UUID
+    product_id: UUID
+    consumer_principal_id: str
+    bound_version_id: UUID
+    bound_version_number: int
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class LineageEdgeRead(ApiModel):

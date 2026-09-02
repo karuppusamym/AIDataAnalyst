@@ -6,14 +6,22 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_certification import asset_certification_is_active
+from aida.catalog_bulk_actions import (
+    CatalogBulkItemError,
+    apply_classify_item,
+    apply_tag_item,
+)
 from aida.models import (
     AssetCertification,
+    AssetTag,
     AssetTermLink,
     BulkStewardshipOperation,
     GlossaryConflict,
     GlossaryLinkProposal,
     GlossaryTerm,
     GlossaryTermVersion,
+    MetadataColumn,
+    MetadataTable,
     OwnershipAssignment,
 )
 from aida.schemas import CoverageDimensionRead, StewardshipCoverageRead
@@ -217,6 +225,71 @@ async def apply_bulk_operation(
             )
             applied += 1
         event_type = "certification.granted.v1"
+    elif operation.operation_type == "TAG":
+        # AT-1: a playbook's TAG action, routed through review because its
+        # match count exceeded the playbook's own auto-apply threshold.
+        # Reuses CT-1's own single-item core (`apply_tag_item`) rather than a
+        # second tagging implementation -- the same function the synchronous
+        # `/tables/bulk-tag` endpoint calls per item.
+        table_rows = (
+            await session.scalars(
+                select(MetadataTable).where(MetadataTable.id.in_(subject_ids))
+            )
+        ).all()
+        tables_by_id = {row.id: row for row in table_rows}
+        existing_tag_rows = (
+            await session.scalars(
+                select(AssetTag).where(
+                    AssetTag.table_id.in_(subject_ids),
+                    AssetTag.tag_key == parameters["tag_key"],
+                )
+            )
+        ).all()
+        existing_tags = {row.table_id: row for row in existing_tag_rows}
+        for subject_id in subject_ids:
+            try:
+                row, is_new = apply_tag_item(
+                    subject_id,
+                    tables=tables_by_id,
+                    existing_tags=existing_tags,
+                    organization_id=operation.organization_id,
+                    tag_key=parameters["tag_key"],
+                    tag_value=parameters.get("tag_value"),
+                    applied_by=reviewer,
+                )
+            except CatalogBulkItemError:
+                # A table this playbook run matched has since been deleted or
+                # deprecated -- skipped, not a hard failure of the whole
+                # governed decision, matching every other branch's idempotent
+                # skip of a subject that went stale between request and
+                # decision (see REASSIGN_LEAVER below).
+                continue
+            if is_new:
+                session.add(row)
+            applied += 1
+        event_type = "catalog.asset_tag.applied.v1"
+    elif operation.operation_type == "CLASSIFY":
+        # AT-1: a playbook's CLASSIFY action, same reuse as TAG above but of
+        # `apply_classify_item`, CT-1's single-item column-classification core.
+        column_rows = (
+            await session.execute(
+                select(MetadataColumn, MetadataTable)
+                .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+                .where(MetadataColumn.id.in_(subject_ids))
+            )
+        ).all()
+        columns_by_id = {row[0].id: (row[0], row[1]) for row in column_rows}
+        for subject_id in subject_ids:
+            try:
+                apply_classify_item(
+                    subject_id,
+                    columns=columns_by_id,
+                    classification=parameters["classification"],
+                )
+            except CatalogBulkItemError:
+                continue
+            applied += 1
+        event_type = "catalog.column.classified.v1"
     elif operation.operation_type == "REASSIGN_LEAVER":
         # GL-7: `subject_ids` here are `OwnershipAssignment.id` values (not
         # bare catalog/glossary ids like every other operation type) --

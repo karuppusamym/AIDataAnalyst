@@ -167,6 +167,138 @@ async def test_openai_adapter_uses_responses_json_schema_without_leaking_key() -
 
 
 @pytest.mark.asyncio
+async def test_openai_adapter_routes_through_a_configured_private_endpoint() -> None:
+    """MG-3: a route's `endpoint_alias` mapped in `model_endpoint_urls` sends the
+    call to that private base URL instead of the public OpenAI default."""
+    seen_hosts: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(
+            200,
+            json={
+                "output": [
+                    {
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "sql": "SELECT account_id FROM retail.account",
+                                        "confidence": 0.9,
+                                        "rationale_codes": ["CATALOG"],
+                                        "referenced_evidence_ids": ["table-1"],
+                                    }
+                                ),
+                            }
+                        ]
+                    }
+                ]
+            },
+        )
+
+    settings = Settings(
+        model_endpoint_urls={"private-model-endpoint": "https://openai.private.bank.internal/v1"},
+        _env_file=None,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenAIResponsesProvider(settings, client)
+    await provider(
+        route=approved_route(),
+        credential="local-test-secret",
+        system_instruction="Generate SQL",
+        payload={"question": "count accounts"},
+        output_schema=SqlGenerationOutput.model_json_schema(),
+        schema_name="SqlGenerationOutput",
+        max_output_tokens=1000,
+    )
+    await client.aclose()
+    assert seen_hosts == ["openai.private.bank.internal"]
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_falls_back_to_the_public_default_for_an_unmapped_alias() -> None:
+    """A route whose `endpoint_alias` has no entry in `model_endpoint_urls` keeps
+    using the public default -- adding the setting must not change behavior for
+    any route approved before it existed."""
+    seen_hosts: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(
+            200,
+            json={"output": [{"content": [{"type": "output_text", "text": "{}"}]}]},
+        )
+
+    settings = Settings(
+        model_endpoint_urls={"some-other-alias": "https://x.internal"}, _env_file=None
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = OpenAIResponsesProvider(settings, client)
+    result = await provider(
+        route=approved_route(),
+        credential="local-test-secret",
+        system_instruction="Generate SQL",
+        payload={"question": "count accounts"},
+        output_schema=SqlGenerationOutput.model_json_schema(),
+        schema_name="SqlGenerationOutput",
+        max_output_tokens=1000,
+    )
+    await client.aclose()
+    assert result == {}
+    assert seen_hosts == ["api.openai.com"]
+
+
+@pytest.mark.asyncio
+async def test_gemini_adapter_routes_through_a_configured_private_endpoint() -> None:
+    seen_hosts: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "sql": "SELECT account_id FROM retail.account",
+                                            "confidence": 0.8,
+                                            "rationale_codes": ["CATALOG"],
+                                            "referenced_evidence_ids": ["table-1"],
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    settings = Settings(
+        model_endpoint_urls={"private-model-endpoint": "https://gemini.private.bank.internal"},
+        _env_file=None,
+    )
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiGenerateContentProvider(settings, client)
+    await provider(
+        route=approved_route("GOOGLE_GEMINI"),
+        credential="local-test-secret",
+        system_instruction="Generate SQL",
+        payload={"question": "count accounts"},
+        output_schema=SqlGenerationOutput.model_json_schema(),
+        schema_name="SqlGenerationOutput",
+        max_output_tokens=1000,
+    )
+    await client.aclose()
+    assert seen_hosts == ["gemini.private.bank.internal"]
+
+
+@pytest.mark.asyncio
 async def test_gemini_adapter_uses_generate_content_json_schema() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["x-goog-api-key"] == "local-test-secret"

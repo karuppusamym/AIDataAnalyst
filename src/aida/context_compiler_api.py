@@ -8,18 +8,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
 from aida.context_compiler import (
+    ResolvedExemplar,
     ResolvedNegativeAssertion,
     ResolvedTableReference,
     compilation_drift_paths,
     compile_context_product,
     validate_compiled_artifact,
 )
+from aida.context_path import derive_context_path
 from aida.context_product_policy import (
     evaluate_context_product_purpose,
     evaluate_context_product_quality_from_db,
 )
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.exemplar_store import find_confirmed_agent_runs, promote_confirmed_agent_run
 from aida.models import (
     ContextProduct,
     ContextProductConsumptionEdge,
@@ -75,6 +78,62 @@ async def _load_negative_knowledge(
     ]
 
 
+async def _load_exemplars(
+    session: AsyncSession,
+    organization_id: UUID,
+    table_ids: list[str],
+    *,
+    scan_limit: int = 200,
+) -> list[ResolvedExemplar]:
+    """Load promoted exemplars (N17) bounded to this context product version's
+    own table scope, mirroring `_load_negative_knowledge`'s "resolve, then
+    pre-serialize" split.
+
+    `find_confirmed_agent_runs` has no DB column to filter by table -- unlike
+    `NegativeAssertionRecord.subject_id`, an `AgentRun`'s resolved objects
+    live inside its own `retrieval_evidence` JSON -- so this scans the
+    organization's `scan_limit` most-recently-confirmed candidates and
+    filters in Python by whether any `TABLE` object the run actually
+    resolved falls inside `table_ids`, the same bound-then-filter shape
+    `aida.studio_eval`'s mining passes already use for a comparable
+    "no column to query on" situation. Never the whole organization's
+    confirmed-run surface -- exactly the same scoping discipline
+    `query_negatives_for_scope` applies to negative knowledge.
+    """
+    if not table_ids:
+        return []
+    scope = frozenset(table_ids)
+    candidates = await find_confirmed_agent_runs(
+        session, organization_id, scan_limit=scan_limit
+    )
+    resolved: list[ResolvedExemplar] = []
+    for agent_run, memory in candidates:
+        context_path = derive_context_path(agent_run)
+        table_object_ids = {
+            object_id
+            for object_type, object_id in context_path.resolved_objects
+            if object_type == "TABLE"
+        }
+        if not table_object_ids & scope:
+            continue
+        exemplar_case = await promote_confirmed_agent_run(session, agent_run, memory)
+        resolved.append(
+            ResolvedExemplar(
+                case_id=exemplar_case.case_id,
+                source=exemplar_case.source,
+                resolved_object_types=tuple(
+                    sorted(exemplar_case.expected_resolved_object_types)
+                ),
+                selected_tool_slug=exemplar_case.expected_selected_tool_slug,
+                semantic_version_kind=exemplar_case.expected_semantic_version_kind,
+                policy_status=exemplar_case.expected_policy_status,
+                policy_reason_code=exemplar_case.expected_policy_reason_code,
+                artifact_hash=exemplar_case.artifact_hash,
+            )
+        )
+    return resolved
+
+
 async def _load_source(
     session: AsyncSession,
     version_id: UUID,
@@ -84,6 +143,7 @@ async def _load_source(
     ContextProductVersion,
     list[ResolvedTableReference],
     list[ResolvedNegativeAssertion],
+    list[ResolvedExemplar],
     dict[str, object],
 ]:
     version = await session.get(ContextProductVersion, version_id)
@@ -141,7 +201,8 @@ async def _load_source(
     negative_knowledge = await _load_negative_knowledge(
         session, version.organization_id, version.table_ids
     )
-    return product, version, resolved, negative_knowledge, quality.snapshot()
+    exemplars = await _load_exemplars(session, version.organization_id, version.table_ids)
+    return product, version, resolved, negative_knowledge, exemplars, quality.snapshot()
 
 
 @router.get("/context-product-versions/{version_id}/compile", response_model=ContextCompilationRead)
@@ -151,10 +212,12 @@ async def compile_context_product_version(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationRead:
-    product, version, tables, negative_knowledge, quality_snapshot = await _load_source(
+    product, version, tables, negative_knowledge, exemplars, quality_snapshot = await _load_source(
         session, version_id, context
     )
-    compiled = compile_context_product(product, version, target, tables, negative_knowledge)
+    compiled = compile_context_product(
+        product, version, target, tables, negative_knowledge, exemplars
+    )
     correlation_id = get_correlation_id()
     record_audit(
         session,
@@ -199,10 +262,12 @@ async def download_context_compilation(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    product, version, tables, negative_knowledge, quality_snapshot = await _load_source(
+    product, version, tables, negative_knowledge, exemplars, quality_snapshot = await _load_source(
         session, version_id, context
     )
-    compiled = compile_context_product(product, version, target, tables, negative_knowledge)
+    compiled = compile_context_product(
+        product, version, target, tables, negative_knowledge, exemplars
+    )
     validation = validate_compiled_artifact(target, compiled.content)
     if not validation.valid:
         raise HTTPException(status_code=409, detail={"findings": validation.findings})
@@ -264,11 +329,11 @@ async def inspect_context_compilation_drift(
     context: SecurityContext = Depends(require_roles(*COMPILER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> ContextCompilationDriftRead:
-    product, version, tables, negative_knowledge, _ = await _load_source(
+    product, version, tables, negative_knowledge, exemplars, _ = await _load_source(
         session, version_id, context
     )
     compiled = compile_context_product(
-        product, version, body.target, tables, negative_knowledge
+        product, version, body.target, tables, negative_knowledge, exemplars
     )
     deployed_hash = body.deployed_hash
     changed_paths: list[str] = []

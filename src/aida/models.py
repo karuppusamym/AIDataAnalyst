@@ -232,6 +232,79 @@ class ClassificationEvidence(Base):
     )
 
 
+class ColumnDerivedClassification(Base):
+    """AT-11: a column's *derived* classification -- one propagated to it along
+    data lineage from a more-sensitive upstream column -- kept in its own table,
+    strictly separate from the *asserted* classification that lives on
+    ``MetadataColumn.classification`` (a steward decision, or an authoritative
+    external feed; see ``aida.classification_feed``).
+
+    The separation is the whole point of the row: for us a classification is an
+    ABAC enforcement input, not a display label, so a value the graph *inferred*
+    must never silently become a value a policy *enforces on*. A derived value
+    only becomes asserted by going through the shared maker-checker review queue
+    (a ``GovernanceReview`` of object type ``COLUMN_CLASSIFICATION_PROMOTION`` --
+    see ``aida.classification_propagation``); nothing else may copy
+    ``classification`` onto the ``MetadataColumn``.
+
+    Evidence is first-class and queryable: ``edge_chain`` is the ordered list of
+    lineage edges the classification travelled (origin -> this column), and
+    ``graph_version`` is the fingerprint of the lineage graph the propagation ran
+    over, so "why is this column derived-PII, and along which edges" is always
+    answerable. Propagation is raise-only and follows only authoritative edge
+    kinds (never inferred ``INFLUENCES`` edges) -- both enforced in
+    ``aida.classification_propagation``, not here.
+
+    ``is_current`` marks the row that reflects the latest propagation pass for a
+    column, mirroring ``ClassificationEvidence``'s append-only ledger shape.
+    """
+
+    __tablename__ = "column_derived_classification"
+    __table_args__ = (
+        Index(
+            "ix_column_derived_classification_column_current", "column_id", "is_current"
+        ),
+        CheckConstraint(
+            "status IN ('DERIVED', 'PROMOTION_PENDING', 'PROMOTED', 'PROMOTION_REJECTED')",
+            name="ck_column_derived_classification_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    # The upstream column whose asserted classification propagated here. SET NULL
+    # rather than CASCADE: losing the origin column must not silently delete the
+    # evidence that a downstream column was raised because of it.
+    origin_column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="SET NULL"), index=True
+    )
+    origin_classification: Mapped[str] = mapped_column(String(30), nullable=False)
+    # Ordered edges the classification travelled (origin -> this column), each a
+    # value-free descriptor: {source_id, target_id, kind, edge_ref}.
+    edge_chain: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    graph_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="DERIVED", nullable=False)
+    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # The COLUMN_CLASSIFICATION_PROMOTION GovernanceReview that promotes (or
+    # rejected) this derived value. Plain id, no FK: the review lives in a
+    # different module's table and the coupling is deliberately loose.
+    review_id: Mapped[UUID | None] = mapped_column(index=True)
+    promoted_by: Mapped[str | None] = mapped_column(String(255))
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 class AnalysisRun(Base, TimestampMixin):
     __tablename__ = "analysis_run"
     __table_args__ = (Index("ix_analysis_run_org_status", "organization_id", "status"),)
@@ -675,6 +748,12 @@ class DataQualityIncident(Base, TimestampMixin):
     anomaly_type: Mapped[str] = mapped_column(String(50), nullable=False)
     severity: Mapped[str] = mapped_column(String(30), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="OPEN", nullable=False)
+    # DQ-8: origin discriminator. "INTERNAL" for Atlas's own deterministic
+    # detectors (volume/null-rate/schema, custom rule packs, dbt bridge);
+    # "EXTERNAL" for incidents reconciled from a third-party detector signal
+    # (Monte Carlo, Anomalo, ...) via the external-signal ingest endpoint, so
+    # externally-sourced and internally-computed signals are never conflated.
+    source: Mapped[str] = mapped_column(String(30), default="INTERNAL", nullable=False)
     summary: Mapped[str] = mapped_column(String(500), nullable=False)
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -2208,6 +2287,11 @@ class UnownedAssetEscalation(Base, TimestampMixin):
     dedup_key: Mapped[str | None] = mapped_column(String(64))
     routed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     escalated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # GL-6: second escalation tier. An entry still unaddressed this long after its
+    # first (tier-1) escalation is escalated again, unconditionally through ITSM
+    # regardless of what channel tier 1 used -- distinct from `escalated_at`, which
+    # only ever records the tier-1 timestamp.
+    escalated_tier2_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -2266,9 +2350,32 @@ class OpenLineageDataset(Base, TimestampMixin):
     schema_fields: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
 
+#: ST-15: the one agreed lineage-edge ``kind`` vocabulary, matching the target set documented in
+#: ``Docs/30-contracts/06-lineage-contract.md`` §2. Enforced at the database level by a CHECK
+#: constraint on every ``edge_kind`` column below (migration ``d7b1e5a9c204``). NOTE: this is the
+#: *lineage* edge kind -- how one asset derives from another -- and is deliberately distinct from
+#: the *relationship/grant* edge-kind axis (``DECLARED_FOREIGN_KEY`` / ``SUGGESTED_RELATIONSHIP`` /
+#: ``APPROVED_RELATIONSHIP_CANDIDATE``) carried by ``CrossBoundaryGrant.edge_kinds`` and the
+#: unified-graph relationship payloads. Those are a different vocabulary for a different purpose
+#: and are not constrained here; conflating the two is what made ST-15 read as a contradiction.
+LINEAGE_EDGE_KINDS: tuple[str, ...] = (
+    "QUERY",
+    "VIEW",
+    "PROCEDURE",
+    "ETL",
+    "DBT",
+    "BI",
+    "AI_DECISION",
+)
+_LINEAGE_EDGE_KIND_CHECK_SQL = (
+    "edge_kind IN (" + ", ".join(f"'{k}'" for k in LINEAGE_EDGE_KINDS) + ")"
+)
+
+
 class OpenLineageTableEdge(Base, TimestampMixin):
     __tablename__ = "openlineage_table_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_openlineage_table_edge_edge_kind"),
         UniqueConstraint(
             "run_event_id",
             "input_dataset_namespace",
@@ -2303,6 +2410,7 @@ class OpenLineageTableEdge(Base, TimestampMixin):
 class OpenLineageColumnEdge(Base, TimestampMixin):
     __tablename__ = "openlineage_column_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_openlineage_column_edge_edge_kind"),
         UniqueConstraint(
             "run_event_id",
             "input_dataset_namespace",
@@ -2529,6 +2637,13 @@ class ContextProductVersion(Base, TimestampMixin):
             "product_id",
             unique=True,
             postgresql_where=text("status = 'PUBLISHED'"),
+            # Without a dialect-specific partial-index clause, SQLAlchemy only
+            # applies `postgresql_where` when compiling for Postgres -- SQLite's
+            # `Base.metadata.create_all()` (every in-memory test fixture in this
+            # codebase) would otherwise compile this as a bare `UNIQUE(product_id)`,
+            # wrongly forbidding a second, non-PUBLISHED version of the same
+            # product from ever coexisting with a PUBLISHED one in a test.
+            sqlite_where=text("status = 'PUBLISHED'"),
         ),
         CheckConstraint("version > 0", name="ck_context_product_version_positive"),
         CheckConstraint(
@@ -2663,6 +2778,48 @@ class ContextProductConsumptionEdge(Base):
     consumed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class ContextProductConsumerBinding(Base, TimestampMixin):
+    """AT-7(b): pins one named consumer to one specific Context Product version.
+
+    A staged rollout mechanism, not a blind percentage/weight A/B split (the
+    tracker explicitly declines those): an operator moves individually-named
+    consumers onto a new version one at a time, so some consumers stay on the
+    prior version deliberately while others move, under explicit control
+    rather than a random split. One binding per (product, consumer) --
+    creating a new one for an already-bound consumer moves it, it does not
+    duplicate it (`PUT`-shaped upsert, not append-only history).
+    """
+
+    __tablename__ = "context_product_consumer_binding"
+    __table_args__ = (
+        UniqueConstraint(
+            "product_id",
+            "consumer_principal_id",
+            name="uq_context_product_consumer_binding_product_consumer",
+        ),
+        Index(
+            "ix_context_product_consumer_binding_org_product",
+            "organization_id",
+            "product_id",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    consumer_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    bound_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
 class McpConsumptionEvidence(Base):
@@ -3639,6 +3796,70 @@ class FreshnessObservation(Base):
     )
 
 
+class ExternalQualitySignal(Base):
+    """DQ-8: an immutable, normalized quality signal ingested from a third-party
+    detector (Monte Carlo, Anomalo, ...).
+
+    Atlas deliberately does not compete on detection science (module 11 §4); this
+    is the "open framework" seam that lets best-of-breed detectors feed the same
+    incident lifecycle Atlas's own controls use, while staying *distinguishable*
+    from internally-computed signals -- both by living in this dedicated table and
+    by the ``DataQualityIncident.source == "EXTERNAL"`` marker the reconciliation
+    stamps on the incident it opens/reopens/resolves.
+
+    Value-free (INV-6/ADR-0014): this row stores only detector metadata, refs and
+    a normalized severity/state -- never source row values. ``details`` is an
+    opaque, caller-supplied metadata blob and is validated at the API boundary to
+    carry no raw business values.
+
+    Idempotent on ``(organization_id, detector_vendor, detector_native_id,
+    observed_at)``: re-delivering the same detector event (at-least-once webhooks)
+    returns the already-stored signal instead of duplicating it or re-opening the
+    incident a second time.
+    """
+
+    __tablename__ = "external_quality_signal"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id",
+            "detector_vendor",
+            "detector_native_id",
+            "observed_at",
+            name="uq_external_quality_signal_dedup",
+        ),
+        Index("ix_external_quality_signal_source_created", "datasource_id", "created_at"),
+        Index("ix_external_quality_signal_org_vendor", "organization_id", "detector_vendor"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), index=True
+    )
+    incident_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_quality_incident.id", ondelete="SET NULL"), index=True
+    )
+    detector_vendor: Mapped[str] = mapped_column(String(50), nullable=False)
+    detector_native_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    severity: Mapped[str] = mapped_column(String(30), nullable=False)
+    signal_status: Mapped[str] = mapped_column(String(30), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runtime Data Contract Enforcement (Phase E - EE.1)
 # ---------------------------------------------------------------------------
@@ -4011,6 +4232,7 @@ class BiReportMetricEdge(Base, TimestampMixin):
 
     __tablename__ = "bi_report_metric_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_bi_report_metric_edge_edge_kind"),
         UniqueConstraint(
             "artifact_import_id",
             "report_id",
@@ -4041,6 +4263,7 @@ class BiMetricColumnEdge(Base, TimestampMixin):
 
     __tablename__ = "bi_metric_column_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_bi_metric_column_edge_edge_kind"),
         UniqueConstraint(
             "artifact_import_id",
             "metric_id",
@@ -4130,6 +4353,64 @@ class CatalogBulkActionRun(Base, TimestampMixin):
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False)
     results: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
     requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class MetadataPlaybook(Base, TimestampMixin):
+    """AT-1: a saved, scheduled bulk-metadata action -- a filter, a CT-1 action
+    (TAG/CLASSIFY/OWN/CERTIFY), and a schedule, run automatically by the fleet
+    scheduler rather than a bespoke one (this row's own exit condition).
+
+    Matches at or below `auto_apply_max_items` are applied immediately through
+    the exact same single-item cores CT-1's synchronous endpoints use
+    (`aida.catalog_bulk_actions.apply_*_item`), recorded as a
+    `CatalogBulkActionRun` with `selection_mode="PLAYBOOK_AUTO"`. A match count
+    above that threshold is not applied directly -- it is queued as a
+    `BulkStewardshipOperation` behind a `GovernanceReview`, mirroring GL-2's
+    (auto-apply is safe at small scale) and GL-5's (review at larger blast
+    radius) precedent for exactly this kind of scale-dependent risk. `describe`
+    is a named action in this row's own exit text but has no existing CT-1
+    single-item core to reuse yet -- honestly out of scope for this pass; see
+    the tracker row's own note.
+    """
+
+    __tablename__ = "metadata_playbook"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name"),
+        Index("ix_metadata_playbook_org_enabled", "organization_id", "enabled"),
+        CheckConstraint(
+            "action IN ('TAG', 'CLASSIFY', 'OWN', 'CERTIFY')",
+            name="action_is_supported",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    action: Mapped[str] = mapped_column(String(20), nullable=False)
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    match_field: Mapped[str] = mapped_column(String(20), default="TABLE_NAME", nullable=False)
+    match_pattern: Mapped[str] = mapped_column(String(255), nullable=False)
+    # CLASSIFY only -- which columns of each matched table to reclassify.
+    # Unused (left NULL) by TAG/OWN/CERTIFY, which act on the whole table.
+    column_name_pattern: Mapped[str | None] = mapped_column(String(255))
+    # Action-specific fields CT-1's own per-action request shape already
+    # defines (tag_key/tag_value, classification, owner_type/owner_principal,
+    # rationale/expires_after_days) -- validated against that shape at create
+    # time (`playbooks_api.py`), not by a database constraint, the same
+    # division of responsibility `NotificationRuleRecord.conditions` already
+    # has between its own JSON column and the engine that reads it.
+    action_parameters: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    schedule_interval_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # <= this many matches: applied immediately. > this many: queued for
+    # governance review instead. Zero means "always review, never auto-apply."
+    auto_apply_max_items: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # ---------------------------------------------------------------------------
@@ -4335,3 +4616,175 @@ class ColumnTokenizationPolicy(Base, TimestampMixin):
     value_shape: Mapped[str] = mapped_column(String(20), default="NUMERIC", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# N8: document ingestion -- the data-dictionary-spreadsheet special case
+# ---------------------------------------------------------------------------
+
+
+class Document(Base, TimestampMixin):
+    """N8: an uploaded document, scoped to project. `media_type` is
+    constrained to `CSV` for this first pass -- the data-dictionary special
+    case `Docs/review-2026-08/target/01-metadata-graph-wiki.md` §3 names as
+    the highest-value case ("this one case covers a large share of real bank
+    documents") -- PDF/DOCX/XLSX structure-preserving extraction is a real,
+    separate build (a parsing library this environment does not carry) and is
+    honestly deferred, not attempted here.
+
+    Raw file bytes are deliberately never persisted here (the design brief's
+    own "stored in object storage, never in a table" -- no object-storage
+    integration exists in this codebase to route through yet, so the
+    honest choice is to hold nothing rather than fake compliance with a
+    plain-table `raw_bytes` column). Only `sha256` (proving what was
+    processed, without holding it) and the resulting `DocumentSection` rows
+    (each holding its own already-extracted, already-small field text)
+    survive past the parse that happens at upload time.
+    """
+
+    __tablename__ = "document"
+    __table_args__ = (
+        Index("ix_document_org_project", "organization_id", "project_id"),
+        CheckConstraint("media_type IN ('CSV')", name="media_type_is_supported"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="UPLOADED", nullable=False)
+    section_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    parse_error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class DocumentSection(Base, TimestampMixin):
+    """N8: one ordered, addressable row of a parsed data-dictionary document
+    -- the object model's `document_section`, narrowed for this pass to the
+    structured `schema | table | column | description` shape rather than the
+    general page/heading/anchor prose model a PDF/DOCX parse would need.
+    `column_name` is nullable: a row naming only a schema and table is a
+    table-level description claim.
+
+    Every `DocumentMapping`/`DocumentClaim` this section produces carries
+    this row's id, so a steward can always click through from an approved
+    claim back to the exact source row it came from -- the design brief's
+    "cite" step (§3.5), satisfied structurally even though this pass builds
+    no UI to render the click-through itself.
+    """
+
+    __tablename__ = "document_section"
+    __table_args__ = (UniqueConstraint("document_id", "ordinal"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_schema_name: Mapped[str | None] = mapped_column(String(255))
+    raw_table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_column_name: Mapped[str | None] = mapped_column(String(255))
+    raw_description: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DocumentMapping(Base, TimestampMixin):
+    """N8: the result of resolving one `DocumentSection` against the live
+    catalog -- the object model's `document_mapping`.
+
+    `mapping_kind` is `STRUCTURAL` (deterministic exact-name match, this
+    pass's only implemented route) or `UNMATCHED` (no candidate found).
+    `SUGGESTED` (semantic/embedding-similarity mapping, per the design
+    brief's third route) is deliberately not built here: N5 (hybrid
+    retrieval) owns this codebase's one embedding-provider integration and is
+    itself still IN PROGRESS on a different worktree -- reusing it correctly
+    is a follow-on pass, not a good place to fork a second one from this row.
+    A `STRUCTURAL` match is never ambiguous by construction: `resolve_
+    structural_mappings` records `UNMATCHED` rather than guessing whenever a
+    section's names resolve to more than one live candidate.
+    """
+
+    __tablename__ = "document_mapping"
+    __table_args__ = (
+        UniqueConstraint("document_section_id"),
+        CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
+        CheckConstraint(
+            "mapping_kind IN ('STRUCTURAL', 'SUGGESTED', 'UNMATCHED')",
+            name="mapping_kind_is_supported",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_section_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_section.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    mapping_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class DocumentClaim(Base, TimestampMixin):
+    """N8: an extracted, reviewable assertion from a mapped document section
+    -- the object model's `claim`. `predicate` is constrained to `DESCRIBES`
+    for this pass (a column-or-table description, the case the sample
+    "schema | table | column | description" dictionary shape actually
+    produces); `grain`/`pii`-shaped claims the design brief also names are a
+    later pass over the same table, not built here.
+
+    Routed through the existing unified `GovernanceReview` queue exactly like
+    every other proposal on this platform (`semantic_api.
+    decide_governance_review`, `object_type="DOCUMENT_CLAIM"`) -- one review
+    per claim, since a steward deciding a claim needs to read its specific
+    source section text, not a batch of unrelated ones.
+
+    An `APPROVED` claim's terminal state *is* this row: no existing
+    column-level description surface in this codebase yet consumes it (the
+    table-level equivalent, `AssetDocumentationVersion`, is GL-9's target and
+    does not fit a single column claim; a genuine column-level "business
+    description of record" store, or N10's knowledge-compilation wiki, is
+    later, larger work this row does not attempt). What this row delivers is
+    a working, fully-cited ingest -> parse -> map -> claim -> review
+    pipeline with durable provenance back to the exact source text -- not
+    that an approved claim propagates everywhere "description" might later
+    be read from.
+    """
+
+    __tablename__ = "document_claim"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
+        CheckConstraint("predicate IN ('DESCRIBES')", name="predicate_is_supported"),
+        Index("ix_document_claim_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_section_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_section.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    predicate: Mapped[str] = mapped_column(String(20), nullable=False)
+    object_value: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

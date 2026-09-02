@@ -239,6 +239,11 @@ _INCOMPLETE_POSTURE_CASES: list[tuple[str, dict[str, Any], str]] = [
         "production model provider URLs must use HTTPS",
     ),
     (
+        "production private model endpoint URL not served over HTTPS (MG-3)",
+        {"model_endpoint_urls": {"vnet-openai": "http://model-proxy.internal"}},
+        "production private model endpoint URLs must use HTTPS",
+    ),
+    (
         "production audit HMAC key shorter than 32 characters",
         {"audit_hmac_key": "too-short"},
         "production audit HMAC key must contain at least 32 characters",

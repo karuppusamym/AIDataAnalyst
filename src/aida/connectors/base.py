@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -269,6 +270,28 @@ class Connector(ABC):
     @abstractmethod
     async def discover(self) -> tuple[DiscoveredCatalog, ...]:
         raise NotImplementedError
+
+    async def discover_streaming(
+        self, *, batch_size: int = 500
+    ) -> AsyncIterator[tuple[DiscoveredCatalog, ...]]:
+        """CN-3/PR-5. Discovery as a sequence of bounded batches instead of one
+        all-at-once return.
+
+        Deliberately NOT `@abstractmethod`: a 100K-table source timing out
+        `discover()` before it can return anything (and, downstream, before
+        anything can be persisted -- see `discover_datasource`) is a real
+        `PostgresConnector`-scale problem today; the other five connectors have
+        no comparable scale harness exercising them, so forcing each to grow a
+        real streaming implementation now would be unproven, unmotivated churn
+        against passing connectors. `PostgresConnector` is the only override;
+        every other connector inherits this default, which just wraps the
+        existing `discover()` as a single batch -- zero behaviour change, zero
+        risk to their existing tests. A caller that wants incremental
+        persistence/heartbeating (`discover_datasource`) can drive any
+        connector through this uniformly; `batch_size` is a hint a connector is
+        free to ignore, as this default does.
+        """
+        yield await self.discover()
 
     @abstractmethod
     async def profile_table(

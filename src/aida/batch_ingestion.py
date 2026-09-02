@@ -36,10 +36,44 @@ class BatchContractError(ValueError):
     pass
 
 
+# IN-2: statuses an operator can drive a batch into that the worker must stop
+# for. The activity re-reads the manifest status cooperatively between chunks
+# and raises `BatchControlSignal` when it sees one of these, so a pause/cancel
+# issued on the operator console takes effect without the workflow having to be
+# killed mid-flight. CANCELLED is terminal; PAUSED is resumable via a fresh
+# workflow (see `resume_metadata_ingestion_batch`).
+_BATCH_STOP_STATUSES = frozenset({"PAUSED", "CANCELLED"})
+
+
+class BatchControlSignal(Exception):
+    """Cooperative stop: the operator moved the batch to PAUSED or CANCELLED
+    while the activity was running. Carries the observed status so the activity
+    can return it cleanly rather than failing the batch."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(f"batch control signal: {status}")
+        self.status = status
+
+
+async def _batch_control_status(batch_id: UUID) -> str | None:
+    """Re-read the batch status in a fresh session and return it if it is a
+    cooperative stop status (PAUSED/CANCELLED), else None."""
+    async with session_factory() as session:
+        status = await session.scalar(
+            select(MetadataIngestionBatch.status).where(MetadataIngestionBatch.id == batch_id)
+        )
+    if status in _BATCH_STOP_STATUSES:
+        return str(status)
+    return None
+
+
 async def _mark_batch_failed(batch_id: UUID, exc: Exception) -> None:
     async with session_factory() as session:
         batch = await session.get(MetadataIngestionBatch, batch_id)
-        if batch is None or batch.status == "COMPLETED":
+        # A batch an operator has already paused or cancelled (or that finished)
+        # must not be stamped FAILED by a late worker exception -- the operator's
+        # transition wins.
+        if batch is None or batch.status in {"COMPLETED", *_BATCH_STOP_STATUSES}:
             return
         batch.status = "FAILED"
         batch.error_class = type(exc).__name__
@@ -320,6 +354,12 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
                     **batch.object_counts,
                     **batch.change_counts,
                 }
+            # IN-2: honor an operator pause/cancel that landed before this
+            # activity picked the batch up (it may have been PAUSED/CANCELLED
+            # while still QUEUED). Stop cleanly rather than overwriting the
+            # operator's status with PROCESSING.
+            if batch.status in _BATCH_STOP_STATUSES:
+                return {"batch_id": str(batch.id), "status": batch.status, "stopped": True}
             datasource = await session.get(DataSource, batch.datasource_id)
             if datasource is None or datasource.status == "DISABLED":
                 raise BatchContractError("batch datasource is unavailable or disabled")
@@ -336,6 +376,14 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
         scope = SnapshotScope()
         envelope_scope = EnvelopeScope()
         for index, chunk_id in enumerate(chunk_ids, start=1):
+            # IN-2: cooperative checkpoint. An operator pause/cancel issued via
+            # the console flips the manifest status; the worker observes it here,
+            # between chunks, and stops promptly without a partial reconciliation
+            # (a FULL batch reconciles only in `_complete_batch`, which this stop
+            # never reaches, so no metadata is retired from a stopped delivery).
+            control = await _batch_control_status(batch_uuid)
+            if control is not None:
+                raise BatchControlSignal(control)
             await _process_chunk(
                 batch_uuid, chunk_id, scope, envelope_scope, record_changes=True
             )
@@ -350,10 +398,19 @@ async def process_metadata_ingestion_batch(batch_id: str) -> dict[str, Any]:
         # Reapply metadata without recording changes so cross-chunk foreign keys resolve
         # regardless of chunk order. Fingerprints make this pass idempotent.
         for chunk_id in chunk_ids:
+            control = await _batch_control_status(batch_uuid)
+            if control is not None:
+                raise BatchControlSignal(control)
             await _process_chunk(
                 batch_uuid, chunk_id, scope, envelope_scope, record_changes=False
             )
         return await _complete_batch(batch_uuid, scope, envelope_scope)
+    except BatchControlSignal as signal:
+        # The operator already owns the batch's status (PAUSED/CANCELLED); return
+        # cleanly so the workflow completes without retrying and without marking
+        # the batch FAILED. A PAUSED batch is later re-driven by a fresh workflow
+        # on resume.
+        return {"batch_id": str(batch_uuid), "status": signal.status, "stopped": True}
     except BatchContractError as exc:
         await _mark_batch_failed(batch_uuid, exc)
         raise ApplicationError(str(exc), type="BatchContractError", non_retryable=True) from exc

@@ -1,4 +1,5 @@
 import json
+from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
@@ -272,6 +273,340 @@ _GRANT_SQL = """
 """
 
 
+# CN-3/PR-5. Streaming-discovery batch queries (`PostgresConnector.discover_streaming`).
+# Each mirrors the unscoped query of the same axis above exactly, with one added
+# predicate that restricts it to the (schema, table) pairs in the current page --
+# see `_batch_predicate` for the shape asyncpg needs to bind two parallel arrays
+# as a single filter. Kept as separate constants rather than building the filter
+# into the original queries so `discover()` (still used by anything that wants
+# the unscoped, single-shot path) is untouched byte-for-byte.
+
+
+def _batch_predicate(schema_column: str, name_column: str) -> str:
+    # noqa: S608 -- `schema_column`/`name_column` are always one of the hardcoded
+    # qualified-identifier literals passed at each call site below (e.g.
+    # "c.table_schema"), never source-derived text; the actual filter values
+    # (schema/table names) are bound separately via asyncpg positional
+    # parameters ($1/$2), never interpolated into the SQL text.
+    return (
+        f"AND ({schema_column}, {name_column}) IN "  # noqa: S608
+        "(SELECT * FROM unnest($1::text[], $2::text[]) AS _batch(schema_name, table_name))"
+    )
+
+
+# Lightweight roster of every ordinary table/view (information_schema never lists
+# materialized views -- see `_MATERIALIZED_VIEW_COLUMN_SQL`'s comment above -- so
+# `_MATERIALIZED_VIEW_ROSTER_SQL` below covers that gap the same way the
+# unscoped path does). One row per table, not per column, so this alone is cheap
+# even at 100K tables; it exists only to compute page boundaries before any
+# per-axis query runs.
+_TABLE_ROSTER_SQL = """
+    SELECT t.table_schema, t.table_name, t.table_type
+    FROM information_schema.tables t
+    WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY t.table_schema, t.table_name
+"""
+
+_MATERIALIZED_VIEW_ROSTER_SQL = """
+    SELECT n.nspname AS table_schema, c.relname AS table_name,
+           'MATERIALIZED VIEW' AS table_type
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind = 'm'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY n.nspname, c.relname
+"""
+
+_COLUMN_BATCH_SQL = (
+    """
+    SELECT
+        c.table_schema,
+        c.table_name,
+        t.table_type,
+        c.column_name,
+        c.ordinal_position,
+        c.data_type,
+        c.is_nullable,
+        c.column_default
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_catalog = c.table_catalog
+     AND t.table_schema = c.table_schema
+     AND t.table_name = c.table_name
+    WHERE c.table_schema NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY c.table_schema, c.table_name, c.ordinal_position
+"""
+).format(
+    predicate=_batch_predicate("c.table_schema", "c.table_name")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_MATERIALIZED_VIEW_COLUMN_BATCH_SQL = (
+    """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        'MATERIALIZED VIEW' AS table_type,
+        a.attname AS column_name,
+        a.attnum AS ordinal_position,
+        format_type(a.atttypid, a.atttypmod) AS data_type,
+        CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END AS is_nullable,
+        pg_get_expr(ad.adbin, ad.adrelid) AS column_default
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    LEFT JOIN pg_attrdef ad
+      ON ad.adrelid = c.oid
+     AND ad.adnum = a.attnum
+    WHERE c.relkind = 'm'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+).format(
+    predicate=_batch_predicate("n.nspname", "c.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_CONSTRAINT_BATCH_SQL = (
+    """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        con.conname AS constraint_name,
+        CASE con.contype
+            WHEN 'p' THEN 'PRIMARY_KEY'
+            WHEN 'u' THEN 'UNIQUE'
+            WHEN 'f' THEN 'FOREIGN_KEY'
+        END AS constraint_type,
+        array_agg(att.attname ORDER BY local_key.ordinality) AS columns,
+        ref_ns.nspname AS referenced_schema,
+        ref_rel.relname AS referenced_table,
+        array_agg(ref_att.attname ORDER BY local_key.ordinality)
+            FILTER (WHERE ref_att.attname IS NOT NULL) AS referenced_columns
+    FROM pg_constraint con
+    JOIN pg_class rel ON rel.oid = con.conrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN LATERAL unnest(con.conkey) WITH ORDINALITY
+        AS local_key(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = local_key.attnum
+    LEFT JOIN pg_class ref_rel ON ref_rel.oid = con.confrelid
+    LEFT JOIN pg_namespace ref_ns ON ref_ns.oid = ref_rel.relnamespace
+    LEFT JOIN LATERAL unnest(con.confkey) WITH ORDINALITY
+        AS foreign_key(attnum, ordinality)
+      ON foreign_key.ordinality = local_key.ordinality
+    LEFT JOIN pg_attribute ref_att
+      ON ref_att.attrelid = ref_rel.oid
+     AND ref_att.attnum = foreign_key.attnum
+    WHERE con.contype IN ('p', 'u', 'f')
+      AND ns.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    GROUP BY
+        ns.nspname,
+        rel.relname,
+        con.conname,
+        con.contype,
+        ref_ns.nspname,
+        ref_rel.relname
+    ORDER BY ns.nspname, rel.relname, con.conname
+"""
+).format(
+    predicate=_batch_predicate("ns.nspname", "rel.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_VIEW_DEFINITION_BATCH_SQL = (
+    """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        pg_get_viewdef(c.oid, true) AS definition,
+        (c.relkind = 'm') AS is_materialized,
+        v.is_updatable AS is_updatable,
+        v.check_option AS check_option
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN information_schema.views v
+      ON v.table_schema = n.nspname
+     AND v.table_name = c.relname
+    WHERE c.relkind IN ('v', 'm')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY n.nspname, c.relname
+"""
+).format(
+    predicate=_batch_predicate("n.nspname", "c.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_TABLE_COMMENT_BATCH_SQL = (
+    """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        obj_description(c.oid, 'pg_class') AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND obj_description(c.oid, 'pg_class') IS NOT NULL
+      {predicate}
+    ORDER BY n.nspname, c.relname
+"""
+).format(
+    predicate=_batch_predicate("n.nspname", "c.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_COLUMN_COMMENT_BATCH_SQL = (
+    """
+    SELECT
+        n.nspname AS table_schema,
+        c.relname AS table_name,
+        a.attname AS column_name,
+        col_description(c.oid, a.attnum) AS description
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a
+      ON a.attrelid = c.oid
+     AND a.attnum > 0
+     AND NOT a.attisdropped
+    WHERE c.relkind IN ('r', 'v', 'm', 'f', 'p')
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND col_description(c.oid, a.attnum) IS NOT NULL
+      {predicate}
+    ORDER BY n.nspname, c.relname, a.attnum
+"""
+).format(
+    predicate=_batch_predicate("n.nspname", "c.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_INDEX_BATCH_SQL = (
+    """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        ic.relname AS index_name,
+        am.amname AS index_type,
+        ix.indisunique AS is_unique,
+        ix.indisprimary AS is_primary,
+        att.attname AS column_name
+    FROM pg_index ix
+    JOIN pg_class rel ON rel.oid = ix.indrelid
+    JOIN pg_class ic ON ic.oid = ix.indexrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN pg_am am ON am.oid = ic.relam
+    JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS cols(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = cols.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY ns.nspname, rel.relname, ic.relname, cols.ordinality
+"""
+).format(
+    predicate=_batch_predicate("ns.nspname", "rel.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_PARTITION_KEY_BATCH_SQL = (
+    """
+    SELECT
+        ns.nspname AS table_schema,
+        rel.relname AS table_name,
+        att.attname AS column_name,
+        key.ordinality AS ordinal_position
+    FROM pg_partitioned_table part
+    JOIN pg_class rel ON rel.oid = part.partrelid
+    JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+    JOIN LATERAL unnest(part.partattrs) WITH ORDINALITY AS key(attnum, ordinality) ON TRUE
+    JOIN pg_attribute att
+      ON att.attrelid = rel.oid
+     AND att.attnum = key.attnum
+    WHERE ns.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY ns.nspname, rel.relname, key.ordinality
+"""
+).format(
+    predicate=_batch_predicate("ns.nspname", "rel.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_PARTITION_BATCH_SQL = (
+    """
+    SELECT
+        parent_ns.nspname AS table_schema,
+        parent.relname AS table_name,
+        child.relname AS partition_name,
+        CASE part.partstrat
+            WHEN 'r' THEN 'RANGE'
+            WHEN 'l' THEN 'LIST'
+            WHEN 'h' THEN 'HASH'
+        END AS partition_type,
+        pg_get_expr(child.relpartbound, child.oid) AS high_value,
+        inh.inhseqno AS ordinal_position
+    FROM pg_inherits inh
+    JOIN pg_class parent ON parent.oid = inh.inhparent
+    JOIN pg_class child ON child.oid = inh.inhrelid
+    JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
+    JOIN pg_partitioned_table part ON part.partrelid = parent.oid
+    WHERE parent_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY parent_ns.nspname, parent.relname, inh.inhseqno
+"""
+).format(
+    predicate=_batch_predicate("parent_ns.nspname", "parent.relname")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+_GRANT_BATCH_SQL = (
+    """
+    SELECT
+        g.table_schema AS schema_name,
+        g.grantee AS grantee,
+        'ROLE' AS grantee_type,
+        g.privilege_type AS privilege,
+        'TABLE' AS object_type,
+        g.table_name AS object_name,
+        g.is_grantable AS is_grantable
+    FROM information_schema.role_table_grants g
+    WHERE g.table_schema NOT IN ('pg_catalog', 'information_schema')
+      {predicate}
+    ORDER BY g.table_schema, g.table_name, g.grantee, g.privilege_type
+"""
+).format(
+    predicate=_batch_predicate("g.table_schema", "g.table_name")
+)  # noqa: S608 -- static, hardcoded identifier columns only; the actual
+# filter values are bound via asyncpg positional parameters ($1/$2) in
+# `discover_streaming`, never interpolated into this SQL text.
+
+
+
 class PostgresConnector(SqlExecutor):
     connector_type = "postgres"
     dialect = "postgres"
@@ -447,6 +782,142 @@ class PostgresConnector(SqlExecutor):
                 None if catalog_description is None else str(catalog_description)
             ),
         )
+
+    async def discover_streaming(
+        self, *, batch_size: int = 500
+    ) -> AsyncIterator[tuple[DiscoveredCatalog, ...]]:
+        """CN-3/PR-5. The real fix for the 100K-table timeout: pages through the
+        source's table roster in bounded batches and scopes every per-axis query
+        (columns, constraints, views, indexes, partitions, comments, grants) to
+        just that batch's tables, yielding one `DiscoveredCatalog` per page
+        instead of building the whole source's inventory in memory before
+        returning anything.
+
+        `discover()` above is unchanged and still the right call for a caller
+        that wants the unscoped, single-shot result (e.g. a small source, or a
+        one-off connectivity check) -- this is an additional path, not a
+        replacement, matching the default `Connector.discover_streaming` every
+        other connector still gets (base.py).
+
+        Catalog-level axes that are not table-scoped -- routines (schema+routine
+        keyed, not table-keyed), schema comments, and the single catalog
+        comment -- are cheap relative to the per-table axes even at 100K tables
+        (a source has orders of magnitude fewer routines and schemas than
+        tables), so they are fetched once, up front, and attached to the
+        *first* yielded batch only; `assemble_catalog` unions schema names
+        across `tables`/`routines`/`grants`/`schema_descriptions`, so a schema
+        that holds only routines still appears even though its routines were
+        attached on batch one, not on the batch containing its tables.
+        """
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        connection = await asyncpg.connect(self._dsn, command_timeout=self._command_timeout)
+        try:
+            catalog_name = str(await connection.fetchval("SELECT current_database()"))
+
+            # One row per table (not per column), so this roster scan is cheap
+            # even at 100K tables -- it exists only to compute page boundaries
+            # before any of the heavier per-axis queries below ever runs.
+            roster_rows = await connection.fetch(_TABLE_ROSTER_SQL)
+            materialized_roster_rows = await connection.fetch(_MATERIALIZED_VIEW_ROSTER_SQL)
+            roster = sorted(
+                {
+                    (str(row["table_schema"]), str(row["table_name"]))
+                    for row in (*roster_rows, *materialized_roster_rows)
+                }
+            )
+            if not roster:
+                yield (DiscoveredCatalog(name=catalog_name, schemas=()),)
+                return
+
+            routine_rows = await connection.fetch(_ROUTINE_SQL)
+            routine_parameter_rows = await connection.fetch(_ROUTINE_PARAMETER_SQL)
+            schema_description_rows = await connection.fetch(_SCHEMA_COMMENT_SQL)
+            catalog_description = await connection.fetchval(_CATALOG_COMMENT_SQL)
+            routines = build_routines(routine_rows, routine_parameter_rows)
+            schema_descriptions = {
+                str(row["schema_name"]): str(row["description"])
+                for row in schema_description_rows
+            }
+            catalog_description_str = (
+                None if catalog_description is None else str(catalog_description)
+            )
+
+            for start in range(0, len(roster), batch_size):
+                page = roster[start : start + batch_size]
+                schemas_arr = [schema for schema, _name in page]
+                names_arr = [name for _schema, name in page]
+
+                column_rows = await connection.fetch(_COLUMN_BATCH_SQL, schemas_arr, names_arr)
+                materialized_view_column_rows = await connection.fetch(
+                    _MATERIALIZED_VIEW_COLUMN_BATCH_SQL, schemas_arr, names_arr
+                )
+                constraint_rows = await connection.fetch(
+                    _CONSTRAINT_BATCH_SQL, schemas_arr, names_arr
+                )
+                view_rows = await connection.fetch(
+                    _VIEW_DEFINITION_BATCH_SQL, schemas_arr, names_arr
+                )
+                table_description_rows = await connection.fetch(
+                    _TABLE_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                )
+                column_description_rows = await connection.fetch(
+                    _COLUMN_COMMENT_BATCH_SQL, schemas_arr, names_arr
+                )
+                grant_rows = await connection.fetch(_GRANT_BATCH_SQL, schemas_arr, names_arr)
+                index_rows = await connection.fetch(_INDEX_BATCH_SQL, schemas_arr, names_arr)
+                partition_key_rows = await connection.fetch(
+                    _PARTITION_KEY_BATCH_SQL, schemas_arr, names_arr
+                )
+                partition_rows = await connection.fetch(
+                    _PARTITION_BATCH_SQL, schemas_arr, names_arr
+                )
+
+                # CN-3: materialized-view rows are appended, not merged separately,
+                # exactly as in `discover()` above -- see `_MATERIALIZED_VIEW_COLUMN_SQL`'s
+                # comment for why.
+                tables = build_table_map_from_column_rows(
+                    [*column_rows, *materialized_view_column_rows]
+                )
+                append_aggregated_constraint_rows(tables, constraint_rows)
+                apply_table_descriptions(tables, table_description_rows)
+                apply_column_descriptions(tables, column_description_rows)
+                apply_view_definitions(tables, view_rows)
+                append_grouped_index_rows(tables, index_rows)
+
+                partition_key_map: dict[tuple[str, str], list[str]] = {}
+                for row in partition_key_rows:
+                    key = (str(row["table_schema"]), str(row["table_name"]))
+                    partition_key_map.setdefault(key, []).append(str(row["column_name"]))
+                merged_partition_rows = [
+                    {
+                        "table_schema": str(row["table_schema"]),
+                        "table_name": str(row["table_name"]),
+                        "partition_name": str(row["partition_name"]),
+                        "partition_type": row["partition_type"],
+                        "high_value": row["high_value"],
+                        "ordinal_position": row["ordinal_position"],
+                        "key_columns": partition_key_map.get(
+                            (str(row["table_schema"]), str(row["table_name"])), []
+                        ),
+                    }
+                    for row in partition_rows
+                ]
+                append_partition_rows(tables, merged_partition_rows)
+
+                is_first_batch = start == 0
+                yield assemble_catalog(
+                    catalog_name,
+                    tables,
+                    routines=routines if is_first_batch else None,
+                    grants=build_grants(grant_rows),
+                    schema_descriptions=schema_descriptions if is_first_batch else None,
+                    catalog_description=(
+                        catalog_description_str if is_first_batch else None
+                    ),
+                )
+        finally:
+            await connection.close()
 
     async def estimate_read_query(self, sql: str, *, timeout_seconds: int) -> QueryEstimate:
         connection = await asyncpg.connect(self._dsn, command_timeout=timeout_seconds)

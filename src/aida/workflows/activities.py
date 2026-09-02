@@ -42,7 +42,11 @@ from aida.connectors.registry import connector_registry
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.identity_resolution import IdentityMatch, score_table_rename
-from aida.ingestion import persist_envelope_extensions
+from aida.ingestion import (
+    EnvelopeScope,
+    deprecate_missing_envelope_extensions,
+    persist_envelope_extensions,
+)
 from aida.models import (
     AnalysisRun,
     ClassificationEvidence,
@@ -312,6 +316,7 @@ async def _get_or_create_column(
             physical_type=discovered.physical_type,
             nullable=discovered.nullable,
             default_expression=discovered.default_expression,
+            source_description=discovered.source_description,
             classification=rule_result.classification,
             classification_source=CLASSIFICATION_SOURCE_RULE,
             fingerprint=column_fingerprint,
@@ -325,6 +330,7 @@ async def _get_or_create_column(
         column.physical_type = discovered.physical_type
         column.nullable = discovered.nullable
         column.default_expression = discovered.default_expression
+        column.source_description = discovered.source_description
         column.fingerprint = column_fingerprint
         # An authoritative external classification (see aida.classification_feed)
         # must never be silently overwritten by rediscovery's rule inference
@@ -963,28 +969,142 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
             table_id=None,
             detail={"stage": "discovering"},
         )
-        catalogs = await connector.discover()
-        if activity.is_cancelled():
-            raise asyncio.CancelledError
 
+        # CN-3/PR-5. `connector.discover_streaming()` replaces a single
+        # `connector.discover()` call that, at 100K-table scale, ran ~14
+        # sequential unbounded full-source-scan queries into one in-memory
+        # tree before this activity persisted anything -- a source that took
+        # longer than the 20-minute `start_to_close_timeout`
+        # (`workflows/discovery.py`) was retried from scratch with zero rows
+        # ever committed, on every attempt. `discover_streaming` yields one
+        # bounded `DiscoveredCatalog` batch at a time (a single batch for
+        # every connector but Postgres, which is unaffected -- see
+        # `Connector.discover_streaming`'s default); each batch is persisted
+        # and committed as it arrives, so a mid-run cancellation or a hard
+        # activity timeout now leaves whatever batches already landed
+        # genuinely committed, instead of losing the entire run.
+        #
+        # The correctness hazard this loop exists to avoid: `snapshot_scope`
+        # and `envelope_scope` accumulate object identities across *every*
+        # batch (exactly `workflows.activities.SnapshotScope` /
+        # `aida.ingestion.EnvelopeScope`, the same accumulator
+        # `batch_ingestion.py`'s chunked push-ingestion path already uses for
+        # the identical reason -- INV-11). Every per-batch call below passes
+        # `deprecate_missing=False`: a FULL-mode run reconciling "missing" after
+        # only the first 500 of 100,000 tables had arrived would tombstone
+        # every table outside that first batch. The single deprecate-missing
+        # pass runs once, after the stream is fully exhausted, against the
+        # complete accumulated scope -- see the `finalize` section below.
+        settings = get_settings()
+        snapshot_scope = SnapshotScope()
+        envelope_scope = EnvelopeScope()
+        created_objects_total = 0
+        changed_objects_total = 0
+        batch_index = 0
+        async for catalogs in connector.discover_streaming(
+            batch_size=settings.discovery_stream_batch_size
+        ):
+            if activity.is_cancelled():
+                raise asyncio.CancelledError
+            batch_index += 1
+            async with session_factory() as session:
+                run = await session.get(AnalysisRun, run_uuid)
+                datasource = await session.get(DataSource, run.datasource_id) if run else None
+                if run is None or datasource is None:
+                    raise ValueError("analysis run or datasource disappeared during discovery")
+                counts = await persist_discovery_snapshot(
+                    session,
+                    run,
+                    datasource,
+                    catalogs,
+                    deprecate_missing=False,
+                    scope=snapshot_scope,
+                )
+                # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
+                # comments and grants in `connector.discover_streaming()`; without
+                # this call it would drop them at persistence while both push paths
+                # keep them. No version gate is needed: a pull snapshot comes from a
+                # connector whose capability flags already say which axes it
+                # collected, so a connector that collects an axis is authoritative
+                # for it. `deprecate_missing=False` here for the same INV-11 reason
+                # as the 1.0 pass above -- reconciled once in `finalize`, below.
+                extension_counts = await persist_envelope_extensions(
+                    session,
+                    datasource,
+                    catalogs,
+                    scope=envelope_scope,
+                    deprecate_missing=False,
+                )
+                created_objects_total += (
+                    counts["created_objects"] + extension_counts["created_objects"]
+                )
+                changed_objects_total += (
+                    counts["changed_objects"] + extension_counts["changed_objects"]
+                )
+                await session.commit()
+            batch_progress = {
+                "stage": "discovering",
+                "batch": batch_index,
+                **snapshot_scope.object_counts(),
+            }
+            activity.heartbeat(batch_progress)
+            await heartbeat_task(
+                analysis_run_id=run_uuid,
+                task_type=TASK_TYPE_DISCOVER_DATASOURCE,
+                table_id=None,
+                detail=batch_progress,
+            )
+
+        # finalize: the one and only deprecate-missing pass for this run, now
+        # that `snapshot_scope`/`envelope_scope` hold every identity observed
+        # across the complete stream -- see `_complete_batch` in
+        # `batch_ingestion.py` for the same pattern on the push-ingestion side.
         async with session_factory() as session:
             run = await session.get(AnalysisRun, run_uuid)
             datasource = await session.get(DataSource, run.datasource_id) if run else None
             if run is None or datasource is None:
                 raise ValueError("analysis run or datasource disappeared during discovery")
-            counts = await persist_discovery_snapshot(session, run, datasource, catalogs)
-            # Envelope 1.1 (gap/02 N1). The pull path collects views, routines,
-            # comments and grants in `connector.discover()`; without this call it
-            # would drop them at persistence while both push paths kept them. No
-            # version gate is needed: a pull snapshot comes from a connector whose
-            # capability flags already say which axes it collected, so a connector
-            # that collects an axis is authoritative for it.
-            counts |= await persist_envelope_extensions(
-                session,
-                datasource,
-                catalogs,
-                deprecate_missing=(run.mode == "FULL"),
-            )
+            deprecated_objects_total = 0
+            if run.mode == "FULL":
+                deprecation_result = await deprecate_missing_snapshot(
+                    session, datasource, snapshot_scope
+                )
+                deprecated_objects_total += deprecation_result.total
+                deprecated_objects_total += await deprecate_missing_envelope_extensions(
+                    session, datasource, envelope_scope
+                )
+                # CT-4: same-run tombstone-plus-create pairing, exactly as the
+                # unchunked path used before this change -- `snapshot_scope` here
+                # is the same accumulator threaded through every batch above, so
+                # `created_table_ids` is every table this run actually created and
+                # `deprecated_table_ids` is exactly what the call just above
+                # tombstoned.
+                await detect_rename_candidates(
+                    session,
+                    run=run,
+                    datasource=datasource,
+                    created_table_ids=snapshot_scope.created_table_ids,
+                    deprecated_table_ids=deprecation_result.deprecated_table_ids,
+                )
+            object_counts = {**snapshot_scope.object_counts(), **envelope_scope.object_counts()}
+            run.discovered_catalogs = object_counts["catalogs"]
+            run.discovered_schemas = object_counts["schemas"]
+            run.discovered_tables = object_counts["tables"]
+            run.discovered_columns = object_counts["columns"]
+            run.discovered_constraints = object_counts["constraints"]
+            run.discovered_indexes = object_counts["indexes"]
+            run.discovered_partitions = object_counts["partitions"]
+            run.created_objects = created_objects_total
+            run.changed_objects = changed_objects_total
+            run.deprecated_objects = deprecated_objects_total
+            run.status = "PROFILING"
+            datasource.status = "ACTIVE"
+            final_counts = {
+                **object_counts,
+                "created_objects": created_objects_total,
+                "changed_objects": changed_objects_total,
+                "deprecated_objects": deprecated_objects_total,
+            }
             worker_context = SecurityContext(
                 principal_id="metadata-worker",
                 principal_type="WORKER",
@@ -999,7 +1119,7 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 resource_id=str(run.id),
                 outcome="SUCCESS",
                 correlation_id=str(run.id),
-                details=counts,
+                details=final_counts,
             )
             record_outbox(
                 session,
@@ -1007,17 +1127,21 @@ async def discover_datasource(run_id: str) -> dict[str, Any]:
                 aggregate_type="analysis_run",
                 aggregate_id=str(run.id),
                 event_type="metadata.discovery.snapshot.v1",
-                payload={"run_id": str(run.id), "datasource_id": str(datasource.id), **counts},
+                payload={
+                    "run_id": str(run.id),
+                    "datasource_id": str(datasource.id),
+                    **final_counts,
+                },
             )
             await session.commit()
-        logger.info("datasource_discovery_completed", run_id=run_id, **counts)
+        logger.info("datasource_discovery_completed", run_id=run_id, **final_counts)
         await finish_task(
             analysis_run_id=run_uuid,
             task_type=TASK_TYPE_DISCOVER_DATASOURCE,
             table_id=None,
             outcome="SUCCESS",
         )
-        return {"run_id": run_id, "status": "COMPLETED", **counts}
+        return {"run_id": run_id, "status": "COMPLETED", **final_counts}
     except asyncio.CancelledError:
         await _mark_run_cancelled(run_uuid)
         await finish_task(

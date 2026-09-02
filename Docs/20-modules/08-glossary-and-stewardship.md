@@ -141,7 +141,7 @@ Implemented event types are cataloged in `30-contracts/04-event-catalog.md`. The
 | GL-3 | Conflict detection and reviewed retained resolution | DONE | P0 |
 | GL-4 | Scoped coverage scoring, dashboard, and history | DONE | P0 |
 | GL-5 | Reviewed bulk table certification with expiry | DONE | P1 |
-| GL-6 | Unowned-asset backlog with routing | IN PROGRESS - bounded backlog exists; automated routing remains | P1 |
+| GL-6 | Unowned-asset backlog with routing | DONE - bounded backlog, automated owner routing, and two-tier escalation | P1 |
 | GL-7 | Dedicated leaver reassignment and ownership vacate workflow | TODO | P2 |
 | GL-8 | Review-confirmed term-link inference from approved annotations | DONE | P1 |
 | GL-9 | Evidence-scored table description drafting, routed through review | DONE | P1 |

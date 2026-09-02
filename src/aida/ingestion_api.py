@@ -774,3 +774,342 @@ async def finalize_metadata_ingestion_batch(
         raise HTTPException(status_code=503, detail="workflow service unavailable") from exc
     await session.refresh(batch)
     return batch
+
+
+# ---------------------------------------------------------------------------
+# IN-2: operator pause / resume / cancel / replay controls.
+#
+# A batch moves through a bounded state machine. The endpoints below are the
+# operator console's actions on it, each writing an audit record in the same
+# transaction as the status transition (INV-7) and a domain event to the
+# outbox. Illegal transitions are refused with 409 rather than silently
+# ignored, so an operator who cancels an already-completed batch, or pauses a
+# draft that has not been finalized, gets a clear answer instead of a no-op.
+#
+# `pause` and `cancel` are pure control-plane writes: they flip the manifest's
+# status and let the durable worker observe it cooperatively (see
+# `aida.batch_ingestion` -- the activity re-reads the status between chunks and
+# stops on PAUSED/CANCELLED). They deliberately do not terminate the Temporal
+# workflow directly; a durable workflow that returns cleanly on the operator's
+# signal is easier to reason about than one killed mid-activity, and the DB
+# flag is the single source of truth both the worker and this API agree on.
+#
+# `resume` and `replay` re-drive the batch: they mint a fresh analysis run and
+# a new workflow (exactly as `finalize` does), leaving the original batch's
+# history intact. Both therefore require Temporal and fail closed with 503 when
+# it is unavailable, matching finalize's "no stranded pseudo-queued job" rule.
+# ---------------------------------------------------------------------------
+
+# The non-terminal states a batch can be driven from, and the transitions each
+# operator action allows. RUNNING and PROCESSING are the same live state under
+# two names seen across the codebase; both are accepted wherever either is.
+_BATCH_PAUSE_FROM = frozenset({"QUEUED", "RUNNING", "PROCESSING"})
+_BATCH_RESUME_FROM = frozenset({"PAUSED"})
+_BATCH_CANCEL_FROM = frozenset({"DRAFT", "QUEUED", "RUNNING", "PROCESSING", "PAUSED"})
+# Terminal states a batch can be replayed from. COMPLETED is excluded on
+# purpose: on success the chunk payloads are physically cleared to NULL
+# (`Docs/20-modules/03-ingestion.md` §7.8), so there is nothing left to
+# reprocess -- a completed batch must be re-uploaded, not replayed. FAILED,
+# SUBMISSION_FAILED and CANCELLED all retain their validated chunk payloads.
+_BATCH_REPLAY_FROM = frozenset({"FAILED", "SUBMISSION_FAILED", "CANCELLED"})
+
+
+async def _require_complete_chunks(session: AsyncSession, batch: MetadataIngestionBatch) -> None:
+    numbers = list(
+        await session.scalars(
+            select(MetadataIngestionChunk.chunk_number)
+            .where(MetadataIngestionChunk.batch_id == batch.id)
+            .order_by(MetadataIngestionChunk.chunk_number)
+        )
+    )
+    if numbers != list(range(1, batch.expected_chunks + 1)):
+        raise HTTPException(
+            status_code=409,
+            detail="all expected chunks must be present before the batch can run",
+        )
+
+
+async def _requeue_batch(
+    session: AsyncSession,
+    batch: MetadataIngestionBatch,
+    context: SecurityContext,
+    *,
+    trigger_type: str,
+    action: str,
+) -> tuple[AnalysisRun, str]:
+    """Stage a fresh analysis run + workflow id for a batch and audit it in the
+    same transaction, returning (run, workflow_id) so the caller can emit its
+    own domain event (with a literal event_type, so the event-catalog gate can
+    trace it) and start the workflow after commit. Shared by resume and replay;
+    mirrors finalize's own body."""
+    await _require_complete_chunks(session, batch)
+    previous_run_id = batch.analysis_run_id
+    run = AnalysisRun(
+        organization_id=batch.organization_id,
+        datasource_id=batch.datasource_id,
+        resumed_from_run_id=previous_run_id,
+        mode=batch.snapshot_type,
+        trigger_type=trigger_type,
+        status="QUEUED",
+        priority=50,
+    )
+    session.add(run)
+    await session.flush()
+    workflow_id = f"metadata-batch-{batch.id}-{uuid4()}"
+    run.temporal_workflow_id = workflow_id
+    batch.analysis_run_id = run.id
+    batch.temporal_workflow_id = workflow_id
+    batch.status = "QUEUED"
+    batch.finalized_at = datetime.now(UTC)
+    batch.error_class = None
+    batch.error_message = None
+    record_audit(
+        session,
+        replace(context, organization_id=batch.organization_id),
+        action=action,
+        resource_type="metadata_ingestion_batch",
+        resource_id=str(batch.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "run_id": str(run.id),
+            "previous_run_id": str(previous_run_id) if previous_run_id else None,
+            "expected_chunks": batch.expected_chunks,
+            "snapshot_type": batch.snapshot_type,
+        },
+    )
+    return run, workflow_id
+
+
+async def _start_batch_workflow(
+    request: Request,
+    session: AsyncSession,
+    batch: MetadataIngestionBatch,
+    run: AnalysisRun,
+    workflow_id: str,
+    settings: Settings,
+) -> None:
+    """Start the durable ingestion workflow after the re-queue transaction has
+    committed, failing the batch closed (SUBMISSION_FAILED) if submission does
+    not take -- identical handling to `finalize`."""
+    client: Client = request.app.state.temporal_client
+    try:
+        await client.start_workflow(
+            MetadataBatchIngestionWorkflow.run,
+            str(batch.id),
+            id=workflow_id,
+            task_queue=settings.temporal_task_queue,
+        )
+    except WorkflowAlreadyStartedError:
+        pass
+    except Exception as exc:
+        batch.status = "SUBMISSION_FAILED"
+        batch.error_class = type(exc).__name__
+        batch.error_message = "workflow submission failed"
+        run.status = "SUBMISSION_FAILED"
+        run.error_class = type(exc).__name__
+        run.error_message = "workflow submission failed"
+        await session.commit()
+        raise HTTPException(status_code=503, detail="workflow service unavailable") from exc
+    await session.refresh(batch)
+
+
+@router.post(
+    "/metadata-ingestion-batches/{batch_id}/pause",
+    response_model=MetadataIngestionBatchRead,
+)
+async def pause_metadata_ingestion_batch(
+    batch_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "MetadataIngestor")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> MetadataIngestionBatch:
+    batch = await _load_batch(session, batch_id, context, for_update=True)
+    if batch.status == "PAUSED":
+        return batch
+    if batch.status not in _BATCH_PAUSE_FROM:
+        raise HTTPException(
+            status_code=409, detail=f"batch cannot be paused from status {batch.status}"
+        )
+    previous_status = batch.status
+    batch.status = "PAUSED"
+    record_audit(
+        session,
+        replace(context, organization_id=batch.organization_id),
+        action="metadata.ingestion.batch.pause",
+        resource_type="metadata_ingestion_batch",
+        resource_id=str(batch.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "datasource_id": str(batch.datasource_id),
+            "previous_status": previous_status,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=batch.organization_id,
+        aggregate_type="metadata_ingestion_batch",
+        aggregate_id=str(batch.id),
+        event_type="metadata.ingestion.batch.paused.v1",
+        payload={
+            "batch_id": str(batch.id),
+            "datasource_id": str(batch.datasource_id),
+            "previous_status": previous_status,
+        },
+    )
+    await session.commit()
+    await session.refresh(batch)
+    return batch
+
+
+@router.post(
+    "/metadata-ingestion-batches/{batch_id}/cancel",
+    response_model=MetadataIngestionBatchRead,
+)
+async def cancel_metadata_ingestion_batch(
+    batch_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "MetadataIngestor")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> MetadataIngestionBatch:
+    batch = await _load_batch(session, batch_id, context, for_update=True)
+    if batch.status == "CANCELLED":
+        return batch
+    if batch.status not in _BATCH_CANCEL_FROM:
+        raise HTTPException(
+            status_code=409, detail=f"batch cannot be cancelled from status {batch.status}"
+        )
+    previous_status = batch.status
+    batch.status = "CANCELLED"
+    batch.error_class = None
+    batch.error_message = None
+    if batch.analysis_run_id is not None:
+        run = await session.get(AnalysisRun, batch.analysis_run_id)
+        if run is not None and run.status in {"QUEUED", "RUNNING", "PROCESSING"}:
+            run.status = "CANCELLED"
+    record_audit(
+        session,
+        replace(context, organization_id=batch.organization_id),
+        action="metadata.ingestion.batch.cancel",
+        resource_type="metadata_ingestion_batch",
+        resource_id=str(batch.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "datasource_id": str(batch.datasource_id),
+            "previous_status": previous_status,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=batch.organization_id,
+        aggregate_type="metadata_ingestion_batch",
+        aggregate_id=str(batch.id),
+        event_type="metadata.ingestion.batch.cancelled.v1",
+        payload={
+            "batch_id": str(batch.id),
+            "datasource_id": str(batch.datasource_id),
+            "previous_status": previous_status,
+        },
+    )
+    await session.commit()
+    await session.refresh(batch)
+    return batch
+
+
+@router.post(
+    "/metadata-ingestion-batches/{batch_id}/resume",
+    response_model=MetadataIngestionBatchRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_metadata_ingestion_batch(
+    batch_id: UUID,
+    request: Request,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "MetadataIngestor")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> MetadataIngestionBatch:
+    if not settings.temporal_enabled or request.app.state.temporal_client is None:
+        raise HTTPException(status_code=503, detail="durable workflow service is unavailable")
+    batch = await _load_batch(session, batch_id, context, for_update=True)
+    if batch.status not in _BATCH_RESUME_FROM:
+        raise HTTPException(
+            status_code=409, detail=f"batch cannot be resumed from status {batch.status}"
+        )
+    run, workflow_id = await _requeue_batch(
+        session,
+        batch,
+        context,
+        trigger_type="BATCH_PUSH",
+        action="metadata.ingestion.batch.resume",
+    )
+    record_outbox(
+        session,
+        organization_id=batch.organization_id,
+        aggregate_type="metadata_ingestion_batch",
+        aggregate_id=str(batch.id),
+        event_type="metadata.ingestion.batch.resumed.v1",
+        payload={
+            "batch_id": str(batch.id),
+            "run_id": str(run.id),
+            "datasource_id": str(batch.datasource_id),
+        },
+    )
+    await session.commit()
+    await _start_batch_workflow(request, session, batch, run, workflow_id, settings)
+    return batch
+
+
+@router.post(
+    "/metadata-ingestion-batches/{batch_id}/replay",
+    response_model=MetadataIngestionBatchRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def replay_metadata_ingestion_batch(
+    batch_id: UUID,
+    request: Request,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "DataAdmin", "MetadataIngestor")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> MetadataIngestionBatch:
+    if not settings.temporal_enabled or request.app.state.temporal_client is None:
+        raise HTTPException(status_code=503, detail="durable workflow service is unavailable")
+    batch = await _load_batch(session, batch_id, context, for_update=True)
+    if batch.status == "COMPLETED":
+        raise HTTPException(
+            status_code=409,
+            detail="a completed batch's chunk payloads were cleared and cannot be replayed",
+        )
+    if batch.status not in _BATCH_REPLAY_FROM:
+        raise HTTPException(
+            status_code=409, detail=f"batch cannot be replayed from status {batch.status}"
+        )
+    run, workflow_id = await _requeue_batch(
+        session,
+        batch,
+        context,
+        trigger_type="BATCH_REPLAY",
+        action="metadata.ingestion.batch.replay",
+    )
+    record_outbox(
+        session,
+        organization_id=batch.organization_id,
+        aggregate_type="metadata_ingestion_batch",
+        aggregate_id=str(batch.id),
+        event_type="metadata.ingestion.batch.replayed.v1",
+        payload={
+            "batch_id": str(batch.id),
+            "run_id": str(run.id),
+            "datasource_id": str(batch.datasource_id),
+        },
+    )
+    await session.commit()
+    await _start_batch_workflow(request, session, batch, run, workflow_id, settings)
+    return batch

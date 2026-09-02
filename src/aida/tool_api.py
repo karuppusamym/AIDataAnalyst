@@ -67,6 +67,12 @@ from aida.tool_certification import (
 from aida.tool_impact import DeprecationImpact, compute_deprecation_impact
 from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
 from aida.tool_usage import DEFAULT_USAGE_LOOKBACK_DAYS
+from aida.view_tool_blueprint import (
+    ViewNotEligibleError,
+    ViewToolBlueprintError,
+    build_view_tool_blueprint,
+    resolve_view_tool_source,
+)
 
 router = APIRouter(prefix="/v1", tags=["governed-tools"])
 
@@ -470,6 +476,119 @@ async def create_multi_table_tool_blueprint(
             ),
         ) from exc
     except MultiTableBlueprintError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    create_body = GovernedToolVersionCreate(
+        slug=body.slug,
+        name=body.name,
+        description=body.description,
+        datasource_id=body.datasource_id,
+        semantic_model_version_id=body.semantic_model_version_id,
+        sql_template=blueprint.sql_template,
+        parameters=list(blueprint.parameters),
+        allowed_roles=body.allowed_roles,
+    )
+    return await _persist_tool_version_draft(
+        project, datasource, create_body, context=context, session=session, settings=settings
+    )
+
+
+class ViewToolBlueprintRequest(ApiModel):
+    """N11: request a deterministically-rendered single-view tool draft
+    instead of hand-authoring `sql_template`. A database VIEW is already a
+    human-authored, pre-curated query, which makes it the highest-quality-
+    per-unit-of-effort source for auto-generating a governed tool -- unlike
+    SM-5's `MultiTableToolBlueprintRequest` (a mechanical FK-join, not a
+    curated one), this path never re-derives the view's own SELECT/JOIN/
+    aggregation logic; it only adds a governed, parameterized read surface
+    on top of it (`SELECT <view's own column list> FROM <view> WHERE
+    <optional equality filters>` -- see `view_tool_blueprint.py`). Mirrors
+    `MultiTableToolBlueprintRequest`'s fields exactly, replacing
+    `table_ids`/generated-join with a single `table_id` naming the view.
+    """
+
+    slug: str = Field(pattern=r"^[a-z][a-z0-9_]{1,99}$")
+    name: str = Field(min_length=2, max_length=200)
+    description: str = Field(min_length=3, max_length=4000)
+    datasource_id: UUID
+    semantic_model_version_id: UUID | None = None
+    table_id: UUID
+    allowed_roles: list[str] = Field(min_length=1, max_length=100)
+
+
+@router.post(
+    "/projects/{project_id}/tool-blueprints/from-view",
+    response_model=GovernedToolVersionRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_view_tool_blueprint(
+    project_id: UUID,
+    body: ViewToolBlueprintRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> GovernedToolVersionRead:
+    """N11: view -> tool ("tool generator B"). Resolves `table_id` as a
+    view -- refusing outright (422) unless it carries a captured, `PARSED`,
+    non-quarantined `MetadataViewDefinition`, mirroring `mcp_server.py`'s
+    AT-19 `_view_definition_transformation_detail` gate exactly: a tool
+    whose underlying logic cannot be shown to a reviewer cannot responsibly
+    be published, even in draft. Then builds the candidate SQL template
+    deterministically from the view's own output columns
+    (`view_tool_blueprint.build_view_tool_blueprint`) and persists it as an
+    ordinary ``DRAFT`` `GovernedToolVersion` through the exact same
+    validation and persistence path `create_tool_version` and SM-5's
+    `create_multi_table_tool_blueprint` use. Publication still requires
+    `submit_tool_for_review` and independent approval, unchanged.
+    """
+    # PG-5: generative tool-blueprint authoring is "Studio (semantic + tool
+    # authoring)" in Docs/00-product/07-packaging-and-editions.md §3 --
+    # Enterprise floor, same gate `create_multi_table_tool_blueprint` applies.
+    entitlement = evaluate_entitlement(
+        organization_edition=settings.edition,
+        capability="studio_semantic_and_tool_authoring",
+    )
+    if not entitlement.allowed:
+        record_audit(
+            session,
+            context,
+            action="tool_blueprint.entitlement_denied",
+            resource_type="governed_tool_version",
+            resource_id=None,
+            outcome="DENIED",
+            correlation_id=get_correlation_id(),
+            details=entitlement.snapshot(),
+        )
+        await session.commit()
+        raise HTTPException(status_code=403, detail=entitlement.reason_code)
+
+    project, datasource = await _load_project_and_datasource(
+        session, context, project_id, body.datasource_id
+    )
+    if body.semantic_model_version_id:
+        semantic_model = await session.get(SemanticModelVersion, body.semantic_model_version_id)
+        if (
+            semantic_model is None
+            or semantic_model.project_id != project.id
+            or semantic_model.status != "PUBLISHED"
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="tool semantic model must be published and belong to this project",
+            )
+    try:
+        view_source = await resolve_view_tool_source(
+            session,
+            organization_id=project.organization_id,
+            datasource_id=datasource.id,
+            table_id=body.table_id,
+        )
+        blueprint = build_view_tool_blueprint(view_source, dialect=datasource.dialect)
+    except ViewNotEligibleError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ViewToolBlueprintError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     create_body = GovernedToolVersionCreate(

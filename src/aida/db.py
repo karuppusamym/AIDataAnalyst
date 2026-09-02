@@ -12,7 +12,18 @@ import from `atlas.platform.db` directly.
 docstring.
 """
 
+from typing import TYPE_CHECKING
+
 from atlas.platform.db import NAMING_CONVENTION, Base, get_session
+
+if TYPE_CHECKING:
+    # Mypy resolves attribute types from this branch only -- it never runs it,
+    # so importing here does not undo the runtime laziness __getattr__ below
+    # provides. Without this, every caller of `session_factory`/`engine` via
+    # this shim sees the `__getattr__` return annotation (`object`) instead
+    # of the real type, and every call site becomes an "object not callable"
+    # mypy error.
+    from atlas.platform.db import engine, session_factory, settings
 
 __all__ = [
     "NAMING_CONVENTION",

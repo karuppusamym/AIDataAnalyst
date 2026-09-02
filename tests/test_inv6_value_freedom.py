@@ -797,3 +797,119 @@ async def test_the_worker_scan_would_notice_a_leak() -> None:
         "the fixture connector's exception does not even carry the sentinel; the "
         "positive test above would pass regardless of whether the fix works"
     )
+
+
+# --- TS-3: sentinel scan over exported trace spans (the last open INV-6 axis) -----
+#
+# Logs are closed (OB-8, `test_log_scrubbing.py`); tables/events/query-audit are
+# closed above and by AU-4's exception-message tests. Traces were the one axis with
+# no sentinel scan at all -- `observability.py`'s only span-attribute writer,
+# `@traced`, sets exactly three known-safe keys (organization_id/principal_id/
+# correlation_id) plus `duration_ms`, so a value could only reach a span through
+# something outside that allowlist. Writing this scan found exactly such a path:
+# OpenTelemetry's `start_as_current_span` records a raised exception's full message
+# and stack trace onto the span *by default* (`record_exception=True`) -- a database
+# constraint violation naming the offending value, flowing through any `@traced`
+# function, would have exported that value verbatim. Fixed in `observability.py` by
+# passing `record_exception=False` and recording only `error_class`
+# (`type(exc).__name__`), the same convention `query_gateway.py` already uses for
+# exactly this reason.
+
+
+async def test_no_source_values_reach_exported_trace_spans() -> None:
+    """TS-3/INV-6: drives two real `@traced` calls -- one whose return value
+    legitimately carries a sentinel (proving `@traced` never inspects a
+    wrapped function's return value), one that raises with a sentinel
+    embedded in its exception message (the actual gap this test found) --
+    against a real `TracerProvider`, then scans every exported span's name,
+    attributes, and events for the sentinel.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    import aida.observability as observability_module
+    from aida.observability import TracingConfig, configure_tracing, traced
+
+    if not observability_module._tracer_configured:
+        assert configure_tracing(TracingConfig(enabled=True, exporter="console")) is True
+
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+
+    @traced
+    async def returns_a_value(organization_id: str, principal_id: str) -> str:
+        return SENTINEL_ROW_VALUE
+
+    @traced
+    async def fails_with_a_value_in_the_message(organization_id: str) -> None:
+        raise ValueError(f"constraint violated by value {SENTINEL_LITERAL!r}")
+
+    returned = await returns_a_value(organization_id="org-1", principal_id="user-1")
+    assert returned == SENTINEL_ROW_VALUE, (
+        "the sentinel never flowed through the traced call, so the scan below "
+        "proves nothing about return values"
+    )
+
+    with pytest.raises(ValueError, match="constraint violated"):
+        await fails_with_a_value_in_the_message(organization_id="org-1")
+
+    spans = exporter.get_finished_spans()
+    assert len(spans) >= 2, "the traced calls above did not actually produce spans"
+
+    leaks: list[str] = []
+    for span in spans:
+        haystacks = [span.name]
+        haystacks.extend(str(value) for value in (span.attributes or {}).values())
+        for event in span.events:
+            haystacks.append(event.name)
+            haystacks.extend(str(value) for value in (event.attributes or {}).values())
+        for sentinel in _SENTINELS:
+            for haystack in haystacks:
+                if sentinel in haystack:
+                    leaks.append(f"{span.name}: {haystack[:200]}")
+    assert leaks == [], f"source values reached an exported trace span: {leaks}"
+
+
+def test_the_trace_span_scan_would_notice_a_leak() -> None:
+    """Negative control for the test above: reproduces exactly what
+    `observability.py` now deliberately avoids -- a span whose exception was
+    recorded with the SDK's own default (`record_exception=True`) -- and
+    requires the scan to find it. Without this, a change that made the scan
+    above check the wrong span field would pass forever while proving
+    nothing.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
+
+    import aida.observability as observability_module
+    from aida.observability import TracingConfig, configure_tracing
+
+    if not observability_module._tracer_configured:
+        assert configure_tracing(TracingConfig(enabled=True, exporter="console")) is True
+
+    exporter = InMemorySpanExporter()
+    trace.get_tracer_provider().add_span_processor(SimpleSpanProcessor(exporter))
+
+    tracer = trace.get_tracer(__name__)
+    with pytest.raises(ValueError):
+        with tracer.start_as_current_span("leaky-span-would-be-scanned"):
+            raise ValueError(f"duplicate value {SENTINEL_LITERAL!r} already exists")
+
+    found = [
+        str(value)
+        for span in exporter.get_finished_spans()
+        for event in span.events
+        for value in (event.attributes or {}).values()
+        if SENTINEL_LITERAL in str(value)
+    ]
+    assert found, (
+        "with automatic exception recording left at the SDK default, the scan "
+        "still found nothing; the leak detector above is not actually looking "
+        "at exception events"
+    )

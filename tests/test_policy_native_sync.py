@@ -293,6 +293,11 @@ def test_sqlserver_column_mask_statements_map_known_profiles() -> None:
             "ALTER TABLE [dbo].[customers] ALTER COLUMN [ssn] "
             f"ADD MASKED WITH (FUNCTION = '{expected_function}');"
         )
+        assert "mc.is_masked = 1" in statements[0].sql
+        assert (
+            "EXEC(N'ALTER TABLE [dbo].[customers] ALTER COLUMN [ssn] DROP MASKED;')"
+            in statements[0].sql
+        )
         assert statements[0].target_column == "ssn"
 
 

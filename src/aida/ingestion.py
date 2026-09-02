@@ -49,7 +49,6 @@ from aida.ingest_screening import CLEAN, screen_text
 from aida.models import (
     DataSource,
     MetadataCatalog,
-    MetadataColumn,
     MetadataSchema,
     MetadataTable,
 )
@@ -481,9 +480,11 @@ def _schema_carries_extensions(schema: DiscoveredSchema) -> bool:
 
 
 def _table_carries_extensions(table: DiscoveredTable) -> bool:
-    if table.view_definition is not None:
-        return True
-    return any(column.source_description is not None for column in table.columns)
+    # IN-5e: column descriptions are no longer this pass's concern -- they land
+    # on `MetadataColumn.source_description` directly during the 1.0 pass
+    # (`persist_discovery_snapshot`, which always runs first), so a table whose
+    # only "extension" was a column comment has nothing left for this loop to do.
+    return table.view_definition is not None
 
 
 async def _upsert_description(
@@ -495,9 +496,10 @@ async def _upsert_description(
     description: str,
     catalog_id: UUID | None = None,
     schema_id: UUID | None = None,
-    column_id: UUID | None = None,
 ) -> MetadataObjectDescription:
-    subject = {"catalog_id": catalog_id, "schema_id": schema_id, "column_id": column_id}
+    """CATALOG/SCHEMA only -- COLUMN moved to `MetadataColumn.source_description`
+    directly (IN-5e); see `persist_envelope_extensions`'s column loop below."""
+    subject = {"catalog_id": catalog_id, "schema_id": schema_id}
     filters = [
         getattr(MetadataObjectDescription, name) == value
         for name, value in subject.items()
@@ -891,37 +893,6 @@ async def persist_envelope_extensions(
                     await session.flush()
                     working_scope.view_definition_ids.add(view.id)
                     counts["views"] += 1
-                described = {
-                    column.name: column.source_description
-                    for column in discovered_table.columns
-                    if column.source_description is not None
-                }
-                if not described:
-                    continue
-                persisted_columns = {
-                    column.name: column
-                    for column in await session.scalars(
-                        select(MetadataColumn).where(
-                            MetadataColumn.table_id == table.id,
-                            MetadataColumn.name.in_(described),
-                        )
-                    )
-                }
-                for column_name, column_description in described.items():
-                    persisted_column = persisted_columns.get(column_name)
-                    if persisted_column is None:
-                        continue
-                    description = await _upsert_description(
-                        session,
-                        datasource,
-                        tracker,
-                        object_type="COLUMN",
-                        description=column_description,
-                        column_id=persisted_column.id,
-                    )
-                    await session.flush()
-                    working_scope.object_description_ids.add(description.id)
-                    counts["object_descriptions"] += 1
 
     if deprecate_missing:
         tracker.deprecated = await deprecate_missing_envelope_extensions(

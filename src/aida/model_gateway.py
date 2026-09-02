@@ -183,12 +183,13 @@ class OpenAIResponsesProvider:
                 }
             },
         }
+        base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.openai_base_url)
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
             response = await post_with_retry(
                 client=client,
-                url=f"{self.settings.openai_base_url.rstrip('/')}/responses",
+                url=f"{base_url.rstrip('/')}/responses",
                 headers={
                     "Authorization": f"Bearer {credential}",
                     "Content-Type": "application/json",
@@ -247,14 +248,13 @@ class GeminiGenerateContentProvider:
             },
         }
         model_id = quote(route.model_id.removeprefix("models/"), safe="-_.")
+        base_url = _resolve_endpoint_base_url(route, self.settings, self.settings.gemini_base_url)
         owned_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.settings.model_timeout_seconds)
         try:
             response = await post_with_retry(
                 client=client,
-                url=(
-                    f"{self.settings.gemini_base_url.rstrip('/')}/models/{model_id}:generateContent"
-                ),
+                url=f"{base_url.rstrip('/')}/models/{model_id}:generateContent",
                 headers={"x-goog-api-key": credential, "Content-Type": "application/json"},
                 body=body,
                 attempts=self.settings.model_provider_max_attempts,
@@ -270,6 +270,19 @@ class GeminiGenerateContentProvider:
         if not isinstance(parsed, dict):
             raise ModelOutputInvalid("Gemini structured output has an invalid shape")
         return parsed
+
+
+def _resolve_endpoint_base_url(route: ApprovedModelRoute, settings: Settings, default: str) -> str:
+    """MG-3: route a call through its approved route's private endpoint, if one is
+    configured for that `endpoint_alias`, instead of always the public default.
+
+    `settings.model_endpoint_urls` is keyed by `endpoint_alias`, the same
+    maker-checker-approved, non-secret label already carried on
+    `ModelRouteConfiguration`. An alias with no entry falls back to the provider's
+    public default unchanged, so this is additive: no previously-approved route's
+    behavior changes until an operator explicitly maps its alias to a private URL.
+    """
+    return settings.model_endpoint_urls.get(route.endpoint_alias, default)
 
 
 def build_model_providers(settings: Settings) -> dict[str, StructuredModelProvider]:

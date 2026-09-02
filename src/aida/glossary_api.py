@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -328,6 +329,36 @@ async def create_glossary_term_version(
     )
     await session.commit()
     return _term_read(term, version)
+
+
+@router.get(
+    "/glossary-term-versions/{version_id}/consumers",
+    response_model=ConsumerFooterRead,
+)
+async def get_glossary_term_version_consumers(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*GLOSSARY_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ConsumerFooterRead:
+    """UX-18: the consumer footer for one glossary term version -- who/what
+    currently consumes *this exact version*, from CX-4 consumption lineage
+    (`aida.consumer_footer`), so a steward opening a term for edit is never
+    blind to its downstream impact. Same version-specific `resource_id`
+    convention as the semantic-object footers in `semantic_api.py`, scoped
+    to `resource_type="glossary_term_version"` -- the same string this
+    module's own `record_audit` calls already use.
+    """
+    version = await session.get(GlossaryTermVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="glossary term version not found")
+    enforce_organization(context, version.organization_id)
+    return await compose_consumer_footer(
+        session,
+        organization_id=version.organization_id,
+        resource_type="glossary_term_version",
+        resource_id=str(version.id),
+        version=version.version,
+    )
 
 
 @router.post(

@@ -14,6 +14,7 @@ from temporalio.client import Client
 
 from aida import __version__
 from aida.access_review_api import router as access_review_router
+from aida.agent_roster_api import router as agent_roster_router
 from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
@@ -32,11 +33,14 @@ from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
 from aida.delegation_api import router as delegation_router
 from aida.detokenization_api import router as detokenization_router
+from aida.document_ingestion_api import router as document_ingestion_router
 from aida.glossary_api import router as glossary_router
 from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
 from aida.intelligence_api import router as intelligence_router
+from aida.lineage_evidence_export_api import router as lineage_evidence_export_router
 from aida.logging import configure_logging
+from aida.marketplace_discovery import router as marketplace_discovery_router
 from aida.mcp_server import router as mcp_router
 from aida.metric_suggestion_api import router as metric_suggestion_router
 from aida.models import Organization
@@ -54,6 +58,7 @@ from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
 from aida.persona_api import router as persona_router
+from aida.playbooks_api import router as playbooks_router
 from aida.policy_native_sync_api import router as policy_native_sync_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
@@ -294,6 +299,7 @@ app.include_router(operational_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(ai_registry_router)
+app.include_router(agent_roster_router)
 app.include_router(dbt_router)
 app.include_router(composite_key_router)
 app.include_router(graph_perspectives_router)
@@ -306,9 +312,11 @@ app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
 app.include_router(unified_lineage_router)
+app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)
 app.include_router(product_marketplace_router)
+app.include_router(marketplace_discovery_router)
 app.include_router(search_router)
 app.include_router(access_review_router)
 app.include_router(ai_decision_lineage_router)
@@ -324,8 +332,10 @@ app.include_router(tool_plans_router)
 app.include_router(table_family_router)
 app.include_router(token_revocation_router)
 app.include_router(detokenization_router)
+app.include_router(document_ingestion_router)
 app.include_router(delegation_router)
 app.include_router(persona_router)
+app.include_router(playbooks_router)
 app.include_router(asset_description_router)
 app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)

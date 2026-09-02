@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # growing. Deliberately a multiple of `profile_plan_page_size` in the
     # default so the boundary lands on a page edge, not mid-page.
     profile_continue_as_new_after_tables: int = Field(default=2_000, ge=1, le=1_000_000)
+    # CN-3/PR-5. Bounded page size for `PostgresConnector.discover_streaming`'s
+    # per-axis queries -- a distinct concern from `profile_plan_page_size`
+    # above (that pages *profiling* tasks over tables the catalog already
+    # knows about; this bounds the *discovery* scan itself, before any table
+    # for this run exists in the catalog yet). Kept an order of magnitude
+    # smaller than the profiling page size by default because each discovery
+    # batch issues roughly ten separate per-axis queries (columns,
+    # constraints, views, indexes, partitions, comments, grants) against the
+    # batch's tables rather than one -- a 500-table discovery batch is already
+    # ~5,000 query executions across a 100K-table run.
+    discovery_stream_batch_size: int = Field(default=500, ge=1, le=50_000)
     # PR-2: how many (value, count) pairs `profile_column_values` captures per
     # gated column -- the "top values" half of the policy-approved exception.
     profile_value_top_n: int = Field(default=10, ge=1, le=100)
@@ -358,6 +369,13 @@ class Settings(BaseSettings):
     model_max_output_tokens: int = Field(default=2_000, ge=100, le=100_000)
     openai_base_url: str = "https://api.openai.com/v1"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    # MG-3: private routing. A `ModelRouteConfiguration.endpoint_alias` that appears
+    # as a key here resolves to this base URL instead of the public
+    # openai_base_url/gemini_base_url default -- e.g. an Azure OpenAI private
+    # endpoint or a PrivateLink-fronted Gemini proxy reachable only from inside the
+    # bank's network. An alias with no entry here keeps using the public default,
+    # so every route approved before this setting existed is unaffected.
+    model_endpoint_urls: dict[str, str] = Field(default_factory=dict)
     model_provider_max_attempts: int = Field(default=3, ge=1, le=5)
     openai_api_key: SecretStr | None = Field(default=None, validation_alias="OPENAI_API_KEY")
     gemini_api_key: SecretStr | None = Field(default=None, validation_alias="GEMINI_API_KEY")
@@ -537,6 +555,17 @@ class Settings(BaseSettings):
             or not self.gemini_base_url.startswith("https://")
         ):
             raise ValueError("production model provider URLs must use HTTPS")
+        if self.environment == "production":
+            insecure_endpoint_aliases = [
+                alias
+                for alias, url in self.model_endpoint_urls.items()
+                if not url.startswith("https://")
+            ]
+            if insecure_endpoint_aliases:
+                raise ValueError(
+                    "production private model endpoint URLs must use HTTPS: "
+                    f"{sorted(insecure_endpoint_aliases)}"
+                )
         if self.environment == "production" and len(self.audit_hmac_key) < 32:
             raise ValueError("a production audit HMAC key must contain at least 32 characters")
         if self.environment == "production" and self.hmac_signing_provider == "local":

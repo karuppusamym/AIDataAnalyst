@@ -74,6 +74,49 @@ export interface AgentAnalysisResponse {
   explanation: string;
 }
 
+/** Whether this agent's plan has a real, code-backed auto-apply branch */
+export interface AgentAutoApplyRead {
+  has_auto_apply_branch: boolean;
+  threshold: number | null;
+  threshold_source: string | null;
+  evidence: string;
+}
+
+/** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
+export interface AgentEvalGateEvaluateRequest {
+  steward_authored_verdicts?: AgentEvalGateVerdictInput[];
+}
+
+/** The gate's current state -- deliverable 3: what a steward reads, */
+export interface AgentEvalGateRead {
+  verdict: "PASS" | "FAIL" | "INSUFFICIENT_DATA";
+  threshold: number;
+  minimum_exemplars: number;
+  total_exemplars: number;
+  passed_exemplars: number;
+  pass_rate: number | null;
+  failing_case_ids: string[];
+  verdicts: AgentEvalGateVerdictRead[];
+  reason: string;
+  evaluated_at: string;
+}
+
+/** One externally-computed `STEWARD_AUTHORED` replay verdict, submitted */
+export interface AgentEvalGateVerdictInput {
+  case_id: string;
+  matched: boolean;
+  drift?: string[];
+  detail?: string;
+}
+
+export interface AgentEvalGateVerdictRead {
+  case_id: string;
+  source: "CONFIRMED_RUN" | "STEWARD_AUTHORED";
+  matched: boolean;
+  drift: string[];
+  detail: string;
+}
+
 export interface AgentEvaluationRunRead {
   id: string;
   organization_id: string;
@@ -89,6 +132,32 @@ export interface AgentEvaluationRunRead {
   updated_at: string;
 }
 
+/** The "task plan" half of this row's exit condition: not a static, */
+export interface AgentMethodSummaryRead {
+  scope: "ORGANIZATION_WIDE";
+  note: string;
+  window_days: number;
+  sampled_runs: number;
+  by_strategy: Record<string, number>;
+  average_confidence: number | null;
+  tool_first: ToolFirstRateSummaryRead;
+}
+
+/** EA.10c AI registry data for one agent's latest version -- the */
+export interface AgentPurposeRead {
+  asset_id: string;
+  asset_key: string;
+  version: number;
+  status: string;
+  name: string;
+  description: string;
+  intended_use: string;
+  owner_principal: string;
+  provider_type: string;
+  risk_tier: string;
+  documentation_url: string | null;
+}
+
 export interface AgentRetrievalPreviewRead {
   datasource_id: string;
   retrieval_evidence: Record<string, unknown>[];
@@ -100,10 +169,37 @@ export interface AgentRetrievalPreviewRequest {
   candidate_sql_available?: boolean;
 }
 
+export interface AgentRosterEntryRead {
+  purpose: AgentPurposeRead;
+  method: AgentMethodSummaryRead;
+  recent_results: AgentRunOutcomeRead[];
+  recent_results_total: number;
+  auto_apply: AgentAutoApplyRead;
+}
+
+export interface AgentRosterRead {
+  organization_id: string;
+  generated_at: string;
+  window_days: number;
+  agents: AgentRosterEntryRead[];
+  total_agents: number;
+}
+
 export interface AgentRunGroundingReceiptsRead {
   agent_run_id: string;
   fragment_count: number;
   fragments: GroundingFragmentReceiptRead[];
+}
+
+/** One recent `AgentRun`'s outcome -- the "live results" half of this */
+export interface AgentRunOutcomeRead {
+  run_id: string;
+  status: string;
+  strategy: string | null;
+  confidence: number | null;
+  generation_source: string;
+  created_at: string;
+  failure_reason: string | null;
 }
 
 export interface AgentRunRead {
@@ -394,6 +490,72 @@ export interface AssetCertificationRead {
 
 export interface AssetDescriptionDraftGenerate {
   table_ids: string[];
+}
+
+export interface AssetDescriptionDraftRead {
+  id: string;
+  organization_id: string;
+  table_id: string;
+  table_name: string;
+  drafted_text: string;
+  accuracy_score: number;
+  clarity_score: number;
+  style_score: number;
+  completeness_score: number;
+  overall_score: number;
+  evidence: Record<string, unknown>;
+  status: string;
+  governance_review_id: string | null;
+  published_version_id: string | null;
+  created_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** AT-14: apply ONE accept/reject decision to the reproducibly-drawn */
+export interface AssetDescriptionSampleDecide {
+  draft_ids: string[];
+  sample_size?: number | null;
+  sample_fraction?: number | null;
+  seed: number;
+  decision: "APPROVE" | "REJECT";
+  reason?: string | null;
+}
+
+export interface AssetDescriptionSampleDecisionResultRead {
+  decision: "APPROVE" | "REJECT";
+  seed: number;
+  batch_size: number;
+  sample_size: number;
+  drawn_draft_ids: string[];
+  unsampled_draft_ids: string[];
+  succeeded_count: number;
+  failed_count: number;
+  results: AssetDescriptionSampleItemRead[];
+}
+
+/** AT-14: draw a reproducible sample from a batch of PENDING_APPROVAL */
+export interface AssetDescriptionSampleDraw {
+  draft_ids: string[];
+  sample_size?: number | null;
+  sample_fraction?: number | null;
+  seed?: number | null;
+}
+
+export interface AssetDescriptionSampleDrawRead {
+  seed: number;
+  batch_size: number;
+  sample_size: number;
+  drawn_draft_ids: string[];
+  drawn_drafts: AssetDescriptionDraftRead[];
+}
+
+export interface AssetDescriptionSampleItemRead {
+  draft_id: string;
+  status: "SUCCEEDED" | "FAILED";
+  reason?: string | null;
 }
 
 export interface AssetDocumentationVersionCreate {
@@ -945,6 +1107,26 @@ export interface ConnectorHealthScoreRead {
   computed_at: string;
 }
 
+/** One consumer of the resource: who/what, over which channel it most */
+export interface ConsumerFooterEntryRead {
+  consumer_id: string;
+  consumer_type: string;
+  channel: string;
+  consumption_count: number;
+  last_consumed_at: string;
+}
+
+/** CX-4 consumption lineage, scoped to one specific version of one */
+export interface ConsumerFooterRead {
+  resource_type: string;
+  resource_id: string;
+  version: number | null;
+  generated_at: string;
+  total_consumption_events: number;
+  consumers: ConsumerFooterEntryRead[];
+  total_consumers: number;
+}
+
 export interface ConsumptionRecordPage {
   items: ConsumptionRecordRead[];
   total: number;
@@ -999,6 +1181,23 @@ export interface ContextCompilationValidationRead {
   target: "MCP" | "REST" | "YAML" | "OSI" | "ODCS" | "SNOWFLAKE_SEMANTIC_VIEW" | "DATABRICKS_METRIC_VIEW";
   valid: boolean;
   findings: string[];
+}
+
+/** AT-7(b): pin `consumer_principal_id` (the path parameter) to this */
+export interface ContextProductConsumerBindingCreate {
+  bound_version_id: string;
+}
+
+export interface ContextProductConsumerBindingRead {
+  id: string;
+  organization_id: string;
+  product_id: string;
+  consumer_principal_id: string;
+  bound_version_id: string;
+  bound_version_number: number;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ContextProductCreate {
@@ -1369,6 +1568,7 @@ export interface DataQualityIncidentRead {
   anomaly_type: string;
   severity: string;
   status: string;
+  source?: string;
   summary: string;
   evidence: Record<string, unknown>;
   occurrence_count: number;
@@ -1600,6 +1800,32 @@ export interface DetokenizeRequest {
   datasource_id?: string | null;
 }
 
+export interface DocumentCreate {
+  filename: string;
+  content: string;
+}
+
+export interface DocumentMappingSummaryRead {
+  document_id: string;
+  matched_count: number;
+  unmatched_count: number;
+}
+
+export interface DocumentRead {
+  id: string;
+  organization_id: string;
+  project_id: string;
+  filename: string;
+  media_type: string;
+  sha256: string;
+  status: string;
+  section_count: number;
+  parse_error_count: number;
+  uploaded_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as */
 export interface DomainLineageGraphRead {
   data_domain_id: string;
@@ -1664,6 +1890,44 @@ export interface ExecutionRead {
   executed_by: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Normalized inbound envelope for a third-party detector quality signal. */
+export interface ExternalQualitySignalIngest {
+  detector_vendor: string;
+  detector_native_id: string;
+  table_id: string;
+  column_id?: string | null;
+  severity: "CRITICAL" | "WARNING" | "INFO";
+  signal_status: "OPEN" | "RESOLVED";
+  summary: string;
+  observed_at: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ExternalQualitySignalIngestResult {
+  signal: ExternalQualitySignalRead;
+  deduplicated: boolean;
+  incident_opened: boolean;
+  incident_resolved: boolean;
+}
+
+export interface ExternalQualitySignalRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  table_id: string;
+  column_id: string | null;
+  incident_id: string | null;
+  detector_vendor: string;
+  detector_native_id: string;
+  severity: string;
+  signal_status: string;
+  summary: string;
+  observed_at: string;
+  details: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
 }
 
 export interface FleetSummaryRead {
@@ -2176,6 +2440,24 @@ export interface MarketplaceAccessRequestRead {
   fulfilled_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
+export interface MarketplaceDiscoveryResponse {
+  results: Page;
+  resolved_filters: MarketplaceFilterResolution;
+  prompt_risk_decision: "ALLOW" | "BLOCK";
+  prompt_risk_reason_codes: string[];
+  prompt_risk_score: number;
+}
+
+/** The structured contract a marketplace question resolves to: exactly */
+export interface MarketplaceFilterResolution {
+  q?: string | null;
+  domain?: string | null;
+  classification?: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "RESTRICTED" | null;
+  sort?: "personalized" | "catalog";
+  rationale_codes?: string[];
 }
 
 export interface MeRead {
@@ -2710,6 +2992,56 @@ export interface PlanStepCreate {
   expected_cost?: number;
 }
 
+export interface PlaybookCreate {
+  name: string;
+  action: "TAG" | "CLASSIFY" | "OWN" | "CERTIFY";
+  datasource_id: string;
+  match_field?: "TABLE_NAME" | "SCHEMA_NAME" | "QUALIFIED_NAME";
+  match_pattern: string;
+  column_name_pattern?: string | null;
+  action_parameters: Record<string, unknown>;
+  schedule_interval_minutes: number;
+  auto_apply_max_items?: number;
+  enabled?: boolean;
+}
+
+export interface PlaybookRead {
+  id: string;
+  organization_id: string;
+  name: string;
+  action: string;
+  datasource_id: string;
+  match_field: string;
+  match_pattern: string;
+  column_name_pattern: string | null;
+  action_parameters: Record<string, unknown>;
+  schedule_interval_minutes: number;
+  auto_apply_max_items: number;
+  enabled: boolean;
+  created_by: string;
+  last_run_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PlaybookRunResultRead {
+  playbook_id: string;
+  matched_count: number;
+  outcome: string;
+  bulk_action_run_id: string | null;
+  bulk_stewardship_operation_id: string | null;
+  governance_review_id: string | null;
+}
+
+export interface PlaybookUpdate {
+  match_pattern?: string | null;
+  column_name_pattern?: string | null;
+  action_parameters?: Record<string, unknown> | null;
+  schedule_interval_minutes?: number | null;
+  auto_apply_max_items?: number | null;
+  enabled?: boolean | null;
+}
+
 export interface PolicyNativeSyncRequestCreate {
   schema_name: string;
   table_name: string;
@@ -3076,8 +3408,24 @@ export interface RelationshipCandidateDecision {
   reason?: string | null;
 }
 
+/** One field-level entry of a candidate's ``nothing -> this edge`` diff. */
+export interface RelationshipCandidateDiffEntryRead {
+  field: string;
+  change: "added" | "removed" | "changed";
+  after?: unknown;
+}
+
 export interface RelationshipCandidateDiscoveryRequest {
   max_candidates?: number;
+}
+
+export interface RelationshipCandidateImpactRead {
+  impact_score: number;
+  source_table_impact: number;
+  target_table_impact: number;
+  depth: number;
+  node_limit: number;
+  truncated: boolean;
 }
 
 export interface RelationshipCandidateRead {
@@ -3099,6 +3447,22 @@ export interface RelationshipCandidateRead {
   reviewed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RelationshipCandidateReviewItemRead {
+  candidate: RelationshipCandidateRead;
+  diff: RelationshipCandidateDiffEntryRead[];
+  impact: RelationshipCandidateImpactRead;
+}
+
+export interface RelationshipCandidateReviewQueueRead {
+  datasource_id: string;
+  items: RelationshipCandidateReviewItemRead[];
+  limit: number;
+  offset: number;
+  scanned_count: number;
+  total_pending_count: number;
+  truncated: boolean;
 }
 
 export interface RenameCandidateDecision {
@@ -3782,6 +4146,17 @@ export interface ToolFirstRateRead {
   computed_at: string;
 }
 
+/** TL-6's `aida.tool_first_rate.ToolFirstRate`, embedded verbatim -- */
+export interface ToolFirstRateSummaryRead {
+  tool_first_executions: number;
+  freeform_executions: number;
+  total_executions: number;
+  rate: number | null;
+  by_source: Record<string, number>;
+  target_rate: number;
+  meets_target: boolean | null;
+}
+
 export interface ToolParameterDefinition {
   name: string;
   parameter_type: "STRING" | "INTEGER" | "NUMBER" | "BOOLEAN" | "DATE";
@@ -3914,6 +4289,7 @@ export interface UnownedAssetBacklogRouteResult {
   organization_id: string;
   routed: UnownedAssetEscalationRead[];
   escalated: UnownedAssetEscalationRead[];
+  escalated_tier2: UnownedAssetEscalationRead[];
   resolved_count: number;
 }
 
@@ -3930,6 +4306,7 @@ export interface UnownedAssetEscalationRead {
   dedup_key: string | null;
   routed_at: string | null;
   escalated_at: string | null;
+  escalated_tier2_at: string | null;
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
@@ -3986,6 +4363,17 @@ export interface ViewLineageParseResponse {
   sql_hash: string;
   errors?: string[];
   persisted_edge_count?: number;
+}
+
+/** N11: request a deterministically-rendered single-view tool draft */
+export interface ViewToolBlueprintRequest {
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: string;
+  semantic_model_version_id?: string | null;
+  table_id: string;
+  allowed_roles: string[];
 }
 
 export interface WorkspaceCreate {

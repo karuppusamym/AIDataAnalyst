@@ -26,6 +26,7 @@ from aida.models import (
     ScanPolicy,
     UnownedAssetEscalation,
 )
+from aida.playbooks import run_due_playbooks_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
 from aida.stewardship_api import (
@@ -363,6 +364,25 @@ async def _sync_owner_routing_for_organization(organization_id: UUID, *, now: da
                 event_type="stewardship.unowned_asset_escalated.v1",
                 payload={"table_id": str(entry.table_id)},
             )
+        for entry in result.escalated_tier2:
+            record_audit(
+                session,
+                worker_context,
+                action="stewardship.unowned_asset.escalated_tier2",
+                resource_type="unowned_asset_escalation",
+                resource_id=str(entry.id),
+                outcome="SUCCESS",
+                correlation_id=str(entry.id),
+                details={"table_id": str(entry.table_id)},
+            )
+            record_outbox(
+                session,
+                organization_id=organization_id,
+                aggregate_type="unowned_asset_escalation",
+                aggregate_id=str(entry.id),
+                event_type="stewardship.unowned_asset_escalated_tier2.v1",
+                payload={"table_id": str(entry.table_id)},
+            )
         for entry in result.resolved:
             record_outbox(
                 session,
@@ -590,6 +610,7 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     await run_owner_routing_pass(settings, now=now)
     await run_custom_rule_pack_pass(now=now)
     await run_graph_reconciliation_scheduler_pass(settings, now=now)
+    await run_due_playbooks_pass(now=now)
     # PR-2's retention contract: expired value-bearing profiling artifacts are
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.

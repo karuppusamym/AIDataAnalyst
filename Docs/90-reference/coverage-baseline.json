@@ -1,0 +1,36 @@
+{
+  "generated_at": "2026-09-01T15:34:51+00:00",
+  "command": "AIDA_ENVIRONMENT=development uv run --extra dev pytest --cov=aida --cov=atlas --cov-report=term-missing --cov-report=xml --cov-report=json",
+  "tests_collected": 6095,
+  "tests_passed": 6082,
+  "tests_failed": 3,
+  "tests_skipped": 9,
+  "tests_xfailed": 1,
+  "totals": {
+    "combined_percent_covered": 74.10,
+    "statement_percent_covered": 77.39,
+    "branch_percent_covered": 59.91,
+    "num_statements": 31433,
+    "covered_statements": 24326,
+    "missing_statements": 7107,
+    "num_branches": 7278,
+    "partial_branches": 1010,
+    "zero_coverage_files": 32
+  },
+  "zero_coverage_aida_modules": [
+    "src/aida/batch_ingestion.py",
+    "src/aida/workflows/worker.py"
+  ],
+  "zero_coverage_atlas_api_modules": [
+    "src/atlas/modules/catalog/api.py",
+    "src/atlas/modules/connectivity/api.py",
+    "src/atlas/modules/identity_tenancy/api.py",
+    "src/atlas/modules/ingestion/api.py",
+    "src/atlas/modules/observability_audit/api.py"
+  ],
+  "api_surface_module_count": 51,
+  "api_surface_module_count_at_zero_coverage": 5,
+  "floor_percent": 69,
+  "floor_margin_points": 5.10,
+  "floor_rationale": "5-point margin below the measured 74.10% combined coverage, matching the AG-8 quality-baseline gate's own 5-point-margin convention for a percentage-point CI floor. A regression ratchet, not a target."
+}

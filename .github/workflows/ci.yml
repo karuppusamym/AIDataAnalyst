@@ -55,7 +55,17 @@
 #                    no 1.1 discovery statement on any connector had run
 #                    against a live source. See
 #                    tests/test_postgres_version_fixtures.py.
-#   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite
+#   pytest        -- includes tests/test_tier0_invariants.py, the Tier-0 invariant suite.
+#                    Also carries AU-14's coverage gate: `pytest-cov` was a declared dev
+#                    dependency invoked nowhere until now. `--cov=aida --cov=atlas` (source/
+#                    omit rules in `pyproject.toml`'s `[tool.coverage.*]`) measures both
+#                    packages, `--cov-report=term-missing` puts the per-file gap in the job
+#                    log, `--cov-report=xml` uploads a Cobertura report as a build artifact,
+#                    and `--cov-fail-under=<floor>` (see `Docs/90-reference/
+#                    coverage-baseline.md` for the measured baseline this floor was set
+#                    from, and the reasoning behind the specific number) fails the job on a
+#                    regression below a level the suite already clears today -- a ratchet
+#                    against backsliding, not a target still to be reached.
 #   migration-drift -- tracker AU-8: Docs/60-delivery/04-end-to-end-audit-2026-08-30.md
 #                    Section 5 found that every DB-backed test builds schema from the ORM
 #                    (`Base.metadata.create_all` against in-memory SQLite), never by running
@@ -449,8 +459,21 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: pytest
-        run: uv run pytest
+      - name: pytest (with coverage, AU-14)
+        run: >
+          uv run pytest
+          --cov=aida --cov=atlas
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-fail-under=69
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 30
 
   dependency-scan:
     name: Dependency vulnerability scan + SBOM (AU-13)

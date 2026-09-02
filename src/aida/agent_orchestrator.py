@@ -17,6 +17,7 @@ from aida.ai_decision_lineage import (
     record_decision,
     record_decisions,
 )
+from aida.answer_provenance import compose_lineage_provenance
 from aida.business_annotation_versions import (
     annotation_version_content_digest,
     resolve_annotation_version,
@@ -857,6 +858,20 @@ class GovernedAgentOrchestrator:
             plan_evidence["trust"] = trust_evidence
             agent_run.plan_evidence = plan_evidence
 
+        # AT-16: the answer's own lineage provenance -- columns, derivation
+        # method (edge_source) and a pinned graph version for every unified-
+        # lineage relationship directly between the tables this answer's
+        # executed SQL referenced. Independent of EXPLAINED's quality-gate
+        # early return above (that returns early absent an open incident;
+        # this runs whenever the answer resolved at least one cited table),
+        # so it is composed here rather than folded into `_checkpoint_explained`.
+        lineage_evidence = await self._compose_lineage_provenance(
+            session, datasource=datasource, gateway_result=gateway_result
+        )
+        if lineage_evidence:
+            plan_evidence["lineage"] = lineage_evidence
+            agent_run.plan_evidence = plan_evidence
+
         completed_failure = self._checkpoint_completed(
             agent_run=agent_run, gateway_result=gateway_result
         )
@@ -1117,6 +1132,32 @@ class GovernedAgentOrchestrator:
             "warnings": [asdict(warning) for warning in warnings],
         }
         return None, trust_evidence
+
+    async def _compose_lineage_provenance(
+        self, session: AsyncSession, *, datasource: DataSource, gateway_result: GatewayResult
+    ) -> dict[str, Any] | None:
+        """AT-16: resolve the answer's own referenced tables and hand them to
+        `aida.answer_provenance.compose_lineage_provenance` -- see that
+        module for the composed shape and the graph-version pin's rationale.
+
+        Resolves `answer_table_ids` independently of `_checkpoint_explained`
+        (which also resolves it, but only as a means to its own quality-gate
+        check and returns early when there is no open incident) so this
+        block is composed for every answer that cites a resolvable table,
+        not only ones with an active quality incident.
+        """
+        answer_table_ids = await resolve_table_ids(
+            session,
+            datasource=datasource,
+            table_names=gateway_result.execution.referenced_tables,
+        )
+        return await compose_lineage_provenance(
+            session,
+            datasource=datasource,
+            answer_table_ids=answer_table_ids,
+            queried_columns=list(gateway_result.execution.referenced_columns),
+            settings=self.settings,
+        )
 
     def _checkpoint_completed(
         self, *, agent_run: AgentRun, gateway_result: GatewayResult

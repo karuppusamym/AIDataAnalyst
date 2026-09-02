@@ -1,0 +1,49 @@
+# PR-5 scale harness: environment overlay for the dev stack's `api` and
+# `metadata-worker` services (compose.yaml), adding exactly two things
+# neither service has by default:
+#
+#   1. AIDA_SCALE_HARNESS_PR5_SOURCE_DSN -- the credential
+#      `POST /projects/{project_id}/datasources` registers as
+#      `credential_reference: "env://AIDA_SCALE_HARNESS_PR5_SOURCE_DSN"`
+#      (see aida.secrets.EnvironmentSecretProvider -- it resolves a
+#      credential_reference by reading this exact env var name out of the
+#      resolving process's own environment, i.e. the api/metadata-worker
+#      container's environment, not your shell's). Points at
+#      `compose.pr5-source.yml`'s standalone container via
+#      `host.docker.internal`, since that container is a deliberately
+#      separate compose project/network from the main dev stack (same
+#      reasoning as CN-3's fixture compose file) -- Docker Desktop resolves
+#      `host.docker.internal` back to the host, where compose.pr5-source.yml
+#      publishes port 55435.
+#
+#   2. AIDA_PROFILE_MAX_TABLES_PER_RUN=100000 -- overrides the dev default of
+#      5000 (src/atlas/platform/config.py's `profile_max_tables_per_run`).
+#      Left unset: `plan_profile_tasks` would stop planning new tables after
+#      5,000 regardless of how many the source actually has, which would
+#      silently truncate this proof to a fifth of the intended scope.
+#      `AIDA_PROFILE_CONTINUE_AS_NEW_AFTER_TABLES` is deliberately left at
+#      its default (2000) -- 100000/2000 = 50 continue-as-new hops over the
+#      run, plenty to prove the mechanism.
+#
+# Usage: add this file to your `docker compose` invocation with a second
+# `-f`, e.g.:
+#   docker compose -f compose.yaml -f scripts/scale_harness/compose.pr5-env.override.yml up -d
+#
+# Docker Compose merges `environment` given as a mapping across `-f` files
+# key-by-key (this file's keys are added to compose.yaml's `x-app-environment`
+# anchor, not a wholesale replacement of it). If your Compose version does
+# not merge as expected -- check with `docker compose -f compose.yaml -f
+# scripts/scale_harness/compose.pr5-env.override.yml config` and look for
+# both this file's keys AND compose.yaml's AIDA_DATABASE_URL etc. under
+# `api`/`metadata-worker` -- fall back to adding these two keys directly
+# under compose.yaml's `x-app-environment` anchor for the duration of this
+# harness run, then remove them afterward.
+services:
+  api:
+    environment:
+      AIDA_SCALE_HARNESS_PR5_SOURCE_DSN: postgresql://source:source-local-only@host.docker.internal:55435/bank_demo_scale
+      AIDA_PROFILE_MAX_TABLES_PER_RUN: "100000"
+  metadata-worker:
+    environment:
+      AIDA_SCALE_HARNESS_PR5_SOURCE_DSN: postgresql://source:source-local-only@host.docker.internal:55435/bank_demo_scale
+      AIDA_PROFILE_MAX_TABLES_PER_RUN: "100000"

@@ -42,6 +42,13 @@ from aida.notification_routing import (
 # notification rule specifies its own `escalation_after_minutes`.
 DEFAULT_ROUTE_AFTER = timedelta(days=7)
 DEFAULT_ESCALATE_AFTER = timedelta(days=14)
+# GL-6 tier 2: an entry still unresolved this long *after its tier-1
+# escalation* (not from first-detected) escalates again, unconditionally
+# through ITSM regardless of what channel tier 1 used -- the single-tier
+# engine has no further tier of its own to fall back to, so tier 2 is a fixed
+# "make sure this becomes an operational ticket" backstop rather than a
+# second configurable notification rule.
+DEFAULT_ESCALATE_TIER2_AFTER = timedelta(days=7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,11 +69,19 @@ class TableFacts:
 
 @dataclass(frozen=True, slots=True)
 class BacklogRoutingResult:
-    """What one sync/route/escalate pass over the unowned backlog did."""
+    """What one sync/route/escalate pass over the unowned backlog did.
+
+    ``escalated`` is tier 1 (ROUTED -> ESCALATED, the originally matched
+    channel). ``escalated_tier2`` is a second, later tier (ESCALATED ->
+    ESCALATED_TIER_2) for an entry still unaddressed a further
+    ``escalate_tier2_after`` past its first escalation -- see
+    ``sync_unowned_asset_backlog``.
+    """
 
     created: list[UnownedAssetEscalation] = field(default_factory=list)
     routed: list[UnownedAssetEscalation] = field(default_factory=list)
     escalated: list[UnownedAssetEscalation] = field(default_factory=list)
+    escalated_tier2: list[UnownedAssetEscalation] = field(default_factory=list)
     resolved: list[UnownedAssetEscalation] = field(default_factory=list)
     itsm_payloads: list[dict[str, object]] = field(default_factory=list)
 
@@ -182,6 +197,7 @@ def sync_unowned_asset_backlog(
     now: datetime,
     route_after: timedelta = DEFAULT_ROUTE_AFTER,
     escalate_after: timedelta = DEFAULT_ESCALATE_AFTER,
+    escalate_tier2_after: timedelta = DEFAULT_ESCALATE_TIER2_AFTER,
     route_limit: int = 500,
 ) -> BacklogRoutingResult:
     """Reconcile the unowned backlog, routing and escalating aged entries.
@@ -201,6 +217,19 @@ def sync_unowned_asset_backlog(
     ``build_stewardship_coverage``. Entries are mutated in place -- new ones
     land in ``result.created`` and are the caller's responsibility to
     ``session.add``.
+
+    Escalation has two tiers. Tier 1 (ROUTED -> ESCALATED) goes through the
+    shared ``notification_routing`` engine exactly as before, on whatever
+    channel the matched rule names. Tier 2 (ESCALATED -> ESCALATED_TIER_2)
+    is this module's own backstop, not the engine's: an entry still
+    unaddressed ``escalate_tier2_after`` past its *own* tier-1
+    ``escalated_at`` (not from first-detected) unconditionally produces an
+    ITSM payload, regardless of what channel tier 1 used -- a bank cannot
+    let an unowned table sit unaddressed indefinitely just because the
+    tier-1 notification channel had no external delivery configured (e.g.
+    the empty-recipient default EMAIL rule ``ensure_default_unowned_backlog_notification_rule``
+    seeds), so tier 2 always escalates operationally rather than repeating
+    the same notification.
     """
     result = BacklogRoutingResult()
     engine_rules = _as_engine_rules(notification_rules)
@@ -272,6 +301,21 @@ def sync_unowned_asset_backlog(
                 entry.status = "ESCALATED"
                 entry.escalated_at = engine_event.escalated_at
                 result.escalated.append(entry)
+            continue
+
+        if entry.status == "ESCALATED" and entry.escalated_at is not None:
+            if now - entry.escalated_at >= escalate_tier2_after:
+                incident = _incident_for(
+                    facts,
+                    first_detected_unowned_at=entry.first_detected_unowned_at,
+                    now=now,
+                    escalate_after=escalate_after,
+                    candidate_owner=entry.candidate_owner,
+                )
+                entry.status = "ESCALATED_TIER_2"
+                entry.escalated_tier2_at = now
+                result.escalated_tier2.append(entry)
+                result.itsm_payloads.append(format_itsm_payload(incident))
 
     for table_id, entry in existing_entries.items():
         if entry.status != "RESOLVED" and table_id not in unowned_table_ids:

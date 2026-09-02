@@ -37,130 +37,17 @@ SRC_ROOT = REPO_ROOT / "src"
 CATALOG_PATH = REPO_ROOT / "Docs" / "30-contracts" / "04-event-catalog.md"
 
 # --------------------------------------------------------------------------------------------
-# ST-14 baseline: event types emitted today that are *not* literally in the catalog, but that a
-# documentation-truth pass traced to a specific existing row (or set of rows) they are a rename
-# or consolidation of. Do not add to this list to make a newly-introduced, genuinely
-# undocumented event pass the gate -- document it in the catalog instead. Only add here (with a
-# reason citing the row(s) it collides with) when the same "authorial rename decision" situation
-# applies, and remove an entry once ST-14 resolves it one way or the other.
+# ST-14 baseline: RESOLVED 2026-09-01. Every event_type= that used to live here as unreconciled
+# drift is now documented directly in Docs/30-contracts/04-event-catalog.md, in the
+# "Reconciled emitted events (ST-14)" subsection. The U2 authorial question ("rename the code or
+# restate the catalog") was resolved in favour of restating the catalog -- the emitted .v1 names
+# are canonical because live consumers (aida.projectors.graph_projector) key on the literal
+# strings. This baseline is now empty: a *new* undocumented event_type= must be documented in
+# the catalog (the normal case) or, only if it is genuinely the same authorial-rename situation,
+# added here with a citation of the row it collides with -- it will no longer be silently
+# absorbed the way the previous ~44 were.
 # --------------------------------------------------------------------------------------------
-_ANALYSIS_RUN_LIFECYCLE = (
-    "the documented `analysis_run.started / .completed / .cancelled` lifecycle"
-)
-
-KNOWN_ST14_DRIFT: dict[str, str] = {
-    # --- tenancy hierarchy: the generic `tenant.created` row was replaced by one specific
-    # event per level, never reconciled ---
-    "organization.created.v1": "same event as documented `tenant.created` (org level)",
-    "line_of_business.created.v1": "same event as documented `tenant.created` (LOB level)",
-    "project.created.v1": "same event as documented `tenant.created` (project level)",
-    # --- straight .v1 renames of an already-documented event ---
-    "datasource.registered.v1": "same event as documented `datasource.registered`",
-    "catalog.asset.certified.v1": "same event as documented `catalog.asset.certified`",
-    "connector.certification.completed.v1": (
-        "same event as documented `certification.completed`"
-    ),
-    "model_route.created.v1": "same event as documented `model.route_version_created`",
-    "model_route.approved.v1": (
-        "same event as documented `model.route_version_created / .approved`"
-    ),
-    "model_route.rejected.v1": "reject sibling of the model-route-approval rename above",
-    "tool.version.draft_created.v1": "same event as documented `tool.drafted`",
-    "tool.version.published.v1": "same event as documented `tool.drafted / .published`",
-    "tool.version.deprecated.v1": "same event as documented `tool.drafted / .deprecated`",
-    "tool.version.rejected.v1": (
-        "reject sibling with no documented counterpart; same family as the "
-        "tool-lifecycle rename above"
-    ),
-    "tool.version.deprecation_rejected.v1": (
-        "reject sibling with no documented counterpart; same family as the "
-        "tool-lifecycle rename above"
-    ),
-    "tool.execution.completed.v1": "same event as documented `tool.invoked`",
-    "semantic_model.published.v1": "same event as documented `semantic.version_published`",
-    "semantic_model.rejected.v1": (
-        "reject sibling with no documented counterpart; same family as the "
-        "semantic-model-publish rename above"
-    ),
-    "agent.analysis.completed.v1": (
-        "same aggregate/lifecycle as documented "
-        "`agent.run_started / .run_completed / .run_denied`"
-    ),
-    "query.execution.completed.v1": "same event as documented `execution.completed`",
-    "query.feedback.updated.v1": "same event as documented `agent.feedback_recorded`",
-    # RL-4 (2026-08-30): the single consolidated `relationship_candidate.decided.v1`
-    # above was split back into two literal event types because
-    # `aida.projectors.graph_projector.run_projector` already listened for exactly
-    # these two names to trigger `project_unified_lineage` and they never matched --
-    # decided candidates were silently never projected to Neo4j. Each is the
-    # approve/reject sibling of the documented `relationship.approved` /
-    # `relationship.rejected` rows.
-    "relationship_candidate.approved.v1": "same event as documented `relationship.approved`",
-    "relationship_candidate.rejected.v1": "same event as documented `relationship.rejected`",
-    "business_semantics.proposals_created.v1": (
-        "same event as documented `semantic.inference_completed` "
-        "(run_id/proposal_count payload matches)"
-    ),
-    "business_semantics.approved.v1": (
-        "same event as documented `semantic.annotation_published` "
-        "(annotation_id/table_id payload matches)"
-    ),
-    "business_semantics.rejected.v1": (
-        "reject sibling with no documented counterpart; same family as the "
-        "annotation-publish rename above"
-    ),
-    "dbt_artifact.imported.v1": (
-        "same event as documented `lineage.artifact_ingested` (dbt manifest case)"
-    ),
-    "openlineage.run_event.ingested.v1": (
-        "same event as documented `lineage.artifact_ingested` (OpenLineage case)"
-    ),
-    "metadata.discovery.snapshot.v1": "same event as documented `ingestion.delivered`",
-    "metadata.ingestion.batch.queued.v1": "same event as documented `batch.finalized`",
-    "data_quality.incident.transitioned.v1": (
-        "consolidates documented `quality.incident_opened` / `.incident_reopened` / "
-        "`.incident_acknowledged` / `.resolved` / `.incident_auto_recovered` into one "
-        "event with a status field"
-    ),
-    # --- analysis_run lifecycle: the documented row only names started/completed/cancelled;
-    # code now emits a larger, differently-prefixed state set for the same aggregate ---
-    "analysis_run.requested.v1": f"pre-`started` state of {_ANALYSIS_RUN_LIFECYCLE}",
-    "analysis_run.scheduled.v1": f"pre-`started` state of {_ANALYSIS_RUN_LIFECYCLE}",
-    "analysis_run.resumed.v1": f"additional state of {_ANALYSIS_RUN_LIFECYCLE}",
-    "analysis_run.cancellation_requested.v1": f"additional state of {_ANALYSIS_RUN_LIFECYCLE}",
-    "metadata.analysis.completed.v1": "renamed `analysis_run.completed`",
-    "metadata.analysis.cancelled.v1": "renamed `analysis_run.cancelled`",
-    "metadata.analysis.failed.v1": (
-        "additional terminal state of the same renamed analysis_run lifecycle"
-    ),
-    "metadata.analysis.cancellation_race_completed.v1": (
-        "additional terminal state of the same renamed analysis_run lifecycle"
-    ),
-    # --- added 2026-08-30: concurrent work landed a `.v1` (or re-prefixed) sibling of an
-    # already-documented event without reconciling the older row, same pattern as above ---
-    "context.product_consumed.v1": (
-        "same event as documented `context.product_consumed`, emitted via the MCP/REST "
-        "read paths that were added after that row was written"
-    ),
-    "context.product_consumption_denied.v1": (
-        "same event as documented `context.consumption_denied`"
-    ),
-    "data_quality.incident_opened": "same event as documented `quality.incident_opened`",
-    "data_quality.incident_resolved": (
-        "same event as documented `quality.incident_acknowledged` / `.resolved`"
-    ),
-    # --- RL-2/RL-3 (module 06 canonical resolution, composite candidates): same
-    # `.v1`-suffix drift as the rest of this baseline. RL-1 (table family
-    # detection) is not here: it shipped as `table_family_candidate.decided.v1`,
-    # already directly documented -- no drift entry needed. ---
-    "canonical_table.resolved.v1": "same event as documented `canonical_table.resolved`",
-    "composite_relationship_candidate.decided.v1": (
-        "composite-candidate sibling of the already-documented-as-drift "
-        "`relationship_candidate.decided.v1` (itself a consolidation of `relationship.approved` "
-        "/ `.rejected`); same decided-with-status-field shape, multi-column candidates instead "
-        "of single-column"
-    ),
-}
+KNOWN_ST14_DRIFT: dict[str, str] = {}
 
 # Sites where `event_type=` could not be fully resolved to a closed set of string literals by
 # static analysis (see event_catalog_lib docstring for what counts as resolvable). Reported so
@@ -260,6 +147,11 @@ def test_catalog_rows_with_no_current_emitter_are_reported_softly() -> None:
         "glossary.term_deprecated.v1",
         "certification.granted.v1",
         "ownership.leaver_reassigned.v1",
+        # AT-11: emitted from the governance-review dispatch's
+        # COLUMN_CLASSIFICATION_PROMOTION branch (via apply_classification_promotion's
+        # returned event_type), invisible to the static scan for the same reason.
+        "classification.derived.promoted.v1",
+        "classification.derived.promotion_rejected.v1",
     }
     unemitted = documented - scan.literals - scan.possible_literals - known_emitted_elsewhere
     if unemitted:

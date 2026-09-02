@@ -5,29 +5,37 @@
 > `Docs/_superseded/`. If a status claim appears in two places, this one wins; every other
 > document should carry a pointer here rather than its own summary.
 
-**Verified:** 2026-08-30 17:35 UTC, against the working tree. (Superseded the 12:25 snapshot in
-place; the 17:20 revision of this correction was itself already stale 15 minutes later — this
-branch is being pushed to by several concurrent sessions in parallel today, and each verification
-below is only "true as of" its own timestamp, not a stable fact. See `06-accomplishment-log.md`'s
-2026-08-30 entries for what changed between checks.)
+**Verified:** 2026-09-02, against the working tree at commit `fd70428`. (This branch has been under
+continuous concurrent push across many parallel sessions since 2026-08-30 — every number below is
+"true as of" this commit, not a stable fact, and will drift again within hours. The §1 table facts
+were re-derived directly from tooling — `pytest`, `mypy`, `ruff`, `alembic heads`, a file count of
+`10-architecture/adr/` — not carried forward from the prior 2026-08-30 17:35 UTC snapshot, which
+had gone stale on several of them: the test suite had nearly tripled, the Alembic head had moved,
+and a real `mypy`/`ruff` regression from concurrent work — 46 "object not callable" errors from a
+type-erasing `__getattr__` shim, plus 13 line-length/subprocess-safety errors — had crept in and
+was found and fixed as part of this pass. See `06-accomplishment-log.md` for what changed between
+checks, and `03-tracker.md`'s §K for the current item-level DONE/TODO/IN-PROGRESS/BLOCKED count
+(267 tracked items, 177 DONE as of the same commit).
 
-> **The tree moved sharply on 2026-08-30.** A parallel session committed three times and added
-> ~35 modules (ABAC API, studio, tool plans, view lineage, full-text index, fusion ranking, graph
-> retrieval, compliance packs, consumption and AI-decision lineage). The suite went 716 → 1,199.
-> That work arrived failing `ruff` and `mypy`; it was cleaned up the same day, and four of the
-> reported errors turned out to be runtime faults rather than style — see §1a.
+> **Scope of this pass.** This refresh corrects §1 ("At a glance") against live tooling output and
+> fixes the two things that were unambiguously wrong (stale counts, a real static-analysis
+> regression). It does **not** re-verify every row of §4's capability matrix, §3's invariant table,
+> or §7's gap register against current code — those were largely kept current by the sessions that
+> did the underlying work (most §4 rows already cite specific recent tracker IDs), but nobody has
+> done a dedicated line-by-line audit of the whole document since 2026-08-30. Treat prose beyond §1
+> as directionally reliable, not independently re-verified today.
 
 ## 1. At a glance
 
 | | |
 |---|---|
-| Test suite | **2,381 passing, 5 skipped, 1 expected failure** (2,387 collected; the xfail is INV-9's known gap, §3), no unexpected failures, no external service required |
-| Static quality | `mypy --strict` clean on **164** files · **4** import-linter contracts kept. `ruff` is **not** clean right now: **14 errors, all auto-fixable** (`ruff check --fix`), introduced by work merged in after the 17:20 revision of this line — not yet run |
-| Migrations | **1** Alembic head, `12aa5b4dd87d` |
-| Architecture decisions | **20** recorded, 1 superseded (ADR-0017 → ADR-0018) |
+| Test suite | **6,497 passing, 11 skipped, 1 expected failure** (6,509 collected; the xfail is INV-9's known gap, §3), no unexpected failures, no external service required |
+| Static quality | `mypy --strict` clean on **283** files · **8** import-linter contracts kept. `ruff` clean except **1** pre-existing, unrelated `E501` (an overlong test function name, out of scope to rename) |
+| Migrations | **1** Alembic head, `ca56d6ce3f18` |
+| Architecture decisions | **22** recorded, 1 superseded (ADR-0017 → ADR-0018) |
 | Invariants | **9 of 9** have an automated test; 3 carry a named limit (see §3) |
-| Authorization | Wired into the execution path and 5 read surfaces; **enforcing nothing** (shadow mode, §3 INV-4) |
-| Open decisions | **4** — two were answered on 2026-08-30 (the embedding model, and Neo4j) (§6) |
+| Authorization | Wired into the execution path and 5 read surfaces; **enforcing nothing** (shadow mode, §3 INV-4) — unverified this pass whether more read surfaces have been wired since 2026-08-30 |
+| Open decisions | **4** — two were answered on 2026-08-30 (the embedding model, and Neo4j) (§6) — not re-audited this pass |
 
 The single most important sentence on this page: **everything in the "Implemented" column below
 has local end-to-end evidence and nothing has bank-scale evidence.** That distinction is held

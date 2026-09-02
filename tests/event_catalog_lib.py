@@ -197,7 +197,7 @@ def scan_emitted_event_types(src_root: Path) -> ScanResult:
     to every ``record_outbox(...)`` call."""
     result = ScanResult()
     for pyfile in sorted(src_root.rglob("*.py")):
-        text = pyfile.read_text()
+        text = pyfile.read_text(encoding="utf-8")
         if RECORD_OUTBOX + "(" not in text:
             continue
         try:
@@ -258,7 +258,7 @@ def parse_catalog_event_names(catalog_path: Path) -> set[str]:
     tables (skips the header/separator rows and any table whose first column isn't `Event`)."""
     names: set[str] = set()
     in_event_table = False
-    for line in catalog_path.read_text().splitlines():
+    for line in catalog_path.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
             in_event_table = False

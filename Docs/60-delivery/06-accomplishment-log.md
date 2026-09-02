@@ -8526,3 +8526,2116 @@ test && npm run build`: all green — `npm run test` is 19/19 (15 pre-existing +
 
 No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
 touched. No new Python or npm dependency added.
+
+---
+
+## 2026-09-01 — AT-16 closed: provenance block in the answer contract, columns + edge_source + a pinned graph version
+
+### Extending a real (but nearly empty) answer contract, not building from nothing
+
+`AgentRun.plan_evidence` (JSON, `dict[str, Any]` — no schema/migration change needed) is the answer
+contract's own evidence field, already populated with `trust` (EE.5's `trust_scoring.compute_trust_score`)
+and `model_call_evidence`/`query_memory_match` sections. But no `lineage` section existed, and the
+row's complaint was confirmed literally: `agent_orchestrator._checkpoint_explained` resolves the
+answer's cited tables (`quality_coupling.resolve_table_ids` against `QueryExecution.referenced_tables`)
+for exactly one purpose — gating on open CRITICAL quality incidents — and returns early with no lineage
+information at all when there is no open incident, which is the common case. So the pre-existing
+"lineage" surfaced in an answer, in practice, was nothing: bare table names, present only on the
+minority of runs that happened to touch an incident. This is an extension of a real but effectively
+empty contract, not greenfield from nothing — stated honestly per the row's own instruction.
+
+### The fix: `answer_provenance.py`, composed from EA.14/AT-19's existing unified-lineage data
+
+New module `aida.answer_provenance.compose_lineage_provenance`, called once by a new
+`GovernedAgentOrchestrator._compose_lineage_provenance` step in the `EXPLAINED` region of `run()` —
+deliberately *not* folded into `_checkpoint_explained` itself, since that method's early return is
+about the quality-incident gate, not about whether lineage should be composed; the new step resolves
+`answer_table_ids` independently so the lineage block is attached to every answer that cites a
+resolvable table, incident or not. It composes directly from
+`unified_lineage_api.build_unified_lineage_graph_payload` (EA.14's own graph builder, the same one the
+REST route, the domain-federated view, and the native MCP `get_lineage_graph` tool already call) —
+lineage is not re-derived, only filtered and reshaped:
+
+- `cited_tables`: every table the answer's executed SQL referenced, resolved to this datasource's
+  catalog, with the unified graph's qualified name.
+- `queried_columns`: the answer's own parsed columns (`QueryExecution.referenced_columns`, the same
+  `sql_guard.py` evidence already persisted per run), deduplicated and sorted — stated honestly as
+  SQL-parsed and not resolved per-table, since the parser does not always qualify a reference.
+- `relationships`: one entry per unified-lineage edge directly between two cited tables, carrying
+  `edge_source` (the derivation method — `FOREIGN_KEY`/`SUGGESTED_RELATIONSHIP`/`DBT_DEPENDENCY`/
+  `OPENLINEAGE_ETL`/`VIEW_DEFINITION`/`PROCEDURE_DEFINITION`, `unified_lineage.UnifiedLink`'s existing
+  taxonomy reused verbatim, no parallel taxonomy invented), `status`, `confidence`, the specific
+  `source_columns`/`target_columns` involved, and `evidence` passed through verbatim — including
+  AT-19's `transformation_reference`/`redaction_status` on a `VIEW_DEFINITION` edge, unmodified.
+- `graph_version`: the pin (next section).
+
+### The pinned graph version: a new concept, built on this platform's own existing idiom
+
+Read first, as the row instructed: neither `unified_lineage.py` nor `unified_lineage_api.py` has any
+version, snapshot id, or "as of" timestamp concept anywhere. This is honestly new state for this row,
+not a surfaced existing field — but it is not invented from nothing either. It follows AT-6's own
+established idiom for exactly this problem (`AgentRun.grounding_fragment_digests`: a SHA-256 digest per
+grounding fragment, captured once at assembly time, resolved and verified later by
+`agent_run_replay.py`, never recomputed live). `graph_version` applies the same shape to lineage:
+
+```
+{"pinned_at": <UTC ISO-8601, captured once>,
+ "datasource_id": <str>,
+ "traversal": {"node_limit": 300, "edge_limit": 1500, "scope": "DIRECT_EDGES_BETWEEN_CITED_TABLES"},
+ "graph_content_fingerprint": <sha256 hex of the canonical-JSON cited_tables + relationships>}
+```
+
+The fingerprint is the stronger half of the pin: not just "when we asked" but "what we saw" —
+content-addressed and independently reproducible from the same evidence, so a re-derivation against a
+since-changed graph provably diverges from it. Because `compose_lineage_provenance` runs exactly once,
+at answer-completion time, and `GET /v1/agent-runs/{id}` (`aida.api`) returns the persisted
+`AgentRun.plan_evidence` unchanged, the pin is captured, not live-recomputed on every read — the
+determinism test below proves this against a real graph mutation, not just against an unchanged one.
+
+### Tests (`tests/test_answer_provenance.py`, 2 new, driving the real orchestrator end to end)
+
+- `test_lineage_provenance_carries_columns_derivation_and_pinned_version`: a two-table fixture
+  (`settlement_ledger` FK-referencing `party`) joined by a governed tool's SQL; asserts the completed
+  `AgentRun.plan_evidence["lineage"]` block's `cited_tables` carry qualified names (not bare names),
+  `queried_columns` carry the answer's actual selected columns, the one `relationships` entry carries
+  `edge_source == "FOREIGN_KEY"` with real `source_columns`/`target_columns`, and `graph_version` carries
+  a 64-hex-char SHA-256 fingerprint, a timezone-aware `pinned_at`, and the exact traversal bounds used.
+- `test_pinned_graph_version_survives_a_later_graph_change`: runs the same fixture to `COMPLETED`,
+  captures the stored pin, then adds a second real `FOREIGN_KEY` `MetadataConstraint` between the same
+  two tables (a genuine graph mutation), re-fetches the same `AgentRun` row the way the read API does
+  (`session.get`, no recomputation), and asserts the pin is byte-identical to what was captured at
+  completion time. A second half proves the mutation was real and not a no-op: calling
+  `compose_lineage_provenance` live against the now-changed graph, with the same inputs, returns one
+  more relationship and a different fingerprint — so the stored pin's stability is proven against an
+  actually-diverging live value, not an accidentally-unchanged one.
+
+### Verification
+
+`ruff check` clean on `src/aida/answer_provenance.py`, `src/aida/agent_orchestrator.py`,
+`tests/test_answer_provenance.py`. `uv run --extra dev mypy src`: clean on all three touched files;
+the same 44 pre-existing `"object" not callable"` errors elsewhere (`workflows/activities.py`,
+`batch_ingestion.py`, `workflows/scheduler.py`, `main.py`, `profiling_exceptions.py`,
+`custom_quality_rules.py`, `projectors/graph_projector.py`, `graph_reconciliation.py`) are unrelated
+and unchanged — confirmed present on `origin/feature/snowflake-dbt-lineage-mcp` before this change, same
+count (44), same files. `uv run --extra dev lint-imports`: 8/8 contracts kept, none newly touched by
+this change (`answer_provenance.py` imports only `unified_lineage_api`/`config`/`models`, no query
+gateway). `AIDA_ENVIRONMENT=development uv run pytest tests/test_answer_provenance.py
+tests/test_agent_orchestrator_checkpoints.py tests/test_agent_orchestrator_decision_lineage.py
+tests/test_agent_orchestrator_retrieval_wiring.py tests/test_agent_orchestrator_query_memory.py
+tests/test_unified_lineage.py -q`: all green. `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q`: clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration touched
+— `AgentRun.plan_evidence` was already a free-form JSON column, wide enough to carry the new `lineage`
+section without any of them. No new HTTP route added (the block rides the existing `GET
+/v1/agent-runs/{id}` response, `AgentRunRead.plan_evidence: dict[str, Any]`, itself untouched), so no
+OpenAPI baseline regen or `ui-next` type regen was needed. No new Python or npm dependency added.
+
+**Known limitation, stated honestly**: `queried_columns` is the SQL parser's raw column references
+(`sql_guard.py`'s `exp.Column.sql()`), not resolved per-table — a query with two same-named columns
+across tables cannot be told apart from this list alone; the per-relationship `source_columns`/
+`target_columns` (from the unified-lineage edge itself) are precise, this top-level convenience list is
+not. `relationships` covers only *direct* edges between two cited tables in the unified graph — a
+same-answer table pair connected only via a multi-hop chain (e.g. through an intermediate view) has no
+entry here today; the graph build this reuses is itself bounded (`node_limit`/`edge_limit`, recorded in
+`graph_version.traversal`) per ADR-0010, an existing limitation of `build_unified_lineage_graph_payload`
+inherited here, not introduced by this row.
+
+---
+
+## 2026-09-01 — AT-14 closed: sampling-based bulk review for drafted prose
+
+A steward reviewing 500 AI-drafted asset descriptions one at a time does not scale; auto-publishing
+them without any human review breaks the 0.70 model-confidence cap. Acceptance sampling is the
+middle path: review a random, reproducible sample, apply that decision to exactly the sampled
+items.
+
+### Design
+
+`aida/sampling_review.py` — pure, DB-free. `draw_reproducible_sample` instantiates a fresh
+`random.Random(seed)` per call (never a shared RNG), so the same seed against the same batch
+membership (a set — input order never matters) draws the same ids, in the same order, in this
+process or any other. `resolve_sample_size` clamps to `[1, batch_size]` from either an explicit
+count or a fraction (rounded up, so a small fraction of a small batch still reviews something).
+
+Two endpoints on `asset_description_api.py`:
+- `POST .../asset-description-drafts/sample-review/draw` — preview only, mutates nothing.
+- `POST .../asset-description-drafts/sample-review/decide` — takes `(batch, sample_size, seed,
+  decision)`, **recomputes** the sample server-side rather than trusting a caller-supplied id
+  list (so the sample actually decided is provably the one a steward read), then applies the
+  decision to exactly those ids via `_apply_governance_review_decision` — the identical function
+  `decide_governance_review`/PG-3's bulk-decision path already use. No parallel, weaker decision
+  route exists for the sampled path.
+
+### The one real design decision, made explicit
+
+Sampled items are individually finalized (published on APPROVE, rejected on REJECT); unsampled
+items are left `PENDING_APPROVAL`, named explicitly in the response as `unsampled_draft_ids`. A
+batch-level "the sample passed, treat the rest as accepted too" outcome was considered and
+rejected — that would let a model's own drafted text become authoritative for items nobody ever
+actually read, exactly what the 0.70 cap (`Docs/90-reference/04-analysis-algorithms.md` §4,
+ADR-0001) exists to prevent. What sampling buys instead is real: reading and deciding ~50 of 500
+drafts in one call, with the seed and drawn ids recorded via `record_audit` (not only on the
+review row) so the verdict is reproducible and auditable after the fact.
+
+### Verification
+
+24 tests: `tests/test_sampling_review.py` (pure determinism — same seed/membership → same draw
+regardless of input order; different seed → generally different draw; `sample_size >= batch_size`
+returns the whole deduplicated batch) and `tests/test_asset_description_sample_review.py`
+(integration against real in-memory SQLite — recomputed-sample replay from a cited seed, audit
+payload carries seed + drawn ids, unsampled items provably untouched). `ruff check` clean.
+`test_doc_claims.py` and `test_openapi_diff_gate.py` clean (`Docs/90-reference/openapi-baseline.json`
+and `ui-next/src/lib/types.ts` regenerated for the two new additive routes). No `models.py`/
+`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+---
+
+## 2026-09-01 — AT-20 closed: lineage evidence export as a signed artifact
+
+"For a bank the artifact is the deliverable — it goes in a BCBS 239 pack. Collibra exports a
+plain diagram; ours is worth more only if we can hand it over." This row composes almost entirely
+from what landed on this branch earlier today: AT-16's pinned-graph-version idiom, AT-19's
+per-edge derivation evidence, and EA.14's unified lineage traversal — reused verbatim, not
+reinvented.
+
+### What shipped
+
+New `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}/export`
+(`aida/lineage_evidence_export_api.py`), composed by `aida/lineage_evidence_export.py`'s
+`compose_lineage_export_artifact`: point-in-time lineage for one chosen asset (`node_id`) and
+traversal `depth` — diagram-shape node set plus edge set — as one downloadable JSON artifact.
+
+- **Node/edge set**: `unified_lineage_api.build_unified_lineage_graph_payload` (EA.14) for the
+  full per-datasource graph, filtered to the node id set `build_unified_lineage_impact_payload`'s
+  own bounded upstream/downstream traversal reports for the chosen focus node and depth — the
+  same traversal the live `.../impact/{node_id}` route runs for the same asset/depth, not a
+  second depth-bounding algorithm invented for export.
+- **Derivation method per edge**: `UnifiedLineageEdgeRead.edge_source` passed through verbatim
+  (`FOREIGN_KEY`, `SUGGESTED_RELATIONSHIP`, `DBT_DEPENDENCY`, `OPENLINEAGE_ETL`,
+  `VIEW_DEFINITION`, `PROCEDURE_DEFINITION`).
+- **Per-edge transformation reference**: AT-19's `evidence.transformation_reference`/
+  `evidence.redaction_status` on `VIEW_DEFINITION` edges, carried through `evidence` verbatim.
+- **Asserting principal for human edges**: `RelationshipCandidate.reviewed_by` (`models.py`,
+  read-only) — the steward who approved a `SUGGESTED_RELATIONSHIP` candidate through
+  `intelligence_api.decide_relationship_candidate`'s explicit maker-checker endpoint (never
+  automatic; "maker cannot review their own candidate" is enforced there, so `reviewed_by` is
+  never the same principal as `created_by`). This is the only edge kind in the unified graph that
+  is a human assertion rather than a mechanical read of a database constraint, a dbt manifest, an
+  OpenLineage run event, or parsed SQL — every other edge kind's `asserting_principal` is `None`,
+  never fabricated. `build_unified_lineage_graph_payload`'s default `suggestion_status="APPROVED"`
+  means every `SUGGESTED_RELATIONSHIP` edge this export can include already has a non-null
+  `reviewed_by`, but the field is still looked up per edge from `RelationshipCandidate` rather
+  than assumed.
+- **Pinned graph version**: AT-16's exact pin shape and construction algorithm, reused rather
+  than reinvented — `answer_provenance._canonical_json` (sorted-key, whitespace-free JSON, AT-6's
+  own canonicalization) imported and called verbatim, over `{"nodes": ..., "edges": ...}` exactly
+  as AT-16 fingerprints `{"cited_tables": ..., "relationships": ...}`. `graph_version` carries
+  `pinned_at`, `datasource_id`, the exact `traversal` params, and the SHA-256
+  `graph_content_fingerprint`.
+- **Delivery**: `context_compiler_api`'s (EE.9) and UX-7's `Content-Disposition`/
+  `X-Artifact-SHA256` attachment idiom, reused a third time on this branch today rather than a
+  new pattern.
+
+### What "signed" honestly means here
+
+No cryptographic signing or key-management infrastructure exists anywhere on this platform, and
+this row's hard constraints forbid adding one. What ships is **hash-verified integrity**: a
+SHA-256 over the exact bytes returned (`X-Artifact-SHA256`), recomputable by any recipient, plus
+the pinned `graph_content_fingerprint` independently reproducible from the artifact's own
+`nodes`/`edges`. That proves the artifact was not altered between composition and receipt — it is
+tamper-evidence, not non-repudiation, and this module's own docstring says so explicitly rather
+than calling a hash a "signature" it isn't. It is still a real step up from Collibra's "plain
+diagram": a verifiable, resolvable evidence chain — pinned graph state, per-edge derivation
+method, the named human steward accountable for every non-mechanical edge — not a picture.
+
+### Authorization
+
+The export route imports `UNIFIED_LINEAGE_READER_ROLES` and `_load_datasource` directly from
+`unified_lineage_api.py` — the literal same objects the live graph/impact routes depend on, not a
+copy — so it can never silently diverge into a separate or weaker export-only gate. Proved by an
+identity assertion in tests, plus a cross-org-denial parity test and an unknown-node 404 parity
+test against the live `.../impact/{node_id}` route.
+
+### Verification
+
+Six new tests in `tests/test_lineage_evidence_export.py`: content fidelity against the live
+`get_unified_lineage_graph`/`get_unified_lineage_impact` routes (including AT-19 evidence
+passthrough on a `VIEW_DEFINITION` edge), the asserting-principal population (maker != checker on
+the `SUGGESTED_RELATIONSHIP` edge, `None` on `FOREIGN_KEY`/`VIEW_DEFINITION`), permission parity
+(same gate objects; identical cross-org 403 and unknown-node 404), and hash verification at both
+the artifact-bytes layer and the pinned content-fingerprint layer — including determinism: two
+independent exports of an unchanged graph produce byte-identical content apart from `pinned_at`.
+`tests/test_unified_lineage.py`, `tests/test_answer_provenance.py`, and `tests/test_asset_evidence.py`
+re-run clean (no regression in the modules this reuses from). `ruff check`/`mypy src` clean on
+every touched file; `lint-imports` clean; `test_doc_claims.py` green.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file or Alembic migration
+touched — the artifact is a plain `dict[str, Any]`, following AT-16's own precedent for a new
+response shape that doesn't need a typed schema. `Docs/90-reference/openapi-baseline.json`
+regenerated (purely additive route) and `test_openapi_diff_gate.py` green; `ui-next` carries no
+generated types keyed off this baseline (checked — no `openapi-typescript`/similar consumer of
+`openapi-baseline.json` exists in `ui-next`), and this row shipped no UI component, so no
+`ui-next` change was needed.
+
+---
+
+## 2026-09-01 — UX-18 closed: version-specific consumer footer on semantic edit surfaces
+
+"No semantic edit is made blind": a steward opening a metric, glossary term, or semantic model
+version for edit can now see who/what currently consumes *that exact version*, sourced from CX-4
+consumption lineage, without a separate lookup.
+
+### What was checked before anything was built
+
+The row's own stop condition was to verify version-specificity against real data first, not
+assume it. `ConsumptionRecord` (`aida/models.py`) has no separate version column. That could have
+been a blocker, but it isn't: every CX-4 write for a versioned resource already keys `resource_id`
+on that *version row's own primary key*, not a logical/parent id — proven by the existing,
+in-production `context_product_api.py`/`mcp_server.py` writes:
+`resource_type="context_product_version"`, `resource_id=str(version.id)`. `SemanticModelVersion`,
+`SemanticMetricVersion`, and `GlossaryTermVersion` all share that exact shape (a UUID primary key
+per version row, plus a separate integer `version` field and a foreign key back to the logical
+parent), so scoping `get_consumption_for_resource` by `resource_id=str(version.id)` is exactly as
+version-specific as the already-proven context-product case: two versions of the same object are
+two different rows with two different primary keys.
+
+A second finding, stated honestly rather than hidden: no MCP or REST route today records a direct
+per-object consumption edge for a metric/glossary-term/model-version read in isolation — CX-4
+currently only writes `metadata_table` and `context_product_version` reads. A semantic object
+consumed only inside a bundled, published context product is attributed to that
+`context_product_version`, not decomposed back to the object it came from. This means a freshly
+authored draft legitimately shows an empty footer today — the honest answer for a version nothing
+has consumed yet, not a defect in the composition. Populating direct per-object consumption writes
+at MCP/REST read time is future instrumentation work, out of this row's scope (composition +
+wiring, no new persisted state).
+
+### Design
+
+`aida/consumer_footer.py` — `compose_consumer_footer` is a pure aggregation over
+`consumption_lineage.get_consumption_for_resource` (reused verbatim, no new persisted state,
+no new resource_type strings beyond the ones `semantic_api.py`/`glossary_api.py` already write to
+the audit log for these same three version tables). Collapses `ConsumptionRecord` rows to one
+entry per distinct consumer (`consumer_id` + `consumer_type`), keeping the most recent
+channel/timestamp and a per-consumer event count, newest-consumer-first; `total_consumption_events`
+is the exact unbounded count from the same helper's own `COUNT(*)`, `total_consumers` a
+`computed_field` over the (bounded) `consumers` list. Response models
+(`ConsumerFooterRead`/`ConsumerFooterEntryRead`) live in this new module rather than in the
+read-only `aida/schemas.py` — the same precedent SM-7's `GovernanceReviewDiffRead`
+(`aida/semantic_api.py`) and UX-17's `ReviewQueueRead` (`aida/review_queue_schemas.py`) already
+established for this tracker.
+
+Wired as three sidecar `GET .../consumers` endpoints, not embedded into an existing list/read
+response: `/v1/semantic-model-versions/{id}/consumers`, `/v1/semantic-metric-versions/{id}/consumers`
+(`semantic_api.py`), `/v1/glossary-term-versions/{id}/consumers` (`glossary_api.py`). This follows
+UX-13's own "a dedicated small composed endpoint, not folded into a batched list row" idiom rather
+than UX-12's batched-into-the-list pattern: there is no single canonical "get one version for
+edit" response to embed into for any of the three object kinds today (editing happens through the
+`POST .../versions` create-draft flow and the `list_*`/`GET .../metrics` collection endpoints), so
+adding a footer field to every row of those list endpoints would cost a query fan-out on every
+list call for data only relevant while actually editing one object — the same reasoning UX-13
+already applied when it kept evidence out of `catalog_read_model`'s batched list rows.
+
+### Verification
+
+`tests/test_consumer_footer.py`, 11 tests against real in-memory SQLite:
+- pure-composition aggregation (per-consumer event count, most-recent channel/timestamp, total
+  counts, empty-footer-when-never-consumed);
+- `test_does_not_leak_consumers_of_a_different_version` — the row's central claim, tested
+  directly: two version rows, two different consumers each recorded against one version's own
+  `resource_id`, and each composed footer reports only its own version's consumer, never the
+  sibling's;
+- integration tests calling the real wired-in route functions for all three object kinds
+  (version-specific footer end to end, 404 for a missing version, cross-org 403, route
+  registration in `app.openapi()`).
+
+`ruff check` and `uv run mypy src` clean on every touched file (same 44 pre-existing "object not
+callable" errors in unrelated files both before and after this change, confirmed via `git stash`);
+`uv run lint-imports` 8/8 kept; `AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q`
+clean. New routes changed `app.openapi()`: `Docs/90-reference/openapi-baseline.json` (480 lines) and
+`ui-next/src/lib/types.ts` (20 lines) regenerated via each script's `--accept-baseline`, both purely
+additive; `cd ui-next && npm run typecheck && npm run test && npm run build` all green (`npm install`
+was needed first — `node_modules` was absent in this worktree). No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file or Alembic migration touched.
+
+---
+
+## 2026-09-01 — MG-3 closed: private-endpoint routing for approved model routes
+
+`ModelRouteConfiguration` already carried a maker-checker-approved `endpoint_alias` field on every
+route, and `ModelCallEvidence` already recorded it on every call -- but nothing ever read it back.
+Both `OpenAIResponsesProvider` and `GeminiGenerateContentProvider` unconditionally called
+`self.settings.openai_base_url`/`gemini_base_url`, a single global public endpoint, regardless of what
+alias the approved route named. A route a bank had approved specifically to route through, say, an
+Azure OpenAI private endpoint would have its calls go out over the public internet anyway -- the
+`endpoint_alias` was decorative.
+
+Fix: a new `Settings.model_endpoint_urls: dict[str, str]` (`atlas/platform/config.py`), keyed by
+`endpoint_alias`. `model_gateway._resolve_endpoint_base_url(route, settings, default)` looks the
+route's alias up in that map; a hit returns the private URL, a miss returns the existing public
+default unchanged. Both providers now call through the resolved URL instead of the hardcoded public
+one. This is additive by construction, not a behavior change requiring a flag: an alias with no entry
+in the (default-empty) map behaves exactly as before, so every route approved up to now keeps working
+identically the moment this ships.
+
+Production posture: extended the existing `if self.environment == "production"` HTTPS check (which
+already covered `openai_base_url`/`gemini_base_url`) to also reject any `model_endpoint_urls` value not
+served over HTTPS, naming the offending alias(es) in the error. Added as a new case to
+`tests/test_tier0_invariants.py`'s `_INCOMPLETE_POSTURE_CASES` parametrized list rather than a
+standalone test, since that list already is INV-4's enumeration of every production fail-closed branch
+in `Settings` -- a new branch belongs in the same table, not next to it.
+
+4 new tests in `tests/test_model_gateway.py`: `test_openai_adapter_routes_through_a_configured_private_endpoint`
+and its Gemini equivalent assert the outbound request's `request.url.host` matches the configured
+private host via `httpx.MockTransport`; `test_openai_adapter_falls_back_to_the_public_default_for_an_unmapped_alias`
+proves a route whose alias isn't in the map still calls `api.openai.com`, so the new setting can never
+silently redirect a route nobody configured it for. `pytest tests/test_model_gateway.py
+tests/test_tier0_invariants.py tests/test_config.py`: 51 passed (baseline 47, +4 new). `ruff check` and
+`mypy --strict` clean on both touched source files (`model_gateway.py`, `config.py`).
+
+Honest gap: no real private endpoint (Azure OpenAI PrivateLink, GCP Private Service Connect, or an
+on-prem proxy) was reachable in this sandbox, so the mechanism that *selects* a private URL is proven
+end to end, but that a request sent to such a URL actually traverses a private network path rather
+than the public internet is not -- the same standing live-infrastructure gap as QG-5/QG-6's Vault
+adapters and CN-1c/CN-2a's live-cloud-account gap.
+
+---
+
+## 2026-09-01 — UX-19 closed: agent roster with published purpose, task plan and live results
+
+A steward should be able to inspect an agent's method before trusting its output. This composes
+that view entirely from data that already exists — no new registry, no new run-tracking table.
+
+### Composition
+
+`GET /v1/organizations/{organization_id}/ai-agents/roster` (`agent_roster_api.py`, composed by
+`agent_roster.py::compose_agent_roster`), same authorization boundary as the rest of the AI
+registry (`ai_registry_api.AI_READERS`):
+
+1. **Purpose** — EA.10c's AI registry. Every `AGENT`-kind `AiAsset`'s governed `AiAssetVersion`
+   already carries steward-authored `name`/`description`/`intended_use`/`owner_principal`/
+   `risk_tier` — a genuine published purpose, not invented here.
+2. **Method** — aggregated from recent `AgentRun.plan_evidence` (the real
+   `GovernedPlanner.plan(...).evidence()` payload), reusing `aida.fleet.tool_first_execution_rate`/
+   `aida.tool_first_rate.compute_tool_first_rate` verbatim for the tool-first/freeform split.
+3. **Live results** — a bounded, paginated window of the organization's most recent `AgentRun`
+   outcomes (status, strategy, confidence, generation_source, failure reason).
+
+### Two honest gaps, not papered over
+
+**No `AgentRun` → `AiAsset` link exists.** Checked directly against `models.py`: `AgentRun` is
+produced by exactly one operational path (`GovernedAgentOrchestrator.run`), scoped only by
+`organization_id`/`datasource_id` — never by "which registered agent." The AI registry can hold
+`AGENT`-kind entries this platform doesn't itself execute (see `test_ai_registry.py`'s "Fraud
+triage agent" fixture — a governance dossier, no matching code path). A name-matching heuristic
+to fake the link would be exactly the fabrication this row forbids. Runs are shown as
+`scope="ORGANIZATION_WIDE"` with an explanatory note instead — real data, honestly scoped.
+
+**No agent in this codebase has a real auto-apply threshold.** The row's exit condition — "plans
+that end in an auto-apply branch state the threshold that governs them" — was checked against
+every AI-authored proposal pathway that exists: glossary-link proposals, asset-description drafts
+(whose own module docstring states it "rejects the no-review auto-apply" pattern), metric
+suggestions, and every GL-2/GL-5/GL-7 bulk operation — all route through the shared
+`GovernanceReview` maker-checker queue with no confidence-gated bypass. The two "confidence"-named
+values that do exist (glossary label-match confidence; `Settings.agent_tool_match_threshold`,
+which gates only which tool is *eligible* to answer a read-only question) don't gate an
+unreviewed action. AT-1 itself — the row that would introduce a real auto-apply branch — is still
+`TODO`. So every agent reports `has_auto_apply_branch=False`; `_AUTO_APPLY_EVIDENCE` is the single
+place to change when a future row adds a genuine one.
+
+### Verification
+
+`tests/test_agent_roster.py` — 7 tests, real in-memory SQLite, all pass. `ruff check` clean.
+`test_doc_claims.py` and `test_openapi_diff_gate.py` clean (baseline + `ui-next` types
+regenerated for the one new additive route). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file or Alembic migration touched — this session finished the close-out after the
+implementing agent paused waiting on a background test run; the diff it left was reviewed, tested
+fresh, and found sound before pushing.
+
+## 2026-09-01 — AT-3 closed: conversational natural-language entry point for marketplace discovery
+
+### What shipped
+
+`GET /v1/marketplace/products/ask` (`src/aida/marketplace_discovery.py`) answers a "find me X"
+marketplace question through the same three governed-question steps
+`agent_orchestrator.GovernedAgentOrchestrator.run()` applies to every other question, without
+standing up a second search stack:
+
+1. **Screening** — `marketplace_discovery.screen_marketplace_question` calls the identical
+   `prompt_risk.DeterministicPromptRiskClassifier` class the orchestrator constructs in its own
+   `__init__`, before any retrieval or model call. A BLOCK raises `MarketplaceDiscoveryBlocked`
+   with the same reason codes/score/classifier version the orchestrator's own
+   `AgentPolicyRejected` path would compute for the identical text — proven directly, not by
+   assertion: `test_malicious_question_gets_the_identical_block_decision_as_a_governed_question`
+   constructs a real `GovernedAgentOrchestrator`, reads its `prompt_risk_classifier`, and asserts
+   the two assessments are equal field-for-field. A second test confirms a BLOCKed question never
+   reaches route resolution or the database at all.
+2. **Resolution** — `resolve_marketplace_filters` calls `model_gateway.ProviderNeutralModelGateway
+   .structured_completion` (an organization-approved, `CLASSIFICATION`-capable route — the same
+   non-SQL model capability `semantic_inference.py`'s metadata inference already uses, chosen
+   deliberately over `SQL_GENERATION` because a marketplace question resolves to filter
+   arguments, never SQL) to translate the question into `MarketplaceFilterResolution`: exactly
+   `search_marketplace`'s own `q`/`domain`/`classification`/`sort` arguments. INV-2 ("SQL
+   execution only through the query gateway") does not apply here — this never generates or
+   executes SQL, only metadata-search filter values — but the discipline that invariant stands
+   for (never trust model output into a query unvalidated) is kept anyway: the pydantic contract
+   itself is the first bound (`classification` restricted to the same literal set
+   `search_marketplace` accepts, `q`/`domain` capped at its 200-char `Query(...)` length — an
+   out-of-contract response fails validation before it ever becomes an argument), and the one
+   open-vocabulary field, `domain`, is independently re-checked against the caller's own
+   discoverable catalog (read through a real `search_marketplace(sort="catalog")` call under the
+   caller's own context, never a separate unfiltered query) and dropped back to `None` — no
+   filter — if it names nothing real, so a hallucinated domain can never silently stand in for
+   the actual answer.
+3. **Policy** — the bounded filters are handed to the real, unmodified `search_marketplace`
+   function with the caller's own unmodified `SecurityContext`. EE.8's SQL-level `DISCOVER`-role
+   filtering therefore applies exactly as it would to a structured call with the same filters —
+   this row never constructs a parallel query path and never post-filters a broader query in
+   application code.
+
+The endpoint lives in its own `APIRouter` (`marketplace_discovery.router`, wired into `main.py`)
+rather than as a new route on `product_marketplace_api.router`: `marketplace_discovery.py` imports
+the real `search_marketplace` from `product_marketplace_api.py`, so that module cannot also import
+back from here without a circular import — a second router, included alongside the first, avoids
+it cleanly instead of reaching for a lazy in-function import that would have cost FastAPI proper
+`response_model` typing/OpenAPI generation for the new schemas.
+
+### Authorization-parity proof
+
+`test_role_restricted_caller_sees_identical_results_via_conversational_and_direct_search`
+seeds two published products — one `DISCOVER`-bound to `"*"`, one bound only to a
+`"RiskCommittee"` role a test-only `Analyst` caller does not hold — points a deterministic
+mocked model-gateway response at an unfiltered "browse everything" resolution (the shape most
+likely to smuggle a hidden product through if the conversational path ever bypassed
+`search_marketplace`'s own filtering), and asserts the conversational and direct-`search_marketplace`
+result sets are identical and both exclude the restricted product. A second half of the same test
+repeats it with a caller who *does* hold `RiskCommittee`, getting both products through both
+paths — confirming the difference is real role-based filtering, not the restricted product being
+broken or unpublished.
+
+### Verification
+
+8 tests in `tests/test_marketplace_discovery.py` (real in-memory SQLite via aiosqlite, same style
+`test_marketplace_personalization.py` uses): screening parity (2), filter resolution against a
+`model_gateway.DeterministicTestProvider` mocked response including the hallucinated-domain bound
+and an out-of-contract `classification` rejection (3), authorization parity plus one unavailable
+-model-route case (2), one blocked-before-DB case (1). `ruff check`/`mypy src` clean on every
+touched file (the same 44 pre-existing `"object" not callable` Temporal-decorator errors as
+before this change, none in the new files); `lint-imports` 8/8 kept;
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean;
+`tests/test_event_catalog_gate.py` clean (no new `record_outbox` call, so no catalog row needed).
+New route changed `app.openapi()` — `Docs/90-reference/openapi-baseline.json` regenerated
+(additive-only, `git diff --stat` confirmed: 259 insertions, 0 deletions) and
+`ui-next/src/lib/types.ts` regenerated (`MarketplaceFilterResolution`/`MarketplaceDiscoveryResponse`
+added, 18 insertions, 0 deletions). No `models.py`/`schemas.py`/`platform_schemas.py`/
+`contracts.py` file touched and no Alembic migration.
+
+---
+
+## 2026-09-01 — GL-6 closed: multi-tier escalation for the unowned-asset backlog
+
+The unowned-asset backlog's escalation was single-tier: `PENDING` -> `ROUTED` -> `ESCALATED`, then
+nothing. If the tier-1 notification channel had no real delivery configured -- exactly the situation
+the scheduler's own lazily-created default rule leaves an organization in until it configures a real
+channel (`ensure_default_unowned_backlog_notification_rule`'s `channel="EMAIL", recipients=[]`) -- an
+`ESCALATED` entry could sit there indefinitely with no further action, ever.
+
+### Design: tier 2 lives in this module, not the shared engine
+
+`glossary_owner_routing.py` deliberately reuses DQ-1's `aida.notification_routing` engine as-is rather
+than forking it (its own module docstring says so). Extending that shared engine itself to understand
+multiple tiers would have meant touching code `data_quality`'s own incident routing also depends on,
+for a need that is specific to this module's backlog. Instead, tier 2 is a fixed backstop implemented
+entirely in `glossary_owner_routing.sync_unowned_asset_backlog`: an entry still `ESCALATED` and
+unaddressed for `DEFAULT_ESCALATE_TIER2_AFTER` (7 days, configurable via a new keyword parameter) past
+its *own* `escalated_at` -- not from first-detected -- moves to `ESCALATED_TIER_2` and unconditionally
+produces an ITSM payload via the already-shared `format_itsm_payload`, regardless of what channel tier
+1 used. "Unconditional ITSM" was picked over a second configurable notification rule because a second
+rule needs its own condition-matching semantics decision (does it use the *same* matched rule, a
+different one, a new rule shape entirely?) that the exit condition does not ask for and that would
+expand this into designing a second routing dimension; a fixed operational-ticket backstop is what
+"make sure a human owns this" concretely means once tier 1 has already failed to get a response.
+
+### What changed
+
+- `models.py`: new `UnownedAssetEscalation.escalated_tier2_at` column, mirroring the shape of the
+  existing `escalated_at`/`resolved_at` columns -- a genuinely new persisted fact (when tier 2 fired),
+  not something an existing column could carry.
+- `schemas.py`: `UnownedAssetEscalationRead.escalated_tier2_at` (read-through) and a new
+  `UnownedAssetBacklogRouteResult.escalated_tier2` list, alongside the existing `routed`/`escalated`.
+- `glossary_owner_routing.py`: new `DEFAULT_ESCALATE_TIER2_AFTER` constant, new
+  `BacklogRoutingResult.escalated_tier2` list, and the tier-2 check itself -- a new `if entry.status ==
+  "ESCALATED" and entry.escalated_at is not None:` branch after the existing `ROUTED` branch (which
+  gained a `continue` so a same-pass ROUTED->ESCALATED transition can't also fall through to the tier-2
+  check in the same iteration; harmless either way since a freshly-set `escalated_at == now` can never
+  already be past the tier-2 deadline, but the `continue` makes the intent explicit).
+- `scheduler.py` / `stewardship_api.py`: both callers gained a `for entry in result.escalated_tier2:`
+  block emitting the same audit-then-outbox pair the existing `routed`/`escalated` loops already do,
+  and `stewardship_api.py`'s response construction now populates the new `escalated_tier2` field.
+- `Docs/30-contracts/04-event-catalog.md`: documented the new `stewardship.unowned_asset_escalated_tier2.v1`
+  event before it could ever be flagged as undocumented by TS-11's event-catalog gate.
+- `migrations/versions/75838f5c1cea_gl6_tier2_escalation_column.py`: single nullable-column `ALTER
+  TABLE`, generated via `alembic revision` then hand-written (not autogenerate, since no live Postgres
+  was reachable to diff against), verified offline with `alembic upgrade eb8987ff4f66:75838f5c1cea
+  --sql` -- produced exactly the expected single statement, no live database touched.
+
+### Tests
+
+`tests/test_glossary_owner_routing.py` gained
+`test_sync_escalates_to_tier2_past_the_second_deadline` (an `ESCALATED` entry whose `escalated_at` is
+pinned to `2000-01-02` -- unambiguously past the 7-day tier-2 window regardless of when the test runs,
+the same anchor-in-the-past style the existing tier-1 escalation test already uses -- moves to
+`ESCALATED_TIER_2`, produces exactly one ITSM payload, and sets `escalated_tier2_at == now`) and
+`test_sync_does_not_escalate_to_tier2_before_the_second_deadline` (an `ESCALATED` entry whose
+`escalated_at` is `now` stays `ESCALATED`, no ITSM payload, `escalated_tier2_at` stays `None`).
+
+### Verification
+
+`pytest tests/test_glossary_owner_routing.py tests/test_glossary_stewardship.py
+tests/test_fleet_scheduling.py`: 57 passed (55 baseline, +2 new), zero changes in outcome for any
+existing assertion. `ruff check` clean on every touched file. `mypy --strict` clean on every touched
+file except one pre-existing, confirmed-unrelated finding in `scheduler.py`
+(`"object" not callable` on `session_factory()` calls at lines outside this change's diff, present
+both before and after -- checked via `git diff` that none of the flagged lines were touched).
+
+Honest gap: no live Postgres in this sandbox to run the migration for real -- same standing limitation
+as CN-1c/CN-2a/DQ-4/QG-5/QG-6/MG-3 above. The offline `--sql` check confirms the migration is
+syntactically correct and produces the intended DDL, not that it applies cleanly against a real,
+populated `unowned_asset_escalation` table.
+
+---
+
+## 2026-09-01 — AT-8 closed: context-path eval suite (pull forward from N17/ST-8)
+
+### What "stored, replayable eval" means here, and the judgment call on module 18
+
+The tracker row's exit criterion is "a stored eval asserts on the resolved context path ...
+and is replayable", explicitly excluding business-value/final-answer expectations
+(INV-6/ADR-0014). Built as a new `tests/context_path_eval/` package plus
+`tests/test_at8_context_path_eval.py` -- **files, not a database table**. An eval case is a
+`ContextPathEvalCase` dataclass in `tests/context_path_eval/cases.py`: it names an input
+scenario (a question, the roles asking it, any tool preference/parameters) and an expected
+context path, never an expected answer. This satisfies "stored" the same way every other test
+fixture in this repository is stored -- committed, versioned, diffable in `git log` -- without a
+bespoke persistence layer; "replayable" is concrete and mechanical: `pytest` re-runs the case
+against a real `GovernedAgentOrchestrator.run()` and re-derives the context path from scratch
+every time, so replaying an old case against today's code is `git checkout <ref>` (or just
+`pytest`, since nothing here depends on wall-clock state) with no server, endpoint, or extra row
+anywhere. **Module 18 (Studio) judgment call, stated explicitly**: no authoring/runner UI surface
+was built. A stored eval file plus a runnable assertion already *is* a stored, replayable eval;
+Studio module ownership names where a future UI would live if stewards ever need to author cases
+without touching Python, not a requirement that one exists for this row's exit criterion to be
+met. `agent_evals.py`'s existing `AgentEvaluationRun`/`POST .../agent-evaluations` mechanism (a
+real DB-table + HTTP eval surface, already live) was deliberately **not** reused or extended: it
+asserts a fixed set of deterministic *safety-control* scenarios (SQL-guard denial, prompt-risk
+denial, tool role-binding) with no database and no real orchestrator run at all -- a different
+axis from "did this real, seeded run resolve the context path we expect." Conflating the two
+would have quietly widened `AgentEvaluationRun`'s contract for a concept it was never built for;
+they stay two separate mechanisms answering two separate questions.
+
+### What is asserted -- context path only, never a value
+
+`tests/context_path_eval/runner.py`'s `derive_context_path` reads four already-existing
+`AgentRun` facts back (never recomputes a live equivalent, the same "capture once, read back
+unchanged" idiom AT-16's `answer_provenance.compose_lineage_provenance` and AT-6's
+`agent_run_replay.resolve_grounding` both use): `plan_evidence.strategy`/
+`selected_tool_version_id`/`tool_decisions` (the governed tool or compiled-plan strategy
+selected), `retrieval_evidence`'s object types/ids (which objects were resolved -- tables,
+business annotations, governed tools), `semantic_version` (the semantic-model-or-fallback pin
+`GovernedAgentOrchestrator.run` computes at RESOLVED), and `status`/`failure_reason` plus
+`plan_evidence.prompt_risk.decision` (the policy decision). `compare_to_expected` diffs those
+against a case's stored expectation field by field and returns named drift strings on mismatch.
+Nothing here reads or asserts on `QueryExecution`, generated SQL text, or any result row.
+
+### Four real eval cases, against real seeded SQLite data, proving the mechanism works
+
+`tests/context_path_eval/scenario.py` seeds one organization/datasource/table with a business
+annotation and one governed tool (`order_lookup`, requiring a `customer_id` parameter no case
+supplies) -- same seeding shape and same "reach RESOLVED/PLANNED without a live SQL warehouse or
+model route" trick `tests/test_at6_context_receipts.py` already established. Four cases in
+`tests/context_path_eval/cases.py`, each proving a different context-path facet:
+
+1. `tool-missing-parameter-reaches-clarification` -- an Analyst who explicitly selects the
+   published tool without its required parameter: strategy `CLARIFICATION`, tool selected,
+   `BUSINESS_ANNOTATION`/`GOVERNED_TOOL`/`TABLE` resolved, `technical-metadata:` semantic
+   fallback pinned (no semantic model published in this scenario), refused with the exact named
+   reason `MISSING_TOOL_PARAMETERS:customer_id`.
+2. `prompt-injection-blocked-before-resolution` -- a deterministic instruction-override phrase:
+   strategy `BLOCKED`, **nothing** resolved (retrieval/planning/the semantic pin never run),
+   proving policy short-circuits ahead of context assembly rather than after it.
+3. `semantic-model-version-pinned-when-published` -- the same request run against a scenario
+   with a published `SemanticModelVersion` v2: pins `semantic-model:<id>:v2` instead of the
+   fallback, and the test additionally asserts the exact pinned string names the real published
+   version, not just "some semantic model."
+4. `role-ineligible-tool-falls-to-model-generation` -- a Viewer asking the identical question
+   over the identical seeded content: the tool is still resolved by retrieval and still recorded
+   REJECTED in `tool_decisions` for a role reason, but the planner selects no tool and falls to
+   `MODEL_GENERATION`, which then fails closed on `MODEL_ROUTE_NOT_CONFIGURED` (no model route
+   configured in tests) -- a different plan strategy than case 1, driven purely by the
+   requester's role.
+
+`test_default_scenario_cases_match_expected_context_path` and
+`test_published_semantic_model_case_matches_expected_context_path` run all four for real and
+hard-assert `result.matched`.
+
+### Replayability proven two ways, including "informational drift, not a hard failure"
+
+`test_replaying_the_same_case_reaches_the_same_context_path` runs case 1 twice against the same
+scenario and asserts the two independently-derived `ContextPath` structs are field-for-field
+identical (two different `AgentRun` rows, same governed answer path).
+`test_replay_reports_structural_drift_when_the_tool_is_unpublished` runs case 1, then withdraws
+the governed tool through its own `status` field (a real governance write, not a direct mutation
+of the first run), then replays the identical case: the second replay's context path legitimately
+changes (retrieval only ever surfaces `PUBLISHED` tool versions, so the tool drops out of
+`resolved_object_types` entirely; the plan falls to `MODEL_GENERATION`; the policy reason changes
+to `MODEL_ROUTE_NOT_CONFIGURED`) and the runner reports every one of those as a named drift
+(`strategy`, `selected_tool_version_id`, `resolved_object_types`, `policy_reason_code`) rather
+than crashing or silently passing -- proving the "reports a structural drift ... informational,
+not necessarily a failure" half of the exit criterion, not just the "matches" half.
+
+### Verification
+
+4 tests, all green: `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_at8_context_path_eval.py -q`. Adjacent suites unaffected:
+`tests/test_at6_context_receipts.py`/`tests/test_agent_orchestrator_retrieval_wiring.py` still
+green (nothing in `agent_orchestrator.py`/`agent_intelligence.py`/`agent_evals.py` was touched --
+this row is additive test infrastructure only). `ruff check` clean on every new file. `mypy src`
+unaffected (the new files live under `tests/`, outside `[tool.mypy] packages = ["aida"]`, so this
+row could not introduce a mypy regression even in principle; `mypy src` itself still shows the
+same pre-existing 44 `"object" not callable" Temporal-decorator errors documented in AT-13's
+entry, none in files this row touched). `AIDA_ENVIRONMENT=development uv run pytest
+tests/test_doc_claims.py -q` clean. No HTTP route added (test-infrastructure only) so no OpenAPI
+baseline regen and no `ui-next` type regen; no new `event_type=` emitted via `record_outbox` so no
+`tests/test_event_catalog_gate.py` change needed. No `models.py`/`schemas.py`/
+`platform_schemas.py`/`contracts.py` file touched (the hard constraint this row's owner flagged)
+and no Alembic migration -- eval cases are plain versioned Python files, which is also why no DB
+table was needed or considered further once that was clear.
+
+---
+
+## 2026-09-01 — AT-10 investigated, BLOCKED: two of the three "orphaned" producers were already joined, and the remaining four are genuinely schema-blocked, not deferred
+
+`Docs/60-delivery/03-tracker.md` row AT-10 ("One canonical lineage graph — join the orphaned edge
+producers") reads: gateway query lineage, view edges, procedure edges, BI edges, AI-decision edges
+and consumption edges are each in their own table and invisible to the unified graph; `LN-9` was
+closed as "one canonical graph" and three edge producers shipped afterwards without joining it.
+That framing was current on 2026-08-30 (`Docs/review-2026-08/atlan-context/03-lineage.md` §2, the
+research finding that opened this row) but stale by the time this row was claimed: LN-7 (closed
+2026-08-31, a day *before* AT-10 existed as a row) already folded view and procedure edges into
+`unified_lineage_api.py::_build_unified_graph` as `VIEW_DEFINITION`/`PROCEDURE_DEFINITION`. Two of
+the original six named producers were therefore already done. This entry investigates the
+remaining four.
+
+### What was re-verified as already joined (no new work needed)
+
+Read `unified_lineage_api.py::_build_unified_graph` in full. Confirmed six edge kinds already
+merge into one graph: `FOREIGN_KEY` (declared constraints), `SUGGESTED_RELATIONSHIP`
+(`RelationshipCandidate`), `DBT_DEPENDENCY` (dbt manifest), `OPENLINEAGE_ETL`, and
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` (`ViewLineageEdge`/`ProcedureLineageEdge`, folded in by
+LN-7). All six feed both `build_unified_lineage_graph_payload` and, through the shared
+`traverse`/`expand_frontier` algorithm in `unified_lineage.py`,
+`build_unified_lineage_impact_payload`.
+
+### The four still-orphaned producers, and exactly why each is blocked
+
+`Docs/review-2026-08/atlan-context/03-lineage.md` §2's table names six producers total; the four
+still outside the unified graph, checked one by one against their real persistence:
+
+1. **Gateway executed-query column lineage** — `QueryExecution.column_lineage`
+   (`src/aida/models.py:775`), a JSON column populated by
+   `query_gateway.extract_column_lineage`. Per-row shape:
+   `{output_column, lineage_type, source_columns: [{table, column}], transformations}` — the
+   source side names real tables (via `referenced_tables`, also JSON), but there is no "target"
+   catalog table: the query's output is an ephemeral result set, not something the catalog scan
+   ever registers as a `MetadataTable`. Even setting that aside, folding it in needs a new
+   `UnifiedLineageEdgeSource` member (below). Separately: the platform's own decision record
+   already routes query-log-derived lineage through the *candidate* review queue rather than
+   direct assertion — `Docs/60-delivery/03-tracker.md` row AT-12 ("Semantic mining of warehouse
+   query history"), still `TODO`, states explicitly "a query-log edge may enter the review queue
+   as a candidate and is never asserted." Building a `RelationshipCandidate`-emitting bridge from
+   gateway query lineage is AT-12's job, not this row's, and doing anything else here would
+   duplicate a mechanism that does not exist yet under a different name.
+
+2. **BI report/metric edges** — `BiReportMetricEdge`/`BiMetricColumnEdge`
+   (`src/aida/models.py:4014,4044`). `BiMetricColumnEdge.matched_table_id`/`matched_column_id`
+   *are* populated against the real catalog (LN-4's own resolution work) — the table-facing side
+   of this producer is exactly as real as an FK or a view edge. The blocker is the other side:
+   `BiReportNode`/`BiMetricNode` (`:3964,3989`) are not `MetadataTable` rows and have no
+   `UnifiedLineageNodeKind` to render as. This is not a new finding — LN-7's own tracker row
+   already named it: *"BI lineage (LN-4, Tableau/Power BI) still has its own `BiReportNode`/
+   `BiMetricNode` node kinds not yet folded in — tracked as LN-11... not required for this exit
+   criterion"* — independent corroboration from a different session on a different day.
+
+3. **AI-decision edges** — `AiDecisionRecord` (`src/aida/models.py:3216`), written by
+   `ai_decision_lineage.record_decision`, real call sites in `agent_orchestrator.py` since AU-5.
+   Read every `AiDecisionEdge(...)` call site: `source_node` is *always* one of a small set of
+   synthetic AI-component tags (`"governed_retriever"`, `"governed_planner"`,
+   `"query_execution_gateway"`, `"governed_agent_orchestrator"`, `"checkpoint:<name>"`) — never a
+   catalog entity — while `target_node` is `f"{object_type}:{object_id}"` (sometimes a real table,
+   sometimes a tool version or an agent run). So an AI-decision edge never connects two real graph
+   nodes; folding it in needs a new node kind for the AI-component side, which does not exist.
+   `AiDecisionRecord` also carries no `datasource_id` column at all, so even a synthetic-node
+   solution would need a name-based `run_id -> AgentRun -> datasource` join to scope a query by
+   datasource, adding complexity on top of the node-kind blocker rather than instead of it.
+
+4. **Consumption edges** — `ContextProductConsumptionEdge` (`src/aida/models.py:2634`), CX-4's
+   immutable per-read record. Traced its FK: `context_product_version_id` points at
+   `ContextProductVersion` (`:2521`), which is `project_id`-scoped — no `datasource_id`, no FK to
+   `MetadataTable` at all, even though it carries a `table_ids: JSON list[str]` column naming the
+   tables the product bundles (not a queryable relationship, just an opaque string list). The
+   edge's other side, `principal_id`/`principal_type`, is a bare consumer-identity string (a human
+   or an agent run), not an asset. Both ends need a `UnifiedLineageNodeKind` that does not exist.
+
+### The actual blocker, verified directly rather than assumed
+
+`UnifiedLineageEdgeSource` and `UnifiedLineageNodeKind` (`src/aida/schemas.py:1287,1290`) are
+closed `Literal`s with exactly six and six members respectively — no unused/reserved slot the way
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` were pre-reserved for LN-7 to fill. Proven, not assumed,
+that pydantic actually rejects an out-of-set value rather than silently coercing it:
+
+```
+>>> UnifiedLineageEdgeRead(id="x", edge_source="GATEWAY_QUERY_LINEAGE", ...)
+ValidationError: Input should be 'FOREIGN_KEY', 'SUGGESTED_RELATIONSHIP', 'DBT_DEPENDENCY',
+'OPENLINEAGE_ETL', 'VIEW_DEFINITION' or 'PROCEDURE_DEFINITION' [type=literal_error]
+```
+
+Reusing one of the six existing values for a new producer was considered and declined: none of
+them honestly describes an AI decision, a BI edge, a consumption read, or a gateway-parsed query
+(`SUGGESTED_RELATIONSHIP` in particular is tied to `RelationshipCandidate`'s maker-checker review
+semantics, which none of these four share), and doing so would misrepresent provenance — the exact
+opposite of what this row exists to fix (`evidence["source"]`-only sub-tagging, the pattern
+`DATABASE_CONSTRAINT`/`DBT_MANIFEST`/`OPENLINEAGE` already use *inside* an honestly-chosen
+top-level bucket, was considered too, but there is no honest top-level bucket for any of these
+four to sit inside). Extending these Literals is a normal, precedented step on this platform —
+`VIEW_DEFINITION`/`PROCEDURE_DEFINITION` were added to the exact same Literal for LN-7 — but this
+row's hard constraints forbid editing `schemas.py` for any reason, so it is out of scope for this
+pass specifically, not architecturally impossible.
+
+### Gap-pinning tests, not a design assertion
+
+Four new tests in `tests/test_unified_lineage.py`, each seeding real rows in the producer's real
+table alongside a real 2-table FK graph, proving the producer's data does not surface as a
+unified-graph edge, a `counts_by_source` entry, or (where relevant) a node — concrete evidence of
+the gap, not just a claim about it:
+
+- `test_at10_bi_metric_column_edges_do_not_appear_in_the_unified_graph` — a `BiMetricColumnEdge`
+  resolved to a real table via `matched_table_id` still contributes nothing.
+- `test_at10_ai_decision_edges_do_not_appear_in_the_unified_graph_or_impact` — a real
+  `RETRIEVAL_SELECTED` `AiDecisionRecord` naming a real table as `target_node` contributes nothing
+  to the graph *or* to that table's own impact traversal (`upstream`/`downstream` both empty).
+- `test_at10_consumption_edges_do_not_appear_in_the_unified_graph` — a real
+  `ContextProductConsumptionEdge` contributes nothing; neither the `principal_id` string nor the
+  `ContextProductVersion` id appear as graph nodes.
+- `test_at10_gateway_query_lineage_does_not_appear_in_the_unified_graph` — a real `QueryExecution`
+  row with real `extract_column_lineage` output over two real catalog tables contributes no edge,
+  while the test also asserts both tables *are* present as ordinary resolved nodes (isolating the
+  gap to edges specifically, not an artifact of the tables being invisible for some other reason).
+
+### Verification
+
+`tests/test_unified_lineage.py` (21 tests total, 4 new): `AIDA_ENVIRONMENT=development uv run
+pytest tests/test_unified_lineage.py -q` all green. `ruff check tests/test_unified_lineage.py`
+clean. `mypy src` unaffected — no `src/` file touched; same pre-existing 44 `"object" not
+callable"` Temporal-decorator errors documented in AT-13's entry, none in a file this row touched.
+`AIDA_ENVIRONMENT=development uv run pytest tests/test_doc_claims.py -q` clean (full suite, no
+failures). No HTTP route added, so no OpenAPI baseline/`ui-next` regen; no new `event_type=`
+emitted via `record_outbox`, so no `tests/test_event_catalog_gate.py` change needed. No
+`models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file touched and no Alembic
+migration — the hard constraints this row's owner set.
+
+### Honest scope statement
+
+0 of the 4 remaining orphaned producers were joined. 2 of the original 6 (view, procedure) were
+already joined by LN-7 before this row was claimed. All 4 remaining are blocked on extending
+`UnifiedLineageEdgeSource`/`UnifiedLineageNodeKind` in `schemas.py` (BI/AI-decision/consumption
+additionally need a new `UnifiedLineageNodeKind`), which this pass's hard constraints forbid. This
+is reported as `BLOCKED`, not `DONE` or a silently-abandoned `TODO` — the row's exit criterion
+("every edge producer writes to the canonical edge table and impact analysis traverses all of
+them") is not met, and AT-21 (impact-as-PR-gate), which names itself "blocked on AT-10," should
+still be read that way.
+
+---
+
+## 2026-09-01 — AT-7(b) closed: consumer-binding registry for staged rollout
+
+AT-7(a)'s own log entry (earlier today) sketched exactly what part (b) needed but explicitly left it
+undone, prioritizing the live correctness bug first: "a `context_product_consumer_binding` table
+..., a REST surface to create/list/move a binding ..., and a read-path hook." This entry builds the
+first two pieces in full and the third as a standalone, tested function -- honestly not wired into a
+live read path, because that path does not exist yet (see Scope note below).
+
+### The registry
+
+New `ContextProductConsumerBinding` (`models.py`, migration `eaf120430212`): one row per
+`(product_id, consumer_principal_id)`, enforced by a real unique constraint -- a `PUT` to
+`/v1/context-products/{product_id}/bindings/{consumer_principal_id}` therefore either creates the
+first binding for that consumer or moves their existing one, never appends a duplicate. `bound_version_id`
+is validated against the path's own `product_id` (422 if the version belongs to a different product,
+whether by typo or by pointing at the wrong product's version by mistake). `GET .../bindings` lists
+every binding for a product with the bound version's number joined in (`bound_version_number`) so a
+caller does not need a second round-trip to know what a binding actually points at. `DELETE
+.../bindings/{consumer_principal_id}` unpins a consumer (404 if there was nothing to unpin). All three
+follow this file's established audit-then-outbox pattern
+(`context.product_consumer_binding_set.v1` / `.removed.v1`, added to `04-event-catalog.md` before
+either could be flagged as an undocumented event by TS-11's gate) and are gated the same way
+version-authoring already is (`CONTEXT_PRODUCT_AUTHORS` for the two mutations, the broader
+`CONTEXT_PRODUCT_LIFECYCLE_READERS` for the list -- an operational rollout control, not something
+every `Analyst`/`Viewer` needs visibility into).
+
+Deliberately not a percentage/weight split: the tracker's own exit text says "Blind A/B splits are
+declined." `ContextProductConsumerBindingCreate` takes exactly one field, `bound_version_id` -- there
+is no dial, no rollout percentage, no random assignment. Staged rollout here means an operator moves
+named, specific consumers one at a time under their own judgment, which is what "explicit operator
+control" concretely means once it has to be implemented rather than described.
+
+### The resolution function
+
+`context_product_policy.resolve_bound_version(session, *, product_id, principal_id, now=None) ->
+ContextProductVersion | None`: the pure logic a future unversioned read path will need. A consumer
+with a binding whose version `can_serve_pinned_version` (PUBLISHED, or SUPPORTED within its own
+window -- the exact same predicate AT-7(a) already uses for version-pinned reads) stays on that
+version even after a newer one publishes; this is the actual staged-rollout mechanic -- an operator
+who pinned someone to v2 does not want them silently bumped to v3 the moment it is approved. A binding
+whose version has since become fully retired (superseded/deprecated, or a support window that has
+elapsed) does not exempt its consumer from that retirement -- resolution falls back to whatever is
+currently PUBLISHED, the same as an unbound consumer gets.
+
+### Found and fixed in passing: a SQLite-only false negative
+
+Writing tests against a real in-memory sqlite DB (necessary here -- the registry's own unique
+constraint has to be exercised for real to prove "second `PUT` moves rather than duplicates" actually
+holds) hit `sqlalchemy.exc.IntegrityError: UNIQUE constraint failed: context_product_version.product_id`
+the instant a test tried to create two versions of one product, even with only one of them PUBLISHED.
+`ContextProductVersion`'s `uq_context_product_version_one_published` index declares
+`postgresql_where=text("status = 'PUBLISHED'")` -- SQLAlchemy only applies a `postgresql_where` clause
+when compiling DDL for the Postgres dialect specifically; with no `sqlite_where` counterpart, SQLite's
+`Base.metadata.create_all()` (every in-memory test fixture in this codebase, this file included)
+compiled it as an unconditional `UNIQUE(product_id)` -- one version per product, full stop, in test
+only. Fixed by adding the matching `sqlite_where=text("status = 'PUBLISHED'")`. Zero effect on
+Postgres (its migration already had the correct partial index) and zero effect on Alembic (SQLite is
+never migrated in this codebase, only used via `create_all()` for fast in-process tests) -- purely a
+test-fixture-fidelity fix, but a real one: before this, no SQLite-backed test in this codebase could
+ever have exercised "two versions of one product coexist, only one PUBLISHED" at all, silently.
+
+### Tests (`tests/test_context_products.py`, 6 new, real in-memory sqlite)
+
+`test_set_binding_creates_then_moves_it` (a second `PUT` for the same consumer changes which version
+is bound rather than creating a second row -- checked by counting rows, not just the response),
+`test_set_binding_rejects_a_version_from_a_different_product` (422), `test_list_bindings_reports_bound_version_numbers`,
+`test_delete_binding_removes_it_and_404s_when_absent`,
+`test_resolve_bound_version_prefers_a_servable_binding_over_a_newer_published_version`,
+`test_resolve_bound_version_falls_back_once_the_binding_is_fully_retired`,
+`test_resolve_bound_version_returns_the_current_published_version_when_unbound`.
+
+### Verification
+
+`pytest tests/test_context_products.py tests/test_context_product_negative_knowledge.py
+tests/test_openapi_diff_gate.py`: 70 passed. `ruff check` clean. `mypy --strict` clean (one
+`no-any-return` on `resolve_bound_version`'s final `session.scalar()` fixed with an explicit local
+type, not suppressed, matching this file's own existing `current_published_version_number` pattern).
+`scripts/openapi_diff.py` (no `--accept-baseline`) reported the new paths as purely additive with no
+breaking changes before the baseline and `ui-next/src/lib/types.ts` were regenerated and accepted.
+
+### Scope note: the read-path hook is a function, not a wired endpoint
+
+`resolve_bound_version` is tested directly and correct, but nothing in a live REST/MCP read path calls
+it yet, because the read path it belongs to does not exist: today's version-pinned reads
+(`get_context_product_version`, `_read_context_product_resource`) all require an explicit version
+number in the path/URI. An *unversioned* "give me the current one for me" endpoint or MCP resource
+type (`atlas://context-products/{key}/latest`, named but explicitly not built in AT-7(a)'s own sketch)
+is a second read surface with its own quality/purpose/consumption-lineage/audit requirements --
+replicating all of `get_context_product_version`'s ~150 lines for a second entry point is real,
+separate scope, not a small addition to bolt on here. Building the registry and the resolution
+function this pass, leaving the wiring for whoever builds that endpoint, matches the tracker's own
+framing of AT-7(b) as "a registry with staged rollout" -- the registry is real and complete; the
+endpoint that would consult it during an ordinary read is the next, separate piece.
+
+---
+
+## 2026-09-01 — Found and fixed: literal unresolved `git stash pop` conflict markers committed to the shared trunk
+
+Rebasing this branch's AT-7(b) commit onto the latest `feature/snowflake-dbt-lineage-mcp` pulled in
+commit `cc41a13` ("feat(glossary): implement two-tier escalation for unowned assets with ITSM
+payloads") -- an independent, parallel implementation of the exact same GL-6 tier-2 escalation feature
+this branch had already closed and pushed earlier the same day. That collision itself is unsurprising
+given how many concurrent sessions are landing work on this branch today; what made it a real defect is
+that `cc41a13` was committed with **literal, unresolved `<<<<<<< Updated upstream` / `=======` /
+`>>>>>>> Stashed changes` markers still in the file** -- the `git stash pop` conflict from reconciling
+that session's own stashed work against this branch's already-pushed GL-6 commit was never actually
+resolved before the commit landed. `git rebase`'s own conflict markers use commit hashes, never
+"Updated upstream"/"Stashed changes" -- confirmed via `git show cc41a13 -- <path>` that these strings
+were already baked into that commit's diff, not an artifact of this session's own rebase.
+
+Scope of the corruption, found by a repo-wide `grep -rln "Updated upstream\|Stashed changes"`:
+`src/aida/stewardship_api.py` (one block, inside `route_unowned_asset_backlog`'s return statement --
+this made the file **fail to parse as Python at all**, since `<<<<<<<` is not valid syntax),
+`tests/test_glossary_owner_routing.py` (eight blocks, spanning two whole test functions'-worth of
+interleaved fixture setup), and `Docs/30-contracts/04-event-catalog.md` (one block, two differently-worded
+rows for the same `stewardship.unowned_asset_escalated_tier2.v1` event). `Docs/90-reference/openapi-baseline.json`
+was also touched by that commit but auto-merged cleanly (confirmed still valid JSON via `json.load`)
+and `Docs/20-modules/08-glossary-and-stewardship.md` merged clean with no markers.
+
+### Resolution
+
+The two implementations differed in one real design choice: this branch's own (already-migrated,
+already-tested) design keeps a dedicated `escalated_tier2_at` column, so `escalated_at` always still
+means "when tier 1 fired" even after tier 2 also fires; the other session's design had no new column at
+all and instead overwrote `escalated_at` with the tier-2 timestamp, plus re-offered the incident to
+`route_notification` a second time before unconditionally building the ITSM payload. Kept this branch's
+version throughout -- it already has a real migration, already-passing tests, and preserves more
+history (both timestamps distinguishable) rather than less. One net-new addition kept from the other
+side: `test_sync_tier2_escalation_produces_itsm_payload_even_without_a_matching_rule`, a legitimate
+(if largely redundant with this branch's own zero-rules assertion) test proving tier 2's ITSM guarantee
+holds with `notification_rules=[]`. The duplicated `DEFAULT_ESCALATE_TIER2_AFTER` constant (defined
+twice, 7 days then silently re-defined to 21 -- Python just uses whichever assignment executes last at
+module load, so the second, unintended value was the one actually active) and the duplicated tier-2
+`if` block in `sync_unowned_asset_backlog` (both would not literally double-fire in one pass, since the
+first one already flips `status` away from `"ESCALATED"` before the second's own guard re-checks it,
+but two competing implementations of the same branch sitting in one function is a defect regardless of
+whether it happened to produce a wrong *answer* today) were both removed, leaving exactly the one
+canonical implementation this branch already had before the rebase pulled in the collision.
+
+### Verification
+
+`ast.parse()` on all three affected Python files confirms they parse as valid syntax again (a
+regression check the normal test suite could not have caught, since a `SyntaxError` in
+`stewardship_api.py` would have failed collection for every test in this session, not just this row's).
+`pytest tests/test_glossary_owner_routing.py tests/test_glossary_stewardship.py
+tests/test_fleet_scheduling.py`: 59 passed (57 before, +2 -- the kept extra test, plus `route_notification`'s
+import staying genuinely used rather than orphaned). `pytest tests/test_openapi_diff_gate.py`: clean,
+confirming the auto-merged baseline still matches `app.openapi()` exactly. `ruff check`/`mypy --strict`
+clean on both touched source files. Full session regression (all 15 touched test files from
+IN-5g/MG-3/GL-6/AT-7b): 314 passed.
+
+Not fixed here, flagged for whoever owns it: `cc41a13` itself remains in this branch's history exactly
+as committed, markers and all, until this fix's own commit lands on top of it -- the broken intermediate
+state is still visible via `git show cc41a13`, which is correct (history is not rewritten), but anyone
+bisecting through that exact commit would find a file that fails to import.
+
+### Update: a second, independent fix for the same corruption landed upstream mid-session, and over-corrected
+
+Before this fix's own commit could be pushed, `origin/feature/snowflake-dbt-lineage-mcp` advanced
+again with commit `4f6cdd2` ("fix(glossary): resolve unresolved stash-conflict markers from cc41a13")
+-- another session had found and fixed the identical corruption independently, converging on the exact
+same judgment call documented above (keep the `escalated_tier2_at` design, keep the one genuinely new
+test, remove the duplicate constant and duplicate code block). Rebasing onto it absorbed that fix
+cleanly with no conflict, which is the reassuring half of this update.
+
+The less reassuring half: `4f6cdd2`'s own removal of the *duplicate* `DEFAULT_ESCALATE_TIER2_AFTER`
+definition removed *both* copies, not one -- leaving `sync_unowned_asset_backlog`'s own keyword default
+(`escalate_tier2_after: timedelta = DEFAULT_ESCALATE_TIER2_AFTER`) referencing a name that no longer
+existed anywhere in the module. This was not a subtle bug: `NameError: name 'DEFAULT_ESCALATE_TIER2_AFTER'
+is not defined` at import time, which meant every test file importing anything from
+`glossary_owner_routing` (or transitively from `stewardship_api`, or the whole `aida.main` app) failed
+collection outright -- five test files errored in this session's own post-rebase regression run before
+this was caught. Fixed by restoring exactly one definition, `DEFAULT_ESCALATE_TIER2_AFTER =
+timedelta(days=7)`, with its original explanatory comment.
+
+Verification after this second fix: `ruff check` clean; `AIDA_ENVIRONMENT=development python -c "from
+aida.main import app"` succeeds (379 routes) -- the same import-time smoke check that would have caught
+`4f6cdd2`'s own regression before it ever reached a rebase; full session regression re-run, 314 passed,
+zero errors.
+
+The pattern worth naming here, not just the individual bug: two independent sessions fixing the *same*
+literal-conflict-marker corruption, minutes apart, on a branch under this much concurrent load, is
+itself a symptom -- the underlying problem (a session running `git stash pop`, hitting a conflict, and
+committing anyway without finishing it) is a process gap, not a one-off mistake, and is likely to recur
+on this branch until whatever is driving concurrent sessions to stash/pop against a moving trunk instead
+of committing or rebasing cleanly is addressed at the workflow level.
+
+---
+
+## 2026-09-01 — TS-3 closed: sentinel scan over exported trace spans finds and fixes a real INV-6 gap
+
+Logs, tables, events, and persisted SQL were already covered by sentinel scans (OB-8, and
+`tests/test_inv6_value_freedom.py`'s existing tests). Traces were the one axis with no scan at all.
+Before writing one, an exhaustive `grep -rn "set_attribute\|start_as_current_span\|add_event"
+src/aida/` confirmed `observability.py`'s `@traced` decorator is the *only* place in the entire
+`src/aida` tree that ever touches a span -- and it only ever sets three known-safe keys
+(`organization_id`, `principal_id`, `correlation_id`) plus `duration_ms`. By that reasoning, trace
+value-freedom looked structurally guaranteed already, with nothing to find. It wasn't.
+
+### The gap the scan found
+
+`tracer.start_as_current_span(span_name)` was called with OpenTelemetry SDK's own default,
+`record_exception=True`. Reproduced directly before touching any source:
+
+```python
+@traced
+async def traced_call(organization_id=None):
+    raise ValueError(f"duplicate key violates unique constraint: value={SENTINEL!r} already exists")
+```
+
+produced an exported span whose `exception` event carried `exception.message` and
+`exception.stacktrace` containing the sentinel verbatim. Any `@traced` function that lets a source
+system's exception propagate -- a database constraint violation naming the offending row value being
+the obvious real-world case -- would export that value to whatever trace backend is configured, entirely
+bypassing the three-key allowlist `_set_span_attributes` was written to enforce. The allowlist was never
+wrong; automatic exception recording is a separate code path the original implementation did not
+account for.
+
+### The fix
+
+`observability.py`: both `async_wrapper` and `sync_wrapper` now call `start_as_current_span(span_name,
+record_exception=False)`, and wrap the `await func(...)` / `func(...)` call in its own `try/except` that
+records only `span.set_attribute("error_class", type(exc).__name__)` plus a generic `Status(StatusCode.ERROR)`
+before re-raising -- never touching `str(exc)`. This is the exact `error_class`-not-message convention
+`query_gateway.py` already established for the same reason (`execution.error_class = type(exc).__name__`,
+never the exception text). Exception propagation itself is unchanged -- the wrapped function's exception
+still reaches the caller identically; only what gets attached to the span changed.
+
+### Tests (`tests/test_inv6_value_freedom.py`, 2 new)
+
+`test_no_source_values_reach_exported_trace_spans`: drives one real `@traced` call whose return value
+carries a sentinel (proving `@traced` never inspects a wrapped function's return value -- it flowed
+through untouched, checked via a sanity assertion) and one that raises with a sentinel embedded in the
+exception message (the actual gap), against a real `TracerProvider` + `InMemorySpanExporter` attached
+the same way `test_observability.py`'s existing `test_lifespan_wires_tracing_and_metrics_and_a_real_request_produces_a_real_span`
+already does. Scans every exported span's name, attribute values, and event names/attribute values for
+three sentinel strings. `test_the_trace_span_scan_would_notice_a_leak`: the negative control -- opens a
+span with `record_exception` left at the SDK's own default (reproducing exactly what `observability.py`
+now avoids) and requires the scan to find it, so a scan that silently stopped looking at exception
+events would not pass by accident.
+
+### Verification
+
+`pytest tests/test_inv6_value_freedom.py tests/test_observability.py`: 65 passed (including the
+existing `test_lifespan_wires_tracing_and_metrics_and_a_real_request_produces_a_real_span`, confirming
+the real request-dispatch `@traced` call site in `main.py` is unaffected). `ruff check` and `mypy
+--strict` clean on `observability.py`. `AIDA_ENVIRONMENT=development python -c "from aida.main import
+app"` succeeds (379 routes) -- the app's one real `@traced` call site, `_traced_dispatch`, still wires
+cleanly through `lifespan`.
+
+Honest gap: this proves value-freedom for *exceptions raised inside a `@traced`-wrapped function's own
+call*, which is the concrete mechanism this scan found. It does not (and structurally cannot, without a
+live source) prove the ingestion/profiling pipelines' traces are value-free end-to-end -- the same
+narrower-than-the-specced-fixture scope `test_no_source_values_in_control_plane`'s own docstring already
+states for the query path, extended here to traces for the same reason: no PostgreSQL, no source
+database, in this sandbox.
+
+---
+
+## 2026-09-01 — SM-1 (governed dimension authoring) investigated, BLOCKED: no dimension-shaped persisted model exists
+
+Claimed this row expecting to mirror module 07's existing governed-metric authoring/versioning/
+maker-checker pattern (`SemanticMetric` / `SemanticMetricVersion` / `SemanticMetricProposal` in
+`models.py`, `metric_suggestion_service.py`, and the metric-version endpoints in `semantic_api.py`) for
+dimensions instead. Read that pattern in full before writing anything, per this row's own brief.
+
+### What was checked
+
+`grep -n "class Semantic" src/aida/models.py` returns exactly five classes: `SemanticModelVersion`,
+`SemanticMetric`, `SemanticMetricVersion`, `SemanticInferenceRun`, `SemanticMetricProposal`. No
+`SemanticDimension`. A second, case-insensitive sweep (`grep -ni dimension src/aida/models.py`) finds
+only: `IndexConfig.dimensions` (embedding vector width, an unrelated module 06 concept),
+`SemanticMetricVersion.allowed_dimension_column_ids` (a plain `JSON` list of raw `metadata_column`
+UUIDs a published metric may be grouped/filtered by -- an allowlist of *columns*, not a governed
+business object with its own identity), an unrelated `dimension: int` on a vector/embedding row, and
+one doc comment. Same sweep across `src/aida/schemas.py` and `src/aida/platform_schemas.py`: nothing
+dimension-shaped there either (`schemas.py`'s only hits are the same `allowed_dimension_column_ids`
+field plus an unrelated `CoverageDimensionRead` used by a data-quality coverage report, not semantics).
+`grep -rn "class.*Dimension" src/atlas/` (all module-07-adjacent packages under the new per-module
+split): zero hits.
+
+Most decisive: `TermSemanticBinding`'s own docstring in `models.py` (~L4197, written for SM-2) says so
+in as many words -- "a future governed-dimension type from SM-1 binds the same way without a schema
+change" -- confirming that as of today's trunk, a governed-dimension type has never been built. Endpoint
+side is equally empty: `semantic_api.py` has `create_metric_version` / `list_metric_versions` /
+`get_semantic_metric_version_consumers` / metric-glossary-binding routes, and nothing dimension-shaped.
+
+### Why this is a schema gap, not a build gap
+
+The metric pattern this row must mirror is a three-table shape: `SemanticMetric` (identity: id, org,
+project, slug) + `SemanticMetricVersion` (immutable versioned content: name, description, aggregation,
+source binding, `semantic_model_version_id` FK, status DRAFT/PUBLISHED, fingerprint) +
+`SemanticMetricProposal` (evidence-driven maker-checker draft feeding the shared `governance_review`
+queue via `metric_suggestion_service.apply_metric_suggestion_proposal` /
+`semantic_api.decide_governance_review`). None of the three has a dimension counterpart. Building the
+authoring/versioning/maker-checker service and API layer this row asks for needs somewhere to persist a
+dimension's identity, its version history, and its own proposal/review record -- none of which exists,
+and inventing it needs a `models.py` + `schemas.py` change plus an Alembic migration, both explicitly
+out of bounds for this worktree.
+
+Declined the workaround this row's own brief warns against by name: storing a dimension definition
+inside an existing generic JSON field on an unrelated table (`SemanticMetricVersion.
+allowed_dimension_column_ids`, or `CatalogBulkActionRun.parameters`) would not give a dimension its own
+identity, independent version history, or its own maker-checker review record -- it would satisfy this
+row's exit criterion in appearance only, the exact category-error AT-15/AT-13's "never present a
+fabricated signal as an established fact" convention exists to prevent. No code changed; nothing wired
+to a non-existent table.
+
+### What a future session needs, precisely
+
+Three new tables mirroring the metric shape 1:1 (`SemanticDimension`: id/org/project/slug;
+`SemanticDimensionVersion`: semantic_model_version_id FK, dimension_id FK, version, status, name,
+description, source_table_id, source_column_id, fingerprint, created_by;
+`SemanticDimensionProposal`/equivalent evidence row entering `governance_review` the same way
+`SemanticMetricProposal` does) plus the matching Alembic migration. Once those three tables exist, the
+authoring/versioning/review service and API layer is a near-verbatim port of
+`metric_suggestion_service.py` + `semantic_api.py`'s metric-version routes -- the hard part of this row
+is the schema, not the workflow logic, and the schema is exactly what this worktree cannot touch.
+
+### Verification
+
+No implementation files touched, so no `ruff`/`mypy` delta to report. `AIDA_ENVIRONMENT=development uv
+run --extra dev pytest tests/test_doc_claims.py -q` run before the closing push (see commit). No HTTP
+route added/changed -> no OpenAPI/`ui-next` regen needed. No new `record_outbox` event type -> no
+`04-event-catalog.md` change needed. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict
+markers run immediately before the closing push: none found.
+
+## 2026-09-01 — AU-14 closed: coverage measurement wired in, a real baseline established, and a CI floor set
+
+`pytest-cov==6.2.1` had been a declared dev dependency since before this session, invoked nowhere -- no
+`--cov` flag anywhere in `pyproject.toml`'s `[tool.pytest.ini_options]` or `.github/workflows/ci.yml`.
+Coverage was simply never measured. Fixed:
+
+- `pyproject.toml`: new `[tool.coverage.run]` (`source = ["aida", "atlas"]`, `branch = true`, test/
+  migration dirs omitted) and `[tool.coverage.report]` sections. Deliberately not folded into
+  `[tool.pytest.ini_options]`'s `addopts` -- `migration-drift`/`reachability`/
+  `connector-version-fixtures` each invoke `pytest` against a single test file for a fast targeted
+  signal, and forcing `--cov` into every one of those would slow them down for a meaningless
+  partial-suite number; `pytest-cov`'s plugin only activates when `--cov` is actually passed on the
+  command line, so this costs those jobs nothing.
+- `.github/workflows/ci.yml`'s `tests` job (the one job that runs the full suite) now runs
+  `--cov=aida --cov=atlas --cov-report=term-missing --cov-report=xml --cov-fail-under=69` and uploads
+  `coverage.xml` as a build artifact.
+
+**A real baseline, run for real, not estimated.** `AIDA_ENVIRONMENT=development uv run --extra dev
+pytest --cov=aida --cov=atlas --cov-report=term-missing --cov-report=xml --cov-report=json` against the
+full suite: 6,095 tests collected, 6,082 passed / 3 failed / 9 skipped / 1 xfailed. **74.10% combined
+statement+branch coverage** (77.39% statement-only, 59.91% branch-only; 31,433 statements, 7,107
+missed, 7,278 branches, 1,010 partial). 32 files at exactly 0%: two real `aida` modules
+(`batch_ingestion.py`, `workflows/worker.py`) and all six files (`api.py`/`contracts.py`/`events.py`/
+`repository.py`/`router.py`/`service.py`) of five `src/atlas/modules/*` scaffolds (`catalog`,
+`connectivity`, `identity_tenancy`, `ingestion`, `observability_audit`) -- confirmed genuinely
+unreachable, not a measurement artifact: `main.py` never imports any of them, and their own
+module-scaffold tests live under `src/atlas/modules/*/tests/`, outside `testpaths = ["tests"]`, so
+they are never collected by a plain `pytest` run.
+
+**Re-verified the row's own "16 of 36 API modules ... imported by no test" claim** against real
+coverage instead of a name-grep proxy, since the count had visibly drifted since the row was written:
+51 API-surface modules exist today (46 `src/aida/*_api.py` + 5 `src/atlas/modules/*/api.py`, the
+latter a naming convention that postdates the row's original count). Result is better than the stale
+claim on the `aida` side and confirms it on the `atlas` side: **0 of the 46 `aida` `*_api.py` files are
+at 0% coverage** (lowest is `ingestion_api.py` at 15.41%) -- a same-name-string grep against `tests/`
+flags 8 of them (`compliance_api.py`, `negative_knowledge_api.py`, `notification_api.py`,
+`quality_api.py`, `runtime_contracts_api.py`, `search_api.py`, `semantic_intelligence_api.py`,
+`sql_validation_api.py`) as apparently untested by name, but all 8 measure 17-72% real coverage --
+reached via `TestClient`-driven integration tests that exercise the live route without the test source
+ever mentioning the module's file name, so the grep proxy overstates the gap and the coverage number is
+the honest one. **All 5 of the `atlas` `api.py` router modules are at 0%** -- the real, current
+instance of the row's claim.
+
+**Floor: `--cov-fail-under=69`.** Chosen as a 5-point margin below the measured 74.10%, matching AG-8's
+own quality-baseline gate's established 5-point-margin convention for a percentage-point CI floor -- a
+regression ratchet against backsliding (the suite already clears it by 5.10 points today), not a target
+still to be reached.
+
+Full results (the complete 51-module coverage table, the zero-coverage-file breakdown, and the
+pre-existing-failure analysis) published at `Docs/90-reference/coverage-baseline.md`, plus a
+machine-readable `Docs/90-reference/coverage-baseline.json` summary, following the AG-8/SM-3 published
+benchmark-results convention.
+
+### Verification
+
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py -q`: clean, all
+citations in the tracker row and the two published files resolve. The 3 test failures surfaced during
+the coverage run are pre-existing and unrelated to this change (CI/tooling-only -- no `aida`/`atlas`
+source was touched): `test_config.py::test_environment_must_be_explicit_outside_tests` fails
+specifically when `AIDA_ENVIRONMENT` is set in the ambient shell env, which this run's own
+`AIDA_ENVIRONMENT=development` (required for `pytest-cov`'s dev-extra import) triggers -- already
+documented as a known, out-of-scope conflict in this same file's AU-12 entry;
+`test_openapi_diff_gate.py::test_committed_baseline_matches_current_app_openapi_output` reflects the
+committed OpenAPI baseline drifting behind other feature rows landing on this fast-moving branch, TS-4's
+own gate's concern, not this row's; `test_au12_temporal_outage_resilience.py::
+test_readiness_recovers_to_up_once_reconnect_succeeds` is a timing-sensitive reconnect-polling assertion
+that reads as ordinary flakiness under a 6,095-test run with coverage instrumentation active. None are
+coverage-tooling issues and none block this row's own exit criterion. Repo-wide grep for literal
+`<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately before the closing push: none found.
+
+---
+
+## 2026-09-01 — IN-5e closed: `source_description` moves from a row to a real column on `metadata_column`
+
+### The gap, exactly as scoped
+
+`metadata_table.source_description` has been a real column since the 1.0 model existed.
+`metadata_column` never got the equivalent -- not for an architectural reason, but because the N1
+workstream that added envelope 1.1's description axis could not touch `models.py` at the time, so
+catalog/schema/column comments all landed in a row-based side table, `metadata_object_description`,
+instead. Tables already had their own column and so were correctly left out of that table's
+`DESCRIBABLE_OBJECT_TYPES`; columns were not, purely because of who owned `models.py` that week.
+
+### What shipped
+
+- `atlas/modules/catalog/models.py`: `MetadataColumn.source_description: Text | None`, same shape as
+  `MetadataTable`'s.
+- Migration `c8fcafc5856a`: backfills the new column from every **ACTIVE** `metadata_object_description`
+  row with `object_type = 'COLUMN'` (a DEPRECATED row is a retracted fact and must not resurrect),
+  deletes those rows entirely (both statuses -- `COLUMN` is no longer a valid `object_type` there going
+  forward), then drops `column_id` and its FK/unique constraint/index, and recreates
+  `object_type_is_describable` (`IN ('CATALOG','SCHEMA')`) and `exactly_one_subject` (two terms, not
+  three) to match. Verified both directions offline (`alembic upgrade`/`downgrade ... --sql`) against a
+  Postgres dialect target -- no live Postgres in this sandbox, same standing limitation shared with
+  every other migration landed today.
+- `envelope_models.py`: `DESCRIBABLE_OBJECT_TYPES` narrowed to `('CATALOG', 'SCHEMA')`; the model
+  docstring updated to say why `column_id` is gone rather than just removing it silently.
+- `workflows/activities.py::_get_or_create_column`: now sets `source_description` on both the create
+  and update branches, exactly mirroring `_get_or_create_table`'s existing two lines. This function is
+  the *shared* column-upsert helper for both native-pull discovery and the 1.0 half of push-envelope
+  ingestion (`persist_discovery_snapshot`, called from `_ingest`-style flows) -- one fix covers both
+  producers.
+- `atlas/modules/catalog/schemas.py::MetadataColumnRead`: gained `source_description: str | None = None`.
+  Left write-only would have just moved today's actual defect (zero consumers in `src/aida` ever read a
+  column's `metadata_object_description` row -- confirmed by grep before touching anything) rather than
+  fixed it.
+
+### A discovery mid-fix: the 1.1-envelope column-description path was already dead code
+
+`ingestion.py::persist_envelope_extensions` (the envelope-1.1-specific pass) had its own
+`object_type="COLUMN"` write path, called *after* `persist_discovery_snapshot`'s 1.0 pass on the same
+`DiscoveredCatalog` tree, per that function's own documented contract ("Must be called after
+`persist_discovery_snapshot` ... on the same catalogs"). Once `_get_or_create_column` (the 1.0 pass)
+started writing `source_description` from the identical `DiscoveredColumn.source_description` field the
+1.1 pass reads, the 1.1 pass's own column branch had nothing left to do -- the fact was already
+persisted, moments earlier, by the time it ran. Verified this rather than assumed it: a first attempt
+left the 1.1-side branch in place with a "write if different" guard, and a fresh
+`test_envelope_11_persists_every_new_axis` run showed `object_descriptions` short by exactly one and
+`created_objects` short by exactly one -- the guard's condition was never true, because the value was
+already identical by the time it ran. Removed the entire now-dead branch (and narrowed
+`_table_carries_extensions` to stop gating table visitation on a check that no longer does anything)
+rather than leave inert code sitting next to a guard that can never fire.
+
+### Tests
+
+`tests/test_envelope_v11.py`: two count assertions updated (`object_descriptions` 3->2,
+`created_objects` 7->6 in two tests -- the column no longer contributes a count to *this* pass, since
+it is fully handled one pass earlier), `described == {"CATALOG","SCHEMA"}` (was `{...,"COLUMN"}`), and a
+new direct assertion that `MetadataColumn.source_description` actually holds
+`"surrogate key of the deposit account"` after a real end-to-end `_ingest()` call -- proving the fact
+still lands somewhere, not just that the old counter stopped counting it.
+
+### Verification
+
+`pytest tests/test_envelope_v11.py tests/test_catalog_pagination.py tests/test_catalog_bulk_actions.py
+tests/test_catalog_bulk_actions_endpoints.py tests/test_inv1_single_authoritative_store.py
+tests/test_inv6_value_freedom.py tests/test_profiling_dag_wiring.py
+tests/test_profiling_exception_policy.py tests/test_connectors.py tests/test_connectors_oracle.py
+tests/test_connectors_snowflake.py tests/test_connectors_bigquery.py`: 240 passed. `ruff check` clean
+on every touched file. `mypy --strict`: 0 new errors (the pre-existing 15 `"object" not callable"`
+Temporal-decorator findings in `activities.py` are present on lines this row's diff never touches,
+confirmed by `git diff`).
+
+Checked and deliberately not committed: `scripts/openapi_diff.py --accept-baseline` produced a 7-line
+diff, but it was the same `ValidationError.ctx`/`.input` pydantic-version drift other rows landed today
+already found and left alone -- confirmed `MetadataColumnRead` isn't even a named component in
+`app.openapi()`'s output at all (`list_columns`'s `CursorPage` response model doesn't register the
+per-item schema class), so this row's own field addition produces no OpenAPI diff whatsoever. Reverted
+the regenerated baseline rather than bake in an unrelated change.
+
+Honest gap: no live Postgres in this sandbox to run the migration for real, same standing limitation as
+every other migration landed on this branch today.
+
+---
+
+## 2026-09-01 — N11 closed: view-to-tool generator ("tool generator B")
+
+### What it is
+
+A database VIEW is already a human-authored, pre-curated query — someone deliberately wrote and
+named it to answer a real question — which makes it the highest-quality-per-unit-of-effort source
+for auto-generating a governed tool: unlike an LLM guessing at a useful query, or even SM-5's
+`multi_table_blueprint.py` (a mechanical FK-join, not a curated one), a view's own SELECT list
+represents real analytical intent someone already had. This row composes SM-5's blueprint/persist-
+draft pattern with AT-19's redaction gating rather than inventing new plumbing:
+
+* `src/aida/view_tool_blueprint.py::build_view_tool_blueprint` — pure, DB-free. Given a view's own
+  output columns (`ViewToolColumn`: name, physical type, ordinal position), deterministically
+  renders `SELECT <view's own column list> FROM <view> WHERE <optional equality filters>` plus a
+  `list[aida.schemas.ToolParameterDefinition]`. The view's internal SELECT/JOIN/aggregation logic
+  is never re-derived or inlined — the view stays the single source of truth for its own logic; this
+  only adds a governed, parameterized *read surface* on top of it. Columns are canonicalized by
+  `(ordinal_position, name)`, so the same view columns always render byte-identical SQL and an
+  identically-ordered parameter list regardless of caller-supplied order (same determinism
+  discipline as `multi_table_blueprint.py`).
+* `resolve_view_tool_source` — the module's one DB-touching function, and the only thing a caller
+  needs to fake to unit-test the builder without a database. Loads the view's active
+  `MetadataColumn` rows *and* enforces the eligibility gate below before the pure builder ever sees
+  the view.
+* `tool_api.py` — new `POST /v1/projects/{project_id}/tool-blueprints/from-view`
+  (`create_view_tool_blueprint`, request model `ViewToolBlueprintRequest`: same
+  slug/name/description/allowed_roles shape as `GovernedToolVersionCreate` and SM-5's
+  `MultiTableToolBlueprintRequest`, a single `table_id` naming the view instead of `table_ids`/a
+  hand-written `sql_template`). Same PG-5 Enterprise-edition entitlement gate
+  (`studio_semantic_and_tool_authoring`) SM-5's sibling endpoint applies, then persists through the
+  *exact* draft-creation/validation tail `create_tool_version` and `create_multi_table_tool_blueprint`
+  already share (`_persist_tool_version_draft` — real `SqlGuard.validate`, the placeholder-vs-
+  parameter check, the datasource-table allowlist check, all unmodified). `submit_tool_for_review`
+  and independent maker-checker approval are completely unchanged — this path only ever produces a
+  `DRAFT`.
+
+### What column/type data was actually available, and why parameterization is FULL
+
+Investigated directly against `envelope_models.py`, `catalog/models.py` and `ingestion.py` before
+writing a line of the generator, per the row's own instruction not to fabricate typed parameters
+if the data isn't really there. Finding: it *is* there, and more completely than the row's own
+framing assumed. `MetadataViewDefinition` (`envelope_models.py`) stores only the view's redacted
+DDL *text* plus its screening/redaction status — no output-column list and no column-to-source
+mapping live on it at all. But a view also gets its own `MetadataTable` row (envelope 1.1) and its
+own `MetadataColumn` rows, populated by the *tier-1* base-envelope ingestion pass
+(`ingestion.py`'s table/column upsert, which runs before the tier-2 `_upsert_view_definition`
+extension and does not care whether `object_type` is `TABLE` or `VIEW`) — because
+`information_schema.columns` (and each connector's equivalent) exposes a view's *result* columns,
+with their real physical types, identically to a table's. That data is independent of whether the
+view's DDL text itself ever parsed, redacted, or screened cleanly. So the honest answer to "does
+the parser capture a column-to-source-table mapping" turned out not to gate parameter typing at
+all — `ViewLineageEdge`'s column-level lineage (N2/LN-2) was never needed for this. Every
+eligible output column's own declared `physical_type` types its parameter, via the exact same
+`relationship_naming.physical_type_family` bucketing `multi_table_blueprint.py` already reuses (no
+new type-validation logic invented). A column whose type does not resolve to a known, filterable
+family (array/JSON/geometry/other) is still selected into the tool's output — never omitted — but
+is never turned into a WHERE parameter, since this generator does not invent a filter type it
+cannot honestly validate. **Scope: FULL**, not partial and not row-limit-only.
+
+### Redaction gating
+
+What *does* gate generation entirely is the view's own `MetadataViewDefinition` — mirroring AT-19's
+`_view_definition_transformation_detail` gate in `mcp_server.py` exactly: `resolve_view_tool_source`
+raises `ViewNotEligibleError` (-> HTTP 422 naming the exact reason) when the table has no captured
+`MetadataViewDefinition` row at all, or when one exists but `status != "ACTIVE"`,
+`availability != "AVAILABLE"`, `redaction_status != "PARSED"`, or
+`screening_status` fails `ingest_screening.is_eligible_for_model_context` (i.e. `QUARANTINED`). A
+tool whose underlying logic cannot be shown to a reviewer cannot responsibly be published, even as
+a draft — so this generator refuses rather than guesses.
+
+### Verification
+
+11 tests in `tests/test_view_tool_blueprint.py`. Pure, no database: `same_input_twice` and
+`determinism_is_independent_of_caller_supplied_column_order` prove byte-identical `sql_template` and
+identically-ordered parameters; `every_recognized_typed_column_becomes_an_optional_parameter` checks
+NUMBER/STRING/BOOLEAN typing end to end; `a_column_with_an_unrecognized_type_is_selected_but_never_
+parameterized` proves a `GEOMETRY` column stays in the output but is never offered as a filter;
+`a_view_with_no_active_columns_is_a_structural_error` covers the one structural-error path;
+`rendered_sql_passes_the_real_sql_guard_and_renders_at_execution_time` runs the generated template
+through the real `aida.sql_guard.SqlGuard.validate` and `aida.tool_rendering.render_tool_sql` (no
+filter -> `IS NULL` keeps every row; a supplied filter value -> a real equality predicate). Real-
+database (in-memory SQLite, `StaticPool`, mirrors `tests/test_multi_table_blueprint.py`'s harness):
+`test_endpoint_creates_a_draft_and_its_rendered_sql_executes_against_the_real_view` seeds a genuine,
+*executable* SQLite `CREATE VIEW "main"."active_customers" AS SELECT id, name FROM "main"."customers"
+WHERE is_active = 1` (SQLite's own default database is literally named `main`, so the governance-
+catalog qualified name is also valid SQLite syntax) alongside the governance-metadata description of
+it, calls the real endpoint, and then takes the *persisted draft's own* `sql_template`/`parameters`
+straight from the `GovernedToolVersionRead` response, renders them via the real `render_tool_sql`,
+and executes the result against the real view — unfiltered returns exactly the two active rows
+(Alice, Carol), a `name` filter returns exactly the one matching row (Alice) — proving round-trip
+correctness through the actual persisted artifact, not a reconstruction of it. Redaction gating:
+`test_resolver_refuses_a_view_with_no_captured_definition`,
+`test_resolver_refuses_a_quarantined_view_definition` (asserts the clear, reason-naming error text,
+not a generic denial), and `test_endpoint_rejects_a_quarantined_view_with_a_clear_422` prove the
+refusal at both the pure-resolver layer and through the real endpoint (HTTP 422).
+`test_resolver_rejects_a_table_id_outside_the_datasource` covers the datasource-scoping structural
+check.
+
+`ruff check` and `mypy src` clean on every touched/new file (`src/aida/view_tool_blueprint.py`,
+`src/aida/tool_api.py`) — no suppressions.
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest tests/test_doc_claims.py -q` clean.
+`tests/test_openapi_diff_gate.py` clean after `scripts/openapi_diff.py --accept-baseline`
+(`Docs/90-reference/openapi-baseline.json`, one path added, non-breaking) and
+`scripts/generate_ui_types.py --accept-baseline` (`ui-next/src/lib/types.ts`).
+`tests/test_event_catalog_gate.py` clean — no new `event_type=` literal introduced; the shared
+`_persist_tool_version_draft` helper's existing `tool.version.draft_created.v1` `record_outbox` call
+is reused verbatim, so no `04-event-catalog.md` change was needed.
+`AIDA_ENVIRONMENT=development uv run --extra dev pytest -q` (full suite, `AIDA_ENVIRONMENT` deselected
+from `test_config.py::test_environment_must_be_explicit_outside_tests`, the same pre-existing
+ambient-env sensitivity documented against that exact test in the AG-7/TL-5/SM-5/AU-14 entries above):
+clean.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately
+before the closing push: none found.
+
+## 2026-09-02 — N17 closed: exemplar store (context-path half), promoted exemplars as a context-product section
+
+### Scope
+
+Per `Docs/review-2026-08/atlan-context/01-context-studio.md` ("Split N17"): the context-path
+regression half only — mine exemplars from confirmed-correct runs and BI/query history, assert on
+resolved objects + versions + selected tool + policy decision, gate change-set submission. The
+answer-delta half (checking whether returned *values* are still correct) stays out of scope —
+INV-6/ADR-0014 forbid asserting business-value expectations, the same reasoning AT-8's own cases
+and TS-3's earlier sentinel-scan work already applied.
+
+### What "confirmed" actually means in this codebase's data
+
+Investigated `ai_decision_lineage.py` and `consumption_lineage.py` before writing anything, per the
+row's own instruction not to invent a new confirmation flag. `AiDecisionRecord`
+(`ai_decision_lineage.py`) records *why* the system made a choice, not whether a human later
+confirmed the outcome was correct — not the signal. The real signal turned out to live one layer
+over, in `intelligence_api.py`/`query_memory.py`: `QueryFeedback` is a human rating a specific
+`AgentRun` ("HELPFUL" or not); `QueryMemoryEvidence.status` reaches `"ELIGIBLE"` only once positive
+feedback exists and no negative feedback is outstanding (`query_memory.py`'s own docstring:
+"Negative feedback already suppresses reuse before this module ever runs"). That is this codebase's
+one existing, human-confirmed "this run was correct" signal, and `promote_confirmed_agent_run`
+(`src/aida/exemplar_store.py`) uses it directly. `consumption_lineage.
+get_consumption_by_resource_counts` supplies the second named source, "BI/query history": a
+heavily-reused governed-tool pairing is evidence of trustworthiness even without an explicit human
+confirmation. It is wired in as a *prioritization* signal (`rank_candidates_by_consumption`) over
+the already-confirmed candidate pool — which confirmed run to promote first when a corpus cap means
+not every confirmed candidate gets kept — not a second, independent promotion path: there is no
+`AgentRun` behind a bare consumption count to derive a context path from, so promoting from
+frequency alone would have nothing to promote.
+
+### The deeper constraint this surfaced: a mined exemplar can never carry a live-replayable question
+
+`AgentRun`'s own docstring states raw user questions are intentionally not persisted (only
+`question_hash`). Checking further: `AgentRun` also never persists the requester's roles, the tool
+they asked for, or the tool-call parameters supplied — all either redacted or never written at all.
+So a `CONFIRMED_RUN` exemplar can only ever carry the *output* side of a case (the resolved context
+path) — never the *input* side (question/roles/preferred_tool_slug/tool_parameters) AT-8's own
+`run_eval_case` needs to literally re-drive the orchestrator. This is not a gap the implementation
+works around; it is the same value-freedom `AgentRun` already enforces on itself, one layer further
+than just the final answer — and it directly shaped the design: `ExemplarCase.question` is `str |
+None`, `None` for every `CONFIRMED_RUN` exemplar, populated only for a `STEWARD_AUTHORED` one (a
+human writes the question directly, the same act of authorship AT-8's own hand-authored `cases.py`
+already performs, just tagged with this module's provenance instead of being a bare
+`ContextPathEvalCase`). `ExemplarCase.is_replayable` names this condition explicitly.
+
+### Storage: investigated and deliberately not a new table
+
+`NegativeAssertionRecord` (N16's reuse target) already existed as a *dedicated* table before N16
+touched it; no equivalent dedicated "exemplar" table existed to reuse the same way, and no existing
+generic JSON field on another table (`AiDecisionRecord.evidence`, `ConsumptionRecord.details`,
+`GovernanceReview.decision_reason`) fit the shape without either misusing an unrelated table's
+semantics or (for `decision_reason`) not even being JSON. But a further check — grepping every
+write to `AgentRun.plan_evidence`/`retrieval_evidence`/`semantic_version`/`status`/`failure_reason`
+— found that nothing outside `GovernedAgentOrchestrator.run` ever writes any of those fields: an
+`AgentRun` is written exactly once. That makes the pair (a `COMPLETED` `AgentRun`, its `ELIGIBLE`
+`QueryMemoryEvidence` row) *already* immutable, already-persisted evidence that a question was
+asked, answered, and confirmed — exactly N16's own "no new persisted state was needed" precedent,
+applied to a different existing pair of tables instead of one. So `promote_confirmed_agent_run`
+computes a deterministic, content-addressed `ExemplarCase` (same `artifact_hash` on every call
+against the same immutable pair — `test_promotion_is_deterministic` proves this) with **no new
+table, column, or migration** — the hard constraint this row carries. `STEWARD_AUTHORED` exemplars,
+having no DB row to project from, are plain frozen dataclasses built once
+(`steward_authored_exemplar`) the same way AT-8's own `cases.py` entries are, and belong wherever
+reviewed content already lives in this repo (git, next to `tests/context_path_eval/cases.py` — not
+inside it, since a mined/promoted corpus and hand-curated regression fixtures are different kinds
+of content even when they share a shape; kept as a separate module,
+`tests/context_path_eval/exemplars.py`, that imports `cases.py`'s types rather than being merged
+into it).
+
+### What shipped
+
+- `src/aida/context_path.py` (new): `ContextPath`/`derive_context_path` relocated out of
+  `tests/context_path_eval/runner.py` so production code (`exemplar_store.py`) can share AT-8's
+  exact derivation instead of re-implementing an equivalent reader of `AgentRun` state a second
+  time. `runner.py` re-exports both names unchanged — no behavior change, confirmed by AT-8's own
+  4 tests still passing verbatim.
+- `src/aida/exemplar_store.py` (new): `ExemplarCase`, `find_confirmed_agent_runs`,
+  `promote_confirmed_agent_run`, `steward_authored_exemplar`, `compare_exemplar_to_current`,
+  `rank_candidates_by_consumption`. Promotion refuses non-`ELIGIBLE` evidence and evidence that
+  does not belong to the given run, rather than silently promoting weaker evidence.
+- `src/aida/context_compiler.py` / `context_compiler_api.py`: `exemplars[]` wired into
+  `compile_context_product` mirroring N16's `negative_knowledge[]` section exactly —
+  `ResolvedExemplar` (pre-scoped, pre-serialized, so compilation stays pure), a new
+  `_load_exemplars` helper alongside `_load_negative_knowledge` in `_load_source`, rendered only
+  into MCP/REST/YAML (`_EXEMPLAR_TARGETS`, same value as `_NEGATIVE_KNOWLEDGE_TARGETS`, kept as its
+  own name so any future divergence stays a one-line change), deterministic `artifact_hash`.
+  `_load_exemplars` scans the organization's confirmed-run candidates (bounded, S5) and filters in
+  Python by whether any resolved `TABLE` object falls inside the version's `table_ids` — unlike
+  `NegativeAssertionRecord.subject_id`, an `AgentRun`'s resolved objects live inside its own
+  `retrieval_evidence` JSON, so there is no DB column to filter on directly, the same "no column to
+  query on" situation `aida.studio_eval`'s mining passes already handle the same way.
+- `tests/context_path_eval/exemplars.py` (new): `exemplar_to_eval_case` converts a replayable
+  exemplar losslessly into AT-8's `ContextPathEvalCase`; `replay_steward_exemplar` drives it
+  through AT-8's own `run_eval_case` against a live orchestrator run — the literal "gate change-set
+  submission is achievable" proof the row's benchmark-suite half asks for.
+  `replay_confirmed_exemplar`/`compare_exemplar_to_current` give a `CONFIRMED_RUN` exemplar's
+  replay instead: re-derive the context path from the same immutable `AgentRun` row right now and
+  diff against the frozen snapshot, mirroring `agent_run_replay.py`'s (AT-6) "verify the digest
+  still matches" idiom rather than a live re-run it has no question to drive.
+
+### What is a documented next step, not done in this pass
+
+Wiring exemplar replay into a literal CI/submission gate (the way `studio_eval.py`'s
+`check_eval_regressions` already gates a Studio change-set submission on its own mined
+`StudioEvalQuestion` corpus) is not done here — this row proves the replay mechanism itself works
+end to end (`test_steward_authored_exemplar_replays_through_at8_runner`), which is what "gate
+change-set submission is achievable" asks for; hooking a scheduled promotion pass and an actual gate
+check into `studio_api.py`'s submission flow is future work.
+
+### Tests (27 new, all passing)
+
+`tests/test_exemplar_store.py` (17 tests): `find_confirmed_agent_runs` returns only `ELIGIBLE`
+evidence; `promote_confirmed_agent_run` produces the correct `ExemplarCase` from real seeded state
+and is deterministic; refuses a non-confirmed run and mismatched evidence; a steward-authored
+exemplar is replayable and deterministic; `exemplar_to_eval_case` refuses a non-replayable exemplar;
+a steward-authored exemplar replays through AT-8's real `run_eval_case` against a live orchestrator
+run; a confirmed-run exemplar replays as stored-vs-current consistency and reports no drift against
+its own source run; `compare_exemplar_to_current` reports named field-level drift on a genuine
+mismatch (pure unit test, no DB); consumption-based ranking prioritizes heavier reuse; a regression
+guard that the AT-8 relocation kept `runner.ContextPath`/`derive_context_path` importable at the
+same identity.
+
+`tests/test_context_product_exemplars.py` (5 tests, mirroring `test_context_product_negative_
+knowledge.py`'s own shape exactly): section determinism (present and absent); `_load_exemplars`
+excludes an out-of-scope table and a non-`ELIGIBLE` (unconfirmed) run; end-to-end glue from DB state
+into a compiled artifact; the section appears only in MCP/REST/YAML and is byte-absent from
+OSI/ODCS/`SNOWFLAKE_SEMANTIC_VIEW`/`DATABRICKS_METRIC_VIEW`.
+
+### Verification
+
+`ruff check` clean on every touched/new file (`src/aida/context_path.py`, `exemplar_store.py`,
+`context_compiler.py`, `context_compiler_api.py`, `tests/context_path_eval/runner.py`,
+`tests/context_path_eval/exemplars.py`, the two new test files). `AIDA_ENVIRONMENT=development uv
+run --extra dev mypy src`: clean on every file this row touched; the same 44 pre-existing `"object"
+not callable"` errors N16's entry already documented (`workflows/activities.py`,
+`workflows/scheduler.py`, `main.py`, …) are unrelated and unchanged by this work.
+`lint-imports` (import-linter, all 8 contracts): kept. `AIDA_ENVIRONMENT=development uv run --extra
+dev pytest tests/test_exemplar_store.py tests/test_context_product_exemplars.py tests/
+test_at8_context_path_eval.py tests/test_context_product_negative_knowledge.py tests/
+test_query_memory.py tests/test_agent_orchestrator_retrieval_wiring.py tests/
+test_at6_context_receipts.py tests/test_doc_claims.py -q`: all pass. No HTTP route was added or its
+signature changed (only `_load_source`'s internal composition and the compiled artifact's own
+content), so `tests/test_openapi_diff_gate.py` passes with no baseline regeneration needed. No new
+`event_type=` was introduced (nothing in this row calls `record_outbox`), so `tests/
+test_event_catalog_gate.py` passes with no `04-event-catalog.md` change needed.
+
+No `models.py`/`schemas.py`/`platform_schemas.py`/`contracts.py` file and no Alembic migration
+touched. Repo-wide grep for literal `<<<<<<<`/`=======`/`>>>>>>>` conflict markers run immediately
+before the closing push: none found (the handful of `=======`-shaped hits are decorative
+module-docstring underlines of a different length, e.g. `negative_knowledge.py`/`retrieval.py`,
+confirmed by exact-length grep, not real merge markers).
+
+---
+
+## 2026-09-01 — AT-1 closed: saved, scheduled bulk-metadata "playbook" objects on top of CT-1
+
+A genuinely new feature, not a tracker-consistency closure or a bugfix: a `MetadataPlaybook` persists a
+filter (a datasource + a table-name pattern, optionally narrowed further by a column-name pattern for
+CLASSIFY), one of CT-1's four bulk actions (TAG/CLASSIFY/OWN/CERTIFY), and a schedule. The existing fleet
+scheduler (`aida.workflows.scheduler`, run by Temporal -- the "existing Temporal scheduler" this row's
+exit text names, not a new one) sweeps every enabled, due playbook, and a manual `POST
+/v1/playbooks/{id}/run` triggers the same evaluation out of cycle.
+
+### Design: reuse over invention
+
+Evaluating a playbook resolves its filter against the live catalog using CT-1's own filter matcher
+(`match_tables_by_filter`/`match_columns_by_pattern`), then branches on match count against the
+playbook's own `auto_apply_max_items` (default 0 -- safe by default, an operator must opt in to
+auto-apply at all):
+
+- at or below the threshold, it applies immediately through CT-1's own single-item cores
+  (`apply_tag_item`/`apply_classify_item`/`apply_own_item`/`apply_certify_item` in
+  `catalog_bulk_actions.py`) -- the exact functions the synchronous `/tables/bulk-*` endpoints call per
+  item -- recorded as a `CatalogBulkActionRun` with `selection_mode="PLAYBOOK_AUTO"`;
+- above it, the action is queued behind a `GovernanceReview` as a `BulkStewardshipOperation`, for a
+  checker to approve or reject through the existing generic dispatch in
+  `semantic_api.py::_apply_governance_review_decision` (untouched -- its `BULK_STEWARDSHIP_OPERATION`
+  branch already dispatches on `operation_type` generically).
+
+This mirrors GL-2 (rule-based ownership auto-applies at small scale) and GL-5 (certification goes
+through review at scale) rather than inventing a third governance shape -- scale-dependent risk already
+has a precedent on this platform, named explicitly in this row's own exit text
+("confidence-threshold auto-apply branch mirroring GL-2/GL-5").
+
+`OWN` and `CERTIFY` already had operation types in `stewardship_service.py::apply_bulk_operation`
+(`ASSIGN_OWNERSHIP`, `CERTIFY_ASSET`, from GL-2/GL-5/GL-7) -- zero new code needed there. `TAG` and
+`CLASSIFY` did not; added as two new `elif` branches reusing `apply_tag_item`/`apply_classify_item`, the
+same cores the new auto-apply path uses, so a queued-then-approved playbook action and an
+auto-applied one go through identical single-item logic either way.
+
+CERTIFY's playbook config stores a *relative* `expires_after_days` (a schedule that fires repeatedly
+should always certify a fresh window from whenever it actually runs), resolved to an absolute
+`expires_at` right before either applying or queuing -- `apply_bulk_operation`'s existing `CERTIFY_ASSET`
+branch already expects an absolute ISO timestamp in `parameters["expires_at"]`, unchanged.
+
+### Honest scope cut: `describe`
+
+This row's exit text names five actions ("tag/classify/own/certify/describe"). `describe` has no
+existing CT-1 single-item core to reuse -- writing a table's description is a different mechanism
+(module 04's steward-authored description tables), not something this row's own scope extends to.
+Documented as a deliberate gap on `MetadataPlaybook`'s own docstring rather than silently dropped; the
+tracker row's exit condition is now written to say `TAG/CLASSIFY/OWN/CERTIFY -- describe scoped out, see
+log` instead of quietly claiming all five.
+
+### New files / models
+
+- `src/aida/models.py`: `MetadataPlaybook` (org + datasource FKs, `action` CHECK-constrained to the four
+  supported values, `match_field`/`match_pattern`/`column_name_pattern`, `action_parameters` JSON,
+  `schedule_interval_minutes`, `auto_apply_max_items`, `enabled`, `last_run_at`). Unlike GL-6/DQ-4/KG-7's
+  in-process last-run-time dicts (no existing column to persist to when those rows were built), this
+  table owns a real `last_run_at` column from the start, so a scheduler restart re-sweeps nothing early.
+- `migrations/versions/62341fa9f017_at1_metadata_playbook.py`: creates `metadata_playbook`. Verified both
+  directions offline (`alembic upgrade`/`downgrade c8fcafc5856a:62341fa9f017 --sql`) against a Postgres
+  dialect target -- no live Postgres in this sandbox, same standing limitation as every other migration
+  landed on this branch. `alembic heads` confirms a single head.
+- `src/aida/playbooks.py` (new): the evaluation/execution engine --
+  `resolve_playbook_matches`/`evaluate_and_run_playbook`/`_auto_apply`/`_queue_for_review`, plus
+  `playbook_due`/`run_due_playbooks_pass` for the scheduler sweep (mirroring
+  `custom_quality_rules.run_due_rule_packs`'s shape and fault-isolation, module-owns-its-sweep like that
+  row).
+- `src/aida/playbooks_api.py` (new): REST CRUD (`POST/GET /v1/organizations/{organization_id}/playbooks`,
+  `GET/PATCH/DELETE /v1/playbooks/{playbook_id}`) plus `POST /v1/playbooks/{playbook_id}/run` for a
+  manual out-of-cycle trigger. Deliberately its **own** file with locally-scoped Pydantic schemas
+  (`PlaybookCreate`/`PlaybookUpdate`/`PlaybookRead`), rather than adding to the shared, hot
+  `aida.api`/`aida.schemas` modules under heavy concurrent edit on this branch -- this row's exit
+  condition does not require touching either, and a new feature that can avoid a collision-prone shared
+  file should. `action_parameters` is validated per-action at create/update time (right shape for
+  TAG/CLASSIFY/OWN/CERTIFY) so a bad playbook fails at creation, not at its first scheduled run.
+- `src/aida/workflows/scheduler.py`: one new import, one new call
+  (`await run_due_playbooks_pass(now=now)`) inside `run_scheduler_iteration`, alongside the existing
+  `run_owner_routing_pass`/`run_custom_rule_pack_pass`/`run_graph_reconciliation_scheduler_pass` calls.
+  No other line in this file touched.
+- `src/aida/stewardship_service.py`: two new `elif` branches (`TAG`, `CLASSIFY`) in
+  `apply_bulk_operation`, immediately before the existing `REASSIGN_LEAVER` branch.
+- `src/aida/main.py`: one import + one `app.include_router(playbooks_router)`, placed in the existing
+  alphabetical import order (`ruff`'s isort catches placement drift; caught and fixed one on the first
+  pass).
+- `Docs/30-contracts/04-event-catalog.md`: documented the one genuinely new event type this row
+  introduces, `metadata.playbook.created.v1`. (`catalog.asset_tag.applied.v1` /
+  `catalog.column.classified.v1`, reused as-is from CT-1's existing `_CATALOG_BULK_ACTION_EVENT_TYPES` in
+  `api.py`, are already undocumented there -- a pre-existing gap predating this row, confirmed by grep;
+  not fixed here as out-of-scope unrelated work, same discipline this branch has followed all day.)
+
+### A real mypy bug caught and fixed while writing `playbooks.py`
+
+`_apply_one_item`'s TAG and OWN branches both originally bound their result to a variable named `row`;
+mypy `--strict` correctly flagged `Incompatible types in assignment (expression has type
+"OwnershipAssignment", variable has type "AssetTag")` -- it narrows a name's type from its first
+assignment across the whole function body, not per-branch. Renamed to `tag`/`assignment` respectively.
+Caught by routine verification, not by a test failure; no behavior was ever wrong, but the annotation
+would have quietly rotted the moment either branch's return type changed.
+
+### Tests
+
+New file `tests/test_playbooks.py`, 16 tests, real-sqlite-engine pattern (matching
+`test_catalog_bulk_actions_endpoints.py` -- `resolve_playbook_matches`/`evaluate_and_run_playbook` issue
+real queries and need real flush-generated ids, so a hand-simulated session would not exercise the actual
+code path):
+
+- `playbook_due`: never-run / before-interval / after-interval, as pure functions.
+- `resolve_playbook_matches`: table-name pattern filtering, and CLASSIFY's further narrowing to matching
+  columns within matched tables.
+- `evaluate_and_run_playbook`: no-match still advances `last_run_at` (so a permanently-unmatched playbook
+  is not re-evaluated every scheduler tick); TAG auto-applies under threshold and persists real
+  `AssetTag` rows plus a `CatalogBulkActionRun`; TAG queues a `GovernanceReview` +
+  `BulkStewardshipOperation` over threshold with no `AssetTag` rows created yet; CERTIFY's relative
+  `expires_after_days` resolves to the correct absolute `expires_at` on the persisted
+  `AssetCertification` (a naive-vs-aware datetime mismatch from sqlite's storage caught and fixed in the
+  test itself, not the production code -- sqlite drops tzinfo on round-trip, same class of quirk this
+  branch has hit before).
+- REST layer, calling the route functions directly in-process (same convention as
+  `test_catalog_bulk_actions_endpoints.py`): endpoint registration via `app.openapi()`, duplicate-name
+  409, cross-organization 403, per-action `action_parameters` shape validation (a first draft of this
+  test wrongly expected default-`auto_apply_max_items=0` to auto-apply -- fixed the test, not the code;
+  0 is the correct safe-by-default value), full create/list/get/update/delete round trip including a 422
+  on an update that would leave `action_parameters` invalid for the playbook's action, and manual-run
+  auto-apply plus its 409 on a disabled playbook.
+
+### Verification
+
+`ruff check --fix` clean on every new/touched file (two real findings: an unquoted-annotation
+`UP037` in `playbooks_api.py`, and the isort-order violation in `scheduler.py`'s new import -- both
+auto-fixed and re-verified). `mypy --strict` clean on `playbooks.py`, `playbooks_api.py`, `models.py`,
+`stewardship_service.py`, `main.py`, and `scheduler.py` **beyond** a pre-existing, already-present-on-
+`HEAD` `"object" not callable"` finding at every `session_factory()` call site across the whole codebase
+(confirmed by running `mypy --strict` against the unmodified `HEAD` copy of `scheduler.py` and against
+`custom_quality_rules.py`, an untouched file -- both show the identical finding at their own
+`session_factory()` calls; it is `aida.db`'s lazy `__getattr__`-based re-export of `session_factory`
+losing its static type, not anything this row introduces).
+
+`pytest tests/test_playbooks.py`: 16 passed. Full regression sweep, zero failures: `pytest
+tests/test_bulk_governance_decisions.py tests/test_glossary_stewardship.py
+tests/test_leaver_reassignment.py tests/test_catalog_bulk_actions.py
+tests/test_catalog_bulk_actions_endpoints.py tests/test_playbooks.py tests/test_fleet_scheduling.py` --
+90 passed. `AIDA_ENVIRONMENT=development python -c "from aida.main import app"` imports cleanly, 385
+routes (was 382 before this row's three new endpoints).
+
+`scripts/openapi_diff.py` (no flag): three new paths reported as additive `info`-level changes, zero
+breaking changes. Unlike IN-5e earlier today (where the baseline diff was reverted because the row's own
+change produced no OpenAPI diff at all), `test_openapi_diff_gate.py::test_committed_baseline_matches_
+current_app_openapi_output` asserts an *exact* match against `app.openapi()` -- this row's three new
+endpoints make the baseline genuinely, unavoidably stale, so `--accept-baseline` was run and both
+`Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` were regenerated and committed.
+The regeneration also swept up the same pre-existing `ValidationError.ctx`/`.input` pydantic-version
+schema drift flagged (and left alone) by several other rows landed on this branch today -- but this time
+there was no way to separate it from a change this row's own new gate compliance genuinely requires, so
+it rides along rather than being reverted. Confirmed `test_openapi_diff_gate.py` (24 tests) is green
+against the regenerated baseline.
+
+Honest gap: `test_event_catalog_gate.py` fails in this sandbox on an unrelated `UnicodeDecodeError`
+(cp1252 decode of a `PG-5` edition-entitlement source file that contains a non-cp1252 byte) that predates
+and is untouched by this row -- confirmed by running the same gate against `HEAD` before this row's
+changes; not attempted here, same standing environment limitation other rows have hit and left alone.
+
+---
+
+## 2026-09-02 — N4 closed: impact-ordered, diff-based relationship-candidate review queue, wired to negative knowledge
+
+Composed four pieces already built on this branch rather than reimplementing any of them: SM-7's diff
+engine, EA.14's bounded lineage traversal, EE.3/N16's negative-knowledge mechanism, and RL-6's
+bulk-decision endpoint (already `DONE` for `RelationshipCandidate` specifically, confirmed by reading
+`intelligence_api.py` first per this row's own instruction). Only three of the four pieces needed new
+wiring; RL-4 (projection) and RL-6 (bulk decisions) were already real and untouched.
+
+**Impact-ordering.** New `GET /v1/datasources/{datasource_id}/relationship-candidates/review-queue`
+(`aida.relationship_candidate_review.compose_relationship_candidate_review_queue`) loads up to
+`REVIEW_QUEUE_SCAN_LIMIT=200` PENDING candidates, computes a real impact score for each via
+`compute_relationship_candidate_impact` -- which calls EA.14's `unified_lineage_api.
+build_unified_lineage_impact_payload` verbatim (the identical function `GET .../unified-lineage/
+impact/{node_id}` and TL-7's deprecation preview call) at *both* endpoints the candidate's edge would
+connect (`source_table_impact` + `target_table_impact`, summed = `impact_score`) -- and sorts the
+queue by that score descending, confidence/id only breaking real ties. A `PENDING` candidate's edge is
+not yet in the graph (`build_unified_lineage_impact_payload` only ever traverses `APPROVED` edges), so
+this measures the blast radius already sitting behind each endpoint -- how much is at stake in the
+decision, in either direction, not a prediction of which way it should go. Defaults mirror TL-7's own
+(`DEFAULT_IMPACT_DEPTH=3`, `DEFAULT_IMPACT_NODE_LIMIT=100`) rather than inventing new bounds.
+
+**Diff representation, decided and justified.** SM-7's `diff_semantic_object` already handles exactly
+this case: called with `before=None` (its own docstring: "a semantic object's very first submission,
+which has no published predecessor to diff against"), every key of the `after` snapshot reports as one
+`added` `FieldDelta` -- semantically correct for "nothing -> this edge," since every fact about a
+not-yet-approved edge is indeed new. No new diff engine or representation was built. The only new work
+is `relationship_candidate_diff_snapshot`, a curated flat dict (source/target table qualified name +
+column name, `detection_rule`, `confidence`, AT-15's `confidence_signals` pulled from the candidate's
+already-stored `evidence["signals"]`) -- deliberately excluding `id`/`organization_id`/`status`/
+timestamps/`reviewed_*`, mirroring `semantic_api.py`'s own `_semantic_model_version_snapshot`/
+`_glossary_term_version_snapshot` curation precedent, so the diff reports one entry per fact a reviewer
+actually cares about rather than one per ORM column.
+
+**Bulk decisions, reused not reimplemented.** RL-6's `bulk_decide_relationship_candidates` and the
+single-item `decide_relationship_candidate` are unchanged in mechanism -- same maker-checker rule, same
+PENDING-only rule, same partial-success reporting. Both now call
+`record_relationship_candidate_rejection` when a decision resolves to `REJECTED`, so a rejection reaches
+negative knowledge identically regardless of which surface rejected it.
+
+**Rejection -> negative knowledge.** `record_relationship_candidate_rejection` calls EE.3/N16's real
+`negative_knowledge.record_negative` (never a parallel rejection-tracking mechanism): `assertion_type=
+"RELATIONSHIP_REJECTED"`, `subject_id="relationship:<source_column_id>:<target_column_id>"` (following
+`negative_knowledge._scope_predicate`'s own documented colon-delimited convention), `predicate={
+"source_column_id", "target_column_id"}` -- deliberately excluding `detection_rule`/`confidence` so an
+edge re-detected by a different or improved rule is still recognized as the same rejected edge. Both
+discovery endpoints (`discover_relationship_candidates`, `discover_cross_source_relationship_candidates`)
+now call `load_suppressed_relationship_predicate_hashes` once up front (bulk-prefetch, mirroring the
+existing `existing_fk_pairs`/`existing_candidate_pairs` precedent already in both loops -- one query,
+then an in-memory membership check per candidate scanned, not a `check_re_proposal` round trip per
+candidate) and skip a suppressed pair; each discovery's audit `details` now reports
+`suppressed_by_negative_knowledge` for transparency.
+
+**No `models.py`/`schemas.py`/migration touched**, per this row's hard constraint: the new module
+`src/aida/relationship_candidate_review.py` defines its own local `ApiModel` response classes
+(`RelationshipCandidateReviewQueueRead` etc.), following `semantic_api.py`'s own precedent for SM-7's
+diff endpoint (`GovernanceReviewDiffRead` defined in `semantic_api.py`, not `schemas.py`) -- `evidence`
+was already free-form JSON on `RelationshipCandidate`, `RelationshipCandidate.status`/`reviewed_*` were
+already the only persisted decision state needed, and `NegativeAssertionRecord` already existed with no
+change.
+
+Tests (`tests/test_relationship_candidate_review.py`, 3 new, real in-memory sqlite via the actual FastAPI
+endpoint functions, no mocks):
+
+* `test_review_queue_orders_by_real_impact_not_by_confidence` -- a "hub" table with three APPROVED edges
+  vs. two fully isolated tables; the PENDING candidate touching the hub has confidence 0.55, the isolated
+  one has confidence 0.95 (deliberately backwards), and the queue still returns the hub candidate first,
+  with `impact_score >= 3 > 0`. Also asserts the diff's field set and that every entry is `added`.
+* `test_bulk_decision_approve_becomes_a_real_edge_reject_becomes_negative_knowledge` -- a mixed
+  approve/reject bulk batch; the approved candidate's edge is confirmed present (via
+  `build_unified_lineage_graph_payload`, not re-derived) in the unified lineage graph as a
+  `SUGGESTED_RELATIONSHIP`/`APPROVED` edge, and the rejected one produces exactly one
+  `NegativeAssertionRecord` with `suppression_active=True`, matched back via `negative_knowledge.
+  check_re_proposal` on the same predicate -- and confirms the approved candidate produces *no* negative
+  assertion.
+* `test_rejected_candidate_is_suppressed_from_re_proposal_even_after_row_is_gone` -- the re-proposal
+  proof this row asked for: discover a candidate, reject it, then **delete the decided
+  `RelationshipCandidate` row itself** (simulating housekeeping/archival) before re-running discovery.
+  `existing_candidate_pairs` alone, freshly re-queried, no longer knows this pair was ever proposed --
+  only the negative-knowledge check can block re-creation, and `re_discovery.total == 0` confirms it does.
+  The audit trail's `suppressed_by_negative_knowledge == 1` names why.
+
+`ruff check` and `mypy src` clean on every touched file (`src/aida/relationship_candidate_review.py`,
+`src/aida/intelligence_api.py`) -- the 44 pre-existing `"object" not callable"` findings elsewhere in
+`src` are unrelated and untouched by this row, same standing finding several other rows this branch
+confirmed against `origin` before their own changes. `AIDA_ENVIRONMENT=development pytest
+tests/test_doc_claims.py` green. One new HTTP route added, so `scripts/openapi_diff.py --accept-baseline`
+and `scripts/generate_ui_types.py --accept-baseline` were run and both `Docs/90-reference/
+openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed;
+`tests/test_openapi_diff_gate.py` green against the regenerated baseline. No new `event_type=` was
+introduced (both decision endpoints already emitted `relationship_candidate.approved.v1`/`.rejected.v1`;
+`record_negative` does not emit an outbox event), so `tests/test_event_catalog_gate.py` needed no catalog
+change and passes (4 passed) unmodified.
+
+## 2026-09-02 — N15 closed: evaluation-gated agent publication, wired into the real shared publish transition
+
+Makes "production-grade agent" evidenced rather than asserted, by adding a real precondition to the one
+place an `AiAssetVersion` (EA.10c AI registry) actually moves to its published/production `APPROVED`
+state -- a direct extension of two things landed earlier the same day: N17's exemplar replay
+(`exemplar_store.py`/`tests/context_path_eval/exemplars.py`) and UX-19's honesty finding that `AgentRun`
+carries no FK back to `AiAsset` (`agent_roster.py`).
+
+**Corrected finding, checked directly rather than assumed from the tracker row's own title:**
+`ai_registry_api.py` never itself flips a version to `APPROVED`. `submit_ai_asset_version` only moves
+DRAFT -> REVIEW_REQUIRED and opens a `GovernanceReview`; the actual APPROVE decision that publishes it is
+applied by `semantic_api._apply_governance_review_decision`, the single shared dispatcher every governed
+object type's maker-checker decision already goes through (both the single-item `decide_governance_review`
+and PG-3's `bulk_decide_governance_reviews` call it, so the two paths cannot drift). Gating publication for
+real meant editing that shared dispatcher's `AI_ASSET_VERSION` branch -- an even better reuse than the
+row's own phrasing implied, since every AI asset version approval already flows through exactly one place.
+
+**Scoping investigated and found honestly absent, not fabricated.** Checked `models.py` (read-only for this
+row) directly: `AiAssetVersion` carries `context_product_version_ids`/`model_route_ids`/`policy_control_ids`
+(dependency references) but no data-domain/table/project scope field, and `AgentRun` has no FK to
+`AiAsset`/`AiAssetVersion` at all -- confirming UX-19's own finding rather than assuming it. So this gate
+is **organization-wide**, labelled and explained exactly as `agent_roster.py` already labels its own
+identical gap, never claimed to be one agent's private evaluation history.
+
+**`src/aida/agent_eval_gate.py`** (new, pure core + one production-safe async replay path):
+* `evaluate_agent_eval_gate(verdicts, threshold, minimum_exemplars=1)` -- pure, DB-free -- computes
+  PASS/FAIL/INSUFFICIENT_DATA from a list of `ExemplarVerdict`s. Fewer than `minimum_exemplars` (default 1)
+  total verdicts is always `INSUFFICIENT_DATA`, including zero -- never a silent pass. Every contributing
+  verdict stays visible on `AgentEvalGateResult.verdicts`, and a `FAIL`'s `reason` names every failing
+  `case_id`.
+* `replay_confirmed_run_corpus` -- the one exemplar-replay path this module can run automatically and
+  synchronously inside a real governance decision: no seeded scenario, no live orchestrator run, just N17's
+  own `find_confirmed_agent_runs`/`promote_confirmed_agent_run` over the organization's currently
+  human-confirmed `AgentRun`s. Documented honestly in the module's own docstring exactly what a
+  `CONFIRMED_RUN` `matched=True` does and does not prove: `derive_context_path` is a pure function of only
+  the fields already on one immutable `AgentRun` row, so comparing a freshly-promoted exemplar against the
+  very same row it was promoted from can never show drift -- `matched=True` proves the run is still
+  genuinely confirmed and its context path still derives cleanly right now, not that the governed catalog
+  has been unchanged since.
+* N17's `STEWARD_AUTHORED` replay (`tests/context_path_eval/exemplars.py::replay_steward_exemplar`) re-drives
+  a real `GovernedAgentOrchestrator.run()` against a seeded `ContextPathEvalScenario` that deliberately lives
+  under `tests/` -- production code under `src/aida` must never import from `tests/` (the same
+  one-directional boundary AT-8/N17 already keep), so this module never computes `STEWARD_AUTHORED` verdicts
+  itself. A caller with a live-replay-capable environment (a steward running the suite by hand today; N17's
+  own docstring already names "wiring the replay into a literal CI gate" as its own documented next step)
+  submits the resulting verdicts through `record_agent_eval_gate_evidence`'s `extra_verdicts`/
+  `steward_authored_verdicts`, persisted into `evaluation_evidence["agent_eval_gate"]
+  ["steward_authored_verdicts"]` so a later publish decision folds them back in via `stored_steward_verdicts`
+  without ever running a live replay itself.
+* `record_agent_eval_gate_evidence` persists into the exact `AiAssetVersion.evaluation_evidence` JSON field
+  `ai_registry.compute_ai_trust_score` already reads (`evaluation_evidence["pass_rate"]`/`["evidence_id"]`
+  feed its EVALUATION_POSTURE trust-score factor) -- so a passing N15 gate run now actually feeds that field
+  for platform-native agents, with no migration and no new column -- and calls the existing `record_audit`,
+  never a parallel audit mechanism.
+
+**Wired into the real publish precondition** (`semantic_api._apply_governance_review_decision`,
+`AI_ASSET_VERSION` branch, `decision == "APPROVE"`, `ai_asset.asset_kind == "AGENT"`): runs
+`compute_agent_eval_gate` live (always recomputes the `CONFIRMED_RUN` half fresh from the database, folds in
+whatever `STEWARD_AUTHORED` verdicts were most recently stored) before allowing the transition. A verdict
+other than `PASS` raises `HTTPException(409, ...)` naming the verdict, the reason, and every failing
+exemplar by `case_id` -- deliberately *before* `ai_version.status = "APPROVED"` is ever set, and deliberately
+without persisting evidence on that path: a raise this deep in the shared dispatcher unwinds without a
+commit in the single-decision path and rolls back inside a `SAVEPOINT` in the bulk path (verified directly:
+`bulk_decide_governance_reviews` wraps each item's dispatch in `session.begin_nested()`), exactly like every
+other precondition failure already raised elsewhere in that same function -- an early inner `session.commit()`
+to force-persist a blocked attempt's evidence was considered and rejected, since it would also commit the
+review's unconditionally-pre-set `status="APPROVED"` mutation, leaving a review neither properly decided nor
+re-decidable, and would corrupt the bulk path's per-item `SAVEPOINT` batching. Only a genuine `PASS` survives
+to the real commit, recorded right alongside the approval it justified.
+
+**Two new endpoints** (`ai_registry_api.py`, same router, no new router registration needed) let a steward
+see the gate's state before ever attempting to publish (this row's third deliverable): `GET
+/v1/ai-asset-versions/{id}/eval-gate` is a live, read-only preview -- no side effect -- that calls the
+*identical* `compute_agent_eval_gate` the real publish decision calls, so the preview can never show a
+different answer than reality. `POST .../eval-gate/evaluate` runs the gate and persists the result either
+way (unlike the automatic publish-time check, an explicit steward action's result is real evidence worth
+keeping whether it passes or fails), accepting externally-submitted `STEWARD_AUTHORED` verdicts -- the
+request schema has no `source` field at all, so a caller can never inject a fabricated `CONFIRMED_RUN`
+verdict; that source is only ever produced by this module's own live database read. Both endpoints 409 for a
+non-`AGENT`-kind asset.
+
+**Tests** (`tests/test_agent_eval_gate.py`, 16 new): pure gate-logic (zero exemplars -> INSUFFICIENT_DATA
+even with nothing to fail; below-minimum-exemplars stays INSUFFICIENT_DATA even at a perfect rate, so a
+thin sample can never pass by accident; enough passes -> PASS with every verdict still visible; too many
+failures -> FAIL naming every failing case; pass-rate-exactly-at-threshold passes; invalid threshold/minimum
+rejected; determinism), `replay_confirmed_run_corpus` and `record_agent_eval_gate_evidence`/
+`stored_steward_verdicts` against a real in-memory sqlite database (N17's own promotion machinery, not a
+mock), and six real integration tests driving the actual `semantic_api.decide_governance_review`: a publish
+attempt is blocked with `INSUFFICIENT_DATA` against zero confirmed runs; blocked with `FAIL` naming a
+specific `steward-fail-1` exemplar when a steward previously submitted a mostly-failing corpus (even with a
+passing confirmed run also present); allowed, `AiAssetVersion.status` becoming `APPROVED` with `PASS`
+evidence recorded, against a real passing confirmed-run corpus; the preview endpoint proven to match what the
+real decision then does; and one case that drives a real `GovernedAgentOrchestrator.run()` through N17's own
+`replay_steward_exemplar` (against AT-8's `TOOL_MISSING_PARAMETER_REACHES_CLARIFICATION` case) and confirms
+that real replay verdict genuinely contributes to a real publish being allowed -- the literal "based on real
+exemplar replay results" proof.
+
+`ruff check`/`mypy src` clean on every touched file; the 44 pre-existing `"object" not callable"` findings
+elsewhere in `src` are unrelated and untouched by this row (confirmed against `origin` before this row's own
+changes, same standing finding several other rows this branch have already reported).
+`AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py` green (all cases). Two new HTTP routes added,
+so `scripts/openapi_diff.py --accept-baseline` and `scripts/generate_ui_types.py --accept-baseline` were run
+twice (once before this row's own final rebase, once after picking up other concurrently-landed routes) and
+both `Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed,
+each time confirmed purely additive via `git diff --stat` before committing; `tests/test_openapi_diff_gate.py`
+green against the regenerated baseline. `cd ui-next && npm run typecheck`/`test`/`build` not run in this
+environment -- `node_modules` was never installed here (`ui-next/node_modules` does not exist), so those
+commands cannot execute at all regardless of this row's changes; noted honestly rather than claimed clean.
+No new `event_type=` was introduced (this row only calls the existing `record_audit`, never `record_outbox`
+for the gate itself), so `tests/test_event_catalog_gate.py` needed no catalog change and passes unmodified.
+Full regression pass across every test file that exercises the shared governance-review dispatcher this row
+edits (`test_asset_description.py`, `test_asset_description_sample_review.py`,
+`test_bulk_governance_decisions.py`, `test_context_products.py`, `test_delegation.py`,
+`test_leaver_reassignment.py`, `test_metric_suggestions.py`, `test_semantic_glossary_binding.py`,
+`test_tier0_invariants.py`, `test_consumer_footer.py`, `test_metric_formula_collision_endpoint.py`,
+`test_review_queue_read_model.py`, `test_semantic_diff_endpoint.py`) green -- no regression to any other
+governed object type's approval path.
+
+---
+
+## 2026-09-01 — N8 (document ingestion): the data-dictionary-spreadsheet special case, end to end
+
+A second genuinely new feature this session, picked up the same way AT-1 was: a "no foundation
+existed" tracker row (`Docs/review-2026-08/gap/02-gap-diff-and-plan.md` line 84, `Docs/60-delivery/
+03-tracker.md`'s N8), not a bugfix or a tracker-consistency closure. N8's own note says to "build [the
+data-dictionary spreadsheet] path first" -- this row does exactly that, completely, and is honest in the
+tracker about the much larger remaining scope (general document parsing, object storage, semantic
+mapping, the wiki) it does not attempt.
+
+### What it is
+
+Per `Docs/review-2026-08/target/01-metadata-graph-wiki.md` §3 (the review's own design brief for
+document ingestion), a bank's data dictionary -- `schema | table | column | description` rows in a
+spreadsheet -- is "the highest-value special case ... covers a large share of real bank documents" and
+should be recognised and mapped directly rather than chunked as prose. This row builds that one path,
+completely, rather than a thin slice of the much larger general-document pipeline the design brief also
+describes (PDF/DOCX/BRD parsing, object storage, virus scanning, semantic/embedding mapping) -- those are
+real, separate builds, explicitly left as this row's own stated remaining scope rather than half-attempted.
+
+**Flow**: upload a CSV data dictionary -> parse into ordered sections -> resolve each section against
+the live catalog by exact name (deterministic, no model) -> extract a reviewable `DESCRIBES` claim for
+every structurally-mapped section -> a checker approves or rejects each claim through the platform's
+existing unified `GovernanceReview` queue, the same one every other proposal on this platform goes
+through.
+
+### Design decisions and why
+
+- **CSV only, not the general parsers.** A data dictionary is already tabular; Python's stdlib `csv`
+  module needed no new dependency. PDF/DOCX/XLSX structure-preserving extraction is a real parsing-library
+  build this sandbox does not carry -- honestly deferred, not stubbed.
+- **Raw file bytes are never persisted.** The design brief itself says uploaded documents should be
+  "stored in object storage, never in a table." No object-storage integration exists in this codebase to
+  route through yet, so the honest choice was to hold nothing rather than fake compliance with a plain
+  `raw_bytes` column -- only `sha256` (proof of what was processed) and the already-extracted, already-small
+  `DocumentSection` field text survive past the parse.
+- **Structural mapping only, never a guess.** The design brief's three mapping routes are explicit
+  (Explicit at upload, Structural by exact name, Semantic by embedding similarity, "never auto-applied").
+  This row builds only Structural. Semantic mapping is deliberately not attempted here: N5 (hybrid
+  retrieval) owns this codebase's one embedding-provider integration and is itself still IN PROGRESS on a
+  different worktree -- forking a second, parallel embedding integration from this row was the wrong
+  call, both for correctness and for this session's own "should not impact other parallel sessions"
+  mandate. A structural match that resolves to more than one live candidate (e.g. two datasources in the
+  same project both have a `public.customers` table) is recorded `UNMATCHED` rather than guessed --
+  proven by a dedicated test (`test_resolve_structural_mappings_refuses_ambiguous_table_names`).
+- **One `GovernanceReview` per claim, not a batch.** Unlike AT-1's playbooks (where a large match count
+  queues one bulk operation), a document claim's whole value is that a steward can read *this specific
+  row's* source text before deciding -- batching claims from unrelated sections into one decision would
+  defeat that. Mirrors GL-9's `AssetDescriptionDraft` (one review per draft) rather than AT-1/GL-2's bulk
+  shape.
+- **`predicate` constrained to `DESCRIBES` only.** The design brief's `claim` object model names
+  description, grain, and PII-classification claims. Only description claims are built here -- the exact
+  shape a `schema | table | column | description` dictionary actually produces; grain/PII claims are a
+  later pass over the same `DocumentClaim` table (the `predicate` CHECK constraint is the one place a
+  follow-up row needs to touch to add them), not attempted here.
+- **An approved claim's terminal state is the claim row itself.** No existing column-level description
+  surface in this codebase consumes an approved claim (the table-level equivalent, GL-9's
+  `AssetDocumentationVersion`, doesn't fit a single column claim, and a genuine column-level
+  "description of record" store or N10's knowledge-compilation wiki is later, larger, separate work).
+  Documented explicitly on `DocumentClaim`'s own docstring as a stated gap, matching AT-1's "describe"
+  precedent from earlier today -- this row delivers a working, fully-cited ingest -> parse -> map ->
+  claim -> review pipeline with durable provenance back to the exact source row, not universal
+  propagation of an approved claim everywhere "description" might later be read from.
+- **Citation is structural, not a UI.** Every `DocumentMapping`/`DocumentClaim` carries its
+  `document_section_id`, and every `DocumentSection` keeps its own raw text -- the design brief's "any
+  annotation derived from a document carries the document_section reference" (§3.5) is satisfied at the
+  data-model level; no click-through UI is built this pass.
+
+### New files / models
+
+- `src/aida/models.py`: `Document` (project-scoped, `media_type` CHECK-constrained to `CSV`),
+  `DocumentSection` (ordered, one row per parsed dictionary row), `DocumentMapping` (one per section,
+  `mapping_kind` CHECK-constrained to `STRUCTURAL`/`SUGGESTED`/`UNMATCHED` -- `SUGGESTED` reserved for the
+  future semantic-mapping pass), `DocumentClaim` (`predicate` CHECK-constrained to `DESCRIBES`,
+  `governance_review_id` 1:1 to a `GovernanceReview`). Polymorphic `subject_id` fields follow this
+  codebase's own established convention (`OwnershipAssignment.subject_id`: a `String(100)`, not a typed
+  UUID column, since a `DocumentMapping`/`DocumentClaim` can point at either a table or a column).
+- `migrations/versions/ca56d6ce3f18_n8_document_ingestion.py`: creates all four tables. Verified both
+  directions offline (`alembic upgrade`/`downgrade 62341fa9f017:ca56d6ce3f18 --sql`) against a Postgres
+  dialect target -- no live Postgres in this sandbox, same standing limitation as every other migration
+  landed on this branch. `alembic heads` confirms a single head.
+- `src/aida/document_ingestion.py` (new): `parse_csv_data_dictionary` (pure, DB-free -- header matching
+  case-insensitive and order-independent, a row missing `table`/`description` is dropped and counted as
+  an error rather than failing the whole upload, capped at `DOCUMENT_MAX_SECTIONS`=5,000 rows),
+  `create_document_from_csv` (upload + parse in one step -- a data dictionary is already tabular, so
+  unlike the general prose-parsing flow there is no separate async parse stage to wait on; 413 over a
+  1MB content cap), `resolve_structural_mappings`, `extract_description_claims`,
+  `apply_document_claim`/`reject_document_claim` (the review-decision publish/reject pair,
+  `semantic_api.py`'s new dispatch branch calls into these directly, mirroring
+  `asset_description_service.apply_asset_description_draft`'s own shape).
+- `src/aida/document_ingestion_api.py` (new): REST -- `POST/GET /v1/projects/{project_id}/documents`,
+  `GET /v1/documents/{id}`, `GET .../sections`, `POST .../map`, `GET .../mappings`, `POST
+  .../extract-claims`, `GET .../claims`. Deliberately its own file with locally-scoped Pydantic schemas,
+  same reasoning as AT-1's `playbooks_api.py` -- kept out of the shared, hot `aida.api`/`aida.schemas`
+  under heavy concurrent edit on this branch.
+- `src/aida/semantic_api.py`: one new `elif review.object_type == "DOCUMENT_CLAIM":` branch in the
+  existing `_apply_governance_review_decision` dispatch (the same function GL-9/AT-1/every other
+  reviewable proposal type already extends), calling `apply_document_claim`/`reject_document_claim`.
+  Deliberately did **not** extend `review_queue_read_model.py`'s per-type confidence/evidence composition
+  (UX-17) -- that module's own docstring explicitly documents that an object type absent from its
+  dispatch still gets a full row in the queue (`confidence=None`, `evidence=[]`,
+  `diffable=False` via SM-7's fallback) rather than being dropped, so `DOCUMENT_CLAIM` reviews already
+  work correctly there with zero code changes; adding native confidence/evidence composition for it is a
+  real, contained follow-up, not a functional gap, and skipping it kept this row's diff out of a file with
+  a very actively-maintained, detailed scoping docstring.
+- `src/aida/main.py`: one import + one `app.include_router(document_ingestion_router)` in the existing
+  alphabetical import order.
+- `Docs/30-contracts/04-event-catalog.md`: `document.uploaded.v1`, `document.mapped.v1`,
+  `document.claims_extracted.v1`, `document.claim.approved.v1`/`.rejected.v1`.
+
+### Tests
+
+New file `tests/test_document_ingestion.py`, 17 tests, real-sqlite-engine pattern (matching
+`test_playbooks.py`): `parse_csv_data_dictionary` (table+column rows, case-insensitive headers,
+malformed-row counting, the section-count cap); `create_document_from_csv` (persists sections, 413 over
+the size cap); `resolve_structural_mappings` (matches table+column, `UNMATCHED` when nothing matches,
+`UNMATCHED` -- not a guess -- when a table name is ambiguous across two datasources in the same project);
+`extract_description_claims` (only structurally-mapped sections produce a claim, one `GovernanceReview`
+per claim); the full governance-decision round trip through the real `semantic_api.decide_governance_review`
+entry point (not just the underlying pure function) -- approve publishes one claim, reject leaves the
+other `REJECTED`, and a maker deciding their own claim is refused with 409, proving the new
+`DOCUMENT_CLAIM` dispatch branch is wired correctly end to end, not just that `apply_document_claim`
+itself works in isolation; REST-layer endpoint registration and a full upload -> map -> extract-claims ->
+list pipeline called through the actual route functions in-process, plus 409s for an out-of-order call
+(mapping twice, extracting claims before mapping) and a 403 for cross-organization access.
+
+### Verification
+
+`ruff check --fix` clean on every new/touched file (real findings caught: a loop-variable-closure bug
+(`B023`) in the CSV field-lookup helper -- would have made every parsed row silently read the *last*
+row's values for any missing/optional header -- fixed by passing the row explicitly rather than closing
+over the loop variable; one long line). `mypy --strict` clean on `document_ingestion.py`,
+`document_ingestion_api.py`, `models.py`, `semantic_api.py`, and `main.py` beyond the same pre-existing,
+already-on-`HEAD` `session_factory()` "object not callable" finding AT-1 documented earlier today (not
+reintroduced by this row -- confirmed present identically on unmodified `main.py`).
+
+`pytest tests/test_document_ingestion.py`: 17 passed on the first real run (the ambiguous-table-name and
+maker-cannot-check-their-own-claim cases both needed no fix once written -- the underlying logic was
+already correct). Regression sweep, zero failures: `pytest tests/test_document_ingestion.py
+tests/test_asset_description.py tests/test_asset_description_sample_review.py
+tests/test_leaver_reassignment.py tests/test_playbooks.py tests/test_delegation.py` -- 66 passed.
+`AIDA_ENVIRONMENT=development python -c "from aida.main import app"` imports cleanly, 394 routes (was
+386 before this row's seven new endpoints).
+
+`scripts/openapi_diff.py` (no flag): seven new paths, three new schemas, zero breaking changes, zero
+removed paths/schemas (diffed old-vs-new baseline by key set, not just by line count, since the raw
+`git diff` line count looked disproportionate to seven added paths -- confirmed it was JSON
+key-reordering noise, not a hidden regression). `--accept-baseline` run and both
+`Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed, same
+as AT-1 earlier today; this time genuinely clean (no unrelated `ValidationError.ctx` drift riding along,
+since AT-1's own regeneration earlier today had already absorbed that).
+
+Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in this sandbox on the
+pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
+rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
+failure.

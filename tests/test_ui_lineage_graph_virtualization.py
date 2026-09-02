@@ -35,6 +35,7 @@ import pytest
 UI_ROOT = Path(__file__).resolve().parents[1] / "ui"
 GRAPH_ENGINE = UI_ROOT / "scripts" / "graph-engine.js"
 VIRTUALIZATION_TEST = UI_ROOT / "scripts" / "graph-engine.virtualization.test.mjs"
+NODE_BIN = shutil.which("node")
 
 
 def test_graph_engine_html_card_mounting_is_gated_by_a_windowed_data_flag() -> None:
@@ -78,7 +79,9 @@ def test_graph_engine_stage_shows_a_render_window_readout() -> None:
     assert ".atlas-graph-window-readout" in css
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is required to execute the LN-8 virtualization proof")
+@pytest.mark.skipif(
+    NODE_BIN is None, reason="node is required to execute the LN-8 virtualization proof"
+)
 def test_windowed_node_count_stays_bounded_at_the_platform_node_limit() -> None:
     """Actually executes computeWindowedNodeIds (no mocking) against synthetic
     graphs sized at/above the platform's own bounds (node_limit up to 4,000 on
@@ -87,15 +90,17 @@ def test_windowed_node_count_stays_bounded_at_the_platform_node_limit() -> None:
     cap -- including the "whole graph fit into view" case that a naive
     mount-every-node renderer would lock up on.
     """
-    completed = subprocess.run(
-        ["node", str(VIRTUALIZATION_TEST)],
+    assert NODE_BIN is not None  # narrows for mypy; skipif above already guarantees this
+    completed = subprocess.run(  # noqa: S603 -- fixed script path, resolved trusted node binary
+        [NODE_BIN, str(VIRTUALIZATION_TEST)],
         cwd=str(UI_ROOT),
         capture_output=True,
         text=True,
         timeout=60,
     )
     assert completed.returncode == 0, (
-        f"graph-engine.virtualization.test.mjs failed:\nstdout={completed.stdout}\nstderr={completed.stderr}"
+        f"graph-engine.virtualization.test.mjs failed:\n"
+        f"stdout={completed.stdout}\nstderr={completed.stderr}"
     )
     payload = json.loads(completed.stdout)
     assert payload["ok"] is True

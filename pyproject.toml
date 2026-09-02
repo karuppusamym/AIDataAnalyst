@@ -67,6 +67,38 @@ testpaths = ["tests"]
 # CWD on `sys.path` implicitly) and fails under the bare `pytest` CI runs.
 pythonpath = ["."]
 
+# AU-14: coverage measurement, deliberately NOT folded into the bare `addopts`
+# above. Several CI jobs (`migration-drift`, `reachability`,
+# `connector-version-fixtures`) invoke `pytest` against a single test file each
+# for a fast, targeted signal -- forcing `--cov` into every invocation via
+# `addopts` would slow those down and produce a meaningless partial-suite
+# coverage report on every one of them. Instead the `tests` job in
+# `.github/workflows/ci.yml` (the one job that runs the full suite) opts in
+# explicitly with `--cov=aida --cov=atlas ...` on its own command line; `pytest`
+# only imports `pytest-cov`'s plugin machinery when `--cov` is actually passed,
+# so leaving these two sections here costs nothing for every other job.
+# `source`/`omit` below apply to any `--cov` invocation of the suite,
+# regardless of which command line passed the flag.
+[tool.coverage.run]
+source = ["aida", "atlas"]
+branch = true
+omit = [
+  "*/tests/*",
+  "*/migrations/*",
+  "*/conftest.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+precision = 2
+exclude_lines = [
+  "pragma: no cover",
+  "raise NotImplementedError",
+  "if TYPE_CHECKING:",
+  "^\\s*\\.\\.\\.$",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py313"
