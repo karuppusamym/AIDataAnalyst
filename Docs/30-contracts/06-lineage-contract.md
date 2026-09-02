@@ -17,9 +17,18 @@
   "edge": {
     "id": "edge_...",
     "kind": "QUERY | VIEW | PROCEDURE | ETL | DBT | BI | AI_DECISION",
-    // Implementation status (2026-08-30): TARGET vocabulary. The code stores a free-text
-    // String(30) defaulting to "ETL" and only ever assigns "SUGGESTED_RELATIONSHIP"
-    // explicitly. See 20-modules/09-lineage.md section 5.
+    // Implementation status (ST-15, 2026-09-01): ENFORCED. This exact vocabulary is now the
+    // agreed set and is enforced at the database level by a CHECK constraint on every edge_kind
+    // column of the four lineage-edge tables (openlineage_table_edge, openlineage_column_edge,
+    // bi_report_metric_edge, bi_metric_column_edge) -- migration d7b1e5a9c204, mirrored in
+    // aida.models.LINEAGE_EDGE_KINDS. The OpenLineage edges default to "ETL" and the BI edges to
+    // "BI" (both in the vocabulary); QUERY/VIEW/PROCEDURE/DBT/AI_DECISION are reserved for edge
+    // types not yet written to these tables. NOTE: "SUGGESTED_RELATIONSHIP" is NOT part of this
+    // vocabulary and never lands in these columns -- it belongs to the separate
+    // relationship/grant edge-kind axis (DECLARED_FOREIGN_KEY / SUGGESTED_RELATIONSHIP /
+    // APPROVED_RELATIONSHIP_CANDIDATE) carried by CrossBoundaryGrant.edge_kinds and the unified
+    // relationship-graph payloads, which is a different vocabulary for a different purpose. The
+    // earlier note conflated the two. See 20-modules/09-lineage.md section 5.
     "from_node": "lin_...",
     "to_node": "lin_...",
     "confidence": 1.0,

@@ -32,10 +32,13 @@
 >   `.github/workflows/ci.yml` runs `ruff`, `mypy`, `lint-imports`, an Alembic head check and
 >   `pytest`. The same applies to step 3 and the closing line of §3 below.
 >
-> Treat §2 as the intended vocabulary and the outbox rows as the current one. Reconciling the
-> two — either renaming emitted events or restating this catalog — is unscheduled work the
-> orchestrator should track; it is not a rename that can be done safely from the docs alone,
-> because consumers key on the emitted names.
+> **ST-14 update (2026-09-01): reconciled.** The two directions above are now joined. The
+> "restate the catalog" resolution (U2) was chosen — consumers key on the emitted `.v1` names,
+> so those are canonical — and every emitted `event_type=` is now documented, in the new
+> **"Reconciled emitted events (ST-14)"** subsection at the end of §2. The remaining pre-`.v1`
+> rows in §2 are retained as the historical intended vocabulary. `tests/test_event_catalog_gate.py`
+> (TS-11) enforces the code→catalog direction going forward with an empty drift baseline. Treat
+> §2's original rows as the intended vocabulary and the reconciled subsection as the current one.
 
 ## 1. Envelope
 
@@ -304,6 +307,67 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 |---|---|---|
 | `audit.event_recorded` | Any governed mutation | actor, action, resource, correlation_id |
 
+### Reconciled emitted events (ST-14) — topic `aida.platform.events.v1`
+
+> Added by **ST-14** (2026-09-01). The rows above in §2 are the *target* naming scheme; every
+> row here is a name the code **actually emits today** via `record_outbox(event_type=...)`. The
+> U2 authorial question (`Docs/review-2026-08/gap/04-documentation-truth-pass.md` §3 — "rename
+> the code, or restate the catalog") is resolved here in favour of **restating the catalog**:
+> the repo made a deliberate, repo-wide switch to `.v1`-versioned event names, live consumers
+> (e.g. `aida.projectors.graph_projector`) key on the literal `.v1` strings, and renaming ~44
+> emitted events back to their pre-`.v1` spelling would break those consumers. So the emitted
+> `.v1` names are canonical; the pre-`.v1` rows in §2 are retained only as the historical
+> intended vocabulary each one renames. This section is what `tests/test_event_catalog_gate.py`
+> (TS-11) now checks `src/` against — the `KNOWN_ST14_DRIFT` baseline it used to carry is now
+> empty, so a *new* undocumented `event_type=` fails the build instead of being absorbed.
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `organization.created.v1` | same event as documented `tenant.created` (org level) | same envelope + payload as the event it renames (see Trigger) |
+| `line_of_business.created.v1` | same event as documented `tenant.created` (LOB level) | same envelope + payload as the event it renames (see Trigger) |
+| `project.created.v1` | same event as documented `tenant.created` (project level) | same envelope + payload as the event it renames (see Trigger) |
+| `datasource.registered.v1` | same event as documented `datasource.registered` | same envelope + payload as the event it renames (see Trigger) |
+| `catalog.asset.certified.v1` | same event as documented `catalog.asset.certified` | same envelope + payload as the event it renames (see Trigger) |
+| `connector.certification.completed.v1` | same event as documented `certification.completed` | same envelope + payload as the event it renames (see Trigger) |
+| `model_route.created.v1` | same event as documented `model.route_version_created` | same envelope + payload as the event it renames (see Trigger) |
+| `model_route.approved.v1` | same event as documented `model.route_version_created / .approved` | same envelope + payload as the event it renames (see Trigger) |
+| `model_route.rejected.v1` | reject sibling of the model-route-approval rename above | same envelope + payload as the event it renames (see Trigger) |
+| `tool.version.draft_created.v1` | same event as documented `tool.drafted` | same envelope + payload as the event it renames (see Trigger) |
+| `tool.version.published.v1` | same event as documented `tool.drafted / .published` | same envelope + payload as the event it renames (see Trigger) |
+| `tool.version.deprecated.v1` | same event as documented `tool.drafted / .deprecated` | same envelope + payload as the event it renames (see Trigger) |
+| `tool.version.rejected.v1` | reject sibling with no documented counterpart; same family as the tool-lifecycle rename above | same envelope + payload as the event it renames (see Trigger) |
+| `tool.version.deprecation_rejected.v1` | reject sibling with no documented counterpart; same family as the tool-lifecycle rename above | same envelope + payload as the event it renames (see Trigger) |
+| `tool.execution.completed.v1` | same event as documented `tool.invoked` | same envelope + payload as the event it renames (see Trigger) |
+| `semantic_model.published.v1` | same event as documented `semantic.version_published` | same envelope + payload as the event it renames (see Trigger) |
+| `semantic_model.rejected.v1` | reject sibling with no documented counterpart; same family as the semantic-model-publish rename above | same envelope + payload as the event it renames (see Trigger) |
+| `agent.analysis.completed.v1` | same aggregate/lifecycle as documented `agent.run_started / .run_completed / .run_denied` | same envelope + payload as the event it renames (see Trigger) |
+| `query.execution.completed.v1` | same event as documented `execution.completed` | same envelope + payload as the event it renames (see Trigger) |
+| `query.feedback.updated.v1` | same event as documented `agent.feedback_recorded` | same envelope + payload as the event it renames (see Trigger) |
+| `relationship_candidate.approved.v1` | same event as documented `relationship.approved` | same envelope + payload as the event it renames (see Trigger) |
+| `relationship_candidate.rejected.v1` | same event as documented `relationship.rejected` | same envelope + payload as the event it renames (see Trigger) |
+| `business_semantics.proposals_created.v1` | same event as documented `semantic.inference_completed` (run_id/proposal_count payload matches) | same envelope + payload as the event it renames (see Trigger) |
+| `business_semantics.approved.v1` | same event as documented `semantic.annotation_published` (annotation_id/table_id payload matches) | same envelope + payload as the event it renames (see Trigger) |
+| `business_semantics.rejected.v1` | reject sibling with no documented counterpart; same family as the annotation-publish rename above | same envelope + payload as the event it renames (see Trigger) |
+| `dbt_artifact.imported.v1` | same event as documented `lineage.artifact_ingested` (dbt manifest case) | same envelope + payload as the event it renames (see Trigger) |
+| `openlineage.run_event.ingested.v1` | same event as documented `lineage.artifact_ingested` (OpenLineage case) | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.discovery.snapshot.v1` | same event as documented `ingestion.delivered` | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.ingestion.batch.queued.v1` | same event as documented `batch.finalized` | same envelope + payload as the event it renames (see Trigger) |
+| `data_quality.incident.transitioned.v1` | consolidates documented `quality.incident_opened` / `.incident_reopened` / `.incident_acknowledged` / `.resolved` / `.incident_auto_recovered` into one event with a status field | same envelope + payload as the event it renames (see Trigger) |
+| `analysis_run.requested.v1` | pre-`started` state of the documented `analysis_run.started / .completed / .cancelled` lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `analysis_run.scheduled.v1` | pre-`started` state of the documented `analysis_run.started / .completed / .cancelled` lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `analysis_run.resumed.v1` | additional state of the documented `analysis_run.started / .completed / .cancelled` lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `analysis_run.cancellation_requested.v1` | additional state of the documented `analysis_run.started / .completed / .cancelled` lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.analysis.completed.v1` | renamed `analysis_run.completed` | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.analysis.cancelled.v1` | renamed `analysis_run.cancelled` | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.analysis.failed.v1` | additional terminal state of the same renamed analysis_run lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `metadata.analysis.cancellation_race_completed.v1` | additional terminal state of the same renamed analysis_run lifecycle | same envelope + payload as the event it renames (see Trigger) |
+| `context.product_consumed.v1` | same event as documented `context.product_consumed`, emitted via the MCP/REST read paths that were added after that row was written | same envelope + payload as the event it renames (see Trigger) |
+| `context.product_consumption_denied.v1` | same event as documented `context.consumption_denied` | same envelope + payload as the event it renames (see Trigger) |
+| `data_quality.incident_opened` | same event as documented `quality.incident_opened` | same envelope + payload as the event it renames (see Trigger) |
+| `data_quality.incident_resolved` | same event as documented `quality.incident_acknowledged` / `.resolved` | same envelope + payload as the event it renames (see Trigger) |
+| `canonical_table.resolved.v1` | same event as documented `canonical_table.resolved` | same envelope + payload as the event it renames (see Trigger) |
+| `composite_relationship_candidate.decided.v1` | composite-candidate sibling of the already-documented-as-drift `relationship_candidate.decided.v1` (itself a consolidation of `relationship.approved` / `.rejected`); same decided-with-status-field shape, multi-column candidates instead of single-column | same envelope + payload as the event it renames (see Trigger) |
+
 ## 3. Adding an event
 
 1. Add the row to this catalog.
@@ -312,7 +376,7 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 4. Confirm the payload carries no values or secrets — the publish-time validator enforces this.
 5. Document consumers, or state explicitly that there are none yet.
 
-CI is intended to assert that every published event type appears in this catalog. **It does not (2026-08-30)** — no such gate exists, which is why the drift documented in the status note at the top of this file was able to accumulate unnoticed.
+CI asserts that every published event type appears in this catalog. **This gate now exists (ST-14 / TS-11, `tests/test_event_catalog_gate.py`):** it scans every `event_type=` passed to `record_outbox` in `src/` and fails the build if one is neither documented here nor named in the (now-empty) `KNOWN_ST14_DRIFT` baseline. Before it existed, the drift documented in the status note at the top of this file was able to accumulate unnoticed.
 
 ## Related documents
 

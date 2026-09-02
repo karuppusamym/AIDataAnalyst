@@ -24,6 +24,10 @@ name: aida-scale-harness-pr5-source
 services:
   scale-harness-source:
     image: postgres:16-alpine
+    # The Postgres metadata query used by PostgresConnector materializes a
+    # 100K-table information_schema result. Docker's default 64 MiB /dev/shm
+    # is insufficient for the required dynamic shared-memory segments.
+    shm_size: 1gb
     environment:
       POSTGRES_USER: source
       POSTGRES_PASSWORD: source-local-only

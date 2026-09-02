@@ -2271,9 +2271,32 @@ class OpenLineageDataset(Base, TimestampMixin):
     schema_fields: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
 
 
+#: ST-15: the one agreed lineage-edge ``kind`` vocabulary, matching the target set documented in
+#: ``Docs/30-contracts/06-lineage-contract.md`` §2. Enforced at the database level by a CHECK
+#: constraint on every ``edge_kind`` column below (migration ``d7b1e5a9c204``). NOTE: this is the
+#: *lineage* edge kind -- how one asset derives from another -- and is deliberately distinct from
+#: the *relationship/grant* edge-kind axis (``DECLARED_FOREIGN_KEY`` / ``SUGGESTED_RELATIONSHIP`` /
+#: ``APPROVED_RELATIONSHIP_CANDIDATE``) carried by ``CrossBoundaryGrant.edge_kinds`` and the
+#: unified-graph relationship payloads. Those are a different vocabulary for a different purpose
+#: and are not constrained here; conflating the two is what made ST-15 read as a contradiction.
+LINEAGE_EDGE_KINDS: tuple[str, ...] = (
+    "QUERY",
+    "VIEW",
+    "PROCEDURE",
+    "ETL",
+    "DBT",
+    "BI",
+    "AI_DECISION",
+)
+_LINEAGE_EDGE_KIND_CHECK_SQL = (
+    "edge_kind IN (" + ", ".join(f"'{k}'" for k in LINEAGE_EDGE_KINDS) + ")"
+)
+
+
 class OpenLineageTableEdge(Base, TimestampMixin):
     __tablename__ = "openlineage_table_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_openlineage_table_edge_edge_kind"),
         UniqueConstraint(
             "run_event_id",
             "input_dataset_namespace",
@@ -2308,6 +2331,7 @@ class OpenLineageTableEdge(Base, TimestampMixin):
 class OpenLineageColumnEdge(Base, TimestampMixin):
     __tablename__ = "openlineage_column_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_openlineage_column_edge_edge_kind"),
         UniqueConstraint(
             "run_event_id",
             "input_dataset_namespace",
@@ -4065,6 +4089,7 @@ class BiReportMetricEdge(Base, TimestampMixin):
 
     __tablename__ = "bi_report_metric_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_bi_report_metric_edge_edge_kind"),
         UniqueConstraint(
             "artifact_import_id",
             "report_id",
@@ -4095,6 +4120,7 @@ class BiMetricColumnEdge(Base, TimestampMixin):
 
     __tablename__ = "bi_metric_column_edge"
     __table_args__ = (
+        CheckConstraint(_LINEAGE_EDGE_KIND_CHECK_SQL, name="ck_bi_metric_column_edge_edge_kind"),
         UniqueConstraint(
             "artifact_import_id",
             "metric_id",
