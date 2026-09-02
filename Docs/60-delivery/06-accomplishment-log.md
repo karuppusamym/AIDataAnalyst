@@ -10361,3 +10361,121 @@ openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed;
 introduced (both decision endpoints already emitted `relationship_candidate.approved.v1`/`.rejected.v1`;
 `record_negative` does not emit an outbox event), so `tests/test_event_catalog_gate.py` needed no catalog
 change and passes (4 passed) unmodified.
+
+## 2026-09-02 — N15 closed: evaluation-gated agent publication, wired into the real shared publish transition
+
+Makes "production-grade agent" evidenced rather than asserted, by adding a real precondition to the one
+place an `AiAssetVersion` (EA.10c AI registry) actually moves to its published/production `APPROVED`
+state -- a direct extension of two things landed earlier the same day: N17's exemplar replay
+(`exemplar_store.py`/`tests/context_path_eval/exemplars.py`) and UX-19's honesty finding that `AgentRun`
+carries no FK back to `AiAsset` (`agent_roster.py`).
+
+**Corrected finding, checked directly rather than assumed from the tracker row's own title:**
+`ai_registry_api.py` never itself flips a version to `APPROVED`. `submit_ai_asset_version` only moves
+DRAFT -> REVIEW_REQUIRED and opens a `GovernanceReview`; the actual APPROVE decision that publishes it is
+applied by `semantic_api._apply_governance_review_decision`, the single shared dispatcher every governed
+object type's maker-checker decision already goes through (both the single-item `decide_governance_review`
+and PG-3's `bulk_decide_governance_reviews` call it, so the two paths cannot drift). Gating publication for
+real meant editing that shared dispatcher's `AI_ASSET_VERSION` branch -- an even better reuse than the
+row's own phrasing implied, since every AI asset version approval already flows through exactly one place.
+
+**Scoping investigated and found honestly absent, not fabricated.** Checked `models.py` (read-only for this
+row) directly: `AiAssetVersion` carries `context_product_version_ids`/`model_route_ids`/`policy_control_ids`
+(dependency references) but no data-domain/table/project scope field, and `AgentRun` has no FK to
+`AiAsset`/`AiAssetVersion` at all -- confirming UX-19's own finding rather than assuming it. So this gate
+is **organization-wide**, labelled and explained exactly as `agent_roster.py` already labels its own
+identical gap, never claimed to be one agent's private evaluation history.
+
+**`src/aida/agent_eval_gate.py`** (new, pure core + one production-safe async replay path):
+* `evaluate_agent_eval_gate(verdicts, threshold, minimum_exemplars=1)` -- pure, DB-free -- computes
+  PASS/FAIL/INSUFFICIENT_DATA from a list of `ExemplarVerdict`s. Fewer than `minimum_exemplars` (default 1)
+  total verdicts is always `INSUFFICIENT_DATA`, including zero -- never a silent pass. Every contributing
+  verdict stays visible on `AgentEvalGateResult.verdicts`, and a `FAIL`'s `reason` names every failing
+  `case_id`.
+* `replay_confirmed_run_corpus` -- the one exemplar-replay path this module can run automatically and
+  synchronously inside a real governance decision: no seeded scenario, no live orchestrator run, just N17's
+  own `find_confirmed_agent_runs`/`promote_confirmed_agent_run` over the organization's currently
+  human-confirmed `AgentRun`s. Documented honestly in the module's own docstring exactly what a
+  `CONFIRMED_RUN` `matched=True` does and does not prove: `derive_context_path` is a pure function of only
+  the fields already on one immutable `AgentRun` row, so comparing a freshly-promoted exemplar against the
+  very same row it was promoted from can never show drift -- `matched=True` proves the run is still
+  genuinely confirmed and its context path still derives cleanly right now, not that the governed catalog
+  has been unchanged since.
+* N17's `STEWARD_AUTHORED` replay (`tests/context_path_eval/exemplars.py::replay_steward_exemplar`) re-drives
+  a real `GovernedAgentOrchestrator.run()` against a seeded `ContextPathEvalScenario` that deliberately lives
+  under `tests/` -- production code under `src/aida` must never import from `tests/` (the same
+  one-directional boundary AT-8/N17 already keep), so this module never computes `STEWARD_AUTHORED` verdicts
+  itself. A caller with a live-replay-capable environment (a steward running the suite by hand today; N17's
+  own docstring already names "wiring the replay into a literal CI gate" as its own documented next step)
+  submits the resulting verdicts through `record_agent_eval_gate_evidence`'s `extra_verdicts`/
+  `steward_authored_verdicts`, persisted into `evaluation_evidence["agent_eval_gate"]
+  ["steward_authored_verdicts"]` so a later publish decision folds them back in via `stored_steward_verdicts`
+  without ever running a live replay itself.
+* `record_agent_eval_gate_evidence` persists into the exact `AiAssetVersion.evaluation_evidence` JSON field
+  `ai_registry.compute_ai_trust_score` already reads (`evaluation_evidence["pass_rate"]`/`["evidence_id"]`
+  feed its EVALUATION_POSTURE trust-score factor) -- so a passing N15 gate run now actually feeds that field
+  for platform-native agents, with no migration and no new column -- and calls the existing `record_audit`,
+  never a parallel audit mechanism.
+
+**Wired into the real publish precondition** (`semantic_api._apply_governance_review_decision`,
+`AI_ASSET_VERSION` branch, `decision == "APPROVE"`, `ai_asset.asset_kind == "AGENT"`): runs
+`compute_agent_eval_gate` live (always recomputes the `CONFIRMED_RUN` half fresh from the database, folds in
+whatever `STEWARD_AUTHORED` verdicts were most recently stored) before allowing the transition. A verdict
+other than `PASS` raises `HTTPException(409, ...)` naming the verdict, the reason, and every failing
+exemplar by `case_id` -- deliberately *before* `ai_version.status = "APPROVED"` is ever set, and deliberately
+without persisting evidence on that path: a raise this deep in the shared dispatcher unwinds without a
+commit in the single-decision path and rolls back inside a `SAVEPOINT` in the bulk path (verified directly:
+`bulk_decide_governance_reviews` wraps each item's dispatch in `session.begin_nested()`), exactly like every
+other precondition failure already raised elsewhere in that same function -- an early inner `session.commit()`
+to force-persist a blocked attempt's evidence was considered and rejected, since it would also commit the
+review's unconditionally-pre-set `status="APPROVED"` mutation, leaving a review neither properly decided nor
+re-decidable, and would corrupt the bulk path's per-item `SAVEPOINT` batching. Only a genuine `PASS` survives
+to the real commit, recorded right alongside the approval it justified.
+
+**Two new endpoints** (`ai_registry_api.py`, same router, no new router registration needed) let a steward
+see the gate's state before ever attempting to publish (this row's third deliverable): `GET
+/v1/ai-asset-versions/{id}/eval-gate` is a live, read-only preview -- no side effect -- that calls the
+*identical* `compute_agent_eval_gate` the real publish decision calls, so the preview can never show a
+different answer than reality. `POST .../eval-gate/evaluate` runs the gate and persists the result either
+way (unlike the automatic publish-time check, an explicit steward action's result is real evidence worth
+keeping whether it passes or fails), accepting externally-submitted `STEWARD_AUTHORED` verdicts -- the
+request schema has no `source` field at all, so a caller can never inject a fabricated `CONFIRMED_RUN`
+verdict; that source is only ever produced by this module's own live database read. Both endpoints 409 for a
+non-`AGENT`-kind asset.
+
+**Tests** (`tests/test_agent_eval_gate.py`, 16 new): pure gate-logic (zero exemplars -> INSUFFICIENT_DATA
+even with nothing to fail; below-minimum-exemplars stays INSUFFICIENT_DATA even at a perfect rate, so a
+thin sample can never pass by accident; enough passes -> PASS with every verdict still visible; too many
+failures -> FAIL naming every failing case; pass-rate-exactly-at-threshold passes; invalid threshold/minimum
+rejected; determinism), `replay_confirmed_run_corpus` and `record_agent_eval_gate_evidence`/
+`stored_steward_verdicts` against a real in-memory sqlite database (N17's own promotion machinery, not a
+mock), and six real integration tests driving the actual `semantic_api.decide_governance_review`: a publish
+attempt is blocked with `INSUFFICIENT_DATA` against zero confirmed runs; blocked with `FAIL` naming a
+specific `steward-fail-1` exemplar when a steward previously submitted a mostly-failing corpus (even with a
+passing confirmed run also present); allowed, `AiAssetVersion.status` becoming `APPROVED` with `PASS`
+evidence recorded, against a real passing confirmed-run corpus; the preview endpoint proven to match what the
+real decision then does; and one case that drives a real `GovernedAgentOrchestrator.run()` through N17's own
+`replay_steward_exemplar` (against AT-8's `TOOL_MISSING_PARAMETER_REACHES_CLARIFICATION` case) and confirms
+that real replay verdict genuinely contributes to a real publish being allowed -- the literal "based on real
+exemplar replay results" proof.
+
+`ruff check`/`mypy src` clean on every touched file; the 44 pre-existing `"object" not callable"` findings
+elsewhere in `src` are unrelated and untouched by this row (confirmed against `origin` before this row's own
+changes, same standing finding several other rows this branch have already reported).
+`AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py` green (all cases). Two new HTTP routes added,
+so `scripts/openapi_diff.py --accept-baseline` and `scripts/generate_ui_types.py --accept-baseline` were run
+twice (once before this row's own final rebase, once after picking up other concurrently-landed routes) and
+both `Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed,
+each time confirmed purely additive via `git diff --stat` before committing; `tests/test_openapi_diff_gate.py`
+green against the regenerated baseline. `cd ui-next && npm run typecheck`/`test`/`build` not run in this
+environment -- `node_modules` was never installed here (`ui-next/node_modules` does not exist), so those
+commands cannot execute at all regardless of this row's changes; noted honestly rather than claimed clean.
+No new `event_type=` was introduced (this row only calls the existing `record_audit`, never `record_outbox`
+for the gate itself), so `tests/test_event_catalog_gate.py` needed no catalog change and passes unmodified.
+Full regression pass across every test file that exercises the shared governance-review dispatcher this row
+edits (`test_asset_description.py`, `test_asset_description_sample_review.py`,
+`test_bulk_governance_decisions.py`, `test_context_products.py`, `test_delegation.py`,
+`test_leaver_reassignment.py`, `test_metric_suggestions.py`, `test_semantic_glossary_binding.py`,
+`test_tier0_invariants.py`, `test_consumer_footer.py`, `test_metric_formula_collision_endpoint.py`,
+`test_review_queue_read_model.py`, `test_semantic_diff_endpoint.py`) green -- no regression to any other
+governed object type's approval path.
