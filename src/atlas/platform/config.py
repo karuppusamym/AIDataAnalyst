@@ -157,6 +157,17 @@ class Settings(BaseSettings):
     # growing. Deliberately a multiple of `profile_plan_page_size` in the
     # default so the boundary lands on a page edge, not mid-page.
     profile_continue_as_new_after_tables: int = Field(default=2_000, ge=1, le=1_000_000)
+    # CN-3/PR-5. Bounded page size for `PostgresConnector.discover_streaming`'s
+    # per-axis queries -- a distinct concern from `profile_plan_page_size`
+    # above (that pages *profiling* tasks over tables the catalog already
+    # knows about; this bounds the *discovery* scan itself, before any table
+    # for this run exists in the catalog yet). Kept an order of magnitude
+    # smaller than the profiling page size by default because each discovery
+    # batch issues roughly ten separate per-axis queries (columns,
+    # constraints, views, indexes, partitions, comments, grants) against the
+    # batch's tables rather than one -- a 500-table discovery batch is already
+    # ~5,000 query executions across a 100K-table run.
+    discovery_stream_batch_size: int = Field(default=500, ge=1, le=50_000)
     # PR-2: how many (value, count) pairs `profile_column_values` captures per
     # gated column -- the "top values" half of the policy-approved exception.
     profile_value_top_n: int = Field(default=10, ge=1, le=100)

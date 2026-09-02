@@ -147,6 +147,11 @@ def test_catalog_rows_with_no_current_emitter_are_reported_softly() -> None:
         "glossary.term_deprecated.v1",
         "certification.granted.v1",
         "ownership.leaver_reassigned.v1",
+        # AT-11: emitted from the governance-review dispatch's
+        # COLUMN_CLASSIFICATION_PROMOTION branch (via apply_classification_promotion's
+        # returned event_type), invisible to the static scan for the same reason.
+        "classification.derived.promoted.v1",
+        "classification.derived.promotion_rejected.v1",
     }
     unemitted = documented - scan.literals - scan.possible_literals - known_emitted_elsewhere
     if unemitted:

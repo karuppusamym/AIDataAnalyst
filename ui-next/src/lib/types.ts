@@ -1568,6 +1568,7 @@ export interface DataQualityIncidentRead {
   anomaly_type: string;
   severity: string;
   status: string;
+  source?: string;
   summary: string;
   evidence: Record<string, unknown>;
   occurrence_count: number;
@@ -1889,6 +1890,44 @@ export interface ExecutionRead {
   executed_by: string;
   created_at: string;
   updated_at: string;
+}
+
+/** Normalized inbound envelope for a third-party detector quality signal. */
+export interface ExternalQualitySignalIngest {
+  detector_vendor: string;
+  detector_native_id: string;
+  table_id: string;
+  column_id?: string | null;
+  severity: "CRITICAL" | "WARNING" | "INFO";
+  signal_status: "OPEN" | "RESOLVED";
+  summary: string;
+  observed_at: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ExternalQualitySignalIngestResult {
+  signal: ExternalQualitySignalRead;
+  deduplicated: boolean;
+  incident_opened: boolean;
+  incident_resolved: boolean;
+}
+
+export interface ExternalQualitySignalRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  table_id: string;
+  column_id: string | null;
+  incident_id: string | null;
+  detector_vendor: string;
+  detector_native_id: string;
+  severity: string;
+  signal_status: string;
+  summary: string;
+  observed_at: string;
+  details: Record<string, unknown>;
+  created_by: string;
+  created_at: string;
 }
 
 export interface FleetSummaryRead {
