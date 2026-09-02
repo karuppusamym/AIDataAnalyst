@@ -63,7 +63,11 @@ from alembic.migration import MigrationContext
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from aida import envelope_models, models  # noqa: F401 -- registers every ORM table on Base.metadata
+from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
+    envelope_models,
+    graph_store,
+    models,
+)
 from aida.db import Base
 from atlas.platform.config import get_settings
 

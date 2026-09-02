@@ -6407,7 +6407,8 @@ and INV-1's closed `permitted_readers` allowlist
 (`tests/test_inv1_single_authoritative_store.py::test_request_path_graph_access_is_read_only_and_closed`)
 does not distinguish request-path from scheduled-background Neo4j readers by directory alone
 outside the `projectors/` package, so `graph_reconciliation.py` needed a reviewed entry — added
-with the same justification style as the existing `api.py`/`lineage_graph_store.py` rows: this
+with the same justification style as the existing `api.py`/lineage_graph_store.py
+(since consolidated into `graph_store.py`, tracker C7) rows: this
 module reads Neo4j only to diff it against PostgreSQL's own selection and alert on disagreement,
 never to answer a request or override PostgreSQL.
 
@@ -10639,6 +10640,121 @@ Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in
 pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
 rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
 failure.
+
+## 2026-09-02 — C7 closed: graph store as a configurable per-organization port (ADR-0020 amendment)
+
+Atlas Wave-2, Group J, run in parallel with three sibling sessions (Groups I/K/L) integrated separately
+later -- scope was deliberately confined to new files plus narrowly-scoped additive edits to the three
+Neo4j call-sites the ADR names, to keep collision surface with the concurrent ST-05/06/07 `models.py`/
+`schemas.py`/`api.py` split to a minimum.
+
+### The port, copying `vector_store.py`'s shape exactly, as instructed
+
+`src/aida/graph_store.py` is new: `GraphStorePort` (abstract `lineage_impact`/`graph_summary`), three
+adapters -- `PostgresGraphStore` (default, certified), `Neo4jGraphStore` (uncertified per INV-9),
+`DisabledGraphStore` (explicit `GraphStoreUnavailable` refusal, never a silent empty answer) -- and
+`build_graph_store`, the resolving factory. `PostgresGraphStore.lineage_impact` is not a second
+implementation of lineage traversal: it is handed `aida.unified_lineage_api._build_unified_graph` as an
+injected `build_snapshot` dependency and runs `aida.unified_lineage.traverse` over the result, the exact
+machinery the endpoint's own Postgres fallback already used. `graph_summary` is genuinely new SQL --
+seven `COUNT` queries against the relational catalog tables, including `sensitive_columns` (reusing the
+existing `aida.classification.SENSITIVE_CLASSES` leaf constant) and `foreign_key_relationships`, neither
+of which the Postgres side had ever computed before (only the Neo4j side had).
+
+### Two of the three named call-sites rewired; the third module deleted, not shimmed
+
+The ADR names three modules that read Neo4j today: `api.py`, lineage_graph_store.py,
+`unified_lineage_api.py`. `api.py::get_graph_summary` and `unified_lineage_api.py::build_unified_lineage_impact_payload`
+now resolve a backend through `resolve_graph_store_backend` and call the port instead of constructing a
+Neo4j driver inline. lineage_graph_store.py itself is **deleted**, not kept as a backward-compatible
+shim: once its one caller (`unified_lineage_api.py`) moved to the port directly, `tests/test_reachability_gate.py`
+caught it as unreachable from any of the five real entry points with zero remaining callers -- exactly
+the failure mode that gate exists to catch (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`'s "code
+that passes its own unit tests with zero live callers") -- and the gate's own stated remedy is delete or
+wire in, not shim around. `pyproject.toml`'s C4/ST-11 import-linter contract updated to name
+`aida.graph_store` in place of the now-nonexistent aida.lineage_graph_store.
+
+`graph_reconciliation.py` (KG-7) is deliberately **not** rewired, despite also reading Neo4j: its entire
+job is diffing Neo4j against PostgreSQL directly to detect projection drift, which a switchable
+single-backend port would make meaningless the moment an organization's setting is `disabled` or
+`postgres`. The ADR's own module list already agrees -- it names three modules, not four.
+
+### A per-organization admin setting that never touches the contested files
+
+`GraphStoreOrganizationSetting` (migration `8396592b30e0_graph_store_organization_setting.py`) is a new,
+standalone table -- `organization_id` unique, `backend` CHECK-constrained to the three valid values --
+declared in `graph_store.py` itself rather than in `models.py`, the same collision-avoidance pattern
+`aida.envelope_models` already established for exactly this situation (a new table landing while
+`models.py` is mid-split). `models.py` is untouched; `migrations/env.py` and
+`tests/test_migration_orm_drift.py` each gained one import (`graph_store` alongside the existing
+`envelope_models`) so Alembic autogenerate/drift detection sees the table -- the same registration
+mechanism `envelope_models` already uses, extended rather than reinvented. No REST admin endpoint was
+added: `api.py` is mid-split under ST-05/06/07, and `get_/set_organization_graph_store_backend` are fully
+functional called directly against the table, the same state `ensure_organization_integration_policy`
+was in before its own endpoint existed.
+
+INV-9 gates `neo4j` twice, not once: an organization can request it, but `resolve_graph_store_backend`
+only actually serves it when the pre-existing process-wide `lineage_neo4j_read_enabled` flag (default
+`false`) is also on -- a request alone is not the same as an operator having certified the backend.
+
+### The conformance suite found a real bug
+
+`tests/test_graph_store_conformance.py` is two layers, so the harness is exercised even without a live
+Neo4j (none is reachable in this sandbox -- no Docker daemon, confirmed by trying). Layer one drives the
+comparison assertion (`_assert_impact_reads_match`) directly against hand-built results, proving it both
+accepts identical output and catches a real divergence (node ordering, truncation disagreement) --
+runnable and run with no database at all. Layer two seeds an identical fixture (a 3-table `a -> b -> c`
+foreign-key chain, fixed UUIDs) into a real SQLite-backed `PostgresGraphStore` and, when reachable, a real
+Neo4j seeded with the exact node/edge property shape `aida.projectors.graph_projector` actually writes,
+then asserts byte-identical `UnifiedLineageImpactRead` results including cap/truncation behaviour under a
+tight `node_limit`. It skips cleanly with a stated reason when Neo4j is unreachable, mirroring
+`tests/test_migration_orm_drift.py`'s own probe-and-skip pattern for PostgreSQL.
+
+Building it surfaced a real, previously-unnoticed bug: `Neo4jGraphStore.lineage_impact`'s UPSTREAM/
+DOWNSTREAM Cypher pattern assignment was inverted relative to `PostgresGraphStore`'s traversal direction
+(and `aida.unified_lineage.UnifiedLink`'s own documented dependent -> dependency edge convention). Traced
+by hand against `aida.projectors.graph_projector`'s real edge-writing code rather than run live (no Neo4j
+reachable here), and fixed in the same pass with an inline comment recording the discovery. Nothing had
+ever run the `neo4j` adapter against a real database to catch this -- precisely the failure mode INV-9
+predicts for an uncertified backend, and precisely the value a conformance suite that actually gets built
+is supposed to have.
+
+### INV-1: proven, not assumed
+
+`tests/test_graph_store_inv1_isolation.py` is two proofs. Static: a breadth-first search over every real
+`import`/`from` statement under `src/` shows `aida.authorization_gate` and `aida.business_graph` cannot
+reach `aida.graph_store` transitively -- not a hand-maintained allowlist, and not merely "doesn't import
+it today"; a future indirect import anywhere in either module's dependency chain fails this test
+immediately. Behavioural: a real `GraphStoreOrganizationSetting` row is seeded alongside the same
+fixtures `gate()` and `rollup()` read (an ENFORCE workspace with a real access rule; a `BusinessNode`
+with real `BusinessAssignment` rows), set to each of the three backends in turn, and both an authorization
+allow, an authorization denial, and a classification roll-up count are asserted byte-identical across all
+three -- proving the setting is inert to these two decisions even when a row for the same organization
+exists in the same database, not merely unimported.
+
+### Verification
+
+35 new/updated tests passed, 2 skipped (both requiring a live Neo4j, stated reason, no fake green):
+`tests/test_graph_store.py` (19, real SQLite -- FK-chain traversal, depth cap, sensitive-column counting,
+the migration's own `CHECK` constraint, per-org setting upsert/resolve, the INV-9 operator-flag gate),
+`tests/test_graph_store_conformance.py` (5, 2 skip), `tests/test_graph_store_inv1_isolation.py` (6),
+`tests/test_graph_summary.py` (7, rewritten in place for the new call path -- same CURRENT/LAGGING/
+NOT_PROJECTED/503 coverage it always had, plus 2 new backend-selection cases). `tests/test_inv1_single_authoritative_store.py`'s
+closed `permitted_readers` list updated to name `graph_store.py` in place of `api.py`/lineage_graph_store.py.
+Full suite green; `ruff check .`, `mypy src sdk/aida_tool_sdk`, `lint-imports` (8 contracts kept, 0
+broken) all clean; exactly one Alembic head (`8396592b30e0`). `Docs/90-reference/openapi-baseline.json`
+regenerated (`get_graph_summary`'s new docstring became its OpenAPI `description` -- purely additive,
+confirmed via `git diff`); `ui-next/src/lib/types.ts` unaffected (`scripts/generate_ui_types.py` confirms
+no schema-shape change); `test_doc_claims.py`/`test_event_catalog_gate.py` (no new `event_type=`) green.
+Five Docs citations of the now-deleted lineage_graph_store.py filename corrected so `test_doc_claims.py`
+keeps resolving every citation to a real file; ADR-0020 gets a 2026-09-02 implementation-status addendum.
+
+Honest gaps, unchanged from the ADR's own accounting: Neo4j does not run in CI, and E5 (the projection
+rebuild drill) has not run -- both were explicitly out of scope for this pass per the parallel-plan
+instruction, and the `neo4j` backend ships advertised as uncertified rather than as though it were
+equally proven, per INV-9. No REST admin endpoint for the per-organization setting exists yet, to avoid
+adding to `api.py`'s collision surface during ST-05/06/07 -- the setting is fully functional at the data
+layer today and an endpoint is a small, natural follow-up once that split lands.
 
 ## 2026-09-02 — UX-15/UX-20/UX-8 closed: ui-next migration (review queue, marketplace, lineage
 refusals, Studio change sets, narrated lineage, persona onboarding)
