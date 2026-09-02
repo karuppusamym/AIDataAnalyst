@@ -20,6 +20,30 @@ class ResolvedTableReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedExemplar:
+    """A promoted exemplar (N17), pre-scoped and pre-serialized by the caller.
+
+    Mirrors `ResolvedNegativeAssertion` exactly: `compile_context_product`
+    stays a pure function of its arguments (no DB access, no clock reads),
+    so every field here is already a JSON primitive -- no `AgentRun` object,
+    no live-derived value -- keeping the artifact hash reproducible. Built
+    from `aida.exemplar_store.ExemplarCase` by
+    `context_compiler_api._load_exemplars`, the same "resolve, then
+    pre-serialize" split `_load_negative_knowledge` uses for negative
+    knowledge.
+    """
+
+    case_id: str
+    source: str
+    resolved_object_types: tuple[str, ...]
+    selected_tool_slug: str | None
+    semantic_version_kind: str
+    policy_status: str
+    policy_reason_code: str | None
+    artifact_hash: str
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedNegativeAssertion:
     """A negative-knowledge record, pre-scoped and pre-serialized by the caller.
 
@@ -40,12 +64,18 @@ class ResolvedNegativeAssertion:
 
 # Targets whose payload carries an Atlas-native `context`/`spec` envelope
 # (built from `common`) rather than conforming to an external vendor
-# schema. The negative-knowledge section is Atlas-specific content -- Snowflake
-# Semantic Views, Databricks Metric Views, OSI, and ODCS have no field for
-# "what we decided is not true" and validating those artifacts against their
+# schema. The negative-knowledge and exemplar sections are Atlas-specific
+# content -- Snowflake Semantic Views, Databricks Metric Views, OSI, and ODCS
+# have no field for "what we decided is not true" or "a confirmed-correct
+# context path to imitate", and validating those artifacts against their
 # vendor spec would reject an unrecognized extra key -- so only these targets
-# carry it.
+# carry either.
 _NEGATIVE_KNOWLEDGE_TARGETS = frozenset({"MCP", "REST", "YAML"})
+#: Deliberately the same set as `_NEGATIVE_KNOWLEDGE_TARGETS` (see above) --
+#: kept as its own name so a future target-selection divergence between the
+#: two sections stays a one-line, easy-to-review change rather than a shared
+#: constant silently governing both.
+_EXEMPLAR_TARGETS = frozenset({"MCP", "REST", "YAML"})
 
 
 def _negative_knowledge_section(assertions: list[ResolvedNegativeAssertion]) -> dict[str, Any]:
@@ -71,6 +101,24 @@ def _negative_knowledge_section(assertions: list[ResolvedNegativeAssertion]) -> 
     return {"count": len(items), "assertions": items}
 
 
+def _exemplars_section(exemplars: list[ResolvedExemplar]) -> dict[str, Any]:
+    items = [
+        {
+            "case_id": exemplar.case_id,
+            "source": exemplar.source,
+            "resolved_object_types": sorted(exemplar.resolved_object_types),
+            "selected_tool_slug": exemplar.selected_tool_slug,
+            "semantic_version_kind": exemplar.semantic_version_kind,
+            "policy_status": exemplar.policy_status,
+            "policy_reason_code": exemplar.policy_reason_code,
+            "artifact_hash": exemplar.artifact_hash,
+        }
+        for exemplar in exemplars
+    ]
+    items.sort(key=lambda item: str(item["case_id"]))
+    return {"count": len(items), "exemplars": items}
+
+
 def _canonical_json(value: Any, *, pretty: bool = True) -> str:
     return json.dumps(
         value,
@@ -87,6 +135,7 @@ def _artifact_payload(
     target: ContextCompilerTarget,
     tables: list[ResolvedTableReference],
     negative_knowledge: list[ResolvedNegativeAssertion],
+    exemplars: list[ResolvedExemplar],
 ) -> dict[str, Any]:
     references = {
         "tables": [
@@ -109,12 +158,13 @@ def _artifact_payload(
         "quality_requirements": version.quality_requirements,
         "policy_summary": version.policy_summary,
     }
-    # Only the Atlas-native envelope carries negative knowledge (see
-    # `_NEGATIVE_KNOWLEDGE_TARGETS`); vendor-standard targets below embed
-    # `common` unchanged.
+    # Only the Atlas-native envelope carries negative knowledge or exemplars
+    # (see `_NEGATIVE_KNOWLEDGE_TARGETS`/`_EXEMPLAR_TARGETS`); vendor-standard
+    # targets below embed `common` unchanged.
     atlas_common = {
         **common,
         "negative_knowledge": _negative_knowledge_section(negative_knowledge),
+        "exemplars": _exemplars_section(exemplars),
     }
     if target == "MCP":
         return {
@@ -213,6 +263,7 @@ def compile_context_product(
     target: ContextCompilerTarget,
     tables: list[ResolvedTableReference],
     negative_knowledge: list[ResolvedNegativeAssertion] | None = None,
+    exemplars: list[ResolvedExemplar] | None = None,
 ) -> ContextCompilationRead:
     """Compile a version-pinned product without time- or environment-dependent fields.
 
@@ -223,6 +274,12 @@ def compile_context_product(
     targets in `_NEGATIVE_KNOWLEDGE_TARGETS`. Defaults to no negative
     knowledge so existing callers compiling without it keep producing the
     same artifact they always did.
+
+    `exemplars` (N17) mirrors that exact pattern: pre-scoped by the caller
+    (see `context_compiler_api._load_exemplars`) to promoted context paths
+    whose own resolved objects touch this version's table scope, rendered
+    only into targets in `_EXEMPLAR_TARGETS`, and defaulting to none so
+    existing callers are unaffected.
     """
     payload = _artifact_payload(
         product,
@@ -230,6 +287,7 @@ def compile_context_product(
         target,
         sorted(tables, key=lambda item: item.table_id),
         negative_knowledge or [],
+        exemplars or [],
     )
     content = (
         yaml.safe_dump(payload, sort_keys=True, allow_unicode=False, width=100)

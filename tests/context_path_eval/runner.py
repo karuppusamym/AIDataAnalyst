@@ -1,14 +1,14 @@
 """The replay mechanism: derive a context path from a persisted `AgentRun`
 and compare it against a stored eval case's expectation.
 
-`derive_context_path` is a pure function over `AgentRun` state that already
-exists on the model today (`plan_evidence`, `retrieval_evidence`,
-`semantic_version`, `status`, `failure_reason`) -- the same "read back what
-was recorded, never recompute a live equivalent" idiom AT-16's
-`answer_provenance.py` and AT-6's `agent_run_replay.py` both use. It never
-touches `AgentRun.grounding_fragment_digests`' resolved content or any
-result-set value: only object identifiers, a version string, a plan
-strategy, and a policy outcome -- the context path, per INV-6/ADR-0014.
+`derive_context_path` (and the `ContextPath` it returns) now live in
+`aida.context_path` -- promoted out of this module for N17, so the
+production exemplar-promotion code (`aida.exemplar_store`) can share the
+exact same derivation this runner already proved out, rather than
+re-implementing an equivalent reader of `AgentRun` state a second time. Both
+still re-export at this name for every existing import site; nothing about
+AT-8's own behavior changed. See `aida.context_path`'s own docstring for the
+"read back what was recorded, never recompute a live equivalent" rationale.
 
 `run_eval_case` is "replayable" in the concrete sense the tracker row asks
 for: it drives a real `GovernedAgentOrchestrator.run()` against the
@@ -25,7 +25,6 @@ since context paths legitimately evolve as governed content changes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,9 +36,18 @@ from aida.agent_orchestrator import (
     ModelRouteUnavailable,
 )
 from aida.config import Settings
+from aida.context_path import ContextPath, derive_context_path
 from aida.models import AgentRun
 from tests.context_path_eval.cases import ContextPathEvalCase
 from tests.context_path_eval.scenario import ContextPathEvalScenario
+
+__all__ = [
+    "ContextPath",
+    "ContextPathEvalResult",
+    "compare_to_expected",
+    "derive_context_path",
+    "run_eval_case",
+]
 
 #: Every terminal exception `GovernedAgentOrchestrator.run` raises once it has
 #: already persisted the `AgentRun` this module reads back -- see
@@ -52,53 +60,6 @@ _EXPECTED_TERMINAL_EXCEPTIONS: tuple[type[Exception], ...] = (
     AgentPolicyRejected,
     ModelRouteUnavailable,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ContextPath:
-    """The structural facts this eval suite asserts on -- object/version
-    identity, plan selection, policy outcome. Deliberately excludes anything
-    that looks like a business value or a final answer (INV-6/ADR-0014):
-    no result rows, no generated SQL text, no model output content.
-    """
-
-    strategy: str | None
-    selected_tool_version_id: str | None
-    tool_decisions: tuple[tuple[str, str], ...]  # (tool_version_id, decision)
-    resolved_object_types: frozenset[str]
-    resolved_objects: frozenset[tuple[str, str]]  # (object_type, object_id)
-    semantic_version: str | None
-    semantic_version_kind: str
-    policy_status: str
-    policy_reason_code: str | None
-    prompt_risk_decision: str | None
-
-
-def derive_context_path(agent_run: AgentRun) -> ContextPath:
-    plan_evidence: dict[str, Any] = agent_run.plan_evidence or {}
-    resolved_objects = frozenset(
-        (str(entry.get("object_type", "")), str(entry.get("object_id", "")))
-        for entry in agent_run.retrieval_evidence
-    )
-    semantic_version = agent_run.semantic_version
-    prompt_risk = plan_evidence.get("prompt_risk") or {}
-    return ContextPath(
-        strategy=plan_evidence.get("strategy"),
-        selected_tool_version_id=plan_evidence.get("selected_tool_version_id"),
-        tool_decisions=tuple(
-            sorted(
-                (str(d.get("tool_version_id", "")), str(d.get("decision", "")))
-                for d in plan_evidence.get("tool_decisions") or []
-            )
-        ),
-        resolved_object_types=frozenset(object_type for object_type, _ in resolved_objects),
-        resolved_objects=resolved_objects,
-        semantic_version=semantic_version,
-        semantic_version_kind=semantic_version.split(":", 1)[0] if semantic_version else "",
-        policy_status=agent_run.status,
-        policy_reason_code=agent_run.failure_reason,
-        prompt_risk_decision=prompt_risk.get("decision"),
-    )
 
 
 def compare_to_expected(

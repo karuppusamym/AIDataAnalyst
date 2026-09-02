@@ -44,10 +44,19 @@ Modules:
 - `cases.py` -- the stored eval cases themselves: `ContextPathEvalCase`
   instances naming an input scenario and an expected context path, never an
   expected answer.
-- `runner.py` -- `derive_context_path` (pure function over a persisted
-  `AgentRun`) and `run_eval_case` (drives a real orchestrator run and
+- `runner.py` -- `run_eval_case` (drives a real orchestrator run and
   compares the derived context path against a case's expectation), the
-  replay mechanism itself.
+  replay mechanism itself. `ContextPath`/`derive_context_path` now live in
+  `aida.context_path` (moved for N17 so production code can share them) and
+  are re-exported here at the same names.
+- `exemplars.py` (N17) -- converts a *promoted* exemplar
+  (`aida.exemplar_store.ExemplarCase`, mined from a confirmed `AgentRun` or
+  authored by a steward) into this package's own `ContextPathEvalCase`
+  format and replays it through `runner.run_eval_case`, the same mechanism
+  above -- the "benchmark suite" half of N17. See `aida.exemplar_store`'s
+  module docstring for the full design (what "confirmed" means in this
+  codebase's real data, and why only a steward-authored exemplar carries a
+  live-replayable question).
 """
 
 from __future__ import annotations
