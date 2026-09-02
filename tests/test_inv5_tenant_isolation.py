@@ -165,7 +165,14 @@ def _foreign_call_arguments(route: APIRoute, foreign_organization: UUID) -> dict
     check after request processing is the bug this test exists to catch.
     """
     arguments: dict[str, Any] = {}
-    for name, parameter in inspect.signature(route.endpoint).parameters.items():
+    # eval_str=True: some routers (e.g. playbooks_api.py) use `from __future__
+    # import annotations`, which makes every annotation a lazy string. Without
+    # this, `annotation is SecurityContext` below silently fails for those
+    # routes -- `context` falls through to the ExplodingSession branch just
+    # like `session` does, and the resulting failure looks like a real
+    # tenancy-check-ordering bug when it is actually this harness not
+    # resolving the type.
+    for name, parameter in inspect.signature(route.endpoint, eval_str=True).parameters.items():
         annotation = parameter.annotation
         if name == "organization_id":
             arguments[name] = foreign_organization
