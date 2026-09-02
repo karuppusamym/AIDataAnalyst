@@ -19,6 +19,7 @@ import type {
   UnifiedLineageImpactRead,
 } from "./types";
 import type {
+  AuditEventRead,
   CatalogRowRead,
   CertificationStatus,
   CursorPage,
@@ -27,6 +28,7 @@ import type {
   QualityState,
 } from "./ui-types";
 import type {
+  AuditEventQuery,
   CatalogQuery,
   LineageImpactQuery,
   MarketplaceQuery,
@@ -1140,5 +1142,115 @@ export async function makeFixtureRelationshipCandidateCalibration(
       { confidence_low: 0.8, confidence_high: 0.9, decided_count: 15, approved_count: 14, rejected_count: 1, observed_approval_rate: 14 / 15 },
       { confidence_low: 0.9, confidence_high: 1.0, decided_count: 13, approved_count: 13, rejected_count: 0, observed_approval_rate: 1 },
     ],
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: audit ledger fixtures, standing in for the real, already-merged
+   `GET /v1/organizations/{id}/audit-events` (`list_audit_events`,
+   `operational_api.py:336`). Same standing as the fixtures above — the wire
+   shape matches `AuditEventRead` (schemas.py:47) field-for-field, including
+   `id` being an `int`, not a UUID like this app's other `*Read` ids.
+--------------------------------------------------------------------------- */
+
+const ORG_ID = "00000000-0000-0000-0000-000000000001";
+
+const AUDIT_EVENT_FIXTURES: AuditEventRead[] = [
+  {
+    id: 5041, organization_id: ORG_ID, principal_id: "priya@tenant.example", principal_type: "USER",
+    action: "governance_review.decide", resource_type: "GOVERNANCE_REVIEW", resource_id: "rq_4179",
+    outcome: "SUCCESS", correlation_id: "corr_9f21a0", source_ip: "10.2.4.18",
+    details: { decision: "APPROVE", object_type: "GLOSSARY_TERM_VERSION", object_id: "term:revenue" },
+    occurred_at: "2026-09-01T10:05:00Z",
+  },
+  {
+    id: 5040, organization_id: ORG_ID, principal_id: "semantic_inference_agent", principal_type: "SERVICE",
+    action: "governance_review.create", resource_type: "GOVERNANCE_REVIEW", resource_id: "rq_4181",
+    outcome: "SUCCESS", correlation_id: "corr_7b13c4", source_ip: null,
+    details: { object_type: "SEMANTIC_METRIC_VERSION", object_id: "metric:revenue", confidence: 0.87 },
+    occurred_at: "2026-09-01T14:02:00Z",
+  },
+  {
+    id: 5039, organization_id: ORG_ID, principal_id: "retail-owner@tenant.example", principal_type: "USER",
+    action: "marketplace.access_request.create", resource_type: "DATA_PRODUCT_VERSION", resource_id: "dpv_customer360",
+    outcome: "SUCCESS", correlation_id: "corr_2ad91e", source_ip: "10.2.4.61",
+    details: { purpose: "loyalty reporting refresh", duration_days: 90 },
+    occurred_at: "2026-09-01T09:12:00Z",
+  },
+  {
+    id: 5038, organization_id: ORG_ID, principal_id: "priya@tenant.example", principal_type: "USER",
+    action: "catalog.certify", resource_type: "TABLE", resource_id: "t_000abc",
+    outcome: "DENIED", correlation_id: "corr_5e6f10", source_ip: "10.2.4.18",
+    details: { reason: "requester's role has no CERTIFY binding", required_roles: ["DataSteward"] },
+    occurred_at: "2026-08-31T16:44:00Z",
+  },
+  {
+    id: 5037, organization_id: ORG_ID, principal_id: "risk-lead@tenant.example", principal_type: "USER",
+    action: "datasource.credential_rotate", resource_type: "DATA_SOURCE", resource_id: "ds_snowflake_prod",
+    outcome: "SUCCESS", correlation_id: "corr_5e6f10", source_ip: "10.2.4.44",
+    details: { vault_path: "vault://ds/snowflake_prod", rotated_by: "scheduled_rotation" },
+    occurred_at: "2026-08-31T02:00:00Z",
+  },
+  {
+    id: 5036, organization_id: ORG_ID, principal_id: "studio_eval_runner", principal_type: "SERVICE",
+    action: "studio.change_set.submit", resource_type: "STUDIO_CHANGE_SET", resource_id: "cs_1001",
+    outcome: "SUCCESS", correlation_id: "corr_1c88f2", source_ip: null,
+    details: { author: "priya@tenant.example", item_count: 1 },
+    occurred_at: "2026-09-01T09:40:00Z",
+  },
+  {
+    id: 5035, organization_id: ORG_ID, principal_id: "pricing_bot", principal_type: "SERVICE",
+    action: "ai_decision.refusal", resource_type: "TABLE", resource_id: "t_risk_exposure",
+    outcome: "DENIED", correlation_id: "corr_0a4d77", source_ip: null,
+    details: { classification: "RESTRICTED", required_roles: ["DataSteward", "Reviewer"] },
+    occurred_at: "2026-08-31T09:47:00Z",
+  },
+  {
+    id: 5034, organization_id: ORG_ID, principal_id: "dev-fixture-user", principal_type: "USER",
+    action: "me.session_start", resource_type: "SESSION", resource_id: null,
+    outcome: "SUCCESS", correlation_id: "corr_884b21", source_ip: "10.2.4.9",
+    details: {},
+    occurred_at: "2026-08-30T08:15:00Z",
+  },
+  {
+    id: 5033, organization_id: ORG_ID, principal_id: "retail-owner@tenant.example", principal_type: "USER",
+    action: "studio.change_set.create", resource_type: "STUDIO_CHANGE_SET", resource_id: "cs_1002",
+    outcome: "SUCCESS", correlation_id: "corr_1c88f2", source_ip: "10.2.4.61",
+    details: { name: "Publish retail customer 360 context product v6" },
+    occurred_at: "2026-08-30T11:00:00Z",
+  },
+  {
+    id: 5032, organization_id: ORG_ID, principal_id: "steward@tenant.example", principal_type: "USER",
+    action: "marketplace.access_request.decide", resource_type: "MARKETPLACE_ACCESS_REQUEST", resource_id: "mar_dpv_risk_exposure",
+    outcome: "FAILURE", correlation_id: "corr_ff3e02", source_ip: "10.2.4.7",
+    details: { error: "fulfillment provider timeout", fulfillment_provider: "okta_entitlements" },
+    occurred_at: "2026-08-29T13:26:00Z",
+  },
+];
+
+function auditMatches(event: AuditEventRead, q: AuditEventQuery): boolean {
+  if (q.action && event.action !== q.action) return false;
+  if (q.resourceType && event.resource_type !== q.resourceType) return false;
+  if (q.correlationId && event.correlation_id !== q.correlationId) return false;
+  if (q.since && event.occurred_at < q.since) return false;
+  if (q.until && event.occurred_at > q.until) return false;
+  return true;
+}
+
+/** `GET /v1/organizations/{id}/audit-events` (UX-16). Filters client-side
+ *  over this fixed set the same way `makeFixtureReviewQueue` does, and pages
+ *  by `limit`/`offset` — the real route's own contract, not a cursor. */
+export async function makeFixtureAuditEvents(
+  query: AuditEventQuery,
+): Promise<PageOf<AuditEventRead>> {
+  await wait(90);
+  const filtered = AUDIT_EVENT_FIXTURES.filter((e) => auditMatches(e, query));
+  const limit = query.limit ?? 100;
+  const offset = query.offset ?? 0;
+  return {
+    items: filtered.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: filtered.length,
   };
 }
