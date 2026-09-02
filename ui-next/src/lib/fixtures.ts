@@ -1,6 +1,9 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  DataQualityIncidentRead,
+  DataQualityIncidentTransition,
+  DataQualitySummaryRead,
   DataSourceRead,
   EvidenceItemRead,
   GovernanceDecisionRequest,
@@ -30,6 +33,7 @@ import type {
   CatalogQuery,
   LineageImpactQuery,
   MarketplaceQuery,
+  QualityIncidentsQuery,
   ReviewQueueQuery,
   StudioChangeSetQuery,
 } from "./api";
@@ -833,4 +837,152 @@ export async function makeFixtureLineageImpact(
     upstream_truncated: false,
     downstream_truncated: false,
   };
+}
+
+/* ---------------------------------------------------------------------------
+   Quality — UX-15/UX-16, `QualityScreen`. Scoped to the one fixture
+   datasource (`FIXTURE_DATASOURCES` above), matching how the real endpoints
+   are datasource-scoped. `severity` mirrors the real values `data_quality.py`'s
+   `evaluate_quality` actually assigns (`CRITICAL`/`WARNING`); `status` mirrors
+   the real lifecycle (`OPEN` default, `ACKNOWLEDGED`/`RESOLVED` only reachable
+   via `transition_quality_incident`).
+--------------------------------------------------------------------------- */
+
+const QUALITY_FIXTURE_DATASOURCE_ID = "ds_snowflake_prod";
+
+const QUALITY_FIXTURE_INCIDENTS: DataQualityIncidentRead[] = [
+  {
+    id: "inc_raw_sales_null", organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: QUALITY_FIXTURE_DATASOURCE_ID, table_id: "t_raw_sales", table_name: "raw_sales",
+    policy_id: "pol_default", latest_observation_id: "obs_9001",
+    anomaly_type: "NULL_RATE_SHIFT", severity: "CRITICAL", status: "OPEN", source: "INTERNAL",
+    summary: "Detected null rate shift outside the governed baseline threshold.",
+    evidence: { column: "amount", baseline_null_rate: 0.01, observed_null_rate: 0.18 },
+    occurrence_count: 3,
+    first_observed_at: "2026-08-30T04:00:00Z", last_observed_at: "2026-09-02T04:00:00Z",
+    acknowledged_by: null, acknowledged_at: null,
+    resolved_by: null, resolved_at: null, resolution_reason: null,
+    created_at: "2026-08-30T04:00:00Z", updated_at: "2026-09-02T04:00:00Z",
+  },
+  {
+    id: "inc_orders_raw_volume", organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: QUALITY_FIXTURE_DATASOURCE_ID, table_id: "t_orders_raw", table_name: "orders_raw",
+    policy_id: "pol_default", latest_observation_id: "obs_9002",
+    anomaly_type: "VOLUME_CHANGE", severity: "WARNING", status: "ACKNOWLEDGED", source: "INTERNAL",
+    summary: "Detected volume change outside the governed baseline threshold.",
+    evidence: { baseline_row_count: 482_000, observed_row_count: 351_000 },
+    occurrence_count: 1,
+    first_observed_at: "2026-09-01T04:00:00Z", last_observed_at: "2026-09-01T04:00:00Z",
+    acknowledged_by: "priya@tenant.example", acknowledged_at: "2026-09-01T09:12:00Z",
+    resolved_by: null, resolved_at: null, resolution_reason: null,
+    created_at: "2026-09-01T04:00:00Z", updated_at: "2026-09-01T09:12:00Z",
+  },
+  {
+    id: "inc_customer_dim_volume", organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: QUALITY_FIXTURE_DATASOURCE_ID, table_id: "t_customer_dim", table_name: "customer_dim",
+    policy_id: "pol_default", latest_observation_id: "obs_9003",
+    anomaly_type: "VOLUME_CHANGE", severity: "CRITICAL", status: "OPEN", source: "INTERNAL",
+    summary: "Detected volume change outside the governed baseline threshold.",
+    evidence: { baseline_row_count: 118_400, observed_row_count: 4_200 },
+    occurrence_count: 2,
+    first_observed_at: "2026-09-01T16:00:00Z", last_observed_at: "2026-09-02T04:00:00Z",
+    acknowledged_by: null, acknowledged_at: null,
+    resolved_by: null, resolved_at: null, resolution_reason: null,
+    created_at: "2026-09-01T16:00:00Z", updated_at: "2026-09-02T04:00:00Z",
+  },
+  {
+    id: "inc_settlement_fact_null", organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: QUALITY_FIXTURE_DATASOURCE_ID, table_id: "t_settlement_fact", table_name: "settlement_fact",
+    policy_id: "pol_default", latest_observation_id: "obs_9004",
+    anomaly_type: "NULL_RATE_SHIFT", severity: "WARNING", status: "OPEN", source: "EXTERNAL",
+    summary: "Detected null rate shift outside the governed baseline threshold.",
+    evidence: { column: "settlement_date", baseline_null_rate: 0.0, observed_null_rate: 0.06 },
+    occurrence_count: 1,
+    first_observed_at: "2026-09-02T04:00:00Z", last_observed_at: "2026-09-02T04:00:00Z",
+    acknowledged_by: null, acknowledged_at: null,
+    resolved_by: null, resolved_at: null, resolution_reason: null,
+    created_at: "2026-09-02T04:00:00Z", updated_at: "2026-09-02T04:00:00Z",
+  },
+  {
+    id: "inc_revenue_agg_schema", organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: QUALITY_FIXTURE_DATASOURCE_ID, table_id: "t_revenue_agg", table_name: "revenue_agg",
+    policy_id: "pol_default", latest_observation_id: "obs_8990",
+    anomaly_type: "SCHEMA_CHANGE", severity: "WARNING", status: "RESOLVED", source: "INTERNAL",
+    summary: "Detected schema change outside the governed baseline threshold.",
+    evidence: { added_columns: ["lob_code"], removed_columns: [] },
+    occurrence_count: 1,
+    first_observed_at: "2026-08-28T04:00:00Z", last_observed_at: "2026-08-28T04:00:00Z",
+    acknowledged_by: "priya@tenant.example", acknowledged_at: "2026-08-28T10:00:00Z",
+    resolved_by: "priya@tenant.example", resolved_at: "2026-08-29T08:00:00Z",
+    resolution_reason: "Expected — lob_code was added by the finance dbt model release.",
+    created_at: "2026-08-28T04:00:00Z", updated_at: "2026-08-29T08:00:00Z",
+  },
+];
+
+/** `GET /v1/datasources/{id}/quality-summary`. Rolled up from the same fixture
+ *  incidents `makeFixtureQualityIncidents` reads, so the tiles and the list
+ *  agree in fixture mode the way the real read model's own queries would. */
+export async function makeFixtureQualitySummary(
+  datasourceId: string,
+): Promise<DataQualitySummaryRead> {
+  await wait(70);
+  const incidents = QUALITY_FIXTURE_INCIDENTS.filter((i) => i.datasource_id === datasourceId);
+  const open = incidents.filter((i) => i.status !== "RESOLVED");
+  return {
+    datasource_id: datasourceId,
+    table_count: 46,
+    observed_table_count: 41,
+    status_counts: { HEALTHY: 33, WARNING: 6, CRITICAL: 2, NO_BASELINE: 5 },
+    open_incident_count: open.length,
+    critical_incident_count: open.filter((i) => i.severity === "CRITICAL").length,
+    average_quality_score: 87.4,
+    last_observed_at: "2026-09-02T04:00:00Z",
+    metadata_scan_age_minutes: 42,
+    metadata_scan_status: "CURRENT",
+    source_freshness_status: "NOT_CONFIGURED",
+  };
+}
+
+/** `GET /v1/datasources/{id}/quality-incidents`. Filters by `status`/`severity`
+ *  the same way the real endpoint does, purely client-side over the fixed set
+ *  above. */
+export async function makeFixtureQualityIncidents(
+  datasourceId: string,
+  query: QualityIncidentsQuery,
+): Promise<PageOf<DataQualityIncidentRead>> {
+  await wait(90);
+  let items = QUALITY_FIXTURE_INCIDENTS.filter((i) => i.datasource_id === datasourceId);
+  if (query.status) items = items.filter((i) => i.status === query.status);
+  if (query.severity) items = items.filter((i) => i.severity === query.severity);
+  const limit = query.limit ?? 200;
+  const offset = query.offset ?? 0;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/quality-incidents/{id}/transition` — mutates the same in-memory
+ *  fixture array `makeFixtureQualityIncidents` reads, so a transition-then-
+ *  refetch in fixture mode behaves like the real endpoint, including its
+ *  refusal to transition an already-RESOLVED incident. */
+export async function makeFixtureTransitionQualityIncident(
+  incidentId: string,
+  body: DataQualityIncidentTransition,
+): Promise<DataQualityIncidentRead> {
+  await wait(80);
+  const incident = QUALITY_FIXTURE_INCIDENTS.find((i) => i.id === incidentId);
+  if (!incident) throw new Error(`fixture: no such quality incident ${incidentId}`);
+  if (incident.status === "RESOLVED") {
+    throw new Error("resolved incidents cannot be transitioned");
+  }
+  const now = new Date().toISOString();
+  incident.status = body.status;
+  if (body.status === "ACKNOWLEDGED") {
+    incident.acknowledged_by = "dev-fixture-user";
+    incident.acknowledged_at = now;
+  } else {
+    incident.resolved_by = "dev-fixture-user";
+    incident.resolved_at = now;
+    incident.resolution_reason = body.reason;
+  }
+  incident.updated_at = now;
+  return { ...incident };
 }

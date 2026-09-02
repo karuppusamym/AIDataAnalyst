@@ -1,6 +1,9 @@
 import type {
   AiDecisionRead,
   AssetEvidenceRead,
+  DataQualityIncidentRead,
+  DataQualityIncidentTransition,
+  DataQualitySummaryRead,
   DataSourceRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
@@ -30,6 +33,8 @@ import {
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
+  makeFixtureQualityIncidents,
+  makeFixtureQualitySummary,
   makeFixtureRefusals,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
@@ -38,6 +43,7 @@ import {
   makeFixtureStudioDiff,
   makeFixtureStudioImpact,
   makeFixtureSubmitStudioChangeSet,
+  makeFixtureTransitionQualityIncident,
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -427,6 +433,79 @@ export async function fetchLineageImpact(
   params.set("node_limit", String(query.nodeLimit ?? 200));
   return get<UnifiedLineageImpactRead>(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Quality — UX-15/UX-16, `QualityScreen`.
+
+   Both real, already-merged routes (`quality_api.py`), gated by `USE_FIXTURES`
+   the same way as every call above. `list_quality_incidents` and
+   `quality_summary` are scoped per datasource, matching UX-20's
+   `fetchLineageImpact` above rather than `fetchCatalogRows`'s organization
+   scoping.
+--------------------------------------------------------------------------- */
+
+export interface QualityIncidentsQuery {
+  /** `null`/omitted means "every status" — the endpoint's own default when
+   *  `status` is left off the query string entirely (unlike
+   *  `fetchReviewQueue`'s explicit-empty-string convention, this endpoint has
+   *  no server-side default status to override, so simply omitting the param
+   *  is the correct "all statuses" request here). */
+  status?: string | null;
+  severity?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{id}/quality-summary` (`quality_api.py::quality_summary`)
+ *  — the dashboard tiles: observed/table counts, open/critical incident
+ *  counts, the datasource's rolled-up average quality score, and the
+ *  metadata-scan freshness state. */
+export async function fetchQualitySummary(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<DataQualitySummaryRead> {
+  if (USE_FIXTURES) return makeFixtureQualitySummary(datasourceId);
+  return get<DataQualitySummaryRead>(
+    `/v1/datasources/${datasourceId}/quality-summary`,
+    signal,
+  );
+}
+
+/** `GET /v1/datasources/{id}/quality-incidents` (`quality_api.py::list_quality_incidents`)
+ *  — the primary incidents list, filterable by `status`/`severity`. */
+export async function fetchQualityIncidents(
+  datasourceId: string,
+  query: QualityIncidentsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DataQualityIncidentRead>> {
+  if (USE_FIXTURES) return makeFixtureQualityIncidents(datasourceId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.severity) params.set("severity", query.severity);
+  params.set("limit", String(query.limit ?? 200));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<DataQualityIncidentRead>>(
+    `/v1/datasources/${datasourceId}/quality-incidents?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/quality-incidents/{id}/transition` (`quality_api.py::transition_quality_incident`)
+ *  — acknowledge or resolve an open incident. The endpoint requires a
+ *  non-empty (>=3 char) `reason` on both transitions and refuses (409) to
+ *  transition an incident that is already RESOLVED. */
+export async function transitionQualityIncident(
+  incidentId: string,
+  body: DataQualityIncidentTransition,
+  signal?: AbortSignal,
+): Promise<DataQualityIncidentRead> {
+  if (USE_FIXTURES) return makeFixtureTransitionQualityIncident(incidentId, body);
+  return postJson<DataQualityIncidentRead>(
+    `/v1/quality-incidents/${incidentId}/transition`,
+    body,
     signal,
   );
 }
