@@ -1,0 +1,54 @@
+# PR-5 scale harness: a standalone, high-table-count PostgreSQL *source* for
+# DatasourceDiscoveryWorkflow to discover and profile for real.
+#
+# Separate from the repo-root `compose.yaml` (the full dev stack) on purpose,
+# same reasoning as tests/fixtures/postgres_versions/compose.yml (CN-3): this
+# is just the one extra server PR-5's harness needs, nothing else, so it can
+# start in seconds and doesn't collide with anything the dev stack already
+# binds on 5432/55432, or CN-3's fixtures on 55416/55414. This is NOT the
+# same database as Aida's own catalog DB (the `postgres` service in the main
+# compose.yaml) — that one is what CT-2's ct2_generate_catalog.py populates.
+# This one is a *source* the app's real PostgresConnector connects OUT to,
+# exactly like the existing `sample-source` service in compose.yaml, just
+# with 100,000 minimal tables instead of a small hand-authored demo schema.
+#
+# Usage:
+#   docker compose -f scripts/scale_harness/compose.pr5-source.yml up -d
+#   uv run python scripts/scale_harness/pr5_generate_source_tables.py
+#
+# Then see README.md's Phase B/C for registering this as a real DataSource
+# through the app's API and triggering DatasourceDiscoveryWorkflow against
+# it through Temporal.
+name: aida-scale-harness-pr5-source
+
+services:
+  scale-harness-source:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: source
+      POSTGRES_PASSWORD: source-local-only
+      POSTGRES_DB: bank_demo_scale
+    ports:
+      - "55435:5432"
+    volumes:
+      - scale-harness-source-data:/var/lib/postgresql/data
+    # 100,000 tables is a lot of catalog metadata for Postgres's own system
+    # catalogs (pg_class/pg_attribute/...) to hold — a larger shared_buffers
+    # than the image's tiny default keeps table-creation and discovery from
+    # thrashing. Not tuned further than this; it's a one-off local fixture,
+    # not a production profile.
+    command:
+      - "postgres"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "max_locks_per_transaction=4096"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U source -d bank_demo_scale"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: "no"
+
+volumes:
+  scale-harness-source-data:
