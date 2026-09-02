@@ -372,6 +372,178 @@
         "title": "AgentAutoApplyRead",
         "type": "object"
       },
+      "AgentEvalGateEvaluateRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts`\nis the caller's assertion of the *current, complete* externally-replayed\ncorpus (see `record_agent_eval_gate_evidence`'s docstring: each call\nreplaces, never merges, what was previously stored); omit it (or send an\nempty list) to evaluate the CONFIRMED_RUN corpus alone, or to\ndeliberately clear a previously-submitted steward-authored set.",
+        "properties": {
+          "steward_authored_verdicts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentEvalGateVerdictInput"
+            },
+            "maxItems": 1000,
+            "title": "Steward Authored Verdicts",
+            "type": "array"
+          }
+        },
+        "title": "AgentEvalGateEvaluateRequest",
+        "type": "object"
+      },
+      "AgentEvalGateRead": {
+        "additionalProperties": false,
+        "description": "The gate's current state -- deliverable 3: what a steward reads,\nbefore ever attempting to publish, to see whether an agent would pass.\nEvery contributing verdict is visible on `verdicts`, never collapsed to\na bare boolean.",
+        "properties": {
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "failing_case_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failing Case Ids",
+            "type": "array"
+          },
+          "minimum_exemplars": {
+            "title": "Minimum Exemplars",
+            "type": "integer"
+          },
+          "pass_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pass Rate"
+          },
+          "passed_exemplars": {
+            "title": "Passed Exemplars",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "total_exemplars": {
+            "title": "Total Exemplars",
+            "type": "integer"
+          },
+          "verdict": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "INSUFFICIENT_DATA"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          },
+          "verdicts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentEvalGateVerdictRead"
+            },
+            "title": "Verdicts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "verdict",
+          "threshold",
+          "minimum_exemplars",
+          "total_exemplars",
+          "passed_exemplars",
+          "pass_rate",
+          "failing_case_ids",
+          "verdicts",
+          "reason",
+          "evaluated_at"
+        ],
+        "title": "AgentEvalGateRead",
+        "type": "object"
+      },
+      "AgentEvalGateVerdictInput": {
+        "additionalProperties": false,
+        "description": "One externally-computed `STEWARD_AUTHORED` replay verdict, submitted\nby a caller with a live-replay-capable environment (see module\ndocstring) -- there is deliberately no `source` field here: every\nverdict submitted through this shape is forced to `STEWARD_AUTHORED` by\nthe endpoint itself, so a caller can never inject a fabricated\n`CONFIRMED_RUN` verdict (that source is only ever produced by this\nmodule's own live database read).",
+        "properties": {
+          "case_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Case Id",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "drift": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Drift",
+            "type": "array"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "case_id",
+          "matched"
+        ],
+        "title": "AgentEvalGateVerdictInput",
+        "type": "object"
+      },
+      "AgentEvalGateVerdictRead": {
+        "additionalProperties": false,
+        "properties": {
+          "case_id": {
+            "title": "Case Id",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "drift": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Drift",
+            "type": "array"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "CONFIRMED_RUN",
+              "STEWARD_AUTHORED"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_id",
+          "source",
+          "matched",
+          "drift",
+          "detail"
+        ],
+        "title": "AgentEvalGateVerdictRead",
+        "type": "object"
+      },
       "AgentEvaluationRunRead": {
         "additionalProperties": false,
         "properties": {
@@ -27713,6 +27885,274 @@
           }
         },
         "summary": "Get Ai Dependency Graph",
+        "tags": [
+          "ai-registry"
+        ]
+      }
+    },
+    "/v1/ai-asset-versions/{version_id}/eval-gate": {
+      "get": {
+        "description": "N15: the evaluation gate's *current* state -- live, read-only, no\nside effect -- for an AGENT-kind AI asset version, so a steward can see\nbefore ever attempting to publish whether this agent would pass.\nRecomputes exactly what the real publish precondition\n(`semantic_api._apply_governance_review_decision`) would compute at this\nmoment: the organization's current confirmed-run exemplar corpus, plus\nwhichever `STEWARD_AUTHORED` verdicts were most recently submitted via\n`POST .../eval-gate/evaluate` -- the two can never show a different\nanswer, since both call `aida.agent_eval_gate.compute_agent_eval_gate`.",
+        "operationId": "get_agent_eval_gate_v1_ai_asset_versions__version_id__eval_gate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvalGateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Eval Gate",
+        "tags": [
+          "ai-registry"
+        ]
+      }
+    },
+    "/v1/ai-asset-versions/{version_id}/eval-gate/evaluate": {
+      "post": {
+        "description": "N15: run the evaluation gate now and persist the result into\n`evaluation_evidence` (evidenced via the existing audit trail --\n`record_audit`, never a parallel mechanism), regardless of the outcome\n-- unlike the automatic check the real publish transition runs (which\nonly persists a PASS, see that function's own comment for why), this is\nan explicit steward action and its result -- pass or fail -- is real\nevidence worth keeping either way.\n\n`body.steward_authored_verdicts`, when given, REPLACES whatever\n`STEWARD_AUTHORED` verdict set was previously stored for this version\n(see `AgentEvalGateEvaluateRequest`'s own docstring) -- submit the\ncaller's current, complete externally-replayed corpus each time, not an\nincremental diff. A later publish attempt reuses whatever was most\nrecently stored here for its own `STEWARD_AUTHORED` half; the\n`CONFIRMED_RUN` half is always recomputed fresh regardless.",
+        "operationId": "evaluate_agent_eval_gate_endpoint_v1_ai_asset_versions__version_id__eval_gate_evaluate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentEvalGateEvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvalGateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evaluate Agent Eval Gate Endpoint",
         "tags": [
           "ai-registry"
         ]

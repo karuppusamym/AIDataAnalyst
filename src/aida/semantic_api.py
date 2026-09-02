@@ -12,6 +12,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.agent_eval_gate import (
+    DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+    compute_agent_eval_gate,
+    record_agent_eval_gate_evidence,
+    stored_steward_verdicts,
+)
 from aida.asset_description_service import (
     apply_asset_description_draft,
     reject_asset_description_draft,
@@ -1700,7 +1706,58 @@ async def _apply_governance_review_decision(
         ai_asset = await session.get(AiAsset, ai_version.asset_id)
         if ai_asset is None or ai_version.status != "REVIEW_REQUIRED":
             raise HTTPException(status_code=409, detail="AI asset is no longer pending")
+        eval_gate_verdict: str | None = None
         if decision == "APPROVE":
+            # N15: an AGENT-kind AiAssetVersion may not move to APPROVED
+            # (its published/production state) unless its evaluation gate
+            # currently shows PASS -- see aida.agent_eval_gate's module
+            # docstring for the full design and the honest org-wide scoping
+            # this reuses from UX-19. Runs live, on every APPROVE decision
+            # (single or bulk -- both paths call this function), so a stale
+            # or manufactured evidence blob can never let a publish through:
+            # the CONFIRMED_RUN half is always recomputed fresh here from the
+            # organization's real, current confirmed-run corpus.
+            if ai_asset.asset_kind == "AGENT":
+                gate_result = await compute_agent_eval_gate(
+                    session,
+                    organization_id=ai_version.organization_id,
+                    extra_verdicts=stored_steward_verdicts(ai_version),
+                    threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+                )
+                eval_gate_verdict = gate_result.verdict
+                if gate_result.verdict != "PASS":
+                    # Deliberately *not* persisted here: a raise this deep
+                    # in `_apply_governance_review_decision` unwinds without
+                    # a commit in the single-decision path, and rolls back
+                    # inside a SAVEPOINT in the bulk path (see
+                    # `bulk_decide_governance_reviews`'s own docstring) --
+                    # exactly like every other precondition failure already
+                    # raised elsewhere in this function. The blocked-attempt
+                    # reason is still fully evidenced in this exception's own
+                    # detail (verdict, pass rate, named failing exemplars);
+                    # `GET .../eval-gate` recomputes the identical live result
+                    # for a steward to inspect before retrying, with no
+                    # side effect and nothing lost by not persisting a
+                    # rolled-back write.
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "agent evaluation gate did not pass "
+                            f"({gate_result.verdict}): {gate_result.reason}"
+                        ),
+                    )
+                # Only a PASS survives to the final commit -- recorded here,
+                # right alongside the approval it justified, into the exact
+                # `evaluation_evidence` field `ai_registry.
+                # compute_ai_trust_score` already reads, via the existing
+                # `record_audit` trail (never a parallel one).
+                record_agent_eval_gate_evidence(
+                    session,
+                    ai_version,
+                    gate_result,
+                    context=replace(context, organization_id=ai_version.organization_id),
+                    stage="PUBLISH",
+                )
             await session.execute(
                 update(AiAssetVersion)
                 .where(
@@ -1725,6 +1782,7 @@ async def _apply_governance_review_decision(
             "asset_kind": ai_asset.asset_kind,
             "version": ai_version.version,
             "review_id": str(review.id),
+            "eval_gate_verdict": eval_gate_verdict,
         }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":
         proposal = await session.get(MetadataEnrichmentProposal, UUID(review.object_id))

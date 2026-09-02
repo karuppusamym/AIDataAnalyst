@@ -10,6 +10,16 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.agent_eval_gate import (
+    DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+    AgentEvalGateEvaluateRequest,
+    AgentEvalGateRead,
+    compute_agent_eval_gate,
+    gate_result_read,
+    record_agent_eval_gate_evidence,
+    steward_verdicts_from_input,
+    stored_steward_verdicts,
+)
 from aida.ai_registry import compute_ai_trust_score, score_assessment_controls
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -689,6 +699,83 @@ async def sync_ai_provider_evidence(
     )
     await session.commit()
     return _version_read(asset, version)
+
+
+@router.get("/ai-asset-versions/{version_id}/eval-gate", response_model=AgentEvalGateRead)
+async def get_agent_eval_gate(
+    version_id: UUID,
+    context: SecurityContext = Depends(require_roles(*AI_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> AgentEvalGateRead:
+    """N15: the evaluation gate's *current* state -- live, read-only, no
+    side effect -- for an AGENT-kind AI asset version, so a steward can see
+    before ever attempting to publish whether this agent would pass.
+    Recomputes exactly what the real publish precondition
+    (`semantic_api._apply_governance_review_decision`) would compute at this
+    moment: the organization's current confirmed-run exemplar corpus, plus
+    whichever `STEWARD_AUTHORED` verdicts were most recently submitted via
+    `POST .../eval-gate/evaluate` -- the two can never show a different
+    answer, since both call `aida.agent_eval_gate.compute_agent_eval_gate`.
+    """
+    asset, version = await _version_scope(session, version_id, context)
+    if asset.asset_kind != "AGENT":
+        raise HTTPException(
+            status_code=409, detail="the evaluation gate applies only to AGENT-kind AI assets"
+        )
+    result = await compute_agent_eval_gate(
+        session,
+        organization_id=version.organization_id,
+        extra_verdicts=stored_steward_verdicts(version),
+        threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+    )
+    return gate_result_read(result)
+
+
+@router.post("/ai-asset-versions/{version_id}/eval-gate/evaluate", response_model=AgentEvalGateRead)
+async def evaluate_agent_eval_gate_endpoint(
+    version_id: UUID,
+    body: AgentEvalGateEvaluateRequest,
+    context: SecurityContext = Depends(require_roles(*AI_AUTHORS)),
+    session: AsyncSession = Depends(get_session),
+) -> AgentEvalGateRead:
+    """N15: run the evaluation gate now and persist the result into
+    `evaluation_evidence` (evidenced via the existing audit trail --
+    `record_audit`, never a parallel mechanism), regardless of the outcome
+    -- unlike the automatic check the real publish transition runs (which
+    only persists a PASS, see that function's own comment for why), this is
+    an explicit steward action and its result -- pass or fail -- is real
+    evidence worth keeping either way.
+
+    `body.steward_authored_verdicts`, when given, REPLACES whatever
+    `STEWARD_AUTHORED` verdict set was previously stored for this version
+    (see `AgentEvalGateEvaluateRequest`'s own docstring) -- submit the
+    caller's current, complete externally-replayed corpus each time, not an
+    incremental diff. A later publish attempt reuses whatever was most
+    recently stored here for its own `STEWARD_AUTHORED` half; the
+    `CONFIRMED_RUN` half is always recomputed fresh regardless.
+    """
+    asset, version = await _version_scope(session, version_id, context)
+    if asset.asset_kind != "AGENT":
+        raise HTTPException(
+            status_code=409, detail="the evaluation gate applies only to AGENT-kind AI assets"
+        )
+    steward_verdicts = steward_verdicts_from_input(body.steward_authored_verdicts)
+    result = await compute_agent_eval_gate(
+        session,
+        organization_id=version.organization_id,
+        extra_verdicts=steward_verdicts,
+        threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+    )
+    record_agent_eval_gate_evidence(
+        session,
+        version,
+        result,
+        context=replace(context, organization_id=version.organization_id),
+        stage="PRE_PUBLISH_CHECK",
+        steward_authored_verdicts=steward_verdicts,
+    )
+    await session.commit()
+    return gate_result_read(result)
 
 
 @router.get("/ai-asset-versions/{version_id}/dependencies", response_model=AiDependencyGraphRead)

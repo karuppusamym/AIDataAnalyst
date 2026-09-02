@@ -82,6 +82,41 @@ export interface AgentAutoApplyRead {
   evidence: string;
 }
 
+/** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
+export interface AgentEvalGateEvaluateRequest {
+  steward_authored_verdicts?: AgentEvalGateVerdictInput[];
+}
+
+/** The gate's current state -- deliverable 3: what a steward reads, */
+export interface AgentEvalGateRead {
+  verdict: "PASS" | "FAIL" | "INSUFFICIENT_DATA";
+  threshold: number;
+  minimum_exemplars: number;
+  total_exemplars: number;
+  passed_exemplars: number;
+  pass_rate: number | null;
+  failing_case_ids: string[];
+  verdicts: AgentEvalGateVerdictRead[];
+  reason: string;
+  evaluated_at: string;
+}
+
+/** One externally-computed `STEWARD_AUTHORED` replay verdict, submitted */
+export interface AgentEvalGateVerdictInput {
+  case_id: string;
+  matched: boolean;
+  drift?: string[];
+  detail?: string;
+}
+
+export interface AgentEvalGateVerdictRead {
+  case_id: string;
+  source: "CONFIRMED_RUN" | "STEWARD_AUTHORED";
+  matched: boolean;
+  drift: string[];
+  detail: string;
+}
+
 export interface AgentEvaluationRunRead {
   id: string;
   organization_id: string;
