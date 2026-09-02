@@ -155,6 +155,10 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
 | `ownership.leaver_reassigned.v1` | Approved leaver-reassignment bulk operation applied | operation_id, applied_count |
 | `metadata.playbook.created.v1` | AT-1: a saved, scheduled bulk-metadata playbook was created | playbook_id, name, action |
+| `document.uploaded.v1` | N8: a data-dictionary document was uploaded and parsed into sections | document_id, project_id, section_count |
+| `document.mapped.v1` | N8: a document's sections were resolved against the live catalog | document_id, matched_count, unmatched_count |
+| `document.claims_extracted.v1` | N8: reviewable description claims were created from a document's structural mappings | document_id, claim_count |
+| `document.claim.approved.v1` / `.rejected.v1` | N8: governed decision on one extracted document claim | claim_id, document_section_id, subject_type, subject_id, review_id |
 | `stewardship.bulk_operation_rejected.v1` | Checker rejected a bulk stewardship request | operation_id, review_id |
 | `stewardship.coverage_computed.v1` | Coverage snapshot persisted | snapshot_id, scope, overall_score |
 | `stewardship.unowned_asset_routed.v1` | Unowned-asset backlog entry routed to a candidate owner | table_id, candidate_owner |

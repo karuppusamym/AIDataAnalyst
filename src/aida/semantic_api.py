@@ -25,6 +25,7 @@ from aida.asset_description_service import (
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.document_ingestion import apply_document_claim, reject_document_claim
 from aida.events import record_audit, record_outbox
 from aida.metric_formula_signature import find_formula_collisions
 from aida.metric_suggestion_service import (
@@ -44,6 +45,7 @@ from aida.models import (
     DataProductAccessRequest,
     DataProductVersion,
     DataSource,
+    DocumentClaim,
     GlossaryConflict,
     GlossaryLinkProposal,
     GlossaryTerm,
@@ -2028,6 +2030,23 @@ async def _apply_governance_review_decision(
             "table_id": str(draft.table_id),
             "overall_score": draft.overall_score,
             "published_version_id": published_version_id,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DOCUMENT_CLAIM":
+        claim = await session.get(DocumentClaim, UUID(review.object_id))
+        if claim is None or claim.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            event_type = await apply_document_claim(claim, reviewer=context.principal_id, now=now)
+        else:
+            event_type = await reject_document_claim(claim, reviewer=context.principal_id, now=now)
+        aggregate_type = "document_claim"
+        aggregate_id = str(claim.id)
+        payload = {
+            "claim_id": str(claim.id),
+            "document_section_id": str(claim.document_section_id),
+            "subject_type": claim.subject_type,
+            "subject_id": claim.subject_id,
             "review_id": str(review.id),
         }
     elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":

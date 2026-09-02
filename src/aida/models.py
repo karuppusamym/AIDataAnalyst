@@ -4447,3 +4447,175 @@ class ColumnTokenizationPolicy(Base, TimestampMixin):
     value_shape: Mapped[str] = mapped_column(String(20), default="NUMERIC", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# N8: document ingestion -- the data-dictionary-spreadsheet special case
+# ---------------------------------------------------------------------------
+
+
+class Document(Base, TimestampMixin):
+    """N8: an uploaded document, scoped to project. `media_type` is
+    constrained to `CSV` for this first pass -- the data-dictionary special
+    case `Docs/review-2026-08/target/01-metadata-graph-wiki.md` §3 names as
+    the highest-value case ("this one case covers a large share of real bank
+    documents") -- PDF/DOCX/XLSX structure-preserving extraction is a real,
+    separate build (a parsing library this environment does not carry) and is
+    honestly deferred, not attempted here.
+
+    Raw file bytes are deliberately never persisted here (the design brief's
+    own "stored in object storage, never in a table" -- no object-storage
+    integration exists in this codebase to route through yet, so the
+    honest choice is to hold nothing rather than fake compliance with a
+    plain-table `raw_bytes` column). Only `sha256` (proving what was
+    processed, without holding it) and the resulting `DocumentSection` rows
+    (each holding its own already-extracted, already-small field text)
+    survive past the parse that happens at upload time.
+    """
+
+    __tablename__ = "document"
+    __table_args__ = (
+        Index("ix_document_org_project", "organization_id", "project_id"),
+        CheckConstraint("media_type IN ('CSV')", name="media_type_is_supported"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("project.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="UPLOADED", nullable=False)
+    section_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    parse_error_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class DocumentSection(Base, TimestampMixin):
+    """N8: one ordered, addressable row of a parsed data-dictionary document
+    -- the object model's `document_section`, narrowed for this pass to the
+    structured `schema | table | column | description` shape rather than the
+    general page/heading/anchor prose model a PDF/DOCX parse would need.
+    `column_name` is nullable: a row naming only a schema and table is a
+    table-level description claim.
+
+    Every `DocumentMapping`/`DocumentClaim` this section produces carries
+    this row's id, so a steward can always click through from an approved
+    claim back to the exact source row it came from -- the design brief's
+    "cite" step (§3.5), satisfied structurally even though this pass builds
+    no UI to render the click-through itself.
+    """
+
+    __tablename__ = "document_section"
+    __table_args__ = (UniqueConstraint("document_id", "ordinal"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    raw_schema_name: Mapped[str | None] = mapped_column(String(255))
+    raw_table_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    raw_column_name: Mapped[str | None] = mapped_column(String(255))
+    raw_description: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DocumentMapping(Base, TimestampMixin):
+    """N8: the result of resolving one `DocumentSection` against the live
+    catalog -- the object model's `document_mapping`.
+
+    `mapping_kind` is `STRUCTURAL` (deterministic exact-name match, this
+    pass's only implemented route) or `UNMATCHED` (no candidate found).
+    `SUGGESTED` (semantic/embedding-similarity mapping, per the design
+    brief's third route) is deliberately not built here: N5 (hybrid
+    retrieval) owns this codebase's one embedding-provider integration and is
+    itself still IN PROGRESS on a different worktree -- reusing it correctly
+    is a follow-on pass, not a good place to fork a second one from this row.
+    A `STRUCTURAL` match is never ambiguous by construction: `resolve_
+    structural_mappings` records `UNMATCHED` rather than guessing whenever a
+    section's names resolve to more than one live candidate.
+    """
+
+    __tablename__ = "document_mapping"
+    __table_args__ = (
+        UniqueConstraint("document_section_id"),
+        CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
+        CheckConstraint(
+            "mapping_kind IN ('STRUCTURAL', 'SUGGESTED', 'UNMATCHED')",
+            name="mapping_kind_is_supported",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_section_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_section.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str | None] = mapped_column(String(100), index=True)
+    mapping_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+
+
+class DocumentClaim(Base, TimestampMixin):
+    """N8: an extracted, reviewable assertion from a mapped document section
+    -- the object model's `claim`. `predicate` is constrained to `DESCRIBES`
+    for this pass (a column-or-table description, the case the sample
+    "schema | table | column | description" dictionary shape actually
+    produces); `grain`/`pii`-shaped claims the design brief also names are a
+    later pass over the same table, not built here.
+
+    Routed through the existing unified `GovernanceReview` queue exactly like
+    every other proposal on this platform (`semantic_api.
+    decide_governance_review`, `object_type="DOCUMENT_CLAIM"`) -- one review
+    per claim, since a steward deciding a claim needs to read its specific
+    source section text, not a batch of unrelated ones.
+
+    An `APPROVED` claim's terminal state *is* this row: no existing
+    column-level description surface in this codebase yet consumes it (the
+    table-level equivalent, `AssetDocumentationVersion`, is GL-9's target and
+    does not fit a single column claim; a genuine column-level "business
+    description of record" store, or N10's knowledge-compilation wiki, is
+    later, larger work this row does not attempt). What this row delivers is
+    a working, fully-cited ingest -> parse -> map -> claim -> review
+    pipeline with durable provenance back to the exact source text -- not
+    that an approved claim propagates everywhere "description" might later
+    be read from.
+    """
+
+    __tablename__ = "document_claim"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        CheckConstraint("subject_type IN ('TABLE', 'COLUMN')", name="subject_type_is_supported"),
+        CheckConstraint("predicate IN ('DESCRIBES')", name="predicate_is_supported"),
+        Index("ix_document_claim_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    document_section_id: Mapped[UUID] = mapped_column(
+        ForeignKey("document_section.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    predicate: Mapped[str] = mapped_column(String(20), nullable=False)
+    object_value: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

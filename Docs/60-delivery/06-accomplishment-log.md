@@ -10269,6 +10269,8 @@ Honest gap: `test_event_catalog_gate.py` fails in this sandbox on an unrelated `
 and is untouched by this row -- confirmed by running the same gate against `HEAD` before this row's
 changes; not attempted here, same standing environment limitation other rows have hit and left alone.
 
+---
+
 ## 2026-09-02 — N4 closed: impact-ordered, diff-based relationship-candidate review queue, wired to negative knowledge
 
 Composed four pieces already built on this branch rather than reimplementing any of them: SM-7's diff
@@ -10479,3 +10481,161 @@ edits (`test_asset_description.py`, `test_asset_description_sample_review.py`,
 `test_tier0_invariants.py`, `test_consumer_footer.py`, `test_metric_formula_collision_endpoint.py`,
 `test_review_queue_read_model.py`, `test_semantic_diff_endpoint.py`) green -- no regression to any other
 governed object type's approval path.
+
+---
+
+## 2026-09-01 — N8 (document ingestion): the data-dictionary-spreadsheet special case, end to end
+
+A second genuinely new feature this session, picked up the same way AT-1 was: a "no foundation
+existed" tracker row (`Docs/review-2026-08/gap/02-gap-diff-and-plan.md` line 84, `Docs/60-delivery/
+03-tracker.md`'s N8), not a bugfix or a tracker-consistency closure. N8's own note says to "build [the
+data-dictionary spreadsheet] path first" -- this row does exactly that, completely, and is honest in the
+tracker about the much larger remaining scope (general document parsing, object storage, semantic
+mapping, the wiki) it does not attempt.
+
+### What it is
+
+Per `Docs/review-2026-08/target/01-metadata-graph-wiki.md` §3 (the review's own design brief for
+document ingestion), a bank's data dictionary -- `schema | table | column | description` rows in a
+spreadsheet -- is "the highest-value special case ... covers a large share of real bank documents" and
+should be recognised and mapped directly rather than chunked as prose. This row builds that one path,
+completely, rather than a thin slice of the much larger general-document pipeline the design brief also
+describes (PDF/DOCX/BRD parsing, object storage, virus scanning, semantic/embedding mapping) -- those are
+real, separate builds, explicitly left as this row's own stated remaining scope rather than half-attempted.
+
+**Flow**: upload a CSV data dictionary -> parse into ordered sections -> resolve each section against
+the live catalog by exact name (deterministic, no model) -> extract a reviewable `DESCRIBES` claim for
+every structurally-mapped section -> a checker approves or rejects each claim through the platform's
+existing unified `GovernanceReview` queue, the same one every other proposal on this platform goes
+through.
+
+### Design decisions and why
+
+- **CSV only, not the general parsers.** A data dictionary is already tabular; Python's stdlib `csv`
+  module needed no new dependency. PDF/DOCX/XLSX structure-preserving extraction is a real parsing-library
+  build this sandbox does not carry -- honestly deferred, not stubbed.
+- **Raw file bytes are never persisted.** The design brief itself says uploaded documents should be
+  "stored in object storage, never in a table." No object-storage integration exists in this codebase to
+  route through yet, so the honest choice was to hold nothing rather than fake compliance with a plain
+  `raw_bytes` column -- only `sha256` (proof of what was processed) and the already-extracted, already-small
+  `DocumentSection` field text survive past the parse.
+- **Structural mapping only, never a guess.** The design brief's three mapping routes are explicit
+  (Explicit at upload, Structural by exact name, Semantic by embedding similarity, "never auto-applied").
+  This row builds only Structural. Semantic mapping is deliberately not attempted here: N5 (hybrid
+  retrieval) owns this codebase's one embedding-provider integration and is itself still IN PROGRESS on a
+  different worktree -- forking a second, parallel embedding integration from this row was the wrong
+  call, both for correctness and for this session's own "should not impact other parallel sessions"
+  mandate. A structural match that resolves to more than one live candidate (e.g. two datasources in the
+  same project both have a `public.customers` table) is recorded `UNMATCHED` rather than guessed --
+  proven by a dedicated test (`test_resolve_structural_mappings_refuses_ambiguous_table_names`).
+- **One `GovernanceReview` per claim, not a batch.** Unlike AT-1's playbooks (where a large match count
+  queues one bulk operation), a document claim's whole value is that a steward can read *this specific
+  row's* source text before deciding -- batching claims from unrelated sections into one decision would
+  defeat that. Mirrors GL-9's `AssetDescriptionDraft` (one review per draft) rather than AT-1/GL-2's bulk
+  shape.
+- **`predicate` constrained to `DESCRIBES` only.** The design brief's `claim` object model names
+  description, grain, and PII-classification claims. Only description claims are built here -- the exact
+  shape a `schema | table | column | description` dictionary actually produces; grain/PII claims are a
+  later pass over the same `DocumentClaim` table (the `predicate` CHECK constraint is the one place a
+  follow-up row needs to touch to add them), not attempted here.
+- **An approved claim's terminal state is the claim row itself.** No existing column-level description
+  surface in this codebase consumes an approved claim (the table-level equivalent, GL-9's
+  `AssetDocumentationVersion`, doesn't fit a single column claim, and a genuine column-level
+  "description of record" store or N10's knowledge-compilation wiki is later, larger, separate work).
+  Documented explicitly on `DocumentClaim`'s own docstring as a stated gap, matching AT-1's "describe"
+  precedent from earlier today -- this row delivers a working, fully-cited ingest -> parse -> map ->
+  claim -> review pipeline with durable provenance back to the exact source row, not universal
+  propagation of an approved claim everywhere "description" might later be read from.
+- **Citation is structural, not a UI.** Every `DocumentMapping`/`DocumentClaim` carries its
+  `document_section_id`, and every `DocumentSection` keeps its own raw text -- the design brief's "any
+  annotation derived from a document carries the document_section reference" (§3.5) is satisfied at the
+  data-model level; no click-through UI is built this pass.
+
+### New files / models
+
+- `src/aida/models.py`: `Document` (project-scoped, `media_type` CHECK-constrained to `CSV`),
+  `DocumentSection` (ordered, one row per parsed dictionary row), `DocumentMapping` (one per section,
+  `mapping_kind` CHECK-constrained to `STRUCTURAL`/`SUGGESTED`/`UNMATCHED` -- `SUGGESTED` reserved for the
+  future semantic-mapping pass), `DocumentClaim` (`predicate` CHECK-constrained to `DESCRIBES`,
+  `governance_review_id` 1:1 to a `GovernanceReview`). Polymorphic `subject_id` fields follow this
+  codebase's own established convention (`OwnershipAssignment.subject_id`: a `String(100)`, not a typed
+  UUID column, since a `DocumentMapping`/`DocumentClaim` can point at either a table or a column).
+- `migrations/versions/ca56d6ce3f18_n8_document_ingestion.py`: creates all four tables. Verified both
+  directions offline (`alembic upgrade`/`downgrade 62341fa9f017:ca56d6ce3f18 --sql`) against a Postgres
+  dialect target -- no live Postgres in this sandbox, same standing limitation as every other migration
+  landed on this branch. `alembic heads` confirms a single head.
+- `src/aida/document_ingestion.py` (new): `parse_csv_data_dictionary` (pure, DB-free -- header matching
+  case-insensitive and order-independent, a row missing `table`/`description` is dropped and counted as
+  an error rather than failing the whole upload, capped at `DOCUMENT_MAX_SECTIONS`=5,000 rows),
+  `create_document_from_csv` (upload + parse in one step -- a data dictionary is already tabular, so
+  unlike the general prose-parsing flow there is no separate async parse stage to wait on; 413 over a
+  1MB content cap), `resolve_structural_mappings`, `extract_description_claims`,
+  `apply_document_claim`/`reject_document_claim` (the review-decision publish/reject pair,
+  `semantic_api.py`'s new dispatch branch calls into these directly, mirroring
+  `asset_description_service.apply_asset_description_draft`'s own shape).
+- `src/aida/document_ingestion_api.py` (new): REST -- `POST/GET /v1/projects/{project_id}/documents`,
+  `GET /v1/documents/{id}`, `GET .../sections`, `POST .../map`, `GET .../mappings`, `POST
+  .../extract-claims`, `GET .../claims`. Deliberately its own file with locally-scoped Pydantic schemas,
+  same reasoning as AT-1's `playbooks_api.py` -- kept out of the shared, hot `aida.api`/`aida.schemas`
+  under heavy concurrent edit on this branch.
+- `src/aida/semantic_api.py`: one new `elif review.object_type == "DOCUMENT_CLAIM":` branch in the
+  existing `_apply_governance_review_decision` dispatch (the same function GL-9/AT-1/every other
+  reviewable proposal type already extends), calling `apply_document_claim`/`reject_document_claim`.
+  Deliberately did **not** extend `review_queue_read_model.py`'s per-type confidence/evidence composition
+  (UX-17) -- that module's own docstring explicitly documents that an object type absent from its
+  dispatch still gets a full row in the queue (`confidence=None`, `evidence=[]`,
+  `diffable=False` via SM-7's fallback) rather than being dropped, so `DOCUMENT_CLAIM` reviews already
+  work correctly there with zero code changes; adding native confidence/evidence composition for it is a
+  real, contained follow-up, not a functional gap, and skipping it kept this row's diff out of a file with
+  a very actively-maintained, detailed scoping docstring.
+- `src/aida/main.py`: one import + one `app.include_router(document_ingestion_router)` in the existing
+  alphabetical import order.
+- `Docs/30-contracts/04-event-catalog.md`: `document.uploaded.v1`, `document.mapped.v1`,
+  `document.claims_extracted.v1`, `document.claim.approved.v1`/`.rejected.v1`.
+
+### Tests
+
+New file `tests/test_document_ingestion.py`, 17 tests, real-sqlite-engine pattern (matching
+`test_playbooks.py`): `parse_csv_data_dictionary` (table+column rows, case-insensitive headers,
+malformed-row counting, the section-count cap); `create_document_from_csv` (persists sections, 413 over
+the size cap); `resolve_structural_mappings` (matches table+column, `UNMATCHED` when nothing matches,
+`UNMATCHED` -- not a guess -- when a table name is ambiguous across two datasources in the same project);
+`extract_description_claims` (only structurally-mapped sections produce a claim, one `GovernanceReview`
+per claim); the full governance-decision round trip through the real `semantic_api.decide_governance_review`
+entry point (not just the underlying pure function) -- approve publishes one claim, reject leaves the
+other `REJECTED`, and a maker deciding their own claim is refused with 409, proving the new
+`DOCUMENT_CLAIM` dispatch branch is wired correctly end to end, not just that `apply_document_claim`
+itself works in isolation; REST-layer endpoint registration and a full upload -> map -> extract-claims ->
+list pipeline called through the actual route functions in-process, plus 409s for an out-of-order call
+(mapping twice, extracting claims before mapping) and a 403 for cross-organization access.
+
+### Verification
+
+`ruff check --fix` clean on every new/touched file (real findings caught: a loop-variable-closure bug
+(`B023`) in the CSV field-lookup helper -- would have made every parsed row silently read the *last*
+row's values for any missing/optional header -- fixed by passing the row explicitly rather than closing
+over the loop variable; one long line). `mypy --strict` clean on `document_ingestion.py`,
+`document_ingestion_api.py`, `models.py`, `semantic_api.py`, and `main.py` beyond the same pre-existing,
+already-on-`HEAD` `session_factory()` "object not callable" finding AT-1 documented earlier today (not
+reintroduced by this row -- confirmed present identically on unmodified `main.py`).
+
+`pytest tests/test_document_ingestion.py`: 17 passed on the first real run (the ambiguous-table-name and
+maker-cannot-check-their-own-claim cases both needed no fix once written -- the underlying logic was
+already correct). Regression sweep, zero failures: `pytest tests/test_document_ingestion.py
+tests/test_asset_description.py tests/test_asset_description_sample_review.py
+tests/test_leaver_reassignment.py tests/test_playbooks.py tests/test_delegation.py` -- 66 passed.
+`AIDA_ENVIRONMENT=development python -c "from aida.main import app"` imports cleanly, 394 routes (was
+386 before this row's seven new endpoints).
+
+`scripts/openapi_diff.py` (no flag): seven new paths, three new schemas, zero breaking changes, zero
+removed paths/schemas (diffed old-vs-new baseline by key set, not just by line count, since the raw
+`git diff` line count looked disproportionate to seven added paths -- confirmed it was JSON
+key-reordering noise, not a hidden regression). `--accept-baseline` run and both
+`Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed, same
+as AT-1 earlier today; this time genuinely clean (no unrelated `ValidationError.ctx` drift riding along,
+since AT-1's own regeneration earlier today had already absorbed that).
+
+Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in this sandbox on the
+pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
+rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
+failure.

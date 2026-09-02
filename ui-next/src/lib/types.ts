@@ -1799,6 +1799,32 @@ export interface DetokenizeRequest {
   datasource_id?: string | null;
 }
 
+export interface DocumentCreate {
+  filename: string;
+  content: string;
+}
+
+export interface DocumentMappingSummaryRead {
+  document_id: string;
+  matched_count: number;
+  unmatched_count: number;
+}
+
+export interface DocumentRead {
+  id: string;
+  organization_id: string;
+  project_id: string;
+  filename: string;
+  media_type: string;
+  sha256: string;
+  status: string;
+  section_count: number;
+  parse_error_count: number;
+  uploaded_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as */
 export interface DomainLineageGraphRead {
   data_domain_id: string;
