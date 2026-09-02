@@ -607,6 +607,7 @@ def sqlserver_column_mask_statements(policy: NativeColumnPolicy) -> tuple[Native
     function = MSSQL_MASKING_FUNCTIONS.get(
         policy.masking_profile.upper(), MSSQL_MASKING_FUNCTIONS["DEFAULT"]
     )
+    drop_mask = f"ALTER TABLE {qualified} ALTER COLUMN {column} DROP MASKED;"
     # Flagged by shape (string-built SQL) but not by substance: every interpolated
     # value below is either an `_mssql_quote_ident`-quoted identifier or an
     # `_mssql_quote_literal`-escaped string literal -- the same "identifiers are
@@ -618,8 +619,12 @@ def sqlserver_column_mask_statements(policy: NativeColumnPolicy) -> tuple[Native
         "JOIN sys.schemas s ON s.schema_id = t.schema_id "
         f"WHERE s.name = {_mssql_quote_literal(schema_name)} "
         f"AND t.name = {_mssql_quote_literal(table_name)} "
-        f"AND mc.name = {_mssql_quote_literal(column_name)}) "
-        f"ALTER TABLE {qualified} ALTER COLUMN {column} DROP MASKED;"
+        # The mask state is explicit, and the DDL is dynamic deliberately:
+        # SQL Server validates `DROP MASKED` while compiling a batch, before
+        # evaluating `IF EXISTS`. Executing it dynamically defers that
+        # validation until a mask actually exists.
+        f"AND mc.name = {_mssql_quote_literal(column_name)} AND mc.is_masked = 1) "
+        f"EXEC(N{_mssql_quote_literal(drop_mask)});"
     )
     return (
         NativeStatement(
