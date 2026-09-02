@@ -1,0 +1,67 @@
+.bm{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px}
+.bm__head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex:none;flex-wrap:wrap}
+.bm__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.bm__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
+.bm__stats{display:flex;gap:18px;font-size:12.5px;color:var(--ink-3);flex-wrap:wrap}
+.bm__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+.tnum{font-variant-numeric:tabular-nums}
+
+.bm__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.bm__filters .field:nth-child(1){width:240px}
+.bm__filters .field:nth-child(2){width:280px}
+
+.bm__tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);flex:none}
+.bm__tab{all:unset;padding:8px 12px;font-size:12.5px;color:var(--ink-3);cursor:pointer;border-bottom:2px solid transparent}
+.bm__tab--active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+
+.bm__main{display:flex;gap:14px;flex:1;min-height:0}
+.bm__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+
+.bmrow{all:unset;box-sizing:border-box;display:block;width:100%;padding:11px 13px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);cursor:pointer;margin-bottom:8px}
+.bmrow:hover{border-color:var(--ink-3)}
+.bmrow--selected{border-color:var(--accent);background:var(--accent-soft)}
+.bmrow__top{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+.bmrow__name{font-weight:600;font-size:13.5px;color:var(--ink)}
+.bmrow__path{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);white-space:nowrap}
+.bmrow__desc{margin:5px 0 8px;font-size:12.5px;color:var(--ink-2);line-height:1.45}
+.bmrow__badges{display:flex;flex-wrap:wrap;gap:5px}
+
+.bmdl{margin:14px 0 0;display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12.5px}
+.bmdl dt{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);align-self:start;padding-top:2px}
+.bmdl dd{margin:0 0 8px;color:var(--ink);line-height:1.5;grid-column:1 / -1}
+.bmdl dt + dd{margin-top:1px}
+
+.bmquestions{margin-top:14px;padding-top:13px;border-top:1px solid var(--line-soft)}
+.bmquestions ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:5px}
+.bmquestions li{font-size:12.5px;color:var(--ink-2);line-height:1.45}
+
+.bmapproved{margin:14px 0 0;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+
+.bmmap{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+.bmmap__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+.bmmap__stats{display:flex;align-items:center;gap:18px;font-size:12.5px;color:var(--ink-3);flex-wrap:wrap}
+.bmmap__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+
+.bmmap__tree{display:flex;flex-direction:column;gap:10px}
+.bmmap__domain{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:12px 14px}
+.bmmap__domainhead{font-weight:600;font-size:13.5px;color:var(--ink);margin-bottom:8px}
+.bmmap__entity{margin-left:14px;padding-left:12px;border-left:2px solid var(--line-soft);margin-bottom:10px}
+.bmmap__entity:last-child{margin-bottom:0}
+.bmmap__entityhead{font-size:12px;color:var(--ink-2);font-weight:600;margin-bottom:6px}
+.bmmap__tables{display:flex;flex-wrap:wrap;gap:6px}
+.bmmap__table{font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--sunk);border:1px solid var(--line);border-radius:var(--radius-sm);padding:4px 8px}
+
+.bmmap__cross{border-top:1px solid var(--line-soft);padding-top:12px}
+.bmmap__cross ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:6px}
+.bmmap__cross li{font-size:12.5px;color:var(--ink-2)}
+.bmmap__crossmeta{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+
+/* Below this the evidence pane stacks under the list -- same reasoning as
+   CatalogScreen's own breakpoint: a virtualized list inside a collapsed flex
+   chain renders zero rows without an explicit height to measure against. */
+@media (max-width:1100px){
+  .bm{height:auto;min-height:100%}
+  .bm__main{flex-direction:column;min-height:0}
+  .bm__main .vlist{height:56vh;flex:none}
+  .evp{width:auto;max-height:none}
+}
