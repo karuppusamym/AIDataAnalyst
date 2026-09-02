@@ -853,6 +853,118 @@ export async function makeFixtureLineageImpact(
 }
 
 /* ---------------------------------------------------------------------------
+   Sources — UX-15/UX-16 follow-on. `GET /v1/datasources/{id}/health`
+   (`operational_api.py::get_datasource_health`) composes `ConnectorHealthScoreRead`
+   from `aida.connector_health.compute_connector_health`'s five weighted
+   factors (RUN_SUCCESS_RATE/35, STALENESS/25, FAILURE_STREAK/20,
+   PROFILING_COVERAGE/10, DATASOURCE_ENABLEMENT/10) and the same
+   score-to-status thresholds the real function uses (no runs -> UNKNOWN;
+   any blocker -> DEGRADED at score>=60 else CRITICAL; otherwise
+   HEALTHY>=85, DEGRADED>=60, else CRITICAL). Deterministic per `datasourceId`
+   (reusing this file's own `h()` hash) so a given fixture source's score does
+   not reshuffle on every reload, the same stability `rowAt` already gives the
+   catalog fixtures. Works for ANY datasource id, not only the ones in
+   `FIXTURE_DATASOURCES` above, since the real endpoint is scoped by id alone. */
+import type { ConnectorHealthFactorRead, ConnectorHealthScoreRead } from "./types";
+
+export async function makeFixtureDatasourceHealth(
+  datasourceId: string,
+): Promise<ConnectorHealthScoreRead> {
+  await wait(65);
+  const seed = Array.from(datasourceId).reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const hasRuns = h(seed, 101) % 100 >= 12; // most sources have run history
+  const disabled = h(seed, 103) % 100 < 8;
+  const streak = hasRuns ? h(seed, 107) % 5 : 0;
+
+  const runSuccess = hasRuns ? Math.round((35 * (h(seed, 109) % 101)) / 100 * 100) / 100 : 17.5;
+  const staleness = hasRuns ? Math.round((25 * (h(seed, 113) % 101)) / 100 * 100) / 100 : 12.5;
+  const failureStreak = streak === 0 ? 20 : streak === 1 ? 12 : streak === 2 ? 6 : 0;
+  const profiling = hasRuns ? Math.round((10 * (h(seed, 127) % 101)) / 100 * 100) / 100 : 5;
+  const enablement = disabled ? 0 : 10;
+
+  const factors: ConnectorHealthFactorRead[] = [
+    {
+      name: "RUN_SUCCESS_RATE",
+      score: runSuccess,
+      maximum: 35,
+      reason: hasRuns
+        ? `${Math.round((runSuccess / 35) * 100)}% of recent completed runs succeeded.`
+        : "No completed or failed runs are recorded yet; score is neutral.",
+      evidence: hasRuns
+        ? { successful_runs: Math.round(runSuccess), terminal_runs: 35 }
+        : { successful_runs: 0, terminal_runs: 0, success_rate: null },
+    },
+    {
+      name: "STALENESS",
+      score: staleness,
+      maximum: 25,
+      reason: hasRuns
+        ? "Most recent run is within the expected scan interval."
+        : "No run history to measure staleness against; score is neutral.",
+      evidence: { minutes_since_last_run: hasRuns ? h(seed, 131) % 720 : null },
+    },
+    {
+      name: "FAILURE_STREAK",
+      score: failureStreak,
+      maximum: 20,
+      reason:
+        streak === 0
+          ? "The most recent run succeeded."
+          : `The last ${streak} run${streak === 1 ? "" : "s"} failed consecutively.`,
+      evidence: { current_failure_streak: streak },
+    },
+    {
+      name: "PROFILING_COVERAGE",
+      score: profiling,
+      maximum: 10,
+      reason: hasRuns
+        ? `${Math.round((profiling / 10) * 100)}% of discovered tables have a recent profile.`
+        : "No run history; profiling coverage is unknown.",
+      evidence: { profiled_ratio: hasRuns ? Math.round((profiling / 10) * 100) / 100 : null },
+    },
+    {
+      name: "DATASOURCE_ENABLEMENT",
+      score: enablement,
+      maximum: 10,
+      reason: disabled
+        ? "The datasource is administratively disabled."
+        : "The datasource status is ACTIVE.",
+      evidence: { datasource_status: disabled ? "DISABLED" : "ACTIVE" },
+    },
+  ];
+
+  const blockers: string[] = [];
+  if (!hasRuns) blockers.push("NO_RUN_HISTORY");
+  else if (h(seed, 137) % 100 < 6) blockers.push("NO_SUCCESSFUL_RUN");
+  if (disabled) blockers.push("DATASOURCE_DISABLED");
+  if (streak >= 3) blockers.push("REPEATED_FAILURES");
+
+  const rawScore = factors.reduce((acc, f) => acc + f.score, 0);
+  const score = Math.round(Math.max(0, Math.min(100, rawScore)));
+
+  const status = !hasRuns
+    ? "UNKNOWN"
+    : blockers.length > 0
+      ? score >= 60
+        ? "DEGRADED"
+        : "CRITICAL"
+      : score >= 85
+        ? "HEALTHY"
+        : score >= 60
+          ? "DEGRADED"
+          : "CRITICAL";
+
+  return {
+    datasource_id: datasourceId,
+    score,
+    status,
+    factors,
+    blockers,
+    computed_at: new Date().toISOString(),
+  };
+}
+
+/* ---------------------------------------------------------------------------
    UX-16: Relationships — fixtures for N4's review queue (`compose_
    relationship_candidate_review_queue`) plus RL-6's single/bulk decision and
    RL-7's confidence-calibration endpoints. Mutates the in-memory candidate

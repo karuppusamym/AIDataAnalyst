@@ -1,0 +1,38 @@
+.srcscreen{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px}
+.srcscreen__head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;flex:none;flex-wrap:wrap}
+.srcscreen__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.srcscreen__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:64ch}
+.srcscreen__stats{display:flex;gap:18px;font-size:12.5px;color:var(--ink-3)}
+.srcscreen__stats b{color:var(--ink);font-weight:600;font-family:var(--mono)}
+.tnum{font-variant-numeric:tabular-nums}
+
+.srcscreen__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.srcscreen__filters .field:nth-child(1){width:260px}
+.srcscreen__filters .field:nth-child(2){width:160px}
+
+.srcscreen__main{display:flex;gap:14px;flex:1;min-height:0}
+.srcscreen__skeleton{flex:1;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+
+.src{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);overflow:hidden}
+.src--sel{outline:2px solid var(--accent);outline-offset:-1px}
+.src__click{all:unset;display:block;width:100%;box-sizing:border-box;padding:12px 15px;cursor:pointer}
+.src__head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.src__name{font-size:14px;font-weight:600;letter-spacing:-.008em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.src__meta{display:flex;gap:6px;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:8px;flex-wrap:wrap}
+
+.src__score{display:flex;align-items:center;gap:14px;padding-bottom:12px;margin-bottom:12px;border-bottom:1px solid var(--line-soft)}
+.src__scorenum{font-family:var(--mono);font-size:34px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+.src__scorenum--ok{color:var(--ok)}
+.src__scorenum--warn{color:var(--warn)}
+.src__scorenum--bad{color:var(--bad)}
+.src__scorenum--mute{color:var(--ink-3)}
+.src__scoremeta{display:flex;flex-direction:column;gap:5px}
+.src__computed{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.src__blockers{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
+
+@media (max-width:1100px){
+  .srcscreen{height:auto;min-height:100%}
+  .srcscreen__main{flex-direction:column;min-height:0}
+  .srcscreen__main .vlist{height:62vh;flex:none}
+  .evp{width:auto;max-height:none}
+}
