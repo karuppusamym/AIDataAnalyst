@@ -1,4 +1,8 @@
 import type {
+  AgentAnalysisRequest,
+  AgentAnalysisResponse,
+  AgentRunGroundingReceiptsRead,
+  AgentRunRead,
   AiDecisionRead,
   AssetEvidenceRead,
   DataSourceRead,
@@ -27,6 +31,7 @@ import type {
   QualityState,
 } from "./ui-types";
 import type {
+  AgentRunsQuery,
   CatalogQuery,
   LineageImpactQuery,
   MarketplaceQuery,
@@ -833,4 +838,258 @@ export async function makeFixtureLineageImpact(
     upstream_truncated: false,
     downstream_truncated: false,
   };
+}
+
+/* ---------------------------------------------------------------------------
+   Ask (UX-15/UX-16) fixtures -- the real `run_agent_analysis`/`list_agent_runs`/
+   `get_agent_run`/`get_agent_run_grounding_receipts` endpoints (`api.py:2912`
+   onward), same standing as everything above: fixture mode mirrors their real
+   wire shape, including AT-9's ambiguous-governed-term refusal, which the
+   real endpoint returns as an HTTP 409 whose `detail` inlines every competing
+   definition (`format_ambiguous_definition_refusal`, semantic_inference.py) --
+   reproduced here byte-for-byte so `classifyAgentAskError` (./api.ts)
+   exercises the exact same parse in fixture mode as it does against the real
+   API. Import of `ApiError` from `./api` is a real circular module reference
+   (api.ts imports these fixture functions the same way) -- safe because both
+   sides only touch the other's export from inside a function body, never at
+   module-evaluation time, exactly like every `makeFixtureX` call already in
+   `api.ts`. */
+
+import { ApiError } from "./api";
+
+let agentRunSeq = 0;
+function nextAgentRunId(): string {
+  agentRunSeq += 1;
+  return `run_ask_${agentRunSeq.toString().padStart(4, "0")}`;
+}
+
+function fragmentDigest(seed: string): string {
+  const n = h(seed.length, 97) ^ h(seed.charCodeAt(0) || 1, 101);
+  return `sha256:${(n >>> 0).toString(16).padStart(8, "0")}${"0".repeat(56)}`;
+}
+
+function groundingReceiptsFor(runId: string, tableName: string): AgentRunGroundingReceiptsRead {
+  const fragments = [
+    {
+      object_type: "TABLE",
+      object_id: `t_${tableName}`,
+      fragment_digest: fragmentDigest(`${runId}:table`),
+      annotation_version_id: `av_${tableName}_3`,
+      annotation_version: 3,
+      annotation_status: "APPROVED",
+      business_name: tableName.replace(/_/g, " "),
+      business_description: `Steward-approved business meaning for ${tableName}, used to ground this answer.`,
+      digest_verified: true,
+    },
+    {
+      object_type: "GLOSSARY_TERM",
+      object_id: "term:net_revenue",
+      fragment_digest: fragmentDigest(`${runId}:term`),
+      annotation_version_id: "av_net_revenue_2",
+      annotation_version: 2,
+      annotation_status: "APPROVED",
+      business_name: "Net Revenue",
+      business_description:
+        "Gross bookings less refunds and intercompany transfers, per the Q3 close workpaper.",
+      digest_verified: true,
+    },
+  ];
+  return { agent_run_id: runId, fragment_count: fragments.length, fragments };
+}
+
+function agentRunRead(
+  runId: string,
+  datasourceId: string,
+  status: string,
+  overrides: Partial<AgentRunRead> = {},
+): AgentRunRead {
+  const now = new Date().toISOString();
+  return {
+    id: runId,
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: datasourceId,
+    principal_id: "dev-fixture-user",
+    status,
+    generation_source: "FREEFORM_SQL",
+    model_route: "default/sql-planner",
+    semantic_version: "sm_2026_09@4",
+    policy_version: "pol_2026_09@2",
+    query_execution_id: null,
+    step_trace: [],
+    retrieval_evidence: [],
+    grounding_fragment_digests: [],
+    plan_evidence: {},
+    recommended_tool_version_id: null,
+    failure_reason: null,
+    created_at: now,
+    updated_at: now,
+    ...overrides,
+  };
+}
+
+const FIXTURE_GROUNDING_RECEIPTS: Record<string, AgentRunGroundingReceiptsRead> = {};
+
+const FIXTURE_AGENT_RUNS: Record<string, AgentRunRead[]> = {
+  ds_snowflake_prod: [
+    agentRunRead("run_ask_0002", "ds_snowflake_prod", "SUCCEEDED", {
+      generation_source: "FREEFORM_SQL",
+      step_trace: [
+        { stage: "RETRIEVED", strategy: "DETERMINISTIC" },
+        { stage: "PLANNED", strategy: "FREEFORM_SQL" },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+      retrieval_evidence: [
+        { object_type: "TABLE", object_id: "t_orders_raw", score: 0.94 },
+      ],
+      plan_evidence: { strategy: "FREEFORM_SQL", confidence: 0.91 },
+      created_at: "2026-09-01T15:40:00Z",
+      updated_at: "2026-09-01T15:40:04Z",
+    }),
+    agentRunRead("run_ask_0001", "ds_snowflake_prod", "FAILED", {
+      generation_source: "FREEFORM_SQL",
+      failure_reason: "AMBIGUOUS_DEFINITION",
+      step_trace: [{ stage: "REJECTED", strategy: "DETERMINISTIC" }],
+      created_at: "2026-09-01T12:05:00Z",
+      updated_at: "2026-09-01T12:05:01Z",
+    }),
+  ],
+};
+
+FIXTURE_AGENT_RUNS.ds_snowflake_prod!.forEach((run) => {
+  FIXTURE_GROUNDING_RECEIPTS[run.id] = groundingReceiptsFor(run.id, "orders_raw");
+});
+
+function buildAmbiguityDetail(term: string): string {
+  return (
+    `the term '${term}' resolves to 2 equally applicable governed ` +
+    "definitions for this datasource's scope; specify which business area you mean:" +
+    ` [business_node=bn_finance_revenue] 'Net Revenue (Finance)' (owner: priya@tenant.example) -- ` +
+    "Gross bookings less refunds and intercompany transfers, per the Q3 close workpaper." +
+    ` [business_node=bn_sales_revenue] 'Net Revenue (Sales)' (owner: sam@tenant.example) -- ` +
+    "Recognized bookings net of discounts, excluding renewals."
+  );
+}
+
+/** `POST /v1/datasources/{id}/agent-analyses` (`run_agent_analysis`).
+ *  Question text is read for a handful of trigger words so every mapped
+ *  failure mode (AT-9 ambiguity, disabled datasource, policy rejection,
+ *  model-route unavailable, unhandled 502) is reachable in fixture mode,
+ *  not only the success path -- matching the real endpoint's own
+ *  `except` clauses (`api.py:2912`) status-for-status. Anything else
+ *  succeeds and is appended to this datasource's history so the screen's
+ *  own history list reflects what was just asked. */
+export async function makeFixtureAgentAnalysis(
+  datasourceId: string,
+  body: AgentAnalysisRequest,
+): Promise<AgentAnalysisResponse> {
+  await wait(140);
+  const question = body.question.toLowerCase();
+
+  if (question.includes("disabled")) {
+    throw new ApiError(409, "datasource is disabled");
+  }
+  if (question.includes("ambiguous") || question.includes("mrr")) {
+    throw new ApiError(409, buildAmbiguityDetail(question.includes("mrr") ? "mrr" : "revenue"));
+  }
+  if (question.includes("policy")) {
+    throw new ApiError(422, "generated query violates row-level masking policy POL-14");
+  }
+  if (question.includes("unavailable")) {
+    throw new ApiError(503, "no model route available for risk tier HIGH");
+  }
+  if (question.includes("fail") || question.includes("502")) {
+    throw new ApiError(502, "agent analysis execution failed");
+  }
+
+  const runId = nextAgentRunId();
+  const execution = {
+    execution_id: `qe_${runId}`,
+    status: "SUCCEEDED",
+    normalized_sql:
+      "SELECT date_trunc('month', order_date) AS month, SUM(net_amount) AS net_revenue\nFROM analytics.core.orders_raw\nGROUP BY 1\nORDER BY 1",
+    referenced_tables: ["analytics.core.orders_raw"],
+    referenced_columns: ["order_date", "net_amount"],
+    column_lineage: [],
+    plan_cost: 12.4,
+    warehouse_query_id: `wh_${runId}`,
+    row_count: 6,
+    elapsed_ms: 340,
+    masked_columns: [],
+    rows: [
+      { month: "2026-04-01", net_revenue: 1_204_500 },
+      { month: "2026-05-01", net_revenue: 1_318_900 },
+      { month: "2026-06-01", net_revenue: 1_276_400 },
+    ],
+  };
+  const response: AgentAnalysisResponse = {
+    agent_run_id: runId,
+    status: "SUCCEEDED",
+    generation_source: "FREEFORM_SQL",
+    semantic_version: "sm_2026_09@4",
+    policy_version: "pol_2026_09@2",
+    step_trace: [
+      { stage: "RETRIEVED", strategy: "DETERMINISTIC", retrieval_evidence_count: 2 },
+      { stage: "RESOLVED", semantic_version: "sm_2026_09@4" },
+      { stage: "PLANNED", strategy: "FREEFORM_SQL", confidence: 0.91 },
+      { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+    ],
+    retrieval_evidence: [
+      {
+        object_type: "TABLE",
+        object_id: "t_orders_raw",
+        score: 0.94,
+        reason: "direct match on 'orders' and 'revenue' in the question",
+      },
+      {
+        object_type: "GLOSSARY_TERM",
+        object_id: "term:net_revenue",
+        score: 0.88,
+        reason: "governed definition of 'net revenue' for this datasource's scope",
+      },
+    ],
+    plan_evidence: { strategy: "FREEFORM_SQL", confidence: 0.91, candidate_tools_considered: 0 },
+    execution,
+    explanation: `Net revenue by month for the last 3 months, computed from analytics.core.orders_raw using the governed "Net Revenue" definition (gross bookings less refunds and intercompany transfers).`,
+  };
+
+  const run = agentRunRead(runId, datasourceId, "SUCCEEDED", {
+    step_trace: response.step_trace,
+    retrieval_evidence: response.retrieval_evidence,
+    plan_evidence: response.plan_evidence,
+    query_execution_id: execution.execution_id,
+  });
+  FIXTURE_AGENT_RUNS[datasourceId] = [run, ...(FIXTURE_AGENT_RUNS[datasourceId] ?? [])];
+  FIXTURE_GROUNDING_RECEIPTS[runId] = groundingReceiptsFor(runId, "orders_raw");
+
+  return response;
+}
+
+/** `GET /v1/datasources/{id}/agent-runs` (`list_agent_runs`). */
+export async function makeFixtureAgentRuns(
+  datasourceId: string,
+  query: AgentRunsQuery,
+): Promise<PageOf<AgentRunRead>> {
+  await wait(80);
+  const all = FIXTURE_AGENT_RUNS[datasourceId] ?? [];
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 50;
+  return { items: all.slice(offset, offset + limit), limit, offset, total: all.length };
+}
+
+/** `GET /v1/agent-runs/{id}` (`get_agent_run`). */
+export async function makeFixtureAgentRun(agentRunId: string): Promise<AgentRunRead> {
+  await wait(70);
+  for (const runs of Object.values(FIXTURE_AGENT_RUNS)) {
+    const run = runs.find((r) => r.id === agentRunId);
+    if (run) return run;
+  }
+  throw new Error(`fixture: no such agent run ${agentRunId}`);
+}
+
+/** `GET /v1/agent-runs/{id}/grounding-receipts` (`get_agent_run_grounding_receipts`). */
+export async function makeFixtureAgentRunGroundingReceipts(
+  agentRunId: string,
+): Promise<AgentRunGroundingReceiptsRead> {
+  await wait(70);
+  return FIXTURE_GROUNDING_RECEIPTS[agentRunId] ?? { agent_run_id: agentRunId, fragment_count: 0, fragments: [] };
 }

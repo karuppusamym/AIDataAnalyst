@@ -1,4 +1,8 @@
 import type {
+  AgentAnalysisRequest,
+  AgentAnalysisResponse,
+  AgentRunGroundingReceiptsRead,
+  AgentRunRead,
   AiDecisionRead,
   AssetEvidenceRead,
   DataSourceRead,
@@ -22,6 +26,10 @@ import type {
   PageOf,
 } from "./ui-types";
 import {
+  makeFixtureAgentAnalysis,
+  makeFixtureAgentRun,
+  makeFixtureAgentRunGroundingReceipts,
+  makeFixtureAgentRuns,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
@@ -429,4 +437,184 @@ export async function fetchLineageImpact(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
     signal,
   );
+}
+
+/* ---------------------------------------------------------------------------
+   Ask (UX-15/UX-16, tracker rows UX-15/UX-16): the single-shot governed
+   question-answering endpoint (`run_agent_analysis`, `api.py:2912`) and its
+   history/evidence reads. Every one of these hits a real, already-merged
+   route -- no backend stub, no invented endpoint, same standing as the
+   UX-15/UX-20 calls above.
+--------------------------------------------------------------------------- */
+
+/** `POST /v1/datasources/{id}/agent-analyses` (`run_agent_analysis`,
+ *  `api.py:2912`) -- ask a governed question against one datasource.
+ *  Single-shot, not streaming: one JSON response carrying the explanation,
+ *  the query that was actually run, and every piece of evidence
+ *  (`step_trace`/`retrieval_evidence`/`plan_evidence`) behind it.
+ *
+ *  This can fail closed several distinct ways, each a *different* HTTP
+ *  status the route maps deliberately rather than collapsing to one error
+ *  shape (`api.py:2912`'s own except clauses):
+ *    409  `AgentClarificationRequired` -- most importantly AT-9's ambiguous-
+ *         governed-term refusal (`_check_definition_ambiguity` /
+ *         `format_ambiguous_definition_refusal`, semantic_inference.py),
+ *         but also a governed tool needing parameters this v1 form never
+ *         sends. Also 409 for a disabled datasource (`ensure_datasource_enabled`,
+ *         fleet.py) -- same status, different `detail`, so a caller must read
+ *         `detail`, not just the status, to tell them apart. See
+ *         `classifyAgentAskError` below.
+ *    422  `AgentPolicyRejected` / `QueryRejected` -- the deterministic policy
+ *         or query layer refused the request or the generated query.
+ *    503  `ModelRouteUnavailable` -- no model route could serve the request.
+ *    502  anything unhandled -- `"agent analysis execution failed"`.
+ */
+export async function runAgentAnalysis(
+  datasourceId: string,
+  body: AgentAnalysisRequest,
+  signal?: AbortSignal,
+): Promise<AgentAnalysisResponse> {
+  if (USE_FIXTURES) return makeFixtureAgentAnalysis(datasourceId, body);
+  return postJson<AgentAnalysisResponse>(
+    `/v1/datasources/${datasourceId}/agent-analyses`,
+    body,
+    signal,
+  );
+}
+
+export interface AgentRunsQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{id}/agent-runs` (`list_agent_runs`, `api.py:2965`)
+ *  -- past questions asked against this datasource, newest first. Offset-
+ *  paged (the route's own `limit`/`offset` query params), unlike the
+ *  cursor-paged catalog/tables routes above. `AgentRunRead` (./types.ts)
+ *  carries no `question` text field -- the server never persists the raw
+ *  question string on the run row -- so a history row is identified by its
+ *  id/status/generation_source/timestamps, not by the question that produced
+ *  it; only a run whose answer is still held in this session's own state
+ *  (just asked, not yet reloaded from a permalink) has its question visible
+ *  client-side. */
+export async function fetchAgentRuns(
+  datasourceId: string,
+  query: AgentRunsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AgentRunRead>> {
+  if (USE_FIXTURES) return makeFixtureAgentRuns(datasourceId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AgentRunRead>>(`/v1/datasources/${datasourceId}/agent-runs?${params}`, signal);
+}
+
+/** `GET /v1/agent-runs/{id}` (`get_agent_run`, `api.py:3001`) -- one run's
+ *  full detail, for the evidence panel behind a history item or a `run`
+ *  URL permalink that outlives this session's own in-memory answer. */
+export async function fetchAgentRun(
+  agentRunId: string,
+  signal?: AbortSignal,
+): Promise<AgentRunRead> {
+  if (USE_FIXTURES) return makeFixtureAgentRun(agentRunId);
+  return get<AgentRunRead>(`/v1/agent-runs/${agentRunId}`, signal);
+}
+
+/** `GET /v1/agent-runs/{id}/grounding-receipts` (`get_agent_run_grounding_receipts`,
+ *  `api.py:3018`) -- AT-6 replay proof: resolves every grounding-fragment
+ *  digest this run recorded back to the actual source content (e.g. the
+ *  business-annotation text) the answer was grounded on, with
+ *  `digest_verified` confirming the stored content still matches what the
+ *  run saw. Powers the "how this was answered" evidence panel for both a
+ *  freshly-asked question and a reopened history item. */
+export async function fetchAgentRunGroundingReceipts(
+  agentRunId: string,
+  signal?: AbortSignal,
+): Promise<AgentRunGroundingReceiptsRead> {
+  if (USE_FIXTURES) return makeFixtureAgentRunGroundingReceipts(agentRunId);
+  return get<AgentRunGroundingReceiptsRead>(
+    `/v1/agent-runs/${agentRunId}/grounding-receipts`,
+    signal,
+  );
+}
+
+/** AT-9 / row UX-15's error-mapping requirement: `run_agent_analysis` maps
+ *  several distinct failures onto only four HTTP statuses (see
+ *  `runAgentAnalysis`'s own doc comment), so the screen must read `detail`,
+ *  not just `status`, to render each as its own state rather than one
+ *  generic failure banner. The ambiguity case additionally carries every
+ *  competing definition inline in `detail`
+ *  (`format_ambiguous_definition_refusal`, semantic_inference.py) --
+ *  `alternatives` below parses those back out so the refusal can render each
+ *  definition and its owner as its own item instead of one wall of text.
+ *  Parsing is a front-end convenience only: if the format ever changes,
+ *  `alternatives` degrades to `[]` and the raw `detail` is still shown. */
+export type AgentAskErrorKind =
+  | "AMBIGUOUS_DEFINITION"
+  | "DATASOURCE_DISABLED"
+  | "POLICY_REJECTED"
+  | "MODEL_UNAVAILABLE"
+  | "CLARIFICATION_NEEDED"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
+export interface AgentAskErrorAlternative {
+  businessNodeId: string;
+  displayName: string;
+  owner: string;
+  definition: string;
+}
+
+export interface AgentAskError {
+  kind: AgentAskErrorKind;
+  status: number;
+  detail: string;
+  /** Only populated for `AMBIGUOUS_DEFINITION`. */
+  alternatives: AgentAskErrorAlternative[];
+}
+
+const AMBIGUOUS_DEFINITION_RE =
+  /^the term '.+' resolves to \d+ equally applicable governed definitions/;
+const AMBIGUOUS_ALTERNATIVE_RE = /^([^\]]+)\] '([^']+)' \(owner: ([^)]+)\) -- ([\s\S]+)$/;
+
+function parseAmbiguousAlternatives(detail: string): AgentAskErrorAlternative[] {
+  const marker = " [business_node=";
+  const firstIdx = detail.indexOf(marker);
+  if (firstIdx === -1) return [];
+  const segments = detail
+    .slice(firstIdx + marker.length)
+    .split(marker)
+    .filter(Boolean);
+  const alternatives: AgentAskErrorAlternative[] = [];
+  for (const segment of segments) {
+    const m = AMBIGUOUS_ALTERNATIVE_RE.exec(segment);
+    if (!m) continue;
+    alternatives.push({
+      businessNodeId: m[1]!,
+      displayName: m[2]!,
+      owner: m[3]!,
+      definition: m[4]!.trim(),
+    });
+  }
+  return alternatives;
+}
+
+export function classifyAgentAskError(error: ApiError): AgentAskError {
+  const { status, detail } = error;
+  if (status === 409 && detail === "datasource is disabled") {
+    return { kind: "DATASOURCE_DISABLED", status, detail, alternatives: [] };
+  }
+  if (status === 409 && AMBIGUOUS_DEFINITION_RE.test(detail)) {
+    return {
+      kind: "AMBIGUOUS_DEFINITION",
+      status,
+      detail,
+      alternatives: parseAmbiguousAlternatives(detail),
+    };
+  }
+  if (status === 409) return { kind: "CLARIFICATION_NEEDED", status, detail, alternatives: [] };
+  if (status === 422) return { kind: "POLICY_REJECTED", status, detail, alternatives: [] };
+  if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, alternatives: [] };
+  if (status === 502) return { kind: "SERVER_ERROR", status, detail, alternatives: [] };
+  return { kind: "UNKNOWN", status, detail, alternatives: [] };
 }
