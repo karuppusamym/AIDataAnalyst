@@ -19,6 +19,7 @@ import type {
   UnifiedLineageImpactRead,
 } from "./types";
 import type {
+  AuditEventRead,
   CatalogRowRead,
   CursorPage,
   MarketplaceProductRead,
@@ -26,6 +27,7 @@ import type {
   PageOf,
 } from "./ui-types";
 import {
+  makeFixtureAuditEvents,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
@@ -528,6 +530,172 @@ export async function fetchSemanticMetricConsumers(
   if (USE_FIXTURES) return makeFixtureSemanticMetricConsumers(metricVersionId);
   return get<ConsumerFooterRead>(
     `/v1/semantic-metric-versions/${metricVersionId}/consumers`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Relationships — the review queue for N4's impact-ordered,
+   diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
+   plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
+   calibration summary. Added here as a clearly-delimited block rather than
+   folded into the imports/exports above, so this screen's additions are easy
+   to find and to lift out cleanly if this file is ever split per screen.
+--------------------------------------------------------------------------- */
+
+import type {
+  RelationshipCandidateBulkDecisionRequest,
+  RelationshipCandidateBulkDecisionResultRead,
+  RelationshipCandidateCalibrationRead,
+  RelationshipCandidateDecision,
+  RelationshipCandidateRead,
+  RelationshipCandidateReviewQueueRead,
+} from "./types";
+import {
+  makeFixtureBulkDecideRelationshipCandidates,
+  makeFixtureDecideRelationshipCandidate,
+  makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidateReviewQueue,
+} from "./fixtures";
+
+export interface RelationshipCandidateReviewQueueQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{datasourceId}/relationship-candidates/review-queue`
+ *  (N4, `get_relationship_candidate_review_queue` — `intelligence_api.py`) —
+ *  PENDING relationship candidates for one datasource, sorted by real
+ *  computed lineage impact (EA.14's bounded traversal), each carrying an
+ *  SM-7 "nothing → this edge" diff and an AT-15 per-signal confidence
+ *  breakdown. Supersedes the raw, confidence-sorted
+ *  `GET .../relationship-candidates` list for a reviewer triaging a
+ *  backlog — read-only; deciding a candidate goes through the two functions
+ *  below. */
+export async function fetchRelationshipCandidateReviewQueue(
+  datasourceId: string,
+  query: RelationshipCandidateReviewQueueQuery = {},
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateReviewQueueRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateReviewQueue(datasourceId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<RelationshipCandidateReviewQueueRead>(
+    `/v1/datasources/${datasourceId}/relationship-candidates/review-queue?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/{candidateId}/decision` — maker-checker
+ *  approve/reject of one PENDING candidate. A REJECT with no `reason` is
+ *  rejected server-side (`RelationshipCandidateDecision.require_reason`);
+ *  callers should collect a reason before calling this the same way
+ *  `decideGovernanceReview` above expects one. */
+export async function decideRelationshipCandidate(
+  candidateId: string,
+  body: RelationshipCandidateDecision,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateRead> {
+  if (USE_FIXTURES) return makeFixtureDecideRelationshipCandidate(candidateId, body);
+  return postJson<RelationshipCandidateRead>(
+    `/v1/relationship-candidates/${candidateId}/decision`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/relationship-candidates/bulk-decision` (RL-6) — decides up to
+ *  500 PENDING candidates by explicit id list in one call; a rule violation
+ *  on one candidate marks that candidate FAILED in the response and the
+ *  rest still proceed (partial success), never aborting the whole batch. */
+export async function bulkDecideRelationshipCandidates(
+  body: RelationshipCandidateBulkDecisionRequest,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateBulkDecisionResultRead> {
+  if (USE_FIXTURES) return makeFixtureBulkDecideRelationshipCandidates(body);
+  return postJson<RelationshipCandidateBulkDecisionResultRead>(
+    `/v1/relationship-candidates/bulk-decision`,
+    body,
+    signal,
+  );
+}
+
+/** `GET /v1/relationship-candidates/confidence-calibration` (RL-7) — this
+ *  organization's own observed steward-approval rate per confidence bucket,
+ *  from its real decision history (never a published external calibration
+ *  curve — see the endpoint's own `methodology_note`, echoed verbatim in the
+ *  response). Optional secondary info for a calibration summary tile;
+ *  `datasourceId: null` reports the org-wide history. */
+export async function fetchRelationshipCandidateCalibration(
+  datasourceId: string | null,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateCalibrationRead> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidateCalibration(datasourceId);
+  const params = new URLSearchParams();
+  if (datasourceId) params.set("datasource_id", datasourceId);
+  return get<RelationshipCandidateCalibrationRead>(
+    `/v1/relationship-candidates/confidence-calibration?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Audit ledger — org-wide, no datasource picker.
+--------------------------------------------------------------------------- */
+
+export interface AuditEventQuery {
+  organizationId: string;
+  action?: string;
+  resourceType?: string;
+  correlationId?: string;
+  /** ISO 8601 datetime, MUST carry a timezone offset (e.g. end in `Z` or
+   *  `+05:30`) — `list_audit_events` (`operational_api.py:336`) 422s a naive
+   *  datetime rather than guessing what timezone it was meant in. Checked
+   *  client-side below so a naive-looking value never reaches the wire. */
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+const TZ_AWARE_ISO = /(Z|[+-]\d{2}:?\d{2})$/i;
+
+function assertTimezoneAware(label: "since" | "until", value: string): void {
+  if (!TZ_AWARE_ISO.test(value)) {
+    throw new Error(
+      `${label} must be a timezone-aware ISO datetime (e.g. end with "Z"), got "${value}"`,
+    );
+  }
+}
+
+/** `GET /v1/organizations/{organization_id}/audit-events` (UX-16,
+ *  `list_audit_events`, `operational_api.py:336`) — every `AuditEvent` the
+ *  org has recorded, filterable by `action`/`resource_type`/`correlation_id`/
+ *  `since`/`until` and paginated by `limit`/`offset` (NOT a cursor — this
+ *  route's own signature, unlike `fetchCatalogRows`'s keyset one). Gated
+ *  server-side behind `PlatformAdmin`/`OrganizationAdmin`/`Auditor`/
+ *  `Operations` (the route's own `require_roles`); an unauthorized caller
+ *  gets the same 403 any other gated call in this file surfaces. */
+export async function fetchAuditEvents(
+  query: AuditEventQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<AuditEventRead>> {
+  if (query.since) assertTimezoneAware("since", query.since);
+  if (query.until) assertTimezoneAware("until", query.until);
+  if (USE_FIXTURES) return makeFixtureAuditEvents(query);
+
+  const params = new URLSearchParams();
+  if (query.action) params.set("action", query.action);
+  if (query.resourceType) params.set("resource_type", query.resourceType);
+  if (query.correlationId) params.set("correlation_id", query.correlationId);
+  if (query.since) params.set("since", query.since);
+  if (query.until) params.set("until", query.until);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+
+  return get<PageOf<AuditEventRead>>(
+    `/v1/organizations/${query.organizationId}/audit-events?${params}`,
     signal,
   );
 }

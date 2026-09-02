@@ -23,6 +23,7 @@ import type {
   UnifiedLineageImpactRead,
 } from "./types";
 import type {
+  AuditEventRead,
   CatalogRowRead,
   CertificationStatus,
   CursorPage,
@@ -31,6 +32,7 @@ import type {
   QualityState,
 } from "./ui-types";
 import type {
+  AuditEventQuery,
   CatalogQuery,
   LineageImpactQuery,
   MarketplaceQuery,
@@ -38,6 +40,21 @@ import type {
   SemanticPageQuery,
   StudioChangeSetQuery,
 } from "./api";
+
+/* UX-16: Relationships — a separate import block (not folded into the one
+   above) so this addition stays easy to find and to lift out cleanly. */
+import type {
+  RelationshipCandidateBulkDecisionItemRead,
+  RelationshipCandidateBulkDecisionRequest,
+  RelationshipCandidateBulkDecisionResultRead,
+  RelationshipCandidateCalibrationRead,
+  RelationshipCandidateDecision,
+  RelationshipCandidateDiffEntryRead,
+  RelationshipCandidateImpactRead,
+  RelationshipCandidateRead,
+  RelationshipCandidateReviewItemRead,
+  RelationshipCandidateReviewQueueRead,
+} from "./types";
 
 /* ---------------------------------------------------------------------------
    Deterministic fixtures standing in for the proposed read-model endpoint.
@@ -1037,4 +1054,407 @@ export async function makeFixtureSemanticMetricConsumers(
       generated_at: new Date().toISOString(), total_consumption_events: 0, consumers: [], total_consumers: 0,
     }
   );
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: Relationships — fixtures for N4's review queue (`compose_
+   relationship_candidate_review_queue`) plus RL-6's single/bulk decision and
+   RL-7's confidence-calibration endpoints. Mutates the in-memory candidate
+   array on decide, the same way `makeFixtureDecideReview` does for
+   `REVIEW_FIXTURE_PROPOSALS`, so fixture-mode decide-then-refetch behaves
+   like the real maker-checker endpoints.
+
+   `diff` entries are built the same way the real endpoint builds them
+   (`relationship_candidate_review.diff_relationship_candidate`, reusing
+   SM-7's `diff_semantic_object` with `before=None`): one `"added"` entry per
+   key of the flat snapshot, in the diff engine's own `sorted(keys)` order —
+   confidence, confidence_signals, detection_rule, source_column,
+   source_table, target_column, target_table — not source-first insertion
+   order, so a screen that (wrongly) assumed field order would fail against
+   fixtures the same way it would against the real endpoint.
+--------------------------------------------------------------------------- */
+
+interface FixtureRelationshipSignal {
+  name: string;
+  score: number;
+  maximum: number;
+  reason: string;
+}
+
+interface FixtureRelationshipCandidate {
+  candidate: RelationshipCandidateRead;
+  sourceTable: string;
+  sourceColumn: string;
+  targetTable: string;
+  targetColumn: string;
+  signals: FixtureRelationshipSignal[];
+  impact: RelationshipCandidateImpactRead;
+}
+
+function relationshipCandidateRead(
+  overrides: Partial<RelationshipCandidateRead> & { id: string },
+): RelationshipCandidateRead {
+  return {
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: "ds_snowflake_prod",
+    target_datasource_id: "ds_snowflake_prod",
+    source_table_id: `t_${overrides.id}_src`,
+    source_column_id: `c_${overrides.id}_src`,
+    target_table_id: `t_${overrides.id}_tgt`,
+    target_column_id: `c_${overrides.id}_tgt`,
+    detection_rule: "EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
+    confidence: 0.9,
+    evidence: {},
+    status: "PENDING",
+    created_by: "relationship_discovery_agent",
+    reviewed_by: null,
+    review_reason: null,
+    reviewed_at: null,
+    created_at: "2026-08-28T09:00:00Z",
+    updated_at: "2026-08-28T09:00:00Z",
+    ...overrides,
+  };
+}
+
+/** Descending impact order on purpose — see this section's own note above:
+ *  a screen must render this order as-is, never re-sort by confidence or id. */
+const RELATIONSHIP_CANDIDATE_FIXTURES: FixtureRelationshipCandidate[] = [
+  {
+    candidate: relationshipCandidateRead({
+      id: "rc_1",
+      detection_rule: "EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
+      confidence: 0.9,
+      evidence: { confidence_algorithm_version: "relationship-confidence-signals-v1" },
+    }),
+    sourceTable: "analytics.core.orders_raw",
+    sourceColumn: "customer_id",
+    targetTable: "analytics.core.customer_dim",
+    targetColumn: "customer_id",
+    signals: [
+      { name: "primary_key_target", score: 0.7, maximum: 0.7, reason: "target column is a declared PRIMARY KEY" },
+      { name: "column_name_match", score: 0.1, maximum: 0.1, reason: "exact, case-insensitive name match" },
+      { name: "physical_type_match", score: 0.1, maximum: 0.1, reason: "exact dialect type match" },
+    ],
+    impact: { impact_score: 138, source_table_impact: 81, target_table_impact: 57, depth: 3, node_limit: 100, truncated: false },
+  },
+  {
+    candidate: relationshipCandidateRead({
+      id: "rc_2",
+      detection_rule: "EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
+      confidence: 0.9,
+      evidence: { confidence_algorithm_version: "relationship-confidence-signals-v1" },
+    }),
+    sourceTable: "analytics.core.settlement_instruction",
+    sourceColumn: "counterparty_id",
+    targetTable: "analytics.core.counterparty_dim",
+    targetColumn: "counterparty_id",
+    signals: [
+      { name: "primary_key_target", score: 0.7, maximum: 0.7, reason: "target column is a declared PRIMARY KEY" },
+      { name: "column_name_match", score: 0.1, maximum: 0.1, reason: "exact, case-insensitive name match" },
+      { name: "physical_type_match", score: 0.1, maximum: 0.1, reason: "exact dialect type match" },
+    ],
+    impact: { impact_score: 91, source_table_impact: 40, target_table_impact: 51, depth: 3, node_limit: 100, truncated: false },
+  },
+  {
+    candidate: relationshipCandidateRead({
+      id: "rc_3",
+      detection_rule: "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1",
+      confidence: 0.75,
+      evidence: { confidence_algorithm_version: "relationship-confidence-signals-v1" },
+    }),
+    sourceTable: "analytics.raw.collateral_position",
+    sourceColumn: "instrument_ref",
+    targetTable: "analytics.core.instrument_dim",
+    targetColumn: "instrument_id",
+    signals: [
+      { name: "primary_key_target", score: 0.55, maximum: 0.55, reason: "target column is a declared PRIMARY KEY (cross-source base)" },
+      { name: "column_name_match", score: 0.1, maximum: 0.1, reason: "canonical/naming-convention-normalized match only" },
+      { name: "physical_type_match", score: 0.1, maximum: 0.1, reason: "exact dialect type match" },
+    ],
+    impact: { impact_score: 47, source_table_impact: 22, target_table_impact: 25, depth: 3, node_limit: 100, truncated: false },
+  },
+  {
+    candidate: relationshipCandidateRead({
+      id: "rc_4",
+      detection_rule: "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1",
+      confidence: 0.65,
+      evidence: { confidence_algorithm_version: "relationship-confidence-signals-v1" },
+    }),
+    sourceTable: "analytics.raw.limit_utilization",
+    sourceColumn: "acct_no",
+    targetTable: "analytics.core.account_dim",
+    targetColumn: "account_id",
+    signals: [
+      { name: "primary_key_target", score: 0.55, maximum: 0.55, reason: "target column is a declared PRIMARY KEY (cross-source base)" },
+      { name: "column_name_match", score: 0.1, maximum: 0.1, reason: "exact, case-insensitive name match" },
+      { name: "physical_type_match", score: 0, maximum: 0.1, reason: "type-family-only match, not dialect-exact" },
+    ],
+    impact: { impact_score: 12, source_table_impact: 9, target_table_impact: 3, depth: 3, node_limit: 100, truncated: false },
+  },
+  {
+    candidate: relationshipCandidateRead({
+      id: "rc_5",
+      detection_rule: "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1",
+      confidence: 0.55,
+      evidence: { confidence_algorithm_version: "relationship-confidence-signals-v1" },
+    }),
+    sourceTable: "analytics.raw.chargeback_event",
+    sourceColumn: "txn_ref",
+    targetTable: "analytics.core.transaction_dim",
+    targetColumn: "transaction_id",
+    signals: [
+      { name: "primary_key_target", score: 0.55, maximum: 0.55, reason: "target column is a declared PRIMARY KEY (cross-source base)" },
+      { name: "column_name_match", score: 0, maximum: 0.1, reason: "canonical/naming-convention-normalized match only" },
+      { name: "physical_type_match", score: 0, maximum: 0.1, reason: "type-family-only match, not dialect-exact" },
+    ],
+    impact: { impact_score: 3, source_table_impact: 3, target_table_impact: 0, depth: 3, node_limit: 100, truncated: false },
+  },
+];
+
+function relationshipCandidateDiff(f: FixtureRelationshipCandidate): RelationshipCandidateDiffEntryRead[] {
+  const snapshot: Record<string, unknown> = {
+    source_table: f.sourceTable,
+    source_column: f.sourceColumn,
+    target_table: f.targetTable,
+    target_column: f.targetColumn,
+    detection_rule: f.candidate.detection_rule,
+    confidence: f.candidate.confidence,
+    confidence_signals: f.signals,
+  };
+  return Object.keys(snapshot)
+    .sort()
+    .map((field) => ({ field, change: "added" as const, after: snapshot[field] }));
+}
+
+function relationshipReviewItem(f: FixtureRelationshipCandidate): RelationshipCandidateReviewItemRead {
+  return { candidate: f.candidate, diff: relationshipCandidateDiff(f), impact: f.impact };
+}
+
+/** `GET /v1/datasources/{id}/relationship-candidates/review-queue` (N4). Only
+ *  `ds_snowflake_prod` (the one datasource `makeFixtureOrgDatasources` lists)
+ *  has fixture candidates; any other id returns an empty, valid queue rather
+ *  than throwing, matching a datasource with nothing pending. */
+export async function makeFixtureRelationshipCandidateReviewQueue(
+  datasourceId: string,
+  query: { limit?: number; offset?: number },
+): Promise<RelationshipCandidateReviewQueueRead> {
+  await wait(100);
+  const all = datasourceId === "ds_snowflake_prod" ? RELATIONSHIP_CANDIDATE_FIXTURES : [];
+  const pending = all.filter((f) => f.candidate.status === "PENDING");
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 50;
+  const page = pending.slice(offset, offset + limit);
+  return {
+    datasource_id: datasourceId,
+    items: page.map(relationshipReviewItem),
+    limit,
+    offset,
+    scanned_count: pending.length,
+    total_pending_count: pending.length,
+    truncated: false,
+  };
+}
+
+/** `POST /v1/relationship-candidates/{id}/decision` — mutates the same
+ *  in-memory fixture array `makeFixtureRelationshipCandidateReviewQueue`
+ *  reads, so a decide-then-refetch in fixture mode drops the decided
+ *  candidate out of the PENDING queue exactly like the real endpoint. */
+export async function makeFixtureDecideRelationshipCandidate(
+  candidateId: string,
+  body: RelationshipCandidateDecision,
+): Promise<RelationshipCandidateRead> {
+  await wait(80);
+  const f = RELATIONSHIP_CANDIDATE_FIXTURES.find((x) => x.candidate.id === candidateId);
+  if (!f) throw new Error(`fixture: no such relationship candidate ${candidateId}`);
+  if (f.candidate.status !== "PENDING") {
+    throw new Error("relationship candidate is already decided");
+  }
+  f.candidate = {
+    ...f.candidate,
+    status: body.decision === "APPROVE" ? "APPROVED" : "REJECTED",
+    reviewed_by: "dev-fixture-user",
+    review_reason: body.reason ?? null,
+    reviewed_at: new Date().toISOString(),
+  };
+  return f.candidate;
+}
+
+/** `POST /v1/relationship-candidates/bulk-decision` (RL-6) — explicit
+ *  `candidate_ids` only (the `filter` selection mode is a server-side
+ *  convenience this fixture does not need to reproduce); each id not found
+ *  or already decided is reported FAILED rather than aborting the batch,
+ *  same partial-success contract as the real endpoint. */
+export async function makeFixtureBulkDecideRelationshipCandidates(
+  body: RelationshipCandidateBulkDecisionRequest,
+): Promise<RelationshipCandidateBulkDecisionResultRead> {
+  await wait(110);
+  const ids = body.candidate_ids ?? [];
+  const results: RelationshipCandidateBulkDecisionItemRead[] = [];
+  let succeeded = 0;
+  for (const id of ids) {
+    const f = RELATIONSHIP_CANDIDATE_FIXTURES.find((x) => x.candidate.id === id);
+    if (!f) {
+      results.push({ candidate_id: id, status: "FAILED", reason: "relationship candidate not found" });
+      continue;
+    }
+    if (f.candidate.status !== "PENDING") {
+      results.push({ candidate_id: id, status: "FAILED", reason: "relationship candidate is already decided" });
+      continue;
+    }
+    f.candidate = {
+      ...f.candidate,
+      status: body.decision === "APPROVE" ? "APPROVED" : "REJECTED",
+      reviewed_by: "dev-fixture-user",
+      review_reason: body.reason ?? null,
+      reviewed_at: new Date().toISOString(),
+    };
+    results.push({ candidate_id: id, status: "SUCCEEDED" });
+    succeeded += 1;
+  }
+  return {
+    decision: body.decision,
+    selection_mode: "EXPLICIT",
+    requested_count: ids.length,
+    succeeded_count: succeeded,
+    failed_count: ids.length - succeeded,
+    truncated: false,
+    results,
+  };
+}
+
+/** `GET /v1/relationship-candidates/confidence-calibration` (RL-7) — a
+ *  small, fixed bucket set standing in for this org's real decision
+ *  history; `datasourceId: null` (org-wide) and `"ds_snowflake_prod"` both
+ *  return the same buckets in fixture mode, since there is only ever one
+ *  fixture datasource. */
+export async function makeFixtureRelationshipCandidateCalibration(
+  datasourceId: string | null,
+): Promise<RelationshipCandidateCalibrationRead> {
+  await wait(70);
+  return {
+    datasource_id: datasourceId,
+    bucket_width: 0.1,
+    total_decided: 62,
+    ground_truth_overrides_applied: 4,
+    methodology_note:
+      "Buckets are the observed steward approval rate from this organization's own decision " +
+      "history, not a published calibration curve against a labelled corpus.",
+    buckets: [
+      { confidence_low: 0.5, confidence_high: 0.6, decided_count: 9, approved_count: 4, rejected_count: 5, observed_approval_rate: 4 / 9 },
+      { confidence_low: 0.6, confidence_high: 0.7, decided_count: 11, approved_count: 7, rejected_count: 4, observed_approval_rate: 7 / 11 },
+      { confidence_low: 0.7, confidence_high: 0.8, decided_count: 14, approved_count: 11, rejected_count: 3, observed_approval_rate: 11 / 14 },
+      { confidence_low: 0.8, confidence_high: 0.9, decided_count: 15, approved_count: 14, rejected_count: 1, observed_approval_rate: 14 / 15 },
+      { confidence_low: 0.9, confidence_high: 1.0, decided_count: 13, approved_count: 13, rejected_count: 0, observed_approval_rate: 1 },
+    ],
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   UX-16: audit ledger fixtures, standing in for the real, already-merged
+   `GET /v1/organizations/{id}/audit-events` (`list_audit_events`,
+   `operational_api.py:336`). Same standing as the fixtures above — the wire
+   shape matches `AuditEventRead` (schemas.py:47) field-for-field, including
+   `id` being an `int`, not a UUID like this app's other `*Read` ids.
+--------------------------------------------------------------------------- */
+
+const ORG_ID = "00000000-0000-0000-0000-000000000001";
+
+const AUDIT_EVENT_FIXTURES: AuditEventRead[] = [
+  {
+    id: 5041, organization_id: ORG_ID, principal_id: "priya@tenant.example", principal_type: "USER",
+    action: "governance_review.decide", resource_type: "GOVERNANCE_REVIEW", resource_id: "rq_4179",
+    outcome: "SUCCESS", correlation_id: "corr_9f21a0", source_ip: "10.2.4.18",
+    details: { decision: "APPROVE", object_type: "GLOSSARY_TERM_VERSION", object_id: "term:revenue" },
+    occurred_at: "2026-09-01T10:05:00Z",
+  },
+  {
+    id: 5040, organization_id: ORG_ID, principal_id: "semantic_inference_agent", principal_type: "SERVICE",
+    action: "governance_review.create", resource_type: "GOVERNANCE_REVIEW", resource_id: "rq_4181",
+    outcome: "SUCCESS", correlation_id: "corr_7b13c4", source_ip: null,
+    details: { object_type: "SEMANTIC_METRIC_VERSION", object_id: "metric:revenue", confidence: 0.87 },
+    occurred_at: "2026-09-01T14:02:00Z",
+  },
+  {
+    id: 5039, organization_id: ORG_ID, principal_id: "retail-owner@tenant.example", principal_type: "USER",
+    action: "marketplace.access_request.create", resource_type: "DATA_PRODUCT_VERSION", resource_id: "dpv_customer360",
+    outcome: "SUCCESS", correlation_id: "corr_2ad91e", source_ip: "10.2.4.61",
+    details: { purpose: "loyalty reporting refresh", duration_days: 90 },
+    occurred_at: "2026-09-01T09:12:00Z",
+  },
+  {
+    id: 5038, organization_id: ORG_ID, principal_id: "priya@tenant.example", principal_type: "USER",
+    action: "catalog.certify", resource_type: "TABLE", resource_id: "t_000abc",
+    outcome: "DENIED", correlation_id: "corr_5e6f10", source_ip: "10.2.4.18",
+    details: { reason: "requester's role has no CERTIFY binding", required_roles: ["DataSteward"] },
+    occurred_at: "2026-08-31T16:44:00Z",
+  },
+  {
+    id: 5037, organization_id: ORG_ID, principal_id: "risk-lead@tenant.example", principal_type: "USER",
+    action: "datasource.credential_rotate", resource_type: "DATA_SOURCE", resource_id: "ds_snowflake_prod",
+    outcome: "SUCCESS", correlation_id: "corr_5e6f10", source_ip: "10.2.4.44",
+    details: { vault_path: "vault://ds/snowflake_prod", rotated_by: "scheduled_rotation" },
+    occurred_at: "2026-08-31T02:00:00Z",
+  },
+  {
+    id: 5036, organization_id: ORG_ID, principal_id: "studio_eval_runner", principal_type: "SERVICE",
+    action: "studio.change_set.submit", resource_type: "STUDIO_CHANGE_SET", resource_id: "cs_1001",
+    outcome: "SUCCESS", correlation_id: "corr_1c88f2", source_ip: null,
+    details: { author: "priya@tenant.example", item_count: 1 },
+    occurred_at: "2026-09-01T09:40:00Z",
+  },
+  {
+    id: 5035, organization_id: ORG_ID, principal_id: "pricing_bot", principal_type: "SERVICE",
+    action: "ai_decision.refusal", resource_type: "TABLE", resource_id: "t_risk_exposure",
+    outcome: "DENIED", correlation_id: "corr_0a4d77", source_ip: null,
+    details: { classification: "RESTRICTED", required_roles: ["DataSteward", "Reviewer"] },
+    occurred_at: "2026-08-31T09:47:00Z",
+  },
+  {
+    id: 5034, organization_id: ORG_ID, principal_id: "dev-fixture-user", principal_type: "USER",
+    action: "me.session_start", resource_type: "SESSION", resource_id: null,
+    outcome: "SUCCESS", correlation_id: "corr_884b21", source_ip: "10.2.4.9",
+    details: {},
+    occurred_at: "2026-08-30T08:15:00Z",
+  },
+  {
+    id: 5033, organization_id: ORG_ID, principal_id: "retail-owner@tenant.example", principal_type: "USER",
+    action: "studio.change_set.create", resource_type: "STUDIO_CHANGE_SET", resource_id: "cs_1002",
+    outcome: "SUCCESS", correlation_id: "corr_1c88f2", source_ip: "10.2.4.61",
+    details: { name: "Publish retail customer 360 context product v6" },
+    occurred_at: "2026-08-30T11:00:00Z",
+  },
+  {
+    id: 5032, organization_id: ORG_ID, principal_id: "steward@tenant.example", principal_type: "USER",
+    action: "marketplace.access_request.decide", resource_type: "MARKETPLACE_ACCESS_REQUEST", resource_id: "mar_dpv_risk_exposure",
+    outcome: "FAILURE", correlation_id: "corr_ff3e02", source_ip: "10.2.4.7",
+    details: { error: "fulfillment provider timeout", fulfillment_provider: "okta_entitlements" },
+    occurred_at: "2026-08-29T13:26:00Z",
+  },
+];
+
+function auditMatches(event: AuditEventRead, q: AuditEventQuery): boolean {
+  if (q.action && event.action !== q.action) return false;
+  if (q.resourceType && event.resource_type !== q.resourceType) return false;
+  if (q.correlationId && event.correlation_id !== q.correlationId) return false;
+  if (q.since && event.occurred_at < q.since) return false;
+  if (q.until && event.occurred_at > q.until) return false;
+  return true;
+}
+
+/** `GET /v1/organizations/{id}/audit-events` (UX-16). Filters client-side
+ *  over this fixed set the same way `makeFixtureReviewQueue` does, and pages
+ *  by `limit`/`offset` — the real route's own contract, not a cursor. */
+export async function makeFixtureAuditEvents(
+  query: AuditEventQuery,
+): Promise<PageOf<AuditEventRead>> {
+  await wait(90);
+  const filtered = AUDIT_EVENT_FIXTURES.filter((e) => auditMatches(e, query));
+  const limit = query.limit ?? 100;
+  const offset = query.offset ?? 0;
+  return {
+    items: filtered.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: filtered.length,
+  };
 }
