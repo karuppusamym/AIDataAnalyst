@@ -1,5 +1,6 @@
 import type {
   AiDecisionRead,
+  AnalysisRunRead,
   AssetEvidenceRead,
   BusinessMapEdgeRead,
   BusinessMapNodeRead,
@@ -10,6 +11,7 @@ import type {
   DataQualitySummaryRead,
   DataSourceRead,
   EvidenceItemRead,
+  FleetSummaryRead,
   GovernanceDecisionRequest,
   GovernanceReviewDiffRead,
   GovernanceReviewRead,
@@ -17,6 +19,8 @@ import type {
   MarketplaceAccessRequestRead,
   MeRead,
   MetadataBusinessAnnotationRead,
+  MetadataIngestionBatchRead,
+  OutboxEventRead,
   ProjectRead,
   ReviewQueueProposalRead,
   ReviewQueueRead,
@@ -39,12 +43,15 @@ import type {
   QualityState,
 } from "./ui-types";
 import type {
+  AnalysisRunsQuery,
   AuditEventQuery,
   BusinessAnnotationsQuery,
   BusinessMapQuery,
   CatalogQuery,
+  IngestionBatchesQuery,
   LineageImpactQuery,
   MarketplaceQuery,
+  OutboxEventsQuery,
   QualityIncidentsQuery,
   ReviewQueueQuery,
   SemanticPageQuery,
@@ -869,6 +876,222 @@ export async function makeFixtureLineageImpact(
 
 
 /* ---------------------------------------------------------------------------
+   UX-16: Operations — fleet-summary, analysis-runs, outbox-events/requeue,
+   and the per-datasource metadata-ingestion-batches drill-down. Same standing
+   as everything above this banner: every one of these stands in for a real,
+   already-merged route (`operational_api.py`/`ingestion_api.py`), not an
+   unbuilt one. `makeFixtureFleetSummary`'s counts are derived from the same
+   fixed arrays the list fixtures below read, so the dashboard tiles and the
+   lists under them can never disagree in fixture mode -- exactly the
+   real backend's two independent-but-consistent queries, reproduced here as
+   two functions over one shared fixture dataset instead of two disconnected
+   ones.
+--------------------------------------------------------------------------- */
+
+const OPS_ORG = "00000000-0000-0000-0000-000000000001";
+const OPS_DS = "ds_snowflake_prod";
+
+const ANALYSIS_RUN_FIXTURES: AnalysisRunRead[] = [
+  {
+    id: "run_a1", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: null,
+    mode: "FULL", trigger_type: "SCHEDULED", priority: 5, status: "RUNNING",
+    temporal_workflow_id: "wf-a1", discovered_catalogs: 1, discovered_schemas: 5,
+    discovered_tables: 210, discovered_columns: 3100, discovered_constraints: 340,
+    created_objects: 4, changed_objects: 12, deprecated_objects: 0,
+    profiled_tables: 88, profiled_columns: 1204, error_class: null, error_message: null,
+    created_at: "2026-09-02T08:00:00Z", updated_at: "2026-09-02T08:41:00Z",
+  },
+  {
+    id: "run_a2", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: null,
+    mode: "INCREMENTAL", trigger_type: "SCAN_POLICY", priority: 5, status: "SUCCEEDED",
+    temporal_workflow_id: "wf-a2", discovered_catalogs: 1, discovered_schemas: 5,
+    discovered_tables: 210, discovered_columns: 3100, discovered_constraints: 340,
+    created_objects: 0, changed_objects: 3, deprecated_objects: 0,
+    profiled_tables: 210, profiled_columns: 3100, error_class: null, error_message: null,
+    created_at: "2026-09-02T02:00:00Z", updated_at: "2026-09-02T02:22:00Z",
+  },
+  {
+    id: "run_a3", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: null,
+    mode: "INCREMENTAL", trigger_type: "SCAN_POLICY", priority: 5, status: "FAILED",
+    temporal_workflow_id: "wf-a3", discovered_catalogs: 1, discovered_schemas: 5,
+    discovered_tables: 0, discovered_columns: 0, discovered_constraints: 0,
+    created_objects: 0, changed_objects: 0, deprecated_objects: 0,
+    profiled_tables: 0, profiled_columns: 0,
+    error_class: "ConnectorTimeoutError", error_message: "connector did not respond within 30s",
+    created_at: "2026-09-01T20:00:00Z", updated_at: "2026-09-01T20:00:31Z",
+  },
+  {
+    id: "run_a4", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: "run_a3",
+    mode: "INCREMENTAL", trigger_type: "MANUAL", priority: 8, status: "PENDING",
+    temporal_workflow_id: null, discovered_catalogs: 0, discovered_schemas: 0,
+    discovered_tables: 0, discovered_columns: 0, discovered_constraints: 0,
+    created_objects: 0, changed_objects: 0, deprecated_objects: 0,
+    profiled_tables: 0, profiled_columns: 0, error_class: null, error_message: null,
+    created_at: "2026-09-02T08:55:00Z", updated_at: "2026-09-02T08:55:00Z",
+  },
+  {
+    id: "run_a5", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: null,
+    mode: "FULL", trigger_type: "MANUAL", priority: 5, status: "CANCELLED",
+    temporal_workflow_id: "wf-a5", discovered_catalogs: 1, discovered_schemas: 2,
+    discovered_tables: 40, discovered_columns: 600, discovered_constraints: 55,
+    created_objects: 40, changed_objects: 0, deprecated_objects: 0,
+    profiled_tables: 0, profiled_columns: 0, error_class: null, error_message: null,
+    created_at: "2026-09-01T15:00:00Z", updated_at: "2026-09-01T15:10:00Z",
+  },
+  {
+    id: "run_a6", organization_id: OPS_ORG, datasource_id: OPS_DS, resumed_from_run_id: null,
+    mode: "INCREMENTAL", trigger_type: "SCAN_POLICY", priority: 5, status: "SUCCEEDED",
+    temporal_workflow_id: "wf-a6", discovered_catalogs: 1, discovered_schemas: 5,
+    discovered_tables: 210, discovered_columns: 3100, discovered_constraints: 340,
+    created_objects: 1, changed_objects: 0, deprecated_objects: 0,
+    profiled_tables: 210, profiled_columns: 3100, error_class: null, error_message: null,
+    created_at: "2026-09-01T02:00:00Z", updated_at: "2026-09-01T02:19:00Z",
+  },
+];
+
+/** `GET /v1/organizations/{organization_id}/analysis-runs`. */
+export async function makeFixtureAnalysisRuns(
+  query: AnalysisRunsQuery,
+): Promise<PageOf<AnalysisRunRead>> {
+  await wait(90);
+  let items = ANALYSIS_RUN_FIXTURES;
+  if (query.runStatus) items = items.filter((r) => r.status === query.runStatus);
+  if (query.datasourceId) items = items.filter((r) => r.datasource_id === query.datasourceId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+const OUTBOX_EVENT_FIXTURES: OutboxEventRead[] = [
+  {
+    id: "obx_1", organization_id: OPS_ORG, aggregate_type: "AnalysisRun", aggregate_id: "run_a2",
+    event_type: "analysis_run.completed", status: "PENDING", attempt_count: 0,
+    next_attempt_at: "2026-09-02T02:23:00Z", last_error: null,
+    occurred_at: "2026-09-02T02:22:00Z", published_at: null,
+  },
+  {
+    id: "obx_2", organization_id: OPS_ORG, aggregate_type: "AnalysisRun", aggregate_id: "run_a3",
+    event_type: "analysis_run.failed", status: "DEAD_LETTER", attempt_count: 6,
+    next_attempt_at: "2026-09-02T02:00:00Z",
+    last_error: "webhook delivery: connection reset by peer (6 attempts)",
+    occurred_at: "2026-09-01T20:00:31Z", published_at: null,
+  },
+  {
+    id: "obx_3", organization_id: OPS_ORG, aggregate_type: "MetadataIngestionBatch", aggregate_id: "batch_3",
+    event_type: "ingestion_batch.failed", status: "DEAD_LETTER", attempt_count: 5,
+    next_attempt_at: "2026-09-01T09:00:00Z",
+    last_error: "downstream consumer returned 503 (5 attempts)",
+    occurred_at: "2026-09-01T08:40:00Z", published_at: null,
+  },
+  {
+    id: "obx_4", organization_id: OPS_ORG, aggregate_type: "DataSource", aggregate_id: OPS_DS,
+    event_type: "datasource.health_degraded", status: "PUBLISHED", attempt_count: 1,
+    next_attempt_at: "2026-09-01T06:00:00Z", last_error: null,
+    occurred_at: "2026-09-01T05:58:00Z", published_at: "2026-09-01T05:58:04Z",
+  },
+];
+
+/** `GET /v1/organizations/{organization_id}/outbox-events`. */
+export async function makeFixtureOutboxEvents(
+  query: OutboxEventsQuery,
+): Promise<PageOf<OutboxEventRead>> {
+  await wait(80);
+  let items = OUTBOX_EVENT_FIXTURES;
+  if (query.status) items = items.filter((e) => e.status === query.status);
+  if (query.eventType) items = items.filter((e) => e.event_type === query.eventType);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/outbox-events/{event_id}/requeue` — mutates the same in-memory
+ *  fixture array `makeFixtureOutboxEvents` reads, the same convention
+ *  `makeFixtureDecideReview` uses above, and rejects a non-DEAD_LETTER event
+ *  exactly like the real route's 409. */
+export async function makeFixtureRequeueOutboxEvent(eventId: string): Promise<OutboxEventRead> {
+  await wait(70);
+  const event = OUTBOX_EVENT_FIXTURES.find((e) => e.id === eventId);
+  if (!event) throw new Error(`fixture: no such outbox event ${eventId}`);
+  if (event.status !== "DEAD_LETTER") throw new Error("only dead-letter events can be requeued");
+  event.status = "PENDING";
+  event.attempt_count = 0;
+  event.next_attempt_at = new Date().toISOString();
+  event.last_error = null;
+  return event;
+}
+
+/** `GET /v1/organizations/{organization_id}/fleet-summary`. Counts are
+ *  derived from `ANALYSIS_RUN_FIXTURES`/`OUTBOX_EVENT_FIXTURES` above rather
+ *  than restated by hand, so the tiles this feeds can never disagree with
+ *  the lists underneath them. */
+export async function makeFixtureFleetSummary(organizationId: string): Promise<FleetSummaryRead> {
+  await wait(60);
+  const analysisRunStatuses = ANALYSIS_RUN_FIXTURES.reduce<Record<string, number>>((acc, r) => {
+    acc[r.status] = (acc[r.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  return {
+    organization_id: organizationId,
+    datasource_statuses: { ACTIVE: FIXTURE_DATASOURCES.length },
+    analysis_run_statuses: analysisRunStatuses,
+    scan_policies_enabled: 6,
+    scan_policies_due: 2,
+    pending_outbox_events: OUTBOX_EVENT_FIXTURES.filter((e) => e.status === "PENDING").length,
+    dead_letter_outbox_events: OUTBOX_EVENT_FIXTURES.filter((e) => e.status === "DEAD_LETTER").length,
+    generated_at: new Date().toISOString(),
+  };
+}
+
+const INGESTION_BATCH_FIXTURES: Record<string, MetadataIngestionBatchRead[]> = {
+  [OPS_DS]: [
+    {
+      id: "batch_1", organization_id: OPS_ORG, datasource_id: OPS_DS, analysis_run_id: "run_a1",
+      batch_key: "2026-09-02T08:00:00Z-full", envelope_version: "1.1", producer: "snowflake-connector@1.4",
+      snapshot_type: "FULL", expected_chunks: 12, received_chunks: 12, processed_chunks: 9,
+      status: "PROCESSING", temporal_workflow_id: "wf-a1",
+      object_counts: { tables: 210 }, change_counts: { created: 4, changed: 12 },
+      submitted_by: "svc-ingest", finalized_at: "2026-09-02T08:20:00Z", completed_at: null,
+      error_class: null, error_message: null,
+      created_at: "2026-09-02T08:00:00Z", updated_at: "2026-09-02T08:41:00Z",
+    },
+    {
+      id: "batch_2", organization_id: OPS_ORG, datasource_id: OPS_DS, analysis_run_id: "run_a2",
+      batch_key: "2026-09-02T02:00:00Z-incr", envelope_version: "1.1", producer: "snowflake-connector@1.4",
+      snapshot_type: "INCREMENTAL", expected_chunks: 3, received_chunks: 3, processed_chunks: 3,
+      status: "COMPLETE", temporal_workflow_id: "wf-a2",
+      object_counts: { tables: 210 }, change_counts: { changed: 3 },
+      submitted_by: "svc-ingest", finalized_at: "2026-09-02T02:05:00Z", completed_at: "2026-09-02T02:22:00Z",
+      error_class: null, error_message: null,
+      created_at: "2026-09-02T02:00:00Z", updated_at: "2026-09-02T02:22:00Z",
+    },
+    {
+      id: "batch_3", organization_id: OPS_ORG, datasource_id: OPS_DS, analysis_run_id: "run_a3",
+      batch_key: "2026-09-01T20:00:00Z-incr", envelope_version: "1.1", producer: "snowflake-connector@1.4",
+      snapshot_type: "INCREMENTAL", expected_chunks: 3, received_chunks: 1, processed_chunks: 0,
+      status: "FAILED", temporal_workflow_id: "wf-a3",
+      object_counts: {}, change_counts: {},
+      submitted_by: "svc-ingest", finalized_at: null, completed_at: null,
+      error_class: "ChunkTimeoutError", error_message: "chunk 2 of 3 was never received within the batch window",
+      created_at: "2026-09-01T20:00:00Z", updated_at: "2026-09-01T20:00:31Z",
+    },
+  ],
+};
+
+/** `GET /v1/datasources/{datasource_id}/metadata-ingestion-batches` — the
+ *  screen's secondary, per-datasource-only drill-down (see this file's
+ *  banner above and `OperationsScreen.tsx`'s module comment for why there is
+ *  no org-wide equivalent to fetch here instead). */
+export async function makeFixtureIngestionBatches(
+  datasourceId: string,
+  opts: IngestionBatchesQuery,
+): Promise<PageOf<MetadataIngestionBatchRead>> {
+  await wait(80);
+  const items = INGESTION_BATCH_FIXTURES[datasourceId] ?? [];
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+/* ---------------------------------------------------------------------------
    Quality — UX-15/UX-16, `QualityScreen`. Scoped to the one fixture
    datasource (`FIXTURE_DATASOURCES` above), matching how the real endpoints
    are datasource-scoped. `severity` mirrors the real values `data_quality.py`'s
@@ -1015,6 +1238,7 @@ export async function makeFixtureTransitionQualityIncident(
   incident.updated_at = now;
   return { ...incident };
 }
+
 /* ---------------------------------------------------------------------------
    UX-16 fixtures — Business meaning. Same standing as everything above: a
    stand-in for `npm run dev`/`npm run test` with no backend running, shaped

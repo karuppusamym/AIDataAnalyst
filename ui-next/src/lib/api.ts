@@ -1,5 +1,6 @@
 import type {
   AiDecisionRead,
+  AnalysisRunRead,
   AssetEvidenceRead,
   BusinessMapRead,
   ConsumerFooterRead,
@@ -7,12 +8,15 @@ import type {
   DataQualityIncidentTransition,
   DataQualitySummaryRead,
   DataSourceRead,
+  FleetSummaryRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
   MetadataBusinessAnnotationRead,
+  MetadataIngestionBatchRead,
+  OutboxEventRead,
   ProjectRead,
   ReviewQueueRead,
   SemanticMetricVersionRead,
@@ -32,21 +36,26 @@ import type {
   PageOf,
 } from "./ui-types";
 import {
+  makeFixtureAnalysisRuns,
   makeFixtureAuditEvents,
   makeFixtureBusinessAnnotations,
   makeFixtureBusinessMap,
   makeFixtureCatalog,
   makeFixtureDecideReview,
   makeFixtureEvidence,
+  makeFixtureFleetSummary,
+  makeFixtureIngestionBatches,
   makeFixtureLineageImpact,
   makeFixtureMarketplaceAccessRequest,
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
   makeFixtureOrgProjects,
+  makeFixtureOutboxEvents,
   makeFixtureQualityIncidents,
   makeFixtureQualitySummary,
   makeFixtureRefusals,
+  makeFixtureRequeueOutboxEvent,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
   makeFixtureSemanticMetricConsumers,
@@ -454,6 +463,118 @@ export async function fetchLineageImpact(
 }
 
 
+/* ---------------------------------------------------------------------------
+   UX-16: Operations. Composed from four org-wide, already-merged
+   `operational_api.py` routes -- fleet-summary, analysis-runs, outbox-events
+   and its requeue action -- plus, as an optional per-datasource drill-down,
+   `ingestion_api.py`'s metadata-ingestion-batches. There is no single
+   endpoint that aggregates ingestion-batch/Temporal-workflow status across
+   every datasource in an org; see `OperationsScreen.tsx`'s own module
+   comment for why this screen does not fake one.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{organization_id}/fleet-summary` (`operational_api.py::fleet_summary`)
+ *  -- the dashboard tiles at the top of the Operations screen. Org-wide, no
+ *  datasource picker needed. */
+export async function fetchFleetSummary(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<FleetSummaryRead> {
+  if (USE_FIXTURES) return makeFixtureFleetSummary(organizationId);
+  return get<FleetSummaryRead>(`/v1/organizations/${organizationId}/fleet-summary`, signal);
+}
+
+export interface AnalysisRunsQuery {
+  organizationId: string;
+  runStatus?: string | null;
+  datasourceId?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/analysis-runs`
+ *  (`operational_api.py::list_organization_analysis_runs`) -- the screen's
+ *  primary list, filterable by run status and/or datasource. */
+export async function fetchAnalysisRuns(
+  query: AnalysisRunsQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<AnalysisRunRead>> {
+  if (USE_FIXTURES) return makeFixtureAnalysisRuns(query);
+  const params = new URLSearchParams();
+  if (query.runStatus) params.set("run_status", query.runStatus);
+  if (query.datasourceId) params.set("datasource_id", query.datasourceId);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AnalysisRunRead>>(
+    `/v1/organizations/${query.organizationId}/analysis-runs?${params}`,
+    signal,
+  );
+}
+
+export interface OutboxEventsQuery {
+  organizationId: string;
+  status?: string | null;
+  eventType?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/outbox-events`
+ *  (`operational_api.py::list_outbox_events`) -- the event-backlog / dead-
+ *  letter panel beneath the analysis-runs list. */
+export async function fetchOutboxEvents(
+  query: OutboxEventsQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<OutboxEventRead>> {
+  if (USE_FIXTURES) return makeFixtureOutboxEvents(query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.eventType) params.set("event_type", query.eventType);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<OutboxEventRead>>(
+    `/v1/organizations/${query.organizationId}/outbox-events?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/outbox-events/{event_id}/requeue` (`operational_api.py::requeue_outbox_event`)
+ *  -- moves one DEAD_LETTER event back to PENDING with a reset attempt count.
+ *  The route takes no request body; `{}` matches this file's own convention
+ *  (see `submitStudioChangeSet`) of never sending an optional-looking empty
+ *  POST without an explicit body. */
+export async function requeueOutboxEvent(
+  eventId: string,
+  signal?: AbortSignal,
+): Promise<OutboxEventRead> {
+  if (USE_FIXTURES) return makeFixtureRequeueOutboxEvent(eventId);
+  return postJson<OutboxEventRead>(`/v1/outbox-events/${eventId}/requeue`, {}, signal);
+}
+
+export interface IngestionBatchesQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/datasources/{datasource_id}/metadata-ingestion-batches`
+ *  (`ingestion_api.py::list_metadata_ingestion_batches`) -- per-datasource
+ *  only, no org-wide equivalent exists. Used by this screen's secondary
+ *  drill-down panel, one datasource at a time, never fanned out across the
+ *  fleet. */
+export async function fetchIngestionBatches(
+  datasourceId: string,
+  opts: IngestionBatchesQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<MetadataIngestionBatchRead>> {
+  if (USE_FIXTURES) return makeFixtureIngestionBatches(datasourceId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<MetadataIngestionBatchRead>>(
+    `/v1/datasources/${datasourceId}/metadata-ingestion-batches?${params}`,
+    signal,
+  );
+}
 /* ---------------------------------------------------------------------------
    Quality — UX-15/UX-16, `QualityScreen`.
 
