@@ -362,7 +362,11 @@ source_modules = [
   "aida.unified_lineage",
   "aida.unified_lineage_api",
   "aida.lineage_cache",
-  "aida.lineage_graph_store",
+  # C7 / ADR-0020 amendment (Group J): `aida.lineage_graph_store` was deleted --
+  # zero callers once `unified_lineage_api`/`api.py`'s Neo4j reads moved behind
+  # `aida.graph_store` (`tests/test_reachability_gate.py` caught the resulting
+  # dead module) -- and `aida.graph_store` is its successor here.
+  "aida.graph_store",
   "aida.openlineage",
   "aida.openlineage_api",
   "aida.knowledge_graph",

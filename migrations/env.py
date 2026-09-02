@@ -5,7 +5,7 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from aida import envelope_models, models  # noqa: F401
+from aida import envelope_models, graph_store, models  # noqa: F401
 from aida.config import get_settings
 from aida.db import Base
 
