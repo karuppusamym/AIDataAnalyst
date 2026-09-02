@@ -10268,3 +10268,96 @@ Honest gap: `test_event_catalog_gate.py` fails in this sandbox on an unrelated `
 (cp1252 decode of a `PG-5` edition-entitlement source file that contains a non-cp1252 byte) that predates
 and is untouched by this row -- confirmed by running the same gate against `HEAD` before this row's
 changes; not attempted here, same standing environment limitation other rows have hit and left alone.
+
+## 2026-09-02 — N4 closed: impact-ordered, diff-based relationship-candidate review queue, wired to negative knowledge
+
+Composed four pieces already built on this branch rather than reimplementing any of them: SM-7's diff
+engine, EA.14's bounded lineage traversal, EE.3/N16's negative-knowledge mechanism, and RL-6's
+bulk-decision endpoint (already `DONE` for `RelationshipCandidate` specifically, confirmed by reading
+`intelligence_api.py` first per this row's own instruction). Only three of the four pieces needed new
+wiring; RL-4 (projection) and RL-6 (bulk decisions) were already real and untouched.
+
+**Impact-ordering.** New `GET /v1/datasources/{datasource_id}/relationship-candidates/review-queue`
+(`aida.relationship_candidate_review.compose_relationship_candidate_review_queue`) loads up to
+`REVIEW_QUEUE_SCAN_LIMIT=200` PENDING candidates, computes a real impact score for each via
+`compute_relationship_candidate_impact` -- which calls EA.14's `unified_lineage_api.
+build_unified_lineage_impact_payload` verbatim (the identical function `GET .../unified-lineage/
+impact/{node_id}` and TL-7's deprecation preview call) at *both* endpoints the candidate's edge would
+connect (`source_table_impact` + `target_table_impact`, summed = `impact_score`) -- and sorts the
+queue by that score descending, confidence/id only breaking real ties. A `PENDING` candidate's edge is
+not yet in the graph (`build_unified_lineage_impact_payload` only ever traverses `APPROVED` edges), so
+this measures the blast radius already sitting behind each endpoint -- how much is at stake in the
+decision, in either direction, not a prediction of which way it should go. Defaults mirror TL-7's own
+(`DEFAULT_IMPACT_DEPTH=3`, `DEFAULT_IMPACT_NODE_LIMIT=100`) rather than inventing new bounds.
+
+**Diff representation, decided and justified.** SM-7's `diff_semantic_object` already handles exactly
+this case: called with `before=None` (its own docstring: "a semantic object's very first submission,
+which has no published predecessor to diff against"), every key of the `after` snapshot reports as one
+`added` `FieldDelta` -- semantically correct for "nothing -> this edge," since every fact about a
+not-yet-approved edge is indeed new. No new diff engine or representation was built. The only new work
+is `relationship_candidate_diff_snapshot`, a curated flat dict (source/target table qualified name +
+column name, `detection_rule`, `confidence`, AT-15's `confidence_signals` pulled from the candidate's
+already-stored `evidence["signals"]`) -- deliberately excluding `id`/`organization_id`/`status`/
+timestamps/`reviewed_*`, mirroring `semantic_api.py`'s own `_semantic_model_version_snapshot`/
+`_glossary_term_version_snapshot` curation precedent, so the diff reports one entry per fact a reviewer
+actually cares about rather than one per ORM column.
+
+**Bulk decisions, reused not reimplemented.** RL-6's `bulk_decide_relationship_candidates` and the
+single-item `decide_relationship_candidate` are unchanged in mechanism -- same maker-checker rule, same
+PENDING-only rule, same partial-success reporting. Both now call
+`record_relationship_candidate_rejection` when a decision resolves to `REJECTED`, so a rejection reaches
+negative knowledge identically regardless of which surface rejected it.
+
+**Rejection -> negative knowledge.** `record_relationship_candidate_rejection` calls EE.3/N16's real
+`negative_knowledge.record_negative` (never a parallel rejection-tracking mechanism): `assertion_type=
+"RELATIONSHIP_REJECTED"`, `subject_id="relationship:<source_column_id>:<target_column_id>"` (following
+`negative_knowledge._scope_predicate`'s own documented colon-delimited convention), `predicate={
+"source_column_id", "target_column_id"}` -- deliberately excluding `detection_rule`/`confidence` so an
+edge re-detected by a different or improved rule is still recognized as the same rejected edge. Both
+discovery endpoints (`discover_relationship_candidates`, `discover_cross_source_relationship_candidates`)
+now call `load_suppressed_relationship_predicate_hashes` once up front (bulk-prefetch, mirroring the
+existing `existing_fk_pairs`/`existing_candidate_pairs` precedent already in both loops -- one query,
+then an in-memory membership check per candidate scanned, not a `check_re_proposal` round trip per
+candidate) and skip a suppressed pair; each discovery's audit `details` now reports
+`suppressed_by_negative_knowledge` for transparency.
+
+**No `models.py`/`schemas.py`/migration touched**, per this row's hard constraint: the new module
+`src/aida/relationship_candidate_review.py` defines its own local `ApiModel` response classes
+(`RelationshipCandidateReviewQueueRead` etc.), following `semantic_api.py`'s own precedent for SM-7's
+diff endpoint (`GovernanceReviewDiffRead` defined in `semantic_api.py`, not `schemas.py`) -- `evidence`
+was already free-form JSON on `RelationshipCandidate`, `RelationshipCandidate.status`/`reviewed_*` were
+already the only persisted decision state needed, and `NegativeAssertionRecord` already existed with no
+change.
+
+Tests (`tests/test_relationship_candidate_review.py`, 3 new, real in-memory sqlite via the actual FastAPI
+endpoint functions, no mocks):
+
+* `test_review_queue_orders_by_real_impact_not_by_confidence` -- a "hub" table with three APPROVED edges
+  vs. two fully isolated tables; the PENDING candidate touching the hub has confidence 0.55, the isolated
+  one has confidence 0.95 (deliberately backwards), and the queue still returns the hub candidate first,
+  with `impact_score >= 3 > 0`. Also asserts the diff's field set and that every entry is `added`.
+* `test_bulk_decision_approve_becomes_a_real_edge_reject_becomes_negative_knowledge` -- a mixed
+  approve/reject bulk batch; the approved candidate's edge is confirmed present (via
+  `build_unified_lineage_graph_payload`, not re-derived) in the unified lineage graph as a
+  `SUGGESTED_RELATIONSHIP`/`APPROVED` edge, and the rejected one produces exactly one
+  `NegativeAssertionRecord` with `suppression_active=True`, matched back via `negative_knowledge.
+  check_re_proposal` on the same predicate -- and confirms the approved candidate produces *no* negative
+  assertion.
+* `test_rejected_candidate_is_suppressed_from_re_proposal_even_after_row_is_gone` -- the re-proposal
+  proof this row asked for: discover a candidate, reject it, then **delete the decided
+  `RelationshipCandidate` row itself** (simulating housekeeping/archival) before re-running discovery.
+  `existing_candidate_pairs` alone, freshly re-queried, no longer knows this pair was ever proposed --
+  only the negative-knowledge check can block re-creation, and `re_discovery.total == 0` confirms it does.
+  The audit trail's `suppressed_by_negative_knowledge == 1` names why.
+
+`ruff check` and `mypy src` clean on every touched file (`src/aida/relationship_candidate_review.py`,
+`src/aida/intelligence_api.py`) -- the 44 pre-existing `"object" not callable"` findings elsewhere in
+`src` are unrelated and untouched by this row, same standing finding several other rows this branch
+confirmed against `origin` before their own changes. `AIDA_ENVIRONMENT=development pytest
+tests/test_doc_claims.py` green. One new HTTP route added, so `scripts/openapi_diff.py --accept-baseline`
+and `scripts/generate_ui_types.py --accept-baseline` were run and both `Docs/90-reference/
+openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed;
+`tests/test_openapi_diff_gate.py` green against the regenerated baseline. No new `event_type=` was
+introduced (both decision endpoints already emitted `relationship_candidate.approved.v1`/`.rejected.v1`;
+`record_negative` does not emit an outbox event), so `tests/test_event_catalog_gate.py` needed no catalog
+change and passes (4 passed) unmodified.
