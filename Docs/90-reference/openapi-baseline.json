@@ -19951,6 +19951,34 @@
         "title": "RelationshipCandidateDecision",
         "type": "object"
       },
+      "RelationshipCandidateDiffEntryRead": {
+        "additionalProperties": false,
+        "description": "One field-level entry of a candidate's ``nothing -> this edge`` diff.\nMirrors ``semantic_api.SemanticFieldDeltaRead``'s own wire shape (kept\nindependent of ``aida.semantic_diff``'s internals, same reasoning).",
+        "properties": {
+          "after": {
+            "title": "After"
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "changed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "change"
+        ],
+        "title": "RelationshipCandidateDiffEntryRead",
+        "type": "object"
+      },
       "RelationshipCandidateDiscoveryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -19963,6 +19991,45 @@
           }
         },
         "title": "RelationshipCandidateDiscoveryRequest",
+        "type": "object"
+      },
+      "RelationshipCandidateImpactRead": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "impact_score": {
+            "title": "Impact Score",
+            "type": "integer"
+          },
+          "node_limit": {
+            "title": "Node Limit",
+            "type": "integer"
+          },
+          "source_table_impact": {
+            "title": "Source Table Impact",
+            "type": "integer"
+          },
+          "target_table_impact": {
+            "title": "Target Table Impact",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "impact_score",
+          "source_table_impact",
+          "target_table_impact",
+          "depth",
+          "node_limit",
+          "truncated"
+        ],
+        "title": "RelationshipCandidateImpactRead",
         "type": "object"
       },
       "RelationshipCandidateRead": {
@@ -20095,6 +20162,79 @@
           "updated_at"
         ],
         "title": "RelationshipCandidateRead",
+        "type": "object"
+      },
+      "RelationshipCandidateReviewItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/RelationshipCandidateRead"
+          },
+          "diff": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateDiffEntryRead"
+            },
+            "title": "Diff",
+            "type": "array"
+          },
+          "impact": {
+            "$ref": "#/components/schemas/RelationshipCandidateImpactRead"
+          }
+        },
+        "required": [
+          "candidate",
+          "diff",
+          "impact"
+        ],
+        "title": "RelationshipCandidateReviewItemRead",
+        "type": "object"
+      },
+      "RelationshipCandidateReviewQueueRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateReviewItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "scanned_count": {
+            "title": "Scanned Count",
+            "type": "integer"
+          },
+          "total_pending_count": {
+            "title": "Total Pending Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "items",
+          "limit",
+          "offset",
+          "scanned_count",
+          "total_pending_count",
+          "truncated"
+        ],
+        "title": "RelationshipCandidateReviewQueueRead",
         "type": "object"
       },
       "RenameCandidateDecision": {
@@ -43583,6 +43723,158 @@
           }
         },
         "summary": "Discover Composite Relationship Candidates",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
+    "/v1/datasources/{datasource_id}/relationship-candidates/review-queue": {
+      "get": {
+        "description": "N4: PENDING relationship candidates for one datasource, sorted by\nreal computed impact (EA.14's bounded lineage traversal against each\ncandidate's two endpoints, descending -- never a fake priority number),\neach carrying a structured ``nothing -> this edge`` diff (SM-7's diff\nengine, reused verbatim) with AT-15's per-signal confidence breakdown.\n\nA richer read than `GET .../relationship-candidates` (which sorts by\nconfidence and returns the raw row): this is the surface a reviewer\ntriaging a backlog should open first, since it orders the queue by how\nmuch is actually at stake in each decision. Deciding a candidate --\nsingly or in RL-6's bulk-decision endpoint below -- is unchanged; this\nendpoint is read-only.",
+        "operationId": "get_relationship_candidate_review_queue_v1_datasources__datasource_id__relationship_candidates_review_queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipCandidateReviewQueueRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Relationship Candidate Review Queue",
         "tags": [
           "intelligence-governance"
         ]

@@ -3308,8 +3308,24 @@ export interface RelationshipCandidateDecision {
   reason?: string | null;
 }
 
+/** One field-level entry of a candidate's ``nothing -> this edge`` diff. */
+export interface RelationshipCandidateDiffEntryRead {
+  field: string;
+  change: "added" | "removed" | "changed";
+  after?: unknown;
+}
+
 export interface RelationshipCandidateDiscoveryRequest {
   max_candidates?: number;
+}
+
+export interface RelationshipCandidateImpactRead {
+  impact_score: number;
+  source_table_impact: number;
+  target_table_impact: number;
+  depth: number;
+  node_limit: number;
+  truncated: boolean;
 }
 
 export interface RelationshipCandidateRead {
@@ -3331,6 +3347,22 @@ export interface RelationshipCandidateRead {
   reviewed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RelationshipCandidateReviewItemRead {
+  candidate: RelationshipCandidateRead;
+  diff: RelationshipCandidateDiffEntryRead[];
+  impact: RelationshipCandidateImpactRead;
+}
+
+export interface RelationshipCandidateReviewQueueRead {
+  datasource_id: string;
+  items: RelationshipCandidateReviewItemRead[];
+  limit: number;
+  offset: number;
+  scanned_count: number;
+  total_pending_count: number;
+  truncated: boolean;
 }
 
 export interface RenameCandidateDecision {

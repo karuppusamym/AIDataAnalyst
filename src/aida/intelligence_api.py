@@ -53,6 +53,13 @@ from aida.models import (
     TableFamilyCandidate,
     TableProfile,
 )
+from aida.relationship_candidate_review import (
+    RelationshipCandidateReviewQueueRead,
+    compose_relationship_candidate_review_queue,
+    is_relationship_pair_suppressed,
+    load_suppressed_relationship_predicate_hashes,
+    record_relationship_candidate_rejection,
+)
 from aida.relationship_intelligence import (
     ColumnMeta,
     generate_composite_relationship_candidates,
@@ -1183,6 +1190,16 @@ async def discover_relationship_candidates(
             )
         ).all()
     }
+    # N4: an edge a steward already REJECTED is queryable "known not true"
+    # (EE.3/N16's negative-knowledge mechanism) -- consult it the same way
+    # `existing_fk_pairs`/`existing_candidate_pairs` are consulted, one bulk
+    # prefetch up front rather than a `check_re_proposal` round trip per
+    # candidate scanned, so this discovery pass never silently re-creates a
+    # candidate a human already dismissed.
+    suppressed_hashes = await load_suppressed_relationship_predicate_hashes(
+        session, datasource.organization_id
+    )
+    suppressed_count = 0
     created: list[RelationshipCandidate] = []
     for target in primary_keys:
         for source in columns_by_name.get(target.name.lower(), []):
@@ -1193,6 +1210,9 @@ async def discover_relationship_candidates(
                 or pair in existing_fk_pairs
                 or pair in existing_candidate_pairs
             ):
+                continue
+            if is_relationship_pair_suppressed(suppressed_hashes, source.id, target.id):
+                suppressed_count += 1
                 continue
             # AT-15: same-source discovery only ever reaches here after an exact
             # case-insensitive name match (columns_by_name lookup, above) and an
@@ -1245,6 +1265,7 @@ async def discover_relationship_candidates(
             "columns_scanned": len(columns),
             "column_scan_limit": settings.relationship_candidate_scan_max_columns,
             "value_inspection": False,
+            "suppressed_by_negative_knowledge": suppressed_count,
         },
     )
     await session.commit()
@@ -1418,6 +1439,12 @@ async def discover_cross_source_relationship_candidates(
             )
         ).all()
     }
+    # N4: same negative-knowledge consultation as the same-source discovery
+    # path above -- see the comment there.
+    suppressed_hashes = await load_suppressed_relationship_predicate_hashes(
+        session, domain.organization_id
+    )
+    suppressed_count = 0
     created: list[RelationshipCandidate] = []
     columns_scanned = 0
     for ds_a, ds_b in pairs:
@@ -1447,6 +1474,9 @@ async def discover_cross_source_relationship_candidates(
                         continue
                     pair = (source.id, target.id)
                     if pair in existing_candidate_pairs:
+                        continue
+                    if is_relationship_pair_suppressed(suppressed_hashes, source.id, target.id):
+                        suppressed_count += 1
                         continue
                     # A literal, dialect-identical match is still the strongest
                     # signal; a canonical/family-only match is real evidence but
@@ -1526,6 +1556,7 @@ async def discover_cross_source_relationship_candidates(
             "columns_scanned": columns_scanned,
             "value_inspection": False,
             "target_data_domain_id": str(target_domain.id) if target_domain else None,
+            "suppressed_by_negative_knowledge": suppressed_count,
         },
     )
     await session.commit()
@@ -1572,6 +1603,61 @@ async def list_relationship_candidates(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# N4: lineage proposal / review / negative-knowledge workflow
+#
+# The impact-ordered, diff-based review queue -- composes SM-7's diff engine, EA.14's bounded
+# lineage traversal, and EE.3/N16's negative-knowledge mechanism (see
+# `aida.relationship_candidate_review`'s module docstring for what is reused verbatim vs. what is
+# new here). Bulk decisions already exist (RL-6's `bulk_decide_relationship_candidates` below);
+# this queue is a richer *read* surface over the same PENDING candidates that endpoint decides.
+# --------------------------------------------------------------------------------------------
+
+
+@router.get(
+    "/datasources/{datasource_id}/relationship-candidates/review-queue",
+    response_model=RelationshipCandidateReviewQueueRead,
+)
+async def get_relationship_candidate_review_queue(
+    datasource_id: UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin",
+            "MetadataAdmin",
+            "DataAdmin",
+            "MetadataReviewer",
+            "DataSteward",
+            "Auditor",
+            "Viewer",
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> RelationshipCandidateReviewQueueRead:
+    """N4: PENDING relationship candidates for one datasource, sorted by
+    real computed impact (EA.14's bounded lineage traversal against each
+    candidate's two endpoints, descending -- never a fake priority number),
+    each carrying a structured ``nothing -> this edge`` diff (SM-7's diff
+    engine, reused verbatim) with AT-15's per-signal confidence breakdown.
+
+    A richer read than `GET .../relationship-candidates` (which sorts by
+    confidence and returns the raw row): this is the surface a reviewer
+    triaging a backlog should open first, since it orders the queue by how
+    much is actually at stake in each decision. Deciding a candidate --
+    singly or in RL-6's bulk-decision endpoint below -- is unchanged; this
+    endpoint is read-only.
+    """
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+    return await compose_relationship_candidate_review_queue(
+        session, datasource, limit=limit, offset=offset, settings=settings
     )
 
 
@@ -1637,6 +1723,13 @@ async def decide_relationship_candidate(
     candidate.reviewed_by = context.principal_id
     candidate.review_reason = body.reason
     candidate.reviewed_at = datetime.now(UTC)
+    if candidate.status == "REJECTED":
+        # N4: the real EE.3/N16 negative-knowledge write, so this rejection
+        # becomes queryable "known not true" and suppresses re-proposal --
+        # see `relationship_candidate_review.record_relationship_candidate_rejection`.
+        await record_relationship_candidate_rejection(
+            session, candidate, rejected_by=context.principal_id, reason=body.reason
+        )
     record_audit(
         session,
         replace(context, organization_id=candidate.organization_id),
@@ -2242,6 +2335,14 @@ async def bulk_decide_relationship_candidates(
         candidate.reviewed_by = context.principal_id
         candidate.review_reason = body.reason
         candidate.reviewed_at = now
+        if candidate.status == "REJECTED":
+            # N4: same real negative-knowledge write the single-item
+            # decision endpoint makes -- a bulk-rejected candidate is
+            # suppressed from re-proposal exactly like an individually
+            # rejected one, through the identical mechanism.
+            await record_relationship_candidate_rejection(
+                session, candidate, rejected_by=context.principal_id, reason=body.reason
+            )
         record_outbox(
             session,
             organization_id=candidate.organization_id,
