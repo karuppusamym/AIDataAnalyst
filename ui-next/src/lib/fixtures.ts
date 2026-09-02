@@ -1,6 +1,38 @@
-import type { AssetEvidenceRead, EvidenceItemRead, MeRead } from "./types";
-import type { CatalogRowRead, CertificationStatus, CursorPage, QualityState } from "./ui-types";
-import type { CatalogQuery } from "./api";
+import type {
+  AiDecisionRead,
+  AssetEvidenceRead,
+  DataSourceRead,
+  EvidenceItemRead,
+  GovernanceDecisionRequest,
+  GovernanceReviewDiffRead,
+  GovernanceReviewRead,
+  MarketplaceAccessRequestCreate,
+  MarketplaceAccessRequestRead,
+  MeRead,
+  ReviewQueueProposalRead,
+  ReviewQueueRead,
+  StudioChangeItemRead,
+  StudioChangeSetRead,
+  StudioDiffRead,
+  StudioImpactPreview,
+  UnifiedLineageImpactNodeRead,
+  UnifiedLineageImpactRead,
+} from "./types";
+import type {
+  CatalogRowRead,
+  CertificationStatus,
+  CursorPage,
+  MarketplaceProductRead,
+  PageOf,
+  QualityState,
+} from "./ui-types";
+import type {
+  CatalogQuery,
+  LineageImpactQuery,
+  MarketplaceQuery,
+  ReviewQueueQuery,
+  StudioChangeSetQuery,
+} from "./api";
 
 /* ---------------------------------------------------------------------------
    Deterministic fixtures standing in for the proposed read-model endpoint.
@@ -310,5 +342,495 @@ export function makeFixtureMe(): MeRead {
     roles: ["Analyst", "DataSteward", "Viewer"],
     persona: null,
     identity_provider: "DEVELOPMENT",
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   UX-15 / UX-20 fixtures — the same standing as everything above: a stand-in
+   for `npm run dev`/`npm run test` with no backend running, wire-shape
+   identical to the real endpoint (see the module docstring on the
+   `AiDecisionRead`/`ReviewQueueRead`/etc. types this mirrors). Every one of
+   these endpoints is real and merged (see the comment above each `fetch*` in
+   `api.ts`) — nothing here stands in for an unbuilt route.
+--------------------------------------------------------------------------- */
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function diffRead(
+  reviewId: string,
+  objectType: string,
+  objectId: string,
+  entries: GovernanceReviewDiffRead["entries"],
+): GovernanceReviewDiffRead {
+  return { review_id: reviewId, object_type: objectType, object_id: objectId, diffable: true, entries };
+}
+
+const REVIEW_FIXTURE_PROPOSALS: ReviewQueueProposalRead[] = [
+  {
+    review_id: "rq_4181",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    object_type: "SEMANTIC_METRIC_VERSION",
+    object_id: "metric:revenue",
+    requested_action: "UPDATE",
+    status: "PENDING",
+    requested_by: "semantic_inference_agent",
+    decided_by: null,
+    decision_reason: null,
+    decided_at: null,
+    created_at: "2026-09-01T14:02:00Z",
+    confidence: 0.87,
+    evidence: [
+      {
+        category: "DATA_QUALITY",
+        claim: "3 regression tests fail on the current filter: intercompany transfers inflate Q4 revenue by ~4%",
+        source: "studio_eval.py · mined question ST-A2/q4-intercompany",
+      },
+      {
+        category: "CONSUMPTION",
+        claim: "Q3 close workpaper referenced by 9 of 12 revenue queries",
+        source: "consumption_lineage.py · CX-4",
+      },
+    ],
+    diff: diffRead("rq_4181", "SEMANTIC_METRIC_VERSION", "metric:revenue", [
+      { field: "filter", change: "changed", before: "status != 'void'", after: "status NOT IN ('void','reversed')" },
+      { field: "exclude", change: "added", before: null, after: ["intercompany_transfers"] },
+    ]),
+  },
+  {
+    review_id: "rq_4182",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    object_type: "GLOSSARY_TERM_VERSION",
+    object_id: "term:mrr",
+    requested_action: "UPDATE",
+    status: "PENDING",
+    requested_by: "semantic_inference_agent",
+    decided_by: null,
+    decision_reason: null,
+    decided_at: null,
+    created_at: "2026-09-01T13:40:00Z",
+    confidence: 0.71,
+    evidence: [
+      {
+        category: "BUSINESS_MEANING",
+        claim: "finance.mrr and sales.mrr resolve to different formulas under the same unqualified name",
+        source: "semantic_diff.py · duplicate-definition scan",
+      },
+    ],
+    diff: diffRead("rq_4182", "GLOSSARY_TERM_VERSION", "term:mrr", [
+      { field: "scope", change: "added", before: null, after: "finance.mrr, sales.mrr (unqualified name blocked)" },
+    ]),
+  },
+  {
+    review_id: "rq_4183",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    object_type: "ASSET_DESCRIPTION_DRAFT",
+    object_id: "table:analytics.orders_raw",
+    requested_action: "CERTIFY",
+    status: "PENDING",
+    requested_by: "priya@tenant.example",
+    decided_by: null,
+    decision_reason: null,
+    decided_at: null,
+    created_at: "2026-09-01T11:15:00Z",
+    confidence: null,
+    evidence: [
+      { category: "CERTIFICATION", claim: "Passes all 15 quality checks, has a named owner", source: "GL-5 certification lifecycle" },
+    ],
+    diff: diffRead("rq_4183", "ASSET_DESCRIPTION_DRAFT", "table:analytics.orders_raw", [
+      { field: "certification", change: "changed", before: "NONE", after: "CERTIFIED" },
+    ]),
+  },
+  {
+    review_id: "rq_4179",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    object_type: "GLOSSARY_TERM_VERSION",
+    object_id: "term:revenue",
+    requested_action: "UPDATE",
+    status: "APPROVED",
+    requested_by: "semantic_inference_agent",
+    decided_by: "priya@tenant.example",
+    decision_reason: "Matches Finance's own usage.",
+    decided_at: "2026-09-01T10:05:00Z",
+    created_at: "2026-09-01T09:50:00Z",
+    confidence: 0.96,
+    evidence: [
+      { category: "CONSUMPTION", claim: "Term appears in 23 queries and 4 dashboards, no conflicting binding", source: "consumption_lineage.py · CX-4" },
+    ],
+    diff: diffRead("rq_4179", "GLOSSARY_TERM_VERSION", "term:revenue", [
+      { field: "synonyms", change: "added", before: null, after: ["net sales", "topline"] },
+    ]),
+  },
+];
+
+/** `GET /v1/governance/reviews/queue` (UX-17). Filters by `status`/`object_type`
+ *  the same way the real endpoint does, purely client-side over this fixed set. */
+export async function makeFixtureReviewQueue(
+  query: ReviewQueueQuery,
+): Promise<ReviewQueueRead> {
+  await wait(90);
+  const statusFilter = query.status === undefined ? "PENDING" : query.status;
+  let proposals = REVIEW_FIXTURE_PROPOSALS;
+  if (statusFilter) proposals = proposals.filter((p) => p.status === statusFilter);
+  if (query.objectType) proposals = proposals.filter((p) => p.object_type === query.objectType);
+  return {
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    status_filter: statusFilter || null,
+    object_type_filter: query.objectType ?? null,
+    inference_run_id_filter: null,
+    generated_at: new Date().toISOString(),
+    proposals,
+    total_proposals: proposals.length,
+    by_status: proposals.reduce<Record<string, number>>((acc, p) => {
+      acc[p.status] = (acc[p.status] ?? 0) + 1;
+      return acc;
+    }, {}),
+    by_object_type: proposals.reduce<Record<string, number>>((acc, p) => {
+      acc[p.object_type] = (acc[p.object_type] ?? 0) + 1;
+      return acc;
+    }, {}),
+    diffable_count: proposals.filter((p) => p.diff.diffable).length,
+  };
+}
+
+/** `POST /v1/governance/reviews/{id}/decision` — mutates the same in-memory
+ *  fixture array `makeFixtureReviewQueue` reads, so a decide-then-refetch in
+ *  fixture mode behaves like the real maker-checker endpoint. */
+export async function makeFixtureDecideReview(
+  reviewId: string,
+  body: GovernanceDecisionRequest,
+): Promise<GovernanceReviewRead> {
+  await wait(80);
+  const proposal = REVIEW_FIXTURE_PROPOSALS.find((p) => p.review_id === reviewId);
+  if (!proposal) throw new Error(`fixture: no such review ${reviewId}`);
+  if (proposal.status !== "PENDING") throw new Error("governance review is already decided");
+  proposal.status = body.decision === "APPROVE" ? "APPROVED" : "REJECTED";
+  proposal.decided_by = "dev-fixture-user";
+  proposal.decision_reason = body.reason ?? null;
+  proposal.decided_at = new Date().toISOString();
+  return {
+    id: proposal.review_id,
+    organization_id: proposal.organization_id,
+    object_type: proposal.object_type,
+    object_id: proposal.object_id,
+    requested_action: proposal.requested_action,
+    status: proposal.status,
+    requested_by: proposal.requested_by,
+    decided_by: proposal.decided_by,
+    decision_reason: proposal.decision_reason,
+    decided_at: proposal.decided_at,
+    created_at: proposal.created_at,
+    updated_at: proposal.decided_at,
+  };
+}
+
+const MARKETPLACE_FIXTURE_PRODUCTS: MarketplaceProductRead[] = [
+  {
+    id: "dpv_revenue", organization_id: "00000000-0000-0000-0000-000000000001",
+    product_id: "dp_revenue", product_key: "finance-revenue-model", version: 3,
+    name: "Finance revenue model", description: "Certified revenue metrics and the tables behind them, governed by Finance.",
+    domain_name: "fin", owner_principal: "priya@tenant.example", usage_terms: "Internal use, Finance-approved queries only.",
+    classification: "INTERNAL", certification_status: "CERTIFIED", quality_score: 0.97, lineage_coverage: 0.91,
+    context_product_version_id: null, discoverable_roles: ["*"], consumer_roles: ["Analyst", "Viewer"],
+    ports: [
+      { port_key: "revenue_semantic", direction: "OUTPUT", name: "Revenue semantic model", description: "Metrics", asset_type: "SEMANTIC_MODEL", asset_id: "sm_revenue" },
+      { port_key: "orders_raw", direction: "OUTPUT", name: "orders_raw", description: "Raw orders table", asset_type: "TABLE", asset_id: "t_orders_raw" },
+    ],
+    status: "PUBLISHED", fingerprint: "a1b2c3", created_by: "priya@tenant.example",
+    approved_by: "steward@tenant.example", approved_at: "2026-08-15T00:00:00Z", published_at: "2026-08-16T00:00:00Z",
+    created_at: "2026-08-01T00:00:00Z", updated_at: "2026-08-16T00:00:00Z",
+    access_status: "ROLE_GRANTED", domain_affinity: true, role_affinity: true,
+  },
+  {
+    id: "dpv_risk_exposure", organization_id: "00000000-0000-0000-0000-000000000001",
+    product_id: "dp_risk_exposure", product_key: "risk-exposure-snapshot", version: 1,
+    name: "Risk exposure snapshot", description: "Daily counterparty exposure, restricted to Risk Analytics.",
+    domain_name: "risk", owner_principal: "risk-lead@tenant.example", usage_terms: "Restricted — Risk Analytics only.",
+    classification: "RESTRICTED", certification_status: "CERTIFIED", quality_score: 0.94, lineage_coverage: 0.88,
+    context_product_version_id: null, discoverable_roles: ["DataSteward", "Reviewer"], consumer_roles: ["Reviewer"],
+    ports: [
+      { port_key: "exposure_table", direction: "OUTPUT", name: "risk_exposure_snapshot", description: "Table", asset_type: "TABLE", asset_id: "t_risk_exposure" },
+    ],
+    status: "PUBLISHED", fingerprint: "d4e5f6", created_by: "risk-lead@tenant.example",
+    approved_by: "steward@tenant.example", approved_at: "2026-08-20T00:00:00Z", published_at: "2026-08-21T00:00:00Z",
+    created_at: "2026-08-10T00:00:00Z", updated_at: "2026-08-21T00:00:00Z",
+    access_status: "NOT_REQUESTED", domain_affinity: false, role_affinity: false,
+  },
+  {
+    id: "dpv_customer360", organization_id: "00000000-0000-0000-0000-000000000001",
+    product_id: "dp_customer360", product_key: "retail-customer-360", version: 5,
+    name: "Retail customer 360", description: "Curated customer context product for the retail data office.",
+    domain_name: "retail", owner_principal: "retail-owner@tenant.example", usage_terms: "Internal use.",
+    classification: "CONFIDENTIAL", certification_status: "CERTIFIED", quality_score: 0.9, lineage_coverage: 0.79,
+    context_product_version_id: "cpv_customer360", discoverable_roles: ["*"], consumer_roles: ["Analyst", "Viewer"],
+    ports: [
+      { port_key: "customer_context", direction: "OUTPUT", name: "customer_360 context product", description: "Bundle", asset_type: "CONTEXT_PRODUCT", asset_id: "cp_customer360" },
+    ],
+    status: "PUBLISHED", fingerprint: "g7h8i9", created_by: "retail-owner@tenant.example",
+    approved_by: "steward@tenant.example", approved_at: "2026-07-28T00:00:00Z", published_at: "2026-07-29T00:00:00Z",
+    created_at: "2026-07-01T00:00:00Z", updated_at: "2026-07-29T00:00:00Z",
+    access_status: "REQUEST_PENDING", domain_affinity: false, role_affinity: true,
+  },
+];
+
+/** `GET /v1/marketplace/products` (CX-9). */
+export async function makeFixtureMarketplaceProducts(
+  query: MarketplaceQuery,
+): Promise<PageOf<MarketplaceProductRead>> {
+  await wait(90);
+  let items = MARKETPLACE_FIXTURE_PRODUCTS;
+  if (query.q) {
+    const needle = query.q.toLowerCase();
+    items = items.filter(
+      (p) => p.name.toLowerCase().includes(needle) || p.description.toLowerCase().includes(needle),
+    );
+  }
+  if (query.domain) items = items.filter((p) => p.domain_name === query.domain);
+  if (query.classification) items = items.filter((p) => p.classification === query.classification);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 50;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/marketplace/products/{version_id}/access-requests`. */
+export async function makeFixtureMarketplaceAccessRequest(
+  versionId: string,
+  body: MarketplaceAccessRequestCreate,
+): Promise<MarketplaceAccessRequestRead> {
+  await wait(80);
+  const now = new Date().toISOString();
+  const product = MARKETPLACE_FIXTURE_PRODUCTS.find((p) => p.id === versionId);
+  if (product) product.access_status = "REQUEST_PENDING";
+  return {
+    id: `mar_${versionId}`,
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    data_product_version_id: versionId,
+    requested_by: "dev-fixture-user",
+    purpose: body.purpose,
+    duration_days: body.duration_days ?? 90,
+    status: "PENDING",
+    governance_review_id: `gr_${versionId}`,
+    decided_by: null, decision_reason: null, decided_at: null, expires_at: null,
+    revoked_by: null, revoked_at: null,
+    fulfillment_status: "PENDING", fulfillment_provider: null, fulfillment_reference: null, fulfillment_error: null,
+    fulfilled_at: null, created_at: now, updated_at: now,
+  };
+}
+
+const REFUSAL_FIXTURES: AiDecisionRead[] = [
+  {
+    id: "dec_r1", organization_id: "00000000-0000-0000-0000-000000000001", run_id: "run_9001",
+    decision_type: "REFUSAL", source_node: "agent:revenue_analyst", target_node: "tool:tool_revenue_by_lob",
+    reason: "tool_revenue_by_lob refused while the raw_sales quality incident is open",
+    evidence: { rule_set: "dq_raw_sales@4", incident: "INC-4821" },
+    control_version: "ADR-0016@2", decided_at: "2026-09-01T15:22:00Z",
+  },
+  {
+    id: "dec_r2", organization_id: "00000000-0000-0000-0000-000000000001", run_id: "run_9002",
+    decision_type: "REFUSAL", source_node: "agent:mrr_reporter", target_node: "metric:mrr",
+    reason: "unqualified metric name 'mrr' is ambiguous between finance.mrr and sales.mrr",
+    evidence: { domains: ["finance", "sales"] },
+    control_version: "SM-9@1", decided_at: "2026-09-01T12:04:00Z",
+  },
+  {
+    id: "dec_r3", organization_id: "00000000-0000-0000-0000-000000000001", run_id: "run_9003",
+    decision_type: "REFUSAL", source_node: "agent:pricing_bot", target_node: "table:t_risk_exposure",
+    reason: "requester's role has no DISCOVER binding for this RESTRICTED asset",
+    evidence: { classification: "RESTRICTED", required_roles: ["DataSteward", "Reviewer"] },
+    control_version: "GL-1@3", decided_at: "2026-08-31T09:47:00Z",
+  },
+];
+
+const RUN_DECISION_FIXTURES: Record<string, AiDecisionRead[]> = {
+  run_9001: [
+    { id: "dec_r1a", organization_id: "00000000-0000-0000-0000-000000000001", run_id: "run_9001", decision_type: "RETRIEVAL_SELECTED", source_node: "agent:revenue_analyst", target_node: "table:t_orders_raw", reason: "selected as the direct dependency of tool_revenue_by_lob", evidence: {}, control_version: null, decided_at: "2026-09-01T15:21:40Z" },
+    { id: "dec_r1", organization_id: "00000000-0000-0000-0000-000000000001", run_id: "run_9001", decision_type: "REFUSAL", source_node: "agent:revenue_analyst", target_node: "tool:tool_revenue_by_lob", reason: "tool_revenue_by_lob refused while the raw_sales quality incident is open", evidence: { rule_set: "dq_raw_sales@4", incident: "INC-4821" }, control_version: "ADR-0016@2", decided_at: "2026-09-01T15:22:00Z" },
+  ],
+};
+
+/** `GET /v1/ai-decisions/refusals` (LN-3). */
+export async function makeFixtureRefusals(
+  opts: { limit?: number; offset?: number },
+): Promise<PageOf<AiDecisionRead>> {
+  await wait(90);
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? 50;
+  return {
+    items: REFUSAL_FIXTURES.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: REFUSAL_FIXTURES.length,
+  };
+}
+
+/** `GET /v1/ai-decisions/{run_id}`. */
+export async function makeFixtureRunDecisions(runId: string): Promise<AiDecisionRead[]> {
+  await wait(70);
+  return RUN_DECISION_FIXTURES[runId] ?? REFUSAL_FIXTURES.filter((d) => d.run_id === runId);
+}
+
+const STUDIO_CHANGE_SETS: StudioChangeSetRead[] = [
+  {
+    id: "cs_1001", organization_id: "00000000-0000-0000-0000-000000000001",
+    name: "Exclude intercompany transfers from net revenue", author: "priya@tenant.example",
+    status: "TESTING", base_version_hash: "0".repeat(64), conflict_status: "CLEAN",
+    created_at: "2026-09-01T09:00:00Z", updated_at: "2026-09-01T09:40:00Z",
+  },
+  {
+    id: "cs_1002", organization_id: "00000000-0000-0000-0000-000000000001",
+    name: "Publish retail customer 360 context product v6", author: "retail-owner@tenant.example",
+    status: "DRAFT", base_version_hash: "0".repeat(64), conflict_status: "CLEAN",
+    created_at: "2026-08-30T11:00:00Z", updated_at: "2026-08-31T08:00:00Z",
+  },
+];
+
+const STUDIO_ITEMS: Record<string, StudioChangeItemRead[]> = {
+  cs_1001: [
+    {
+      id: "item_1", organization_id: "00000000-0000-0000-0000-000000000001", change_set_id: "cs_1001",
+      object_type: "METRIC", object_id: "metric:revenue", operation: "UPDATE",
+      before_snapshot: { filter: "status != 'void'" },
+      after_snapshot: { filter: "status NOT IN ('void','reversed')", exclude: ["intercompany_transfers"] },
+      diff: { filter: { before: "status != 'void'", after: "status NOT IN ('void','reversed')" } },
+      test_status: "PASSED", created_at: "2026-09-01T09:05:00Z", updated_at: "2026-09-01T09:35:00Z",
+    },
+  ],
+  cs_1002: [
+    {
+      id: "item_2", organization_id: "00000000-0000-0000-0000-000000000001", change_set_id: "cs_1002",
+      object_type: "CONTEXT_PRODUCT", object_id: "cp_customer360", operation: "UPDATE",
+      before_snapshot: { version: 5 }, after_snapshot: { version: 6, ports: ["customer_context", "loyalty_context"] },
+      diff: { ports: { before: ["customer_context"], after: ["customer_context", "loyalty_context"] } },
+      test_status: "UNTESTED", created_at: "2026-08-30T11:05:00Z", updated_at: "2026-08-30T11:05:00Z",
+    },
+  ],
+};
+
+/** `GET /v1/studio/change-sets` (ST-A7). */
+export async function makeFixtureStudioChangeSets(
+  query: StudioChangeSetQuery,
+): Promise<StudioChangeSetRead[]> {
+  await wait(80);
+  let items = STUDIO_CHANGE_SETS;
+  if (query.status) items = items.filter((cs) => cs.status === query.status);
+  return items;
+}
+
+/** `POST /v1/studio/change-sets/{id}/submit`. */
+export async function makeFixtureSubmitStudioChangeSet(
+  changeSetId: string,
+): Promise<StudioChangeSetRead> {
+  await wait(90);
+  const cs = STUDIO_CHANGE_SETS.find((c) => c.id === changeSetId);
+  if (!cs) throw new Error(`fixture: no such change set ${changeSetId}`);
+  const items = STUDIO_ITEMS[changeSetId] ?? [];
+  const untested = items.filter((i) => i.test_status !== "PASSED");
+  if (items.length === 0) throw new Error("cannot submit an empty change set");
+  if (untested.length > 0) throw new Error(`${untested.length} item(s) have not passed testing`);
+  cs.status = "SUBMITTED";
+  cs.updated_at = new Date().toISOString();
+  return cs;
+}
+
+/** `GET /v1/studio/change-sets/{id}/items`. */
+export async function makeFixtureStudioChangeSetItems(
+  changeSetId: string,
+): Promise<StudioChangeItemRead[]> {
+  await wait(70);
+  return STUDIO_ITEMS[changeSetId] ?? [];
+}
+
+/** `GET /v1/studio/change-sets/{id}/diff`. */
+export async function makeFixtureStudioDiff(changeSetId: string): Promise<StudioDiffRead> {
+  await wait(70);
+  const items = STUDIO_ITEMS[changeSetId] ?? [];
+  return {
+    change_set_id: changeSetId,
+    items: items.map((i) => ({
+      item_id: i.id,
+      object_type: i.object_type,
+      object_id: i.object_id,
+      operation: i.operation,
+      diff: i.diff,
+    })),
+  };
+}
+
+/** `GET /v1/studio/change-sets/{id}/impact` (`compute_impact`). */
+export async function makeFixtureStudioImpact(changeSetId: string): Promise<StudioImpactPreview> {
+  await wait(70);
+  const items = STUDIO_ITEMS[changeSetId] ?? [];
+  const affected = items.map((i) => ({
+    object_type: i.object_type,
+    object_id: i.object_id,
+    reason: `${i.operation.toLowerCase()} via change set ${changeSetId}`,
+  }));
+  return {
+    change_set_id: changeSetId,
+    affected_object_count: affected.length,
+    affected_objects: affected,
+  };
+}
+
+const FIXTURE_DATASOURCES: DataSourceRead[] = [
+  {
+    id: "ds_snowflake_prod", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_fin", data_domain_id: "dom_fin", project_id: "proj_core",
+    name: "snowflake_prod", connector_type: "SNOWFLAKE", dialect: "snowflake", environment: "PRODUCTION",
+    network_zone: "default", credential_reference: "vault://ds/snowflake_prod", max_concurrency: 8,
+    status: "ACTIVE", capabilities: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
+  },
+];
+
+/** `GET /v1/organizations/{id}/datasources`. */
+export async function makeFixtureOrgDatasources(): Promise<PageOf<DataSourceRead>> {
+  await wait(60);
+  return { items: FIXTURE_DATASOURCES, limit: 500, offset: 0, total: FIXTURE_DATASOURCES.length };
+}
+
+function impactNode(
+  id: string,
+  kind: UnifiedLineageImpactNodeRead["node_kind"],
+  label: string,
+  qualifiedName: string,
+  depth: number,
+  sources: UnifiedLineageImpactNodeRead["contributing_edge_sources"],
+): UnifiedLineageImpactNodeRead {
+  return { node_id: id, node_kind: kind, label, qualified_name: qualifiedName, depth, contributing_edge_sources: sources };
+}
+
+/** `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`. A small,
+ *  hand-built two-hop graph (`raw_sales` -> `orders_raw` -> `revenue_agg`) so
+ *  the narrated-traversal screen has more than one hop to narrate, matching
+ *  the AT-D4 propagation story this same shell already tells in the review
+ *  queue (see `PropagationLog`'s hard-coded steps) — but here fed by this
+ *  fixture standing in for the *real* endpoint's shape, not invented prose. */
+export async function makeFixtureLineageImpact(
+  datasourceId: string,
+  nodeId: string,
+  _query: LineageImpactQuery,
+): Promise<UnifiedLineageImpactRead> {
+  await wait(120);
+  const known: Record<string, { label: string; qualifiedName: string }> = {
+    t_orders_raw: { label: "orders_raw", qualifiedName: "analytics.core.orders_raw" },
+    t_raw_sales: { label: "raw_sales", qualifiedName: "analytics.raw.raw_sales" },
+    t_revenue_agg: { label: "revenue_agg", qualifiedName: "analytics.mart.revenue_agg" },
+  };
+  const focus = known[nodeId] ?? { label: nodeId, qualifiedName: nodeId };
+  return {
+    datasource_id: datasourceId,
+    focus_node_id: nodeId,
+    focus_node_kind: "TABLE",
+    focus_label: focus.qualifiedName,
+    upstream: [
+      impactNode("t_raw_sales", "TABLE", "raw_sales", "analytics.raw.raw_sales", 1, ["FOREIGN_KEY"]),
+    ],
+    downstream: [
+      impactNode("t_revenue_agg", "TABLE", "revenue_agg", "analytics.mart.revenue_agg", 1, ["DBT_DEPENDENCY"]),
+      impactNode("t_revenue_by_lob", "DBT_MODEL", "revenue_by_lob", "analytics.mart.revenue_by_lob", 2, ["DBT_DEPENDENCY", "VIEW_DEFINITION"]),
+    ],
+    requested_depth: _query.depth ?? 5,
+    node_limit: _query.nodeLimit ?? 200,
+    upstream_truncated: false,
+    downstream_truncated: false,
   };
 }

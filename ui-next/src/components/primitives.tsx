@@ -55,11 +55,21 @@ export function Empty({ title, hint }: { title: string; hint?: string }) {
   );
 }
 
-/** Errors say what happened and what to do, never "something went wrong". */
-export function ErrorState({ detail, onRetry }: { detail: string; onRetry: () => void }) {
+/** Errors say what happened and what to do, never "something went wrong".
+ *  `title` defaults to the Catalog screen's original copy (UX-11) so every
+ *  existing call site is unchanged; UX-15's other screens pass their own. */
+export function ErrorState({
+  detail,
+  onRetry,
+  title = "The catalog could not be loaded",
+}: {
+  detail: string;
+  onRetry: () => void;
+  title?: string;
+}) {
   return (
     <div className="errbox" role="alert">
-      <div className="errbox__t">The catalog could not be loaded</div>
+      <div className="errbox__t">{title}</div>
       <div className="errbox__d">{detail}</div>
       <Button onClick={onRetry}>Try again</Button>
     </div>

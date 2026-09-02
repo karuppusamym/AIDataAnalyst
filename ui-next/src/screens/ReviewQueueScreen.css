@@ -1,11 +1,15 @@
-.rq{padding:22px 24px 60px;overflow-y:auto;max-width:1000px}
+.rq{display:flex;flex-direction:column;min-height:0;height:100%;padding:22px 24px;gap:14px}
 .rq__load{color:var(--ink-3);font-size:13px;padding:20px 0}
-.rq__head{margin-bottom:16px}
+.rq__head{flex:none}
 .rq__h1{margin:0;font-size:22px;letter-spacing:-.015em}
 .rq__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
 .rq__lede b{color:var(--ink);font-weight:600}
 
-.rq__tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:26px}
+.rq__filters{display:flex;align-items:flex-end;gap:12px;flex:none;flex-wrap:wrap}
+.rq__filters .field:nth-child(1){width:170px}
+.rq__filters .field:nth-child(2){width:240px}
+
+.rq__tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;flex:none}
 @media (max-width:760px){.rq__tiles{grid-template-columns:1fr}}
 .tile{border:1px solid var(--line);border-top-width:3px;border-radius:var(--radius);background:var(--surface);padding:13px 15px;position:relative}
 .tile--ok{border-top-color:var(--ok)}
@@ -16,10 +20,24 @@
 .tile--info .tile__n{color:var(--info)}
 .tile--warn .tile__n{color:var(--warn)}
 .tile__l{font-size:12.5px;color:var(--ink-3);margin-top:2px}
-.tile__a{position:absolute;top:12px;right:13px;background:none;border:1px solid var(--line);border-radius:var(--radius-sm);font:inherit;font-size:11.5px;color:var(--ink-2);padding:3px 9px;cursor:pointer}
-.tile__a:hover{background:var(--sunk);color:var(--ink)}
 
-.rq__sec{margin-bottom:28px}
+.rq__main{display:flex;flex-direction:column;flex:1;min-height:220px}
+.rq__sec{flex:none;margin-top:6px}
 .rq__h2{font-size:13px;font-weight:600;margin:0 0 11px;display:flex;align-items:center;gap:8px;color:var(--ink-2)}
-.rq__list{display:flex;flex-direction:column;gap:12px}
 .tnum{font-variant-numeric:tabular-nums}
+
+/* Proposal rows reuse ProposalCard.css's `.prop*` classes; PENDING (the real
+   status this screen actually gets back) has no dedicated rule there yet —
+   the fixture-era card only knew `needs_review`/`auto_applied`. */
+.prop--pending{border-left:3px solid var(--warn)}
+.prop--focused{outline:2px solid var(--accent);outline-offset:-1px}
+.prop__title{all:unset;cursor:pointer;font-size:14.5px;font-weight:600;letter-spacing:-.008em;display:block}
+.prop__title:hover{text-decoration:underline}
+.prop__nodiff{margin:0 15px;font-size:12px;color:var(--ink-3)}
+.prop__evsrc{color:var(--ink-3)}
+.dl--added{background:var(--ok-soft);color:var(--ok)}
+.dl--removed{background:var(--bad-soft);color:var(--bad)}
+.dl--changed{background:var(--info-soft);color:var(--info)}
+
+.rq__evidence{position:fixed;right:24px;bottom:24px;top:auto;max-height:70vh;z-index:5;box-shadow:0 8px 28px rgba(0,0,0,.18)}
+@media (max-width:900px){.rq__evidence{position:static;width:auto;max-height:none;box-shadow:none;margin-top:14px}}
