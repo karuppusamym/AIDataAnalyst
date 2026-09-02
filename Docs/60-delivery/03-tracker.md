@@ -6,7 +6,7 @@
 > capability matrix, invariant status, open gaps and the decisions waiting on a person — read
 > `60-delivery/00-status.md` instead. This file is the detail behind it, not a second copy of it.
 
-**Last reviewed:** 2026-08-31
+**Last reviewed:** 2026-09-02 (§K summary recount only — individual row edits happen continuously and are not all reflected in this date)
 **Note on evidence text:** counts inside row `Exit` cells are landing-time evidence unless a row says they were re-checked later. Do not read an old route/test total in a row as the current repo-wide total.
 
 ## How to use this
@@ -394,21 +394,49 @@ These do not block product development. They **do** block production release.
 
 ## K. Summary
 
-**Recounted 2026-09-01** — the table below was stale (last accurate at 171 total rows; the tracker has grown to 220 as rows were added by later sessions, e.g. `ST-11`..`ST-18`, `IN-5a`..`IN-5f`, `AT-D*`, and the counts were never re-derived). Recount method: every row in sections A-H carrying an explicit `P0`/`P1`/`P2` cell, counted programmatically against the file as of this commit — not hand-tallied. "Open" excludes any row whose Status column contains `DONE`.
+**Recounted 2026-09-02** — the 2026-09-01 table below had gone stale within a day (this branch is
+under continuous concurrent push) and, independent of drift, had always undercounted: it covered
+only sections A-H and its own H row was wrong by 10 items (32 vs. the 22 `TS-`/`PF-`/`CE-` rows
+that actually exist — traced to a stale intermediate copy, not a change in the file). This pass
+also extends coverage to sections **L** (Atlan competitive review), **M** (experience shell
+rebuild) and **N** (end-to-end audit findings), which existed on 2026-09-01 but were never folded
+into this table. Recount method unchanged: every row in sections A-H/L-M-N carrying an explicit
+`P0`/`P1`/`P2` cell, counted programmatically against the file as of this commit, not hand-tallied.
+`I` (drill currency) and `J` (bank decisions) are excluded — neither carries a `Pri` column, and
+§J's rows are decisions, not engineering work. "Open" excludes any row whose Status column is
+exactly `DONE` (`BLOCKED`, `IN PROGRESS` and `DONE, MEASURING`-style qualified statuses count as
+open).
 
 | Category | P0 | P1 | P2 | Total | Open P0 | Open P1 | Open P2 | DONE |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Structural foundation | 11 | 7 | 0 | 18 | 2 | 5 | 0 | 11 |
-| Connectors and ingestion | 10 | 12 | 3 | 25 | 6 | 10 | 1 | 8 |
-| Catalog / profiling / relationships | 1 | 15 | 2 | 18 | 1 | 1 | 0 | 16 |
+| Structural foundation | 11 | 7 | 0 | 18 | 4 | 5 | 0 | 9 |
+| Connectors and ingestion | 10 | 12 | 3 | 25 | 7 | 10 | 0 | 8 |
+| Catalog / profiling / relationships | 1 | 15 | 2 | 18 | 1 | 2 | 0 | 15 |
 | Semantics / glossary / lineage / graph | 9 | 18 | 4 | 31 | 2 | 2 | 1 | 26 |
 | Quality / retrieval / runtime | 14 | 9 | 3 | 26 | 2 | 1 | 1 | 22 |
-| Tools / gateways / governance | 14 | 13 | 2 | 29 | 7 | 5 | 0 | 17 |
-| Identity / studio / context / UX / observability | 17 | 21 | 3 | 41 | 4 | 10 | 2 | 25 |
-| Testing / performance / certification | 19 | 9 | 4 | 32 | 8 | 5 | 4 | 15 |
-| **Total** | **95** | **104** | **21** | **220** | **32** | **39** | **9** | **140** |
+| Tools / gateways / governance | 14 | 13 | 2 | 29 | 6 | 5 | 0 | 18 |
+| Identity / studio / context / UX / observability | 17 | 21 | 3 | 41 | 4 | 9 | 2 | 26 |
+| Testing / performance / certification | 16 | 5 | 1 | 22 | 8 | 3 | 1 | 10 |
+| Atlan competitive review | 4 | 20 | 7 | 31 | 0 | 6 | 3 | 22 |
+| Experience shell rebuild | 3 | 6 | 3 | 12 | 0 | 2 | 2 | 8 |
+| End-to-end audit findings | 8 | 5 | 1 | 14 | 1 | 0 | 0 | 13 |
+| **Total** | **107** | **131** | **29** | **267** | **35** | **45** | **10** | **177** |
 
-**The honest read.** 140 of 220 tracked items (64%) are `DONE` with verifiable exit evidence — most of that closed by iterative sessions on `feature/snowflake-dbt-lineage-mcp`, not upfront. What's left skews toward what a sandboxed session structurally cannot close alone: 32 open P0 items are concentrated in live-infrastructure certification (bank OIDC/secret-manager/Oracle-BigQuery-Snowflake-Databricks connectors against real accounts), timed drills (`I. Drill currency` — six still marked **OVERDUE**: projection rebuild, PITR restore, temporal failover, credential rotation, regional failover, break-glass; kill-switch and batch-forced-restart are drilled but only for local/in-process, not a deployed gateway or production Postgres), and 1M-object/1000-source scale benchmarks (Phase D). The architecture is well ahead of the operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md` §7. Phase D is not a formality; it is where the product's claims become defensible.
+**The honest read.** 177 of 267 tracked items (66%) are `DONE` with verifiable exit evidence —
+almost all of it closed by iterative sessions on `feature/snowflake-dbt-lineage-mcp`, not upfront.
+What's left still skews toward what a sandboxed session structurally cannot close alone: 35 open P0
+items concentrate in live-infrastructure certification (bank OIDC/secret-manager/Oracle-BigQuery-
+Snowflake-Databricks connectors against real accounts), timed drills (`I. Drill currency` — six
+still marked **OVERDUE**: projection rebuild, PITR restore, temporal failover, credential rotation,
+regional failover, break-glass; kill-switch and batch-forced-restart are drilled but only for
+local/in-process, not a deployed gateway or production Postgres), and 1M-object/1000-source scale
+benchmarks (Phase D). A separate cross-cutting vocabulary — the "2026-08 review items" section's
+own `C1-C10`/`N1-N19`/`E1-E13` IDs, immediately below — restates much of this same open work from
+the review's own angle; 8 of its 42 rows are explicit duplicates of a row above (e.g. `C4`=`ST-11`,
+`N1`=`IN-5a`, `E9`=`MG-2`) and are not double-counted here, but the other 34 are additional
+standalone scope this table's totals do not include. The architecture is well ahead of the
+operational evidence — which is exactly the pattern named in `50-security/04-compliance-and-evidence.md`
+§7. Phase D is not a formality; it is where the product's claims become defensible.
 
 ## L. Atlan competitive review (2026-08-30)
 
