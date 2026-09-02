@@ -2005,6 +2005,29 @@ export interface GeneratePackRequest {
   name?: string | null;
 }
 
+/** One ranked hit from ``GET /v1/organizations/{organization_id}/global-search`` */
+export interface GlobalSearchHitRead {
+  object_type: string;
+  object_id: string;
+  display_name: string;
+  score: number;
+  datasource_id: string;
+  reason_codes: string[];
+  evidence: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+/** Response for ``GET /v1/organizations/{organization_id}/global-search``. */
+export interface GlobalSearchResponse {
+  items: GlobalSearchHitRead[];
+  total: number;
+  datasource_count: number;
+  limit: number;
+  fusion_method: string;
+  vector_enabled: boolean;
+  graph_enabled: boolean;
+}
+
 export interface GlossaryCategoryCreate {
   category_key: string;
   display_name: string;
