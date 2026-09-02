@@ -55,6 +55,10 @@ from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryReject
 from aida.query_memory import MemoryMatch, find_query_memory_match, retrieved_table_ids_from_hits
 from aida.schemas import ToolParameterDefinition
 from aida.security import SecurityContext
+from aida.semantic_inference import (
+    format_ambiguous_definition_refusal,
+    resolve_scoped_glossary_term,
+)
 from aida.tool_rendering import ToolParameterError, render_tool_sql
 from aida.trust_scoring import AssetContext, compute_trust_score
 
@@ -138,6 +142,37 @@ def _record_retrieval_decisions(
     )
     if edges:
         record_decisions(session, organization_id, edges)
+
+
+async def _check_definition_ambiguity(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    retrieval_hits: list[RetrievalHit],
+) -> str | None:
+    """Group K / AT-9: the refusal check itself, wired into the real grounded
+    run. Every distinct term_key this run's own retrieval evidence surfaced
+    (a `GLOSSARY_TERM` hit -- `retrieval.hybrid_retrieve`'s own metadata
+    shape, unchanged by this hook) is resolved against this datasource's
+    business-graph scope; the first ambiguous one becomes this run's refusal
+    message. Returns `None` when nothing surfaced is ambiguous -- including
+    when nothing surfaced is a glossary term at all, the common case.
+    """
+    term_keys = {
+        hit.metadata["term_key"]
+        for hit in retrieval_hits
+        if hit.object_type == "GLOSSARY_TERM" and "term_key" in hit.metadata
+    }
+    for term_key in sorted(term_keys):
+        resolution = await resolve_scoped_glossary_term(
+            session,
+            organization_id=datasource.organization_id,
+            term_key=term_key,
+            datasource_id=datasource.id,
+        )
+        if resolution.status == "AMBIGUOUS":
+            return format_ambiguous_definition_refusal(term_key, resolution.alternatives)
+    return None
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -464,6 +499,26 @@ class GovernedAgentOrchestrator:
         agent_run.grounding_fragment_digests = await _compute_grounding_fragment_digests(
             session, retrieval_hits
         )
+        # Group K / AT-9: where a term/metric this question's evidence surfaced
+        # resolves to more than one governed definition for this datasource's
+        # business-graph scope, refuse with both definitions and both owners
+        # rather than silently picking one. See
+        # `semantic_inference.resolve_scoped_glossary_term` for the
+        # most-specific-wins resolution this checks.
+        ambiguity_reason = await _check_definition_ambiguity(
+            session, datasource=datasource, retrieval_hits=retrieval_hits
+        )
+        if ambiguity_reason is not None:
+            await self._persist_rejection(
+                session,
+                agent_run,
+                state,
+                trace,
+                context,
+                correlation_id,
+                "AMBIGUOUS_DEFINITION",
+            )
+            raise AgentClarificationRequired(ambiguity_reason)
         state = state.transition(RuntimeStage.RESOLVED, semantic_version=semantic_version)
         trace.append(
             _trace(

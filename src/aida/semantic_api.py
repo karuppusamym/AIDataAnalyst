@@ -66,6 +66,7 @@ from aida.models import (
     TermSemanticBinding,
 )
 from aida.product_marketplace_api import approve_access_request
+from aida.query_history_miner import apply_query_history_metric_candidate_decision
 from aida.retrieval import hybrid_retrieve_cross_source
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
@@ -2095,6 +2096,19 @@ async def _apply_governance_review_decision(
         # the maker != checker / PENDING-only guards above already ran, so no
         # derived value reaches assertion without an independent decision.
         event_type, aggregate_type, aggregate_id, payload = await apply_classification_promotion(
+            session, review, decision=decision, context=context, now=now
+        )
+    elif review.object_type == "QUERY_HISTORY_METRIC_CANDIDATE":
+        # Group K / AT-12: a metric candidate mined from value-free query-log
+        # structure becomes a real, published SemanticMetric only under an
+        # independent APPROVE -- see
+        # `query_history_miner.apply_query_history_metric_candidate_decision`.
+        (
+            event_type,
+            aggregate_type,
+            aggregate_id,
+            payload,
+        ) = await apply_query_history_metric_candidate_decision(
             session, review, decision=decision, context=context, now=now
         )
     else:
