@@ -23,6 +23,7 @@ from aida.envelope_models import AVAILABLE, MetadataRoutine
 from aida.events import record_audit
 from aida.ingest_screening import is_eligible_for_model_context
 from aida.models import DataSource, MetadataCatalog, MetadataSchema, MetadataTable
+from aida.procedure_capability_matrix import build_capability_matrix
 from aida.procedure_lineage import (
     ProcedureLineageEdgeRecord,
     ProcedureParseResult,
@@ -32,6 +33,8 @@ from aida.procedure_lineage_models import DeepProcedureLineageEdge
 from aida.schemas import (
     DeepProcedureLineageEdgeRead,
     DeepProcedureLineageParseResponse,
+    ProcedureCapabilityConstructRead,
+    ProcedureCapabilityMatrixRead,
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
@@ -321,3 +324,38 @@ async def list_deep_procedure_lineage(
         )
         for row in rows
     ]
+
+
+@router.get(
+    "/procedure-lineage/capability-matrix",
+    response_model=ProcedureCapabilityMatrixRead,
+)
+async def get_procedure_lineage_capability_matrix(
+    context: SecurityContext = Depends(require_roles(*_LINEAGE_READER_ROLES)),
+) -> ProcedureCapabilityMatrixRead:
+    """AT-22: serve the parser capability matrix live, generated from
+    `sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code
+    at request time (`aida.procedure_capability_matrix.build_capability_matrix`)
+    -- the same source `scripts/generate_procedure_capability_matrix.py`
+    uses to publish `Docs/90-reference/procedure-lineage-capability-matrix.md`,
+    so that published page is verifiably backed by a live, callable source,
+    not only a one-off script. Not datasource-scoped (dialect/construct
+    support is a property of the parser code itself, not of any one
+    customer's data), so no `datasource_id`/tenancy check applies here --
+    `context` is still required so an unauthenticated caller cannot reach it.
+    """
+    matrix = build_capability_matrix()
+    return ProcedureCapabilityMatrixRead(
+        generated_at=matrix.generated_at,
+        dialects=list(matrix.dialects),
+        constructs=[
+            ProcedureCapabilityConstructRead(
+                construct_name=row.construct,
+                view_parser_status=row.view_parser_status,
+                procedure_parser_status=row.procedure_parser_status,
+                evidence=row.evidence,
+            )
+            for row in matrix.constructs
+        ],
+        unparsed_reasons=list(matrix.unparsed_reasons),
+    )

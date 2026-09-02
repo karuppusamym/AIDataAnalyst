@@ -31,6 +31,7 @@ from aida.models import (
 )
 from aida.procedure_lineage_api import (
     RoutineNotEligibleError,
+    get_procedure_lineage_capability_matrix,
     list_deep_procedure_lineage,
     parse_deep_procedure_lineage_endpoint,
     require_eligible_routine_body,
@@ -325,3 +326,31 @@ class TestParseAndPersist:
         assert [row.statement_ordinal for row in listed] == sorted(
             row.statement_ordinal for row in listed
         )
+
+
+class TestCapabilityMatrixRoute:
+    """AT-22: the matrix is also served live (not just published as a
+    generated doc), so it is reachable from a real entry point
+    (`aida.main`) and verifiably backed by the same source the publishing
+    script uses."""
+
+    async def test_route_returns_the_same_matrix_the_generator_produces(self) -> None:
+        from aida.procedure_capability_matrix import build_capability_matrix
+
+        expected = build_capability_matrix()
+        datasource = DataSource(
+            id=uuid4(), organization_id=uuid4(), line_of_business_id=uuid4(),
+            data_domain_id=uuid4(), project_id=uuid4(), name="x", connector_type="mssql",
+            dialect="tsql", environment="PROD", network_zone="default",
+            credential_reference="env://X", capabilities={},
+        )
+        context = _context(datasource)
+
+        response = await get_procedure_lineage_capability_matrix(context=context)
+
+        assert response.dialects == list(expected.dialects)
+        assert response.unparsed_reasons == list(expected.unparsed_reasons)
+        assert [c.construct_name for c in response.constructs] == [
+            row.construct for row in expected.constructs
+        ]
+        assert any(c.procedure_parser_status == "EXPLICIT_UNPARSED" for c in response.constructs)

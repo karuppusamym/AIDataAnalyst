@@ -10864,3 +10864,36 @@ the regenerated baseline.
   priorities; Postgres inherits the same statement-level dispatch logic and is exercised indirectly
   through `sql_lineage_parser.py`'s own existing Postgres coverage, but no `procedure_lineage.py`-specific
   Postgres procedure-body test exists yet.
+
+## 2026-09-02 — Group I follow-up: AT-22's matrix is also served live, closing a real CI reachability gap
+
+Real CI on PR #19 caught two things the local run above did not check: `ui-next/src/lib/types.ts` was
+stale against the three new N3/N12 response schemas (`UX-14`'s generation gate), and
+`tests/test_reachability_gate.py` (`AU-1`) failed because `aida.procedure_capability_matrix` was reachable
+from nothing but its own test and the standalone `scripts/generate_procedure_capability_matrix.py` --
+real code with zero live callers, exactly what that gate exists to catch.
+
+Fixed by making AT-22's matrix genuinely live-servable rather than only script-generated -- the stronger
+fix, not a workaround: new `GET /v1/procedure-lineage/capability-matrix` on `procedure_lineage_api.py`
+(already a registered router) calls `procedure_capability_matrix.build_capability_matrix()` at request
+time, the identical function the publishing script calls, so the committed
+`Docs/90-reference/procedure-lineage-capability-matrix.md` is now verifiably backed by a live, callable
+source rather than a one-off script no other code path reaches. This closes the reachability gap for real
+(`aida.main` -> `procedure_lineage_api` -> `procedure_capability_matrix`, a genuine import edge, not an
+`ALLOWLIST` entry) rather than declaring the module an accepted, permanent gap. New response schemas
+`ProcedureCapabilityMatrixRead`/`ProcedureCapabilityConstructRead` (Group I's marked schema block, same as
+before) -- caught and fixed a real pydantic footgun while adding them: a field literally named `construct`
+silently shadows `pydantic.BaseModel.construct` (the v2 unvalidated-construction classmethod), which
+`pytest` surfaced immediately as a `UserWarning` on collection; renamed to `construct_name` before it
+became a real API contract. One new test (`TestCapabilityMatrixRoute` in
+`tests/test_procedure_lineage_api.py`) asserts the route returns the identical matrix
+`build_capability_matrix()` produces directly, including at least one `EXPLICIT_UNPARSED` row --
+verifying the live path and the script path can never silently diverge, not just that the route returns
+200.
+
+OpenAPI baseline and `ui-next/src/lib/types.ts` regenerated in the correct order (route added first, then
+both regenerated) -- `scripts/openapi_diff.py` reports the new path as purely additive, zero breaking
+changes; `scripts/generate_ui_types.py` (no flag, the same check-only invocation CI's `UX-14` job runs)
+now reports "matches the current OpenAPI schema" with exit 0. `tests/test_reachability_gate.py` (5/5) and
+`tests/test_openapi_diff_gate.py` (24/24) both green. `ruff check`/`mypy src` (292 files, `--strict`)
+clean; `lint-imports` still 8/8 kept.

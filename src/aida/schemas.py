@@ -2692,6 +2692,34 @@ class DeepProcedureLineageParseResponse(ApiModel):
     persisted_edge_count: int = 0
 
 
+class ProcedureCapabilityConstructRead(ApiModel):
+    """One row of the AT-22 parser capability matrix -- see
+    `aida.procedure_capability_matrix`'s module docstring for how every
+    field here is derived from the parsers' own dispatch code, not
+    hand-typed. `construct_name`, not `construct` -- the latter shadows
+    pydantic `BaseModel.construct`."""
+
+    construct_name: str
+    view_parser_status: str
+    procedure_parser_status: str
+    evidence: str
+
+
+class ProcedureCapabilityMatrixRead(ApiModel):
+    """AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`,
+    generated at request time from `sql_lineage_parser.py`'s and
+    `procedure_lineage.py`'s own dispatch code -- the same source
+    `scripts/generate_procedure_capability_matrix.py` uses to publish
+    `Docs/90-reference/procedure-lineage-capability-matrix.md`, so the
+    published page is verifiably backed by a live, callable source rather
+    than only a one-off script."""
+
+    generated_at: str
+    dialects: list[str]
+    constructs: list[ProcedureCapabilityConstructRead]
+    unparsed_reasons: list[str]
+
+
 # ---------------------------------------------------------------------------
 # End Group I addition.
 # ---------------------------------------------------------------------------

@@ -19375,6 +19375,75 @@
         "title": "PortfolioUsageRead",
         "type": "object"
       },
+      "ProcedureCapabilityConstructRead": {
+        "additionalProperties": false,
+        "description": "One row of the AT-22 parser capability matrix -- see\n`aida.procedure_capability_matrix`'s module docstring for how every\nfield here is derived from the parsers' own dispatch code, not\nhand-typed. `construct_name`, not `construct` -- the latter shadows\npydantic `BaseModel.construct`.",
+        "properties": {
+          "construct_name": {
+            "title": "Construct Name",
+            "type": "string"
+          },
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "procedure_parser_status": {
+            "title": "Procedure Parser Status",
+            "type": "string"
+          },
+          "view_parser_status": {
+            "title": "View Parser Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "construct_name",
+          "view_parser_status",
+          "procedure_parser_status",
+          "evidence"
+        ],
+        "title": "ProcedureCapabilityConstructRead",
+        "type": "object"
+      },
+      "ProcedureCapabilityMatrixRead": {
+        "additionalProperties": false,
+        "description": "AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`,\ngenerated at request time from `sql_lineage_parser.py`'s and\n`procedure_lineage.py`'s own dispatch code -- the same source\n`scripts/generate_procedure_capability_matrix.py` uses to publish\n`Docs/90-reference/procedure-lineage-capability-matrix.md`, so the\npublished page is verifiably backed by a live, callable source rather\nthan only a one-off script.",
+        "properties": {
+          "constructs": {
+            "items": {
+              "$ref": "#/components/schemas/ProcedureCapabilityConstructRead"
+            },
+            "title": "Constructs",
+            "type": "array"
+          },
+          "dialects": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dialects",
+            "type": "array"
+          },
+          "generated_at": {
+            "title": "Generated At",
+            "type": "string"
+          },
+          "unparsed_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unparsed Reasons",
+            "type": "array"
+          }
+        },
+        "required": [
+          "generated_at",
+          "dialects",
+          "constructs",
+          "unparsed_reasons"
+        ],
+        "title": "ProcedureCapabilityMatrixRead",
+        "type": "object"
+      },
       "ProcedureLineageEdgeRead": {
         "additionalProperties": false,
         "properties": {
@@ -70771,6 +70840,125 @@
         "summary": "Run Playbook Now",
         "tags": [
           "playbooks"
+        ]
+      }
+    },
+    "/v1/procedure-lineage/capability-matrix": {
+      "get": {
+        "description": "AT-22: serve the parser capability matrix live, generated from\n`sql_lineage_parser.py`'s and `procedure_lineage.py`'s own dispatch code\nat request time (`aida.procedure_capability_matrix.build_capability_matrix`)\n-- the same source `scripts/generate_procedure_capability_matrix.py`\nuses to publish `Docs/90-reference/procedure-lineage-capability-matrix.md`,\nso that published page is verifiably backed by a live, callable source,\nnot only a one-off script. Not datasource-scoped (dialect/construct\nsupport is a property of the parser code itself, not of any one\ncustomer's data), so no `datasource_id`/tenancy check applies here --\n`context` is still required so an unauthenticated caller cannot reach it.",
+        "operationId": "get_procedure_lineage_capability_matrix_v1_procedure_lineage_capability_matrix_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcedureCapabilityMatrixRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Procedure Lineage Capability Matrix",
+        "tags": [
+          "procedure-lineage"
         ]
       }
     },
