@@ -2642,6 +2642,61 @@ class ProcedureLineageEdgeRead(ApiModel):
     updated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Group I addition (Atlas Wave-2, tracker N3/N12): API schemas for
+# `procedure_lineage_api.py`'s routine-identity-aware, procedure-aware
+# lineage parse (`aida.procedure_lineage`/`aida.procedure_lineage_models`).
+# Purely additive -- nothing above this block is changed.
+# ---------------------------------------------------------------------------
+
+
+class DeepProcedureLineageEdgeRead(ApiModel):
+    """One edge from the procedure-aware parser (N3) -- richer than
+    `LineageEdgeRead`/`ProcedureLineageEdgeRead`: carries the statement it
+    came from, whether that statement was a write, whether either side is an
+    intermediate (temp table/variable) local to the procedure body, and,
+    for a construct the parser could not resolve, the named reason why
+    (never a silently dropped statement -- see `aida.procedure_lineage`'s
+    module docstring)."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    transformation_type: str
+    confidence: str
+    dialect: str
+    source_resolved: bool
+    statement_ordinal: int
+    is_write: bool
+    is_intermediate: bool
+    control_flow_context: str | None = None
+    unparsed_reason: str | None = None
+    via_temp_table: str | None = None
+
+
+class DeepProcedureLineageParseResponse(ApiModel):
+    edges: list[DeepProcedureLineageEdgeRead]
+    statement_count: int
+    confidence: str
+    dialect: str
+    sql_hash: str
+    errors: list[str] = Field(default_factory=list)
+    # True iff every statement chunk in the body resolved to a concrete
+    # DML/DDL shape or a genuinely lineage-free one (DECLARE/SET/structural
+    # control-flow) -- zero UNPARSED chunks. N12 eligibility requires this.
+    is_fully_parsed: bool
+    # True iff `is_fully_parsed` AND no statement touched INSERT/UPDATE/
+    # DELETE/MERGE/CREATE -- proven read-only, not merely "no write found".
+    is_read_only: bool
+    persisted_edge_count: int = 0
+
+
+# ---------------------------------------------------------------------------
+# End Group I addition.
+# ---------------------------------------------------------------------------
+
+
 class StudioChangeSetCreate(ApiModel):
     name: str = Field(min_length=2, max_length=200)
 

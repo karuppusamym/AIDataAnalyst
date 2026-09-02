@@ -10639,3 +10639,228 @@ Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in
 pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
 rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
 failure.
+
+## 2026-09-02 — N3/N12/AT-22 closed: procedure-aware lineage, tool generator C, and a code-derived capability matrix (Atlas Wave-2 Group I)
+
+Three tracker rows, one dependency chain: N3 (real procedure-body parsing) unblocks N12 (procedure ->
+governed tool, eligible only when N3's parse *proves* read-only) and gives AT-22 (the published parser
+capability matrix, blocked on AT-D2 until now) a second, richer parser to introspect alongside
+`sql_lineage_parser.py`. Delivered as five new files plus one Alembic migration; `sql_lineage_parser.py`
+and `view_lineage_api.py` (AT-D2's own files) are untouched -- every one of AT-D2's six fixes is inherited
+by reuse, not at risk of drifting out of sync with a duplicated reimplementation.
+
+### N3: `procedure_lineage.py` is a real, procedure-aware parser -- not `_parse_sql` again
+
+AT-D5 (2026-09-01) established the exact defect this closes: `sql_lineage_parser.parse_procedure_lineage`
+hands a whole procedure body to one `sqlglot.parse` call, which cannot understand T-SQL/PL-SQL control
+flow and silently falls back to an opaque `Command` node at the first unrecognised token -- everything
+after that point is gone, with nothing distinguishing "this procedure genuinely has no more lineage" from
+"the parser gave up here". Proven directly, not just asserted: `tests/test_procedure_lineage.py::test_the_generic_flat_parser_silently_truncates_the_same_body`
+feeds the old path a real `IF...BEGIN...INSERT...END` body and asserts `result.edges == []`.
+
+The new parser never asks sqlglot to parse a whole body in one call. It (1) strips the `CREATE
+[OR REPLACE] PROCEDURE/FUNCTION ... AS/IS` header and the outer `BEGIN...END` (or `$$...$$`) wrapper,
+quote/comment-aware; (2) splits the body into top-level, `;`-delimited chunks, also quote/comment-aware
+so a `;` inside a string literal or comment is never mistaken for a statement boundary; (3) peels a
+recognised control-flow *header* (`IF...BEGIN`, `WHILE...LOOP`, `ELSIF...THEN`, bare `BEGIN`/`END`/`ELSE`,
+T-SQL `BEGIN TRY`/`END CATCH`, and PL/SQL cursor `FOR rec IN (SELECT...) LOOP` -- whose parenthesised
+SELECT genuinely carries lineage and is extracted as its own read) off the front of each chunk, leaving
+the real DML statement, if any, to parse on its own; (4) dispatches by statement kind; (5) resolves
+temp-table/variable intermediate writes through to final targets.
+
+One real, non-obvious bug found and fixed *while building the body-stripper itself*: the first version's
+`BEGIN...END` nesting counter treated any bare `END` as closing the nearest `BEGIN`, but `LOOP`/`IF`/
+`CASE`/`WHILE` are closed by `END LOOP`/`END IF`/`END CASE`/`END WHILE` -- constructs that never
+incremented the counter in the first place. A PL/SQL `FOR...LOOP...END LOOP` nested inside a procedure
+body was closing the *outer* procedure's `BEGIN...END` early, silently truncating everything after the
+loop -- the exact failure mode this module exists to eliminate, just relocated into its own scaffolding.
+Caught by `test_plsql_cursor_for_loop_select_source_is_extracted_as_a_real_read` failing during
+development (a trailing `EXECUTE IMMEDIATE` after the loop went missing entirely); fixed by only
+decrementing on a bare `END` whose next token is not one of `LOOP`/`IF`/`CASE`/`WHILE`.
+
+**The core invariant, extending INV-9 exactly as AT-C4 already scoped it for lineage parsers:** a
+construct this parser cannot resolve -- dynamic SQL (`EXEC(@sql)`, `sp_executesql`,
+`EXECUTE IMMEDIATE`), a nested `EXEC other_proc`/`CALL other_proc(...)` (its own body not fetched or
+analyzed), a sqlglot parse error, or a statement shape sqlglot itself could not parse (its own `Command`
+fallback) -- always produces its own `ProcedureLineageEdgeRecord` with `transformation_type="UNPARSED"`,
+`source_resolved=False`, and `unparsed_reason` naming exactly which of five categories
+(`DYNAMIC_SQL`/`NESTED_PROCEDURE_CALL`/`UNSUPPORTED_STATEMENT_SHAPE`/`PARSE_ERROR`/
+`UNRESOLVED_CONTROL_FLOW`) applies. This is deliberately an *edge*, not a side-channel flag on the parse
+result -- a consumer reading only the edge list, the way `dbt_column_lineage.py` and
+`view_lineage_api.py` both already do for the sibling parser, still sees the gap.
+
+Two real, pre-existing gaps in `sql_lineage_parser.py` were found while building on top of it -- neither
+fixed there (out of this row's file-ownership scope; `sql_lineage_parser.py` is zero-edit this pass) but
+worked around locally in `procedure_lineage.py`: (a) `_extract_target_table`'s `Insert` branch only
+unwraps a bare `exp.Table`, so `INSERT INTO t (a, b) SELECT x, y` (an explicit column list) resolves its
+target to `exp.Schema` and silently produces zero edges; (b) even once resolved, reusing
+`_extract_edges_from_select`'s own alias/name-based target-column naming would be wrong whenever an
+explicit column list reorders or renames relative to the select list. `procedure_lineage._extract_edges_from_insert`
+fixes both locally: resolves `exp.Schema`-wrapped targets, and positionally zips an explicit column list
+against the SELECT's own projections when one is present.
+
+MERGE got genuinely new capability, not a workaround: `sql_lineage_parser._extract_from_statement`'s
+MERGE handling only walks nested `SELECT`s (the `USING` source, when it's itself a subquery) and never
+maps `WHEN MATCHED THEN UPDATE SET`/`WHEN NOT MATCHED THEN INSERT (...) VALUES (...)` at column level at
+all. `procedure_lineage._extract_edges_from_merge` adds that: walks `statement.args["whens"]`, and for
+each `exp.Update`/`exp.Insert` `then` branch, maps target columns to source expressions the same way an
+ordinary UPDATE/INSERT would -- both a `WHEN MATCHED` and a `WHEN NOT MATCHED` branch producing the same
+source->target fact collapse to one edge (`_dedupe_edges`), not two identical rows.
+
+Temp-table propagation: a write to a T-SQL `#temp`/`##temp` table, `@table` variable, or `SELECT...INTO`
+target is tagged `is_intermediate=True`. A later statement reading FROM that same intermediate gets a
+*synthesised transitive* edge too (`via_temp_table` set, confidence capped `PARTIAL`) linking the true
+upstream source straight through to the real final target -- direct hop-by-hop edges are always kept
+alongside it, never replaced, so "what does the final output ultimately depend on" and "what exactly
+happened at each step" are both answerable from the same edge list. Iterated to a fixed point (bounded 5
+passes) so a two-hop chain (`orders -> #a -> #b -> final`) still collapses to one direct fact, proven in
+the T-SQL control-flow integration test.
+
+### N3 persistence: `procedure_lineage_api.py` + `DeepProcedureLineageEdge` -- routine-identity-aware from the start
+
+New `POST/GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage[/parse]`, taking a real
+`MetadataRoutine.id` rather than raw SQL text -- closing, for this new table specifically, the identity
+gap AT-19 documented for the existing `ProcedureLineageEdge` ("this endpoint takes only raw SQL, no
+routine-identity parameter, so a standalone SELECT buckets under a shared sentinel"). Eligibility gating
+mirrors `view_tool_blueprint.py`'s `MetadataViewDefinition` gate exactly: a routine that is not
+`ACTIVE`, whose body is `UNAVAILABLE`, whose `redaction_status` is not `PARSED`, or whose
+`screening_status` is quarantined is refused (422) naming the exact reason, never guessed at.
+`DeepProcedureLineageEdge` (new table, own migration -- see below) is a new, dedicated table rather than
+an extension of `models.ProcedureLineageEdge`'s already-declared class body (AT-D2's natural-key unique
+constraint and existing callers stay completely undisturbed); its own unique constraint is scoped to
+`(datasource_id, routine_id, statement_ordinal, source/target, transformation_type, via_temp_table)`, and
+its `source_resolved` column is real and typed (AT-D2 defect 3's fix, applied here from the start rather
+than an `"UNRESOLVED"` string comparison). 8 tests in `tests/test_procedure_lineage_api.py`: the
+eligibility gate (missing/unavailable/quarantined body all refused), `source_table_id`/`target_table_id`
+resolved against the real catalog, re-parsing one routine never touches another routine's rows (mirrors
+AT-D2 defect 5's own re-parse-doesn't-double test), and an UNPARSED chunk persists as an explicit marker
+row, not silently absent.
+
+### N12: `procedure_tool_blueprint.py` + `procedure_tool_api.py` -- "tool generator C", gated on N3's own proof
+
+`POST /v1/projects/{project_id}/tool-blueprints/from-procedure`, following N11's (view-to-tool) exact
+shape: eligibility (`find_single_read_only_result_statement`) requires N3's parse to be fully parsed
+(zero `UNPARSED` chunks -- "no write statement found" because the parser gave up is never accepted as
+proof, pinned directly by a test), zero write statements, and exactly one standalone terminal result
+SELECT. The generated tool's SQL is the procedure's own reconstructed result statement (not a fresh query
+the way N11 builds `SELECT <cols> FROM <view>` -- a procedure has no live, column-typed catalog surface a
+view does), which creates a real correctness risk N11 never had to solve: the only body text this
+platform has for a procedure is already literal-redacted (INV-6), so a redacted `'<REDACTED>'`/`<NUM>`
+left in a reconstructed WHERE clause would render as an executable-looking tool that silently returns
+wrong (usually empty) results. `build_procedure_tool_blueprint` refuses generation outright the moment any
+`exp.Literal` survives in the reconstructed statement -- refuse rather than publish something broken that
+looks fine, the same posture `view_tool_blueprint.py` applies to a missing/unparsed view definition.
+Procedure `IN`/`INOUT` parameters referenced in the result statement are remapped to real
+`ToolParameterDefinition`s (via `MetadataRoutineParameter`, typed through `view_tool_blueprint`'s own
+`_PARAMETER_TYPE_BY_PHYSICAL_FAMILY`); a variable reference that cannot be mapped this way refuses
+generation rather than being left as inert unbound text in the SQL (unlike an unfilterable *column* in
+N11, which stays selected just unparameterized -- a variable the renderer does not resolve to a
+placeholder is not valid SQL at all, not merely a filter not offered).
+
+This route lives in its own new file rather than as an addition to `tool_api.py` -- a large, central
+module under heavy concurrent edit across this Wave-2 pass -- but reuses `tool_api._load_project_and_datasource`
+and `tool_api._persist_tool_version_draft` by direct import, the literal same functions every other
+tool-generator path (hand-authored, SM-5's multi-table join, N11's view-to-tool) already funnels through,
+so this path's maker-checker gate can never quietly diverge from theirs. New
+`ProcedureToolGenerationRecord` (own migration) records the provenance: which routine, which redacted-body
+hash, how many statements the read-only proof covered -- independent of whatever later happens to the
+generated tool version itself. 11 tests in `tests/test_procedure_tool_blueprint.py`: pure eligibility-gate
+tests (a write, an UNPARSED chunk, zero results, and more than one result each refused with a distinct
+named reason), pure builder tests (literal refusal, IN-parameter mapping to a real placeholder, an
+unmapped variable refused, byte-identical determinism), and one real in-memory-SQLite endpoint test
+proving a genuinely read-only procedure (real JOIN + GROUP BY over two seeded tables) produces a `DRAFT`
+`GovernedToolVersion` plus its provenance row, and a second proving a procedure containing a real INSERT
+is refused 422 with no `GovernedTool` row created at all.
+
+### AT-22: the published capability matrix is *generated from the parsers' own code*, not hand-typed
+
+New `src/aida/procedure_capability_matrix.py` + `scripts/generate_procedure_capability_matrix.py`,
+publishing `Docs/90-reference/procedure-lineage-capability-matrix.md` (+ `.json`). Unblocked now that
+AT-D2 is done (publishing a matrix for a parser that degraded silently would have been exactly the
+"marketed vs. actual" drift this codebase criticises elsewhere) -- and this row's own stated purpose is
+that the matrix itself must not become that drift, which is why nothing in it is hand-typed prose:
+
+- **Dialects** are read directly off `sql_lineage_parser._SQLGLOT_DIALECT_MAP` (shared by both parsers).
+- **Which statement shapes each dispatcher recognises** comes from `_dispatched_node_types`, which walks
+  the real Python AST (`inspect.getsource` + the `ast` module) of `sql_lineage_parser._extract_from_statement`
+  and `procedure_lineage._classify_and_extract` and extracts every `isinstance(node, exp.<Type>)` check
+  each one actually makes -- a branch added or removed there changes the published matrix on next
+  regeneration, with no second place to remember to update.
+- **Which of those shapes the procedure parser explicitly degrades on** (rather than silently, or
+  extracting real lineage) comes from `_explicitly_unparsed_node_types`, which walks the same AST and, per
+  `isinstance` branch, checks whether that branch's own body calls `_unparsed_statement(...)` -- N3's one
+  and only path to an UNPARSED marker.
+- **Control-flow and dynamic-SQL recognition** (regex-based text peeling -- sqlglot cannot parse a whole
+  procedure body's control flow as AST nodes at all, see N3's entry above) is enumerated from
+  `procedure_lineage`'s own live module-level `_..._RE` compiled-pattern attribute names, itself proof a
+  recognition rule exists in code, not merely a claim about one.
+
+19 construct rows x 5 dialects, each tagged `SUPPORTED`/`EXPLICIT_UNPARSED`/`RECOGNISED_NO_LINEAGE`/
+`UNSUPPORTED`/`N/A`, plus the 5 named `UnparsedReason` categories read straight off the real enum. The
+AST-derived introspection caught one real, small bug while being built: the `sp_executesql` dispatch
+branch used `type(node).__name__ == "ExecuteSql"` rather than `isinstance`, so the introspection
+(correctly) could not see it and reported it `UNSUPPORTED` rather than `EXPLICIT_UNPARSED` -- fixed in
+`procedure_lineage.py` to `isinstance(node, exp.ExecuteSql)`, matching every other branch's idiom, which
+both corrected the code and made the published matrix accurate. Deliberately **not** derived from "the
+E12 certification corpus" the row's original note named -- no such corpus exists on this branch yet, and
+source-code introspection is the stronger proof this row's own stated purpose needs: a corpus proves what
+real-world SQL happens to hit, source introspection proves what the parser can and cannot do at all,
+independent of what anyone has tried against it yet. 11 tests in `tests/test_procedure_capability_matrix.py`,
+including three that exercise the introspection primitives against small synthetic dispatcher functions --
+one of which changes a throwaway dispatcher and asserts the derived matrix output changes with it, pinning
+the "derived, not hand-typed" claim directly rather than merely asserting the output looks plausible.
+
+### Migration, scope, and verification
+
+One Alembic revision (`466f21849789`, `down_revision="7e6460d905fe"` -- the single head this pass started
+from), creating `deep_procedure_lineage_edge` and `procedure_tool_generation_record`. Both new ORM classes
+live in a new `src/aida/procedure_lineage_models.py` rather than in `models.py`'s already-declared,
+concurrently-edited class bodies -- the same technique `envelope_models.py` already established for
+exactly this reason (registers on the same `Base.metadata` via one import added to `migrations/env.py`,
+so autogenerate/`create_all` see them identically to a `models.py`-declared table). Verified against a
+real local PostgreSQL 16 (started for this pass; none was otherwise available in the sandbox): clean
+`alembic upgrade head` from the pre-existing single head, `alembic downgrade -1` / `upgrade head` round
+trip, and `alembic check` reporting "No new upgrade operations detected" both before and after the round
+trip -- genuine zero ORM/migration drift, not merely "the file exists".
+
+Additive-only edits to three shared files, each narrowly scoped and clearly commented as this pass's own:
+`src/aida/schemas.py` (two new response schemas, `DeepProcedureLineageEdgeRead`/`DeepProcedureLineageParseResponse`,
+in their own marked block -- no existing schema touched), `src/aida/main.py` (one import block + two
+`app.include_router(...)` lines), `migrations/env.py` (one import, mirroring the existing `envelope_models`
+line). `sql_lineage_parser.py`, `view_lineage_api.py`, `unified_lineage_api.py`, `tool_api.py`, and
+`bi_lineage.py` are all untouched -- zero edits, zero collision surface with the other three Wave-2 groups
+editing those files concurrently. `models.py` is untouched.
+
+`ruff check`/`mypy src` (292 files, `--strict`) clean on every new and touched file; `lint-imports`
+reports all 8 contracts kept, unchanged. `scripts/openapi_diff.py` reports the three new routes as
+purely additive (`added path`), zero breaking changes; baseline regenerated and committed
+(`--accept-baseline`). 45 new tests across four new test files (`test_procedure_lineage.py` 15,
+`test_procedure_lineage_api.py` 8, `test_procedure_tool_blueprint.py` 11, `test_procedure_capability_matrix.py`
+11) all green, no mocking of the parser or the persistence layer -- real sqlglot parses, real in-memory
+SQLite ORM sessions. `tests/test_openapi_diff_gate.py` and `tests/test_doc_claims.py` both green against
+the regenerated baseline.
+
+**Honest gaps, stated plainly:**
+
+- **`unified_lineage_api.py` is not wired to the new `DeepProcedureLineageEdge` table.** AT-19 documented
+  that the existing `PROCEDURE_DEFINITION` edges carry no `transformation_reference` because
+  `ProcedureLineageEdge` has no routine identity to point back to -- `DeepProcedureLineageEdge`'s real
+  `routine_id` FK is exactly that missing identity, but wiring it into the unified graph means editing
+  `unified_lineage_api.py`, a file under heavy, active concurrent edit by AT-10/AT-16/AT-19/AT-20 across
+  this same Wave-2 pass. Judged out of scope for this row rather than risk that collision surface; a
+  follow-on pass can close it without any further schema work.
+- **N3's control-flow peeling is regex-based text recognition, not a grammar.** It handles the documented,
+  common shapes (`IF...BEGIN`/`IF...THEN`/`WHILE`/`CASE...WHEN...THEN`/cursor `FOR` loops/`BEGIN TRY`/
+  `END CATCH`) but is not a full T-SQL/PL-SQL parser -- an unrecognised or sufficiently unusual
+  control-flow shape correctly falls through to an `UNRESOLVED_CONTROL_FLOW`/`UNSUPPORTED_STATEMENT_SHAPE`
+  UNPARSED marker rather than silently mis-parsing, but it is not exhaustive. The capability matrix
+  (AT-22) publishes exactly this limitation rather than hiding it.
+- **CTAS/CREATE with an explicit column list** does not get the same positional-remapping fix INSERT got
+  (`_extract_edges_from_insert`) -- it still reuses `sql_lineage_parser._extract_from_statement`'s Create
+  branch as-is. Less common in practice inside a procedure body (`SELECT...INTO`/plain INSERT dominate);
+  noted rather than fixed, since INSERT was the construct explicitly named in scope.
+- **Postgres/PL-pgSQL** dialect support in N3 is present (the `$$...$$` body-extraction path) but was not
+  given dedicated test coverage this pass -- T-SQL and PL/SQL (Oracle) were the explicitly named
+  priorities; Postgres inherits the same statement-level dispatch logic and is exercised indirectly
+  through `sql_lineage_parser.py`'s own existing Postgres coverage, but no `procedure_lineage.py`-specific
+  Postgres procedure-body test exists yet.

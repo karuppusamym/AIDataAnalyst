@@ -1,0 +1,1286 @@
+"""N3: procedure-body-aware SQL lineage extraction (T-SQL and PL/SQL first).
+
+AT-D5 established that `sql_lineage_parser.parse_procedure_lineage` is
+`_parse_sql` under a procedure-flavoured name: it hands the *entire*
+procedure body to `sqlglot.parse` as if it were a flat sequence of ordinary
+statements. That is provably wrong for a real `CREATE PROCEDURE ... AS
+BEGIN ... END` body -- sqlglot's tsql/oracle dialects do not understand
+T-SQL/PL-SQL control-flow syntax (`IF`/`WHILE`/`BEGIN..END`/`LOOP`/cursor
+`FOR` loops), and `sqlglot.parse` on such a body does not raise: it falls
+back to an opaque `Command` node covering everything from the first
+unrecognised token onward, silently discarding every statement after that
+point. A caller relying on `parse_procedure_lineage` today gets a lineage
+graph that is either right for a body with no control flow at all, or
+silently truncated for any body that has some -- with nothing distinguishing
+the two.
+
+This module is a real, procedure-aware replacement. It never asks sqlglot to
+parse a whole body in one call. Instead it:
+
+  1. Strips the `CREATE [OR REPLACE] PROCEDURE ... AS/IS` header and the
+     outer `BEGIN ... END` (or `$$ ... $$`) wrapper, quote/comment-aware
+     (`_extract_body`).
+  2. Splits the body into top-level, semicolon-delimited statement chunks,
+     also quote/comment-aware so a `;` inside a string literal or a comment
+     is never mistaken for a statement boundary (`_split_top_level_statements`).
+  3. Peels recognised control-flow *headers* off the front of a chunk --
+     `IF ... BEGIN`, `WHILE ... LOOP`, `ELSE`, bare `BEGIN`/`END`, PL/SQL
+     `IF ... THEN`/`ELSIF ... THEN`/`CASE ... WHEN ... THEN`, T-SQL
+     `BEGIN TRY`/`END CATCH`, and PL/SQL cursor `FOR rec IN (SELECT ...)
+     LOOP` (whose parenthesised SELECT *does* carry real lineage and is
+     extracted as its own read) -- leaving the real DML statement, if any,
+     to parse on its own (`_peel_control_flow_prefix`).
+  4. Classifies what is left. A bare structural leftover (`BEGIN`, `END`,
+     `ELSE`, an empty remainder) carries no lineage and is skipped, not
+     flagged -- there is genuinely nothing to report. Everything else is
+     either dispatched to a per-statement-kind extractor (SELECT/INSERT/
+     UPDATE/DELETE/MERGE/CREATE, reusing `sql_lineage_parser`'s own
+     extraction where the shape already matches it, and new logic here for
+     UPDATE/MERGE/DELETE and `SELECT ... INTO`, which
+     `sql_lineage_parser._extract_from_statement` does not handle at all),
+     or -- and this is the module's core invariant, extending INV-9 exactly
+     the way AT-C4 already scoped it for lineage parsers -- explicitly
+     marked **UNPARSED** with a named reason when it cannot be: dynamic SQL
+     (`EXEC(@sql)`, `sp_executesql`, `EXECUTE IMMEDIATE`), a nested
+     procedure call whose own body this pass does not descend into, a
+     sqlglot parse error, or a statement shape sqlglot itself could not
+     parse (its own `Command` fallback). An UNPARSED chunk is never
+     silently dropped: it always produces its own `ProcedureLineageEdgeRecord`
+     (`transformation_type="UNPARSED"`, `source_resolved=False`) carrying the
+     reason, so a consumer reading only the edge list -- never a side-channel
+     flag that is easy to ignore -- still sees the gap.
+  5. Resolves intermediate writes. A write whose target is a T-SQL `#temp`/
+     `##temp` table or `@table` variable, or a `SELECT ... INTO` target, is
+     tagged `is_intermediate=True`. A later statement reading FROM that same
+     intermediate additionally gets a synthesised *transitive* edge
+     (`via_temp_table` set) linking the original upstream source straight to
+     the real final target -- so "does the procedure's output ultimately
+     depend on `orders.amount`" is answerable without the caller manually
+     chasing every temp-table hop themselves. The direct hop-by-hop edges are
+     kept alongside it, never replaced, so no evidence is lost either way.
+     Iterated to a fixed point (bounded) so a two-hop temp chain
+     (`orders -> #a -> #b -> final`) still collapses to one transitive edge.
+
+What this module deliberately does NOT attempt (each surfaces as an explicit
+UNPARSED marker on the statement that needed it, never a silent gap):
+dynamic SQL of any form; a nested `EXEC other_proc` / `CALL other_proc(...)`
+whose own body is not fetched and analyzed; PL/SQL collection/record variable
+assignment (not SQL DML at all, so not a sqlglot construct in the first
+place); cursor `OPEN`/`FETCH`/`CLOSE` (T-SQL) -- the *declaration*'s own
+`SELECT` is captured if written as `DECLARE cur CURSOR FOR SELECT ...`, but
+the fetch loop's per-row processing is not modeled beyond its own
+statements; `TRY`/`CATCH` error-handling logic itself (its *contents* are
+still walked as ordinary statements). See `Docs/90-reference/procedure-lineage-capability-matrix.md`
+(AT-22, generated by `procedure_capability_matrix.py`) for the exhaustive,
+code-derived version of this list.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Final
+
+from aida.sql_lineage_parser import (
+    _SQLGLOT_AVAILABLE,
+    _SQLGLOT_DIALECT_MAP,
+    PROCEDURE_RESULT_TARGET,
+    UNRESOLVED_TABLE,
+    Confidence,
+    LineageEdge,
+    TransformationType,
+    _classify_transformation,
+    _collect_table_aliases,
+    _compute_sql_hash,
+    _extract_edges_from_select,
+    _extract_from_statement,
+    _extract_source_columns,
+    _extract_star_edges,
+    _extract_target_table,
+    _has_aggregate_functions,
+    _resolve_or_mark_unresolved,
+    _resolve_table_name,
+)
+
+try:
+    import sqlglot
+    from sqlglot import exp
+    from sqlglot.errors import ErrorLevel
+except ImportError:  # pragma: no cover -- see _SQLGLOT_AVAILABLE above
+    pass
+
+
+# ---------------------------------------------------------------------------
+# UNPARSED: the reason a chunk this module could not resolve is named. Never
+# used as a `str` the caller has to string-compare by convention -- every
+# unparsed chunk carries one of these as `ParsedStatement.unparsed_reason`
+# (prefix) plus, where useful, a short suffix with the specific detail
+# (parse error text, node type name, callee name).
+# ---------------------------------------------------------------------------
+class UnparsedReason(StrEnum):
+    DYNAMIC_SQL = "DYNAMIC_SQL"
+    NESTED_PROCEDURE_CALL = "NESTED_PROCEDURE_CALL"
+    UNSUPPORTED_STATEMENT_SHAPE = "UNSUPPORTED_STATEMENT_SHAPE"
+    PARSE_ERROR = "PARSE_ERROR"
+    UNRESOLVED_CONTROL_FLOW = "UNRESOLVED_CONTROL_FLOW"
+
+
+# Marker `transformation_type` for an UNPARSED edge -- deliberately not added
+# to `sql_lineage_parser.TransformationType` (that module is not touched by
+# this one at all); `LineageEdge.transformation_type` is a plain `str`, so
+# this needs no change there.
+UNPARSED_TRANSFORMATION_TYPE: Final[str] = "UNPARSED"
+
+# Placeholder source/target for an UNPARSED chunk: neither side is known, so
+# neither is a name that could collide with a real table.
+UNPARSED_MARKER: Final[str] = "<UNPARSED>"
+
+
+@dataclass(frozen=True, slots=True)
+class ProcedureLineageEdgeRecord:
+    """One column-level (or, for `UNPARSED`, statement-level) lineage fact
+    extracted from a procedure body."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    transformation_type: str
+    confidence: str
+    dialect: str
+    source_resolved: bool
+    statement_ordinal: int
+    is_write: bool
+    is_intermediate: bool
+    control_flow_context: str | None = None
+    unparsed_reason: str | None = None
+    # Set only on a synthesised transitive edge: the intermediate (temp
+    # table/variable) name this edge's source->target link was resolved
+    # *through*, so a consumer can always tell a direct hop from a
+    # multi-statement derivation rather than the two looking identical.
+    via_temp_table: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedStatement:
+    """One top-level statement chunk of a procedure body, after control-flow
+    peeling and classification -- the unit `find_single_read_only_result_statement`
+    (procedure_tool_blueprint.py, N12) and `parse_procedure_lineage` are both
+    built from."""
+
+    ordinal: int
+    is_write: bool
+    is_unparsed: bool
+    is_no_lineage: bool  # DECLARE/SET/session-config -- genuinely nothing to report
+    unparsed_reason: str | None
+    control_flow_context: str | None
+    target_table: str | None
+    is_intermediate_target: bool
+    node: exp.Expr | None  # the parsed sqlglot node, or None if not resolved to one
+    edges: tuple[ProcedureLineageEdgeRecord, ...]
+
+
+@dataclass(slots=True)
+class ProcedureParseResult:
+    """Result of a procedure-aware lineage parse."""
+
+    edges: list[ProcedureLineageEdgeRecord] = field(default_factory=list)
+    statement_count: int = 0
+    confidence: str = Confidence.LOW.value
+    dialect: str = ""
+    sql_hash: str = ""
+    errors: list[str] = field(default_factory=list)
+    # True iff every statement chunk in the body was either resolved to a
+    # concrete DML/DDL shape or recognised as genuinely lineage-free
+    # (DECLARE/SET/structural control-flow keyword) -- i.e. zero UNPARSED
+    # chunks. This is the "every branch accounted for" signal N12 requires;
+    # it is never inferred from an empty edge list, only from this.
+    is_fully_parsed: bool = False
+    # True iff `is_fully_parsed` AND no statement touched INSERT/UPDATE/
+    # DELETE/MERGE/CREATE (any DDL/DML write) -- i.e. proven read-only, not
+    # merely "no write statement happened to be found". See the module
+    # docstring and N12 in the tracker.
+    is_read_only: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Step 1: strip the CREATE PROCEDURE/FUNCTION header and outer BEGIN..END (or
+# $$..$$) wrapper, quote/comment-aware. If no such wrapper is recognised the
+# whole input is treated as already being the body -- matching the existing
+# convention (`sql_lineage_parser.parse_procedure_lineage`'s docstring) that
+# a caller may hand in an already-unwrapped body.
+# ---------------------------------------------------------------------------
+
+_HEADER_RE = re.compile(
+    r"^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:PROCEDURE|FUNCTION)\b", re.IGNORECASE
+)
+
+
+def _scan_tokens(sql: str) -> list[tuple[int, int, str]]:
+    """Scan `sql` once, quote/comment-aware, yielding `(start, end, kind)`
+    spans for the meaningful pieces: `"word"` for a bare identifier/keyword
+    run, `"other"` for a single significant character (`;`, `(`, `)`), and
+    nothing at all for whitespace, comments, or the *inside* of a quoted
+    literal/identifier (so a keyword or `;` inside a string can never be
+    mistaken for a real one). Shared by the body extractor and the
+    statement splitter so both agree on what counts as "inside a string".
+    """
+    tokens: list[tuple[int, int, str]] = []
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch in " \t\r\n":
+            i += 1
+            continue
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'" and sql[j : j + 2] != "''":
+                    j += 1
+                    break
+                j = j + 2 if sql[j : j + 2] == "''" else j + 1
+            i = j
+            continue
+        if ch == '"' or ch == "[":
+            close = '"' if ch == '"' else "]"
+            j = sql.find(close, i + 1)
+            i = n if j == -1 else j + 1
+            continue
+        if ch == "$" and sql[i : i + 2] == "$$":
+            j = sql.find("$$", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch.isalpha() or ch == "_" or ch == "@" or ch == "#":
+            j = i
+            while j < n and (sql[j].isalnum() or sql[j] in "_@#$"):
+                j += 1
+            tokens.append((i, j, "word"))
+            i = j
+            continue
+        if ch in ";()":
+            tokens.append((i, i + 1, "other" if ch != ";" else ";"))
+            i += 1
+            continue
+        i += 1
+    return tokens
+
+
+def _extract_body(sql: str) -> str:
+    """Strip a `CREATE PROCEDURE/FUNCTION ... AS/IS BEGIN ... END` (or
+    `$$ ... $$`) wrapper. Best-effort: falls back to the whole input when the
+    header/wrapper is not clearly recognised, which is always safe (the
+    statement splitter below still walks it correctly; a genuinely malformed
+    or unrecognised header just becomes its own UNPARSED chunk rather than
+    crashing anything).
+    """
+    if not _HEADER_RE.match(sql):
+        return sql
+
+    tokens = _scan_tokens(sql)
+    # Postgres/PL-pgSQL: CREATE FUNCTION ... AS $$ ... $$ LANGUAGE plpgsql.
+    dollar_start = sql.find("$$")
+    if dollar_start != -1:
+        dollar_end = sql.find("$$", dollar_start + 2)
+        if dollar_end != -1:
+            inner = sql[dollar_start + 2 : dollar_end]
+            # The dollar-quoted body may itself be a BEGIN..END block; if so
+            # strip that too so plpgsql matches the T-SQL/PL-SQL shape.
+            return _strip_begin_end(inner) or inner
+    return _strip_begin_end_from_tokens(sql, tokens) or sql
+
+
+def _strip_begin_end(text: str) -> str | None:
+    return _strip_begin_end_from_tokens(text, _scan_tokens(text))
+
+
+_NON_BEGIN_END_CLOSERS = {"LOOP", "IF", "CASE", "WHILE"}
+
+
+def _strip_begin_end_from_tokens(sql: str, tokens: list[tuple[int, int, str]]) -> str | None:
+    """Find the first top-level `BEGIN` and its matching `END`, returning the
+    text strictly between them, or None if no `BEGIN` is found.
+
+    Only a bare `BEGIN` opens a nesting level here -- `LOOP`/`IF`/`CASE`/
+    `WHILE` never do (they are closed by `END LOOP`/`END IF`/`END CASE`/
+    `END WHILE`, not by a `BEGIN`). So a compound closer whose next word is
+    one of those must NOT decrement this counter: nothing incremented it for
+    that construct in the first place, and treating it as if it did closes
+    the outer `BEGIN...END` early -- silently truncating everything after a
+    `LOOP`/`IF`/`CASE` nested inside the procedure body, which is exactly
+    the silent-truncation failure mode this module exists to avoid.
+    """
+    word_tokens = [
+        (start, end, sql[start:end].upper()) for start, end, kind in tokens if kind == "word"
+    ]
+    depth = 0
+    begin_body_start: int | None = None
+    for index, (start, end, word) in enumerate(word_tokens):
+        if word == "BEGIN":
+            if depth == 0 and begin_body_start is None:
+                begin_body_start = end
+            depth += 1
+        elif word == "END":
+            next_word = word_tokens[index + 1][2] if index + 1 < len(word_tokens) else None
+            if next_word in _NON_BEGIN_END_CLOSERS:
+                continue
+            depth -= 1
+            if depth == 0 and begin_body_start is not None:
+                return sql[begin_body_start:start]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Step 2: split the body into top-level, `;`-delimited statement chunks.
+# ---------------------------------------------------------------------------
+
+
+def _split_top_level_statements(body: str) -> list[str]:
+    tokens = _scan_tokens(body)
+    chunks: list[str] = []
+    chunk_start = 0
+    for start, end, kind in tokens:
+        if kind == ";":
+            chunks.append(body[chunk_start:start])
+            chunk_start = end
+    tail = body[chunk_start:]
+    if tail.strip():
+        chunks.append(tail)
+    return [c for c in (c.strip() for c in chunks) if c]
+
+
+# ---------------------------------------------------------------------------
+# Step 3: peel a recognised control-flow header off the front of a chunk.
+# ---------------------------------------------------------------------------
+
+_STRUCTURAL_ONLY_RE = re.compile(
+    r"^\s*(BEGIN\s+TRY|END\s+TRY|BEGIN\s+CATCH|END\s+CATCH|BEGIN|END(?:\s+(?:IF|LOOP|WHILE|CASE))?|ELSE)\s*$",
+    re.IGNORECASE,
+)
+_IF_BEGIN_RE = re.compile(r"^\s*IF\b(?P<cond>.*?)\bBEGIN\b\s*", re.IGNORECASE | re.DOTALL)
+_IF_THEN_RE = re.compile(
+    r"^\s*(?:IF|ELSIF|ELSEIF)\b(?P<cond>.*?)\bTHEN\b\s*", re.IGNORECASE | re.DOTALL
+)
+_ELSE_RE = re.compile(r"^\s*ELSE\b\s*", re.IGNORECASE)
+_WHILE_BEGIN_RE = re.compile(r"^\s*WHILE\b(?P<cond>.*?)\bBEGIN\b\s*", re.IGNORECASE | re.DOTALL)
+_WHILE_LOOP_RE = re.compile(r"^\s*WHILE\b(?P<cond>.*?)\bLOOP\b\s*", re.IGNORECASE | re.DOTALL)
+_CURSOR_FOR_LOOP_RE = re.compile(
+    r"^\s*FOR\s+\w+\s+IN\s*\((?P<select>.*)\)\s*LOOP\s*", re.IGNORECASE | re.DOTALL
+)
+_BARE_FOR_LOOP_RE = re.compile(r"^\s*FOR\b.*?\bLOOP\b\s*", re.IGNORECASE | re.DOTALL)
+_BARE_LOOP_RE = re.compile(r"^\s*LOOP\b\s*", re.IGNORECASE)
+# A bare BEGIN/END with more text following in the same chunk: T-SQL does
+# not require a `;` after a bare BEGIN/END, so the statement splitter (which
+# only splits on `;`) legitimately produces e.g. "END\n\nINSERT INTO ..." as
+# one raw chunk when the source omits that optional semicolon -- these peel
+# the leading structural keyword off so the real statement underneath still
+# gets classified, rather than the whole chunk falling through to UNPARSED.
+_BARE_BEGIN_MID_RE = re.compile(r"^\s*BEGIN\s+", re.IGNORECASE)
+_BARE_END_MID_RE = re.compile(r"^\s*END(?:\s+(?:IF|LOOP|WHILE|CASE|TRY|CATCH))?\s+", re.IGNORECASE)
+_CASE_WHEN_THEN_RE = re.compile(r"^\s*(?:CASE\s*)?WHEN\b.*?\bTHEN\b\s*", re.IGNORECASE | re.DOTALL)
+_MAX_PEEL_ITERATIONS: Final[int] = 8
+
+
+@dataclass(frozen=True, slots=True)
+class _PeelResult:
+    remainder: str
+    control_flow_context: str | None
+    cursor_loop_source_sql: str | None
+
+
+def _peel_control_flow_prefix(chunk: str) -> _PeelResult:
+    """Repeatedly strip a recognised control-flow header from the front of
+    `chunk`. Returns the leftover text (empty if the chunk was purely
+    structural), the innermost control-flow context peeled (for evidence),
+    and -- for a PL/SQL cursor `FOR ... IN (SELECT ...) LOOP` -- the
+    parenthesised SELECT text, which carries real lineage of its own and is
+    extracted separately by the caller.
+    """
+    if _STRUCTURAL_ONLY_RE.match(chunk):
+        return _PeelResult("", None, None)
+
+    remainder = chunk
+    context: str | None = None
+    cursor_sql: str | None = None
+    for _ in range(_MAX_PEEL_ITERATIONS):
+        if match := _CURSOR_FOR_LOOP_RE.match(remainder):
+            cursor_sql = match.group("select")
+            context = "CURSOR_FOR_LOOP"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _IF_BEGIN_RE.match(remainder):
+            context = "IF_BRANCH"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _IF_THEN_RE.match(remainder):
+            context = "IF_BRANCH"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _WHILE_BEGIN_RE.match(remainder):
+            context = "WHILE_LOOP"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _WHILE_LOOP_RE.match(remainder):
+            context = "WHILE_LOOP"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _CASE_WHEN_THEN_RE.match(remainder):
+            context = "CASE_BRANCH"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _BARE_FOR_LOOP_RE.match(remainder):
+            context = "FOR_LOOP"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _ELSE_RE.match(remainder):
+            context = "ELSE_BRANCH"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _BARE_LOOP_RE.match(remainder):
+            context = context or "LOOP_BLOCK"
+            remainder = remainder[match.end() :]
+            continue
+        if match := _BARE_BEGIN_MID_RE.match(remainder):
+            remainder = remainder[match.end() :]
+            continue
+        if match := _BARE_END_MID_RE.match(remainder):
+            remainder = remainder[match.end() :]
+            continue
+        if _STRUCTURAL_ONLY_RE.match(remainder):
+            remainder = ""
+            break
+        break
+    return _PeelResult(remainder.strip(), context, cursor_sql)
+
+
+# ---------------------------------------------------------------------------
+# Step 3b: recognise dynamic SQL / nested procedure calls before attempting a
+# generic sqlglot parse -- both would otherwise either fail to parse at all
+# (EXECUTE IMMEDIATE under the oracle dialect) or parse "successfully" into a
+# shape with no table references at all (`EXEC(@sql)`), silently producing
+# zero edges either way with nothing flagging the gap.
+# ---------------------------------------------------------------------------
+
+_DYNAMIC_SQL_RE = re.compile(
+    r"\bEXECUTE\s+IMMEDIATE\b|\bsp_executesql\b|\bEXEC(?:UTE)?\s*\(", re.IGNORECASE
+)
+_NESTED_CALL_RE = re.compile(
+    r"^\s*(?:EXEC(?:UTE)?|CALL)\s+([A-Za-z_][\w.$#]*)", re.IGNORECASE
+)
+_NO_LINEAGE_KEYWORDS_RE = re.compile(
+    r"^\s*(SET|DECLARE|EXIT|CONTINUE|LEAVE|GOTO|RAISERROR|RAISE|PRINT|THROW|COMMIT|"
+    r"ROLLBACK|SAVEPOINT|OPEN|CLOSE|FETCH|DBMS_OUTPUT)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_temp_name(name: str) -> bool:
+    return name.startswith("#") or name.startswith("@")
+
+
+def _table_is_temp(table: object) -> bool:
+    if not _SQLGLOT_AVAILABLE or not isinstance(table, exp.Table):
+        return False
+    this = table.args.get("this")
+    if isinstance(this, exp.Parameter):
+        return True
+    if isinstance(this, exp.Identifier) and this.args.get("temporary"):
+        return True
+    return False
+
+
+def _collect_table_aliases_with_temp(statement: object) -> tuple[dict[str, str], set[str]]:
+    """Mirrors `sql_lineage_parser._collect_table_aliases`'s exact walk
+    order (so alias resolution stays consistent) while additionally
+    recording which resolved names are temp tables/variables."""
+    aliases: dict[str, str] = {}
+    temp: set[str] = set()
+    if not _SQLGLOT_AVAILABLE or not isinstance(statement, exp.Expression):
+        return aliases, temp
+    for table in statement.find_all(exp.Table):
+        fqn = _resolve_table_name(table)
+        if not fqn:
+            continue
+        is_temp = _table_is_temp(table)
+        if table.alias:
+            aliases[table.alias] = fqn
+            if is_temp:
+                temp.add(table.alias)
+        aliases[fqn] = fqn
+        if table.name:
+            aliases[table.name] = fqn
+        if is_temp:
+            temp.add(fqn)
+    return aliases, temp
+
+
+def _where_filter_edges(
+    where_node: object,
+    target_table: str,
+    dialect: str,
+    aliases: dict[str, str],
+    exclude: set[tuple[str, str]],
+) -> list[LineageEdge]:
+    """FILTERED evidence for columns referenced only in a WHERE clause --
+    the UPDATE/DELETE counterpart of `sql_lineage_parser._extract_filter_only_edges`
+    (that helper is typed to `exp.Select` specifically and is not reused
+    here; this mirrors its behaviour and its `FILTER_EVIDENCE_TARGET_COLUMN`
+    convention exactly)."""
+    if not _SQLGLOT_AVAILABLE or where_node is None:
+        return []
+    from aida.sql_lineage_parser import FILTER_EVIDENCE_TARGET_COLUMN
+
+    edges: list[LineageEdge] = []
+    seen: set[tuple[str, str]] = set()
+    for table_ref, col_name in _extract_source_columns(where_node):
+        resolved, ok = _resolve_or_mark_unresolved(table_ref, aliases)
+        key = (resolved, col_name)
+        if key in exclude or key in seen:
+            continue
+        seen.add(key)
+        edges.append(
+            LineageEdge(
+                source_table=resolved if ok else UNRESOLVED_TABLE,
+                source_column=col_name,
+                target_table=target_table,
+                target_column=FILTER_EVIDENCE_TARGET_COLUMN,
+                transformation_type=TransformationType.FILTERED.value,
+                confidence=Confidence.PARTIAL.value,
+                dialect=dialect,
+                source_resolved=ok,
+            )
+        )
+    return edges
+
+
+def _extract_edges_from_update(
+    statement: exp.Update, dialect: str
+) -> tuple[list[LineageEdge], str]:
+    """UPDATE ... SET ... [FROM ...] [WHERE ...] -- not handled by
+    `sql_lineage_parser._extract_from_statement` at all. Supports both the
+    ANSI shape (`UPDATE t SET t.c = ... WHERE ...`) and the T-SQL
+    `UPDATE alias SET ... FROM real_table alias JOIN ... ` shape, where the
+    target named after UPDATE is only an alias for the real table named in
+    FROM -- resolved through the same alias table JOIN/FROM tables
+    contribute, exactly like a SELECT's FROM/JOIN.
+    """
+    aliases, _temp = _collect_table_aliases_with_temp(statement)
+    raw_target = (
+        _resolve_table_name(statement.this) if isinstance(statement.this, exp.Table) else ""
+    )
+    target_table = aliases.get(raw_target, raw_target)
+
+    edges: list[LineageEdge] = []
+    select_list_refs: set[tuple[str, str]] = set()
+    for assignment in statement.expressions:
+        if not isinstance(assignment, exp.EQ) or not isinstance(
+            assignment.this, exp.Column
+        ):
+            continue
+        target_col = assignment.this.name
+        source_expr = assignment.expression
+        has_agg = _has_aggregate_functions(source_expr)
+        transformation = _classify_transformation(source_expr, has_agg)
+        for table_ref, col_name in _extract_source_columns(source_expr):
+            resolved, ok = _resolve_or_mark_unresolved(table_ref, aliases)
+            select_list_refs.add((resolved, col_name))
+            edges.append(
+                LineageEdge(
+                    source_table=resolved if ok else UNRESOLVED_TABLE,
+                    source_column=col_name,
+                    target_table=target_table,
+                    target_column=target_col,
+                    transformation_type=transformation,
+                    confidence=Confidence.FULL.value if ok else Confidence.PARTIAL.value,
+                    dialect=dialect,
+                    source_resolved=ok,
+                )
+            )
+    edges.extend(
+        _where_filter_edges(
+            statement.args.get("where"), target_table, dialect, aliases, select_list_refs
+        )
+    )
+    return edges, target_table
+
+
+def _extract_edges_from_merge(
+    statement: exp.Merge, dialect: str
+) -> tuple[list[LineageEdge], str]:
+    """MERGE INTO target USING source ON (...) WHEN MATCHED THEN UPDATE SET
+    ... WHEN NOT MATCHED THEN INSERT (...) VALUES (...) -- column-level for
+    each WHEN branch. `sql_lineage_parser._extract_from_statement`'s MERGE
+    handling only walks nested `SELECT`s (the USING source, if it is itself
+    a subquery); it does not map WHEN-branch columns at all. This does, in
+    addition -- both are additive, not a replacement of what that gives.
+    """
+    aliases, _temp = _collect_table_aliases_with_temp(statement)
+    target_table = (
+        _resolve_table_name(statement.this) if isinstance(statement.this, exp.Table) else ""
+    )
+    if not target_table:
+        return [], ""
+
+    edges: list[LineageEdge] = []
+    whens = statement.args.get("whens")
+    when_exprs = whens.expressions if whens is not None else []
+    for when in when_exprs:
+        then = when.args.get("then")
+        if isinstance(then, exp.Update):
+            for assignment in then.expressions:
+                if not isinstance(assignment, exp.EQ) or not isinstance(
+                    assignment.this, exp.Column
+                ):
+                    continue
+                target_col = assignment.this.name
+                source_expr = assignment.expression
+                has_agg = _has_aggregate_functions(source_expr)
+                transformation = _classify_transformation(source_expr, has_agg)
+                for table_ref, col_name in _extract_source_columns(source_expr):
+                    resolved, ok = _resolve_or_mark_unresolved(table_ref, aliases)
+                    edges.append(
+                        LineageEdge(
+                            source_table=resolved if ok else UNRESOLVED_TABLE,
+                            source_column=col_name,
+                            target_table=target_table,
+                            target_column=target_col,
+                            transformation_type=transformation,
+                            confidence=(
+                                Confidence.FULL.value if ok else Confidence.PARTIAL.value
+                            ),
+                            dialect=dialect,
+                            source_resolved=ok,
+                        )
+                    )
+        elif isinstance(then, exp.Insert):
+            target_tuple = then.this
+            source_tuple = then.expression
+            target_cols = (
+                target_tuple.expressions if isinstance(target_tuple, exp.Tuple) else []
+            )
+            source_exprs = (
+                source_tuple.expressions if isinstance(source_tuple, exp.Tuple) else []
+            )
+            for target_col_expr, source_expr in zip(target_cols, source_exprs, strict=False):
+                if not isinstance(target_col_expr, exp.Column):
+                    continue
+                target_col = target_col_expr.name
+                has_agg = _has_aggregate_functions(source_expr)
+                transformation = _classify_transformation(source_expr, has_agg)
+                for table_ref, col_name in _extract_source_columns(source_expr):
+                    resolved, ok = _resolve_or_mark_unresolved(table_ref, aliases)
+                    edges.append(
+                        LineageEdge(
+                            source_table=resolved if ok else UNRESOLVED_TABLE,
+                            source_column=col_name,
+                            target_table=target_table,
+                            target_column=target_col,
+                            transformation_type=transformation,
+                            confidence=(
+                                Confidence.FULL.value if ok else Confidence.PARTIAL.value
+                            ),
+                            dialect=dialect,
+                            source_resolved=ok,
+                        )
+                    )
+        # WHEN [NOT] MATCHED THEN DELETE, or any other branch shape: no
+        # column-level mapping to add -- the MERGE as a whole is still a
+        # write (tracked by the caller regardless of edges), just not one
+        # this branch fabricates column lineage for.
+    return edges, target_table
+
+
+def _extract_edges_from_insert(
+    statement: exp.Insert, dialect: str
+) -> tuple[list[LineageEdge], str]:
+    """INSERT INTO t [(col, ...)] SELECT ... -- not fully handled by
+    `sql_lineage_parser._extract_from_statement`, in two ways this fixes:
+
+    1. `_extract_target_table`'s `Insert` branch only unwraps a bare
+       `exp.Table`; an INSERT with an explicit column list parses its target
+       as `exp.Schema` wrapping the table (the same shape `CREATE VIEW`
+       already unwraps), so `INSERT INTO t (a, b) SELECT x, y` silently
+       resolved to an empty target table and produced zero edges -- a
+       pre-existing gap in the shared helper, not introduced by AT-D2, found
+       while building this module. Not fixed in `sql_lineage_parser.py`
+       itself (out of this module's file-ownership scope); worked around
+       here instead.
+    2. Even once the target resolves, an explicit column list is
+       authoritative for target column *names* -- `INSERT INTO t (a, b)
+       SELECT x, y` must produce `a<-x, b<-y`, not `x<-x, y<-y` (what
+       reusing `_extract_edges_from_select`'s own alias-based naming would
+       give, since `x`/`y` are the select list's own names, not `t`'s).
+       Positionally zipped against the column list when one is given;
+       falls back to the select list's own alias/name (the existing,
+       already-tested behaviour) when the INSERT has no explicit list.
+    """
+    this = statement.this
+    target_columns: list[str] | None = None
+    if isinstance(this, exp.Schema):
+        table = this.this
+        target_table = _resolve_table_name(table) if isinstance(table, exp.Table) else ""
+        target_columns = [
+            column.name
+            for column in this.expressions
+            if isinstance(column, exp.Column | exp.Identifier)
+        ]
+    elif isinstance(this, exp.Table):
+        target_table = _resolve_table_name(this)
+    else:
+        target_table = ""
+    if not target_table:
+        return [], ""
+
+    table_aliases = _collect_table_aliases(statement)
+    inner_select = statement.find(exp.Union) or statement.find(exp.Select)
+    if inner_select is None:
+        return [], target_table
+
+    if not target_columns:
+        return (
+            _extract_edges_from_select(inner_select, target_table, dialect, table_aliases),
+            target_table,
+        )
+
+    projections = (
+        inner_select.left.expressions
+        if isinstance(inner_select, exp.Union) and isinstance(inner_select.left, exp.Select)
+        else (inner_select.expressions if isinstance(inner_select, exp.Select) else [])
+    )
+    edges: list[LineageEdge] = []
+    for target_col, select_expr in zip(target_columns, projections, strict=False):
+        source_expr = select_expr.this if isinstance(select_expr, exp.Alias) else select_expr
+        if isinstance(source_expr, exp.Star) or (
+            isinstance(source_expr, exp.Column) and isinstance(source_expr.this, exp.Star)
+        ):
+            star_alias = source_expr.table if isinstance(source_expr, exp.Column) else None
+            edges.extend(
+                _extract_star_edges(
+                    star_alias, target_table, dialect, table_aliases, {}, table_aliases,
+                    inner_select if isinstance(inner_select, exp.Select) else inner_select,
+                )
+            )
+            continue
+        has_agg = _has_aggregate_functions(source_expr)
+        transformation = _classify_transformation(source_expr, has_agg)
+        for table_ref, col_name in _extract_source_columns(source_expr):
+            resolved, ok = _resolve_or_mark_unresolved(table_ref, table_aliases)
+            edges.append(
+                LineageEdge(
+                    source_table=resolved if ok else UNRESOLVED_TABLE,
+                    source_column=col_name,
+                    target_table=target_table,
+                    target_column=target_col,
+                    transformation_type=transformation,
+                    confidence=Confidence.FULL.value if ok else Confidence.PARTIAL.value,
+                    dialect=dialect,
+                    source_resolved=ok,
+                )
+            )
+    return edges, target_table
+
+
+def _extract_edges_from_select_into(
+    statement: object, dialect: str, table_aliases: dict[str, str]
+) -> tuple[list[LineageEdge], str]:
+    into = statement.args.get("into") if isinstance(statement, exp.Select) else None
+    into_table = into.this if into is not None else None
+    if isinstance(into_table, exp.Table):
+        target_table = _resolve_table_name(into_table)
+    else:
+        target_table = PROCEDURE_RESULT_TARGET
+    edges = _extract_edges_from_select(statement, target_table, dialect, table_aliases)
+    return edges, target_table
+
+
+# ---------------------------------------------------------------------------
+# Step 4: the per-chunk dispatcher.
+# ---------------------------------------------------------------------------
+
+
+def _classify_and_extract(
+    ordinal: int, raw_chunk: str, dialect: str, sqlglot_dialect: str
+) -> list[ParsedStatement]:
+    peeled = _peel_control_flow_prefix(raw_chunk)
+    results: list[ParsedStatement] = []
+
+    if peeled.cursor_loop_source_sql:
+        results.extend(
+            _classify_and_extract(
+                ordinal, peeled.cursor_loop_source_sql, dialect, sqlglot_dialect
+            )
+        )
+
+    remainder = peeled.remainder
+    if not remainder:
+        # Purely structural (BEGIN/END/ELSE/...) -- genuinely no lineage.
+        return results
+
+    if _NO_LINEAGE_KEYWORDS_RE.match(remainder):
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal,
+                is_write=False,
+                is_unparsed=False,
+                is_no_lineage=True,
+                unparsed_reason=None,
+                control_flow_context=peeled.control_flow_context,
+                target_table=None,
+                is_intermediate_target=False,
+                node=None,
+                edges=(),
+            )
+        )
+        return results
+
+    if _DYNAMIC_SQL_RE.search(remainder):
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.DYNAMIC_SQL.value}: {remainder[:120]!r}",
+            )
+        )
+        return results
+
+    if match := _NESTED_CALL_RE.match(remainder):
+        callee = match.group(1)
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {callee}",
+            )
+        )
+        return results
+
+    if not _SQLGLOT_AVAILABLE:
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.PARSE_ERROR.value}: sqlglot library is not available",
+            )
+        )
+        return results
+
+    try:
+        node = sqlglot.parse_one(remainder, dialect=sqlglot_dialect, error_level=ErrorLevel.RAISE)
+    except Exception as exc:  # sqlglot raises a broad ParseError/TokenError family
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.PARSE_ERROR.value}: {exc!s}"[:300],
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Command):
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.UNSUPPORTED_STATEMENT_SHAPE.value}: "
+                f"sqlglot could not parse this statement shape "
+                f"({remainder[:120]!r})",
+            )
+        )
+        return results
+
+    table_aliases = _collect_table_aliases(node)
+
+    if isinstance(node, exp.Select | exp.Union):
+        edges, target = _extract_edges_from_select_into(node, dialect, table_aliases)
+        is_write = target != PROCEDURE_RESULT_TARGET
+        temp = target in _collect_table_aliases_with_temp(node)[1] if is_write else False
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=is_write, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, is_write, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Insert):
+        edges, target = _extract_edges_from_insert(node, dialect)
+        temp = target in _collect_table_aliases_with_temp(node)[1]
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target or None, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Update):
+        edges, target = _extract_edges_from_update(node, dialect)
+        temp = target in _collect_table_aliases_with_temp(node)[1]
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target or None, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Delete):
+        aliases, temp_set = _collect_table_aliases_with_temp(node)
+        target_expr = node.this
+        target = _resolve_table_name(target_expr) if isinstance(target_expr, exp.Table) else ""
+        target = aliases.get(target, target)
+        temp = target in temp_set
+        edges = _where_filter_edges(
+            node.args.get("where"), target or "<UNKNOWN_TARGET>", dialect, aliases, set()
+        )
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target or None, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Merge):
+        edges, target = _extract_edges_from_merge(node, dialect)
+        temp = target in _collect_table_aliases_with_temp(node)[1]
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target or None, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Create):
+        target = _extract_target_table(node)
+        temp = target in _collect_table_aliases_with_temp(node)[1]
+        # [] for a plain CREATE TABLE, non-empty for CREATE TABLE ... AS SELECT.
+        edges = _extract_from_statement(node, dialect)
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=True, is_unparsed=False, is_no_lineage=False,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=target or None, is_intermediate_target=temp, node=node,
+                edges=tuple(_wrap(edges, ordinal, True, temp, peeled.control_flow_context)),
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Execute):
+        this = node.args.get("this")
+        # `EXEC(@sql)`/`EXECUTE(@sql)`: a parenthesised expression, not a
+        # plain procedure name -- dynamic SQL sqlglot happened to parse
+        # cleanly into a shape with no table references at all.
+        if isinstance(this, exp.Paren) or not isinstance(this, exp.Table | exp.Column):
+            results.append(
+                _unparsed_statement(
+                    ordinal, dialect, peeled.control_flow_context,
+                    f"{UnparsedReason.DYNAMIC_SQL.value}: EXEC(...) with a dynamic argument",
+                )
+            )
+            return results
+        callee = _resolve_table_name(this) if isinstance(this, exp.Table) else str(this)
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.NESTED_PROCEDURE_CALL.value}: {callee}",
+            )
+        )
+        return results
+
+    if isinstance(node, exp.ExecuteSql):
+        results.append(
+            _unparsed_statement(
+                ordinal, dialect, peeled.control_flow_context,
+                f"{UnparsedReason.DYNAMIC_SQL.value}: sp_executesql",
+            )
+        )
+        return results
+
+    if isinstance(node, exp.Set | exp.Declare):
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=True,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=None, is_intermediate_target=False, node=node, edges=(),
+            )
+        )
+        return results
+
+    # Anything else sqlglot did successfully parse into a *specific* node
+    # type this dispatcher does not recognise: if it references no table at
+    # all, it cannot carry table-level lineage (a bare RAISERROR/PRINT/THROW
+    # function-call statement, for instance) -- genuinely nothing to report.
+    # If it does reference a table, INV-9/AT-C4 says flag it rather than
+    # guess: never fabricate lineage for a shape this module was not written
+    # to interpret.
+    references_table = isinstance(node, exp.Expression) and node.find(exp.Table) is not None
+    if not references_table:
+        results.append(
+            ParsedStatement(
+                ordinal=ordinal, is_write=False, is_unparsed=False, is_no_lineage=True,
+                unparsed_reason=None, control_flow_context=peeled.control_flow_context,
+                target_table=None, is_intermediate_target=False, node=node, edges=(),
+            )
+        )
+        return results
+
+    results.append(
+        _unparsed_statement(
+            ordinal, dialect, peeled.control_flow_context,
+            f"{UnparsedReason.UNRESOLVED_CONTROL_FLOW.value}: unrecognised statement shape "
+            f"{type(node).__name__} references a table but is not one of this module's "
+            f"known DML/DDL kinds",
+        )
+    )
+    return results
+
+
+def _wrap(
+    edges: list[LineageEdge],
+    ordinal: int,
+    is_write: bool,
+    is_intermediate: bool,
+    control_flow_context: str | None,
+) -> list[ProcedureLineageEdgeRecord]:
+    return [
+        ProcedureLineageEdgeRecord(
+            source_table=e.source_table,
+            source_column=e.source_column,
+            target_table=e.target_table,
+            target_column=e.target_column,
+            transformation_type=e.transformation_type,
+            confidence=e.confidence,
+            dialect=e.dialect,
+            source_resolved=e.source_resolved,
+            statement_ordinal=ordinal,
+            is_write=is_write,
+            is_intermediate=is_intermediate,
+            control_flow_context=control_flow_context,
+        )
+        for e in edges
+    ]
+
+
+def _unparsed_statement(
+    ordinal: int, dialect: str, control_flow_context: str | None, reason: str
+) -> ParsedStatement:
+    edge = ProcedureLineageEdgeRecord(
+        source_table=UNRESOLVED_TABLE,
+        source_column=UNPARSED_MARKER,
+        target_table=PROCEDURE_RESULT_TARGET,
+        target_column=UNPARSED_MARKER,
+        transformation_type=UNPARSED_TRANSFORMATION_TYPE,
+        confidence=Confidence.LOW.value,
+        dialect=dialect,
+        source_resolved=False,
+        statement_ordinal=ordinal,
+        is_write=False,
+        is_intermediate=False,
+        control_flow_context=control_flow_context,
+        unparsed_reason=reason,
+    )
+    return ParsedStatement(
+        ordinal=ordinal, is_write=False, is_unparsed=True, is_no_lineage=False,
+        unparsed_reason=reason, control_flow_context=control_flow_context,
+        target_table=None, is_intermediate_target=False, node=None, edges=(edge,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 5: temp-table/variable hop propagation, iterated to a fixed point.
+# ---------------------------------------------------------------------------
+
+_MAX_PROPAGATION_PASSES: Final[int] = 5
+
+
+def _propagate_intermediate_hops(
+    edges: list[ProcedureLineageEdgeRecord],
+) -> list[ProcedureLineageEdgeRecord]:
+    def _key(
+        source_table: str, source_column: str, target_table: str, target_column: str
+    ) -> tuple[str, str, str, str]:
+        return (
+            source_table.lower(), source_column.lower(),
+            target_table.lower(), target_column.lower(),
+        )
+
+    synthesized: list[ProcedureLineageEdgeRecord] = []
+    known_keys = {
+        _key(e.source_table, e.source_column, e.target_table, e.target_column) for e in edges
+    }
+    frontier = list(edges)
+    for _ in range(_MAX_PROPAGATION_PASSES):
+        # (temp_table.lower(), temp_column.lower()) -> upstream edges that fed it
+        temp_writes: dict[tuple[str, str], list[ProcedureLineageEdgeRecord]] = {}
+        for e in frontier + synthesized:
+            if e.is_intermediate and e.transformation_type != UNPARSED_TRANSFORMATION_TYPE:
+                temp_key = (e.target_table.lower(), e.target_column.lower())
+                temp_writes.setdefault(temp_key, []).append(e)
+
+        new_edges: list[ProcedureLineageEdgeRecord] = []
+        for e in edges + synthesized:
+            if e.transformation_type == UNPARSED_TRANSFORMATION_TYPE:
+                continue
+            upstream = temp_writes.get((e.source_table.lower(), e.source_column.lower()))
+            if not upstream:
+                continue
+            for hop in upstream:
+                key = _key(hop.source_table, hop.source_column, e.target_table, e.target_column)
+                if key in known_keys:
+                    continue
+                known_keys.add(key)
+                is_agg = TransformationType.AGGREGATED.value in {
+                    hop.transformation_type, e.transformation_type,
+                }
+                new_edges.append(
+                    ProcedureLineageEdgeRecord(
+                        source_table=hop.source_table,
+                        source_column=hop.source_column,
+                        target_table=e.target_table,
+                        target_column=e.target_column,
+                        transformation_type=(
+                            TransformationType.AGGREGATED.value
+                            if is_agg
+                            else TransformationType.DERIVED.value
+                        ),
+                        confidence=Confidence.PARTIAL.value,
+                        dialect=e.dialect,
+                        source_resolved=hop.source_resolved,
+                        statement_ordinal=e.statement_ordinal,
+                        is_write=e.is_write,
+                        is_intermediate=e.is_intermediate,
+                        control_flow_context=e.control_flow_context,
+                        via_temp_table=e.source_table,
+                    )
+                )
+        if not new_edges:
+            break
+        synthesized.extend(new_edges)
+    return synthesized
+
+
+def _dedupe_edges(
+    edges: list[ProcedureLineageEdgeRecord],
+) -> list[ProcedureLineageEdgeRecord]:
+    """Two different branches of the same statement (e.g. a MERGE's WHEN
+    MATCHED UPDATE and WHEN NOT MATCHED INSERT both mapping the same source
+    column onto the same target column) can legitimately produce the exact
+    same fact twice. Kept as one edge, not silently multiplied -- this also
+    keeps the natural key the persistence layer's unique constraint uses
+    collision-free without that layer needing to know about branches at all.
+    """
+    seen: set[tuple[str, str, str, str, str, int, str | None]] = set()
+    deduped: list[ProcedureLineageEdgeRecord] = []
+    for edge in edges:
+        key = (
+            edge.source_table, edge.source_column, edge.target_table, edge.target_column,
+            edge.transformation_type, edge.statement_ordinal, edge.via_temp_table,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge)
+    return deduped
+
+
+# ---------------------------------------------------------------------------
+# Public entry points.
+# ---------------------------------------------------------------------------
+
+
+def walk_procedure_statements(sql: str, dialect: str) -> list[ParsedStatement]:
+    """Split, peel, and classify every top-level statement in a procedure
+    body. Exposed (not just an internal helper of `parse_procedure_lineage`)
+    because `procedure_tool_blueprint.py` (N12) needs the parsed AST nodes
+    themselves, not just the flattened edge list.
+    """
+    if not _SQLGLOT_AVAILABLE or dialect not in _SQLGLOT_DIALECT_MAP:
+        return []
+    sqlglot_dialect = _SQLGLOT_DIALECT_MAP[dialect]
+    body = _extract_body(sql)
+    chunks = _split_top_level_statements(body)
+    statements: list[ParsedStatement] = []
+    ordinal = 0
+    for chunk in chunks:
+        for statement in _classify_and_extract(ordinal, chunk, dialect, sqlglot_dialect):
+            statements.append(statement)
+            ordinal += 1
+    return statements
+
+
+def parse_procedure_lineage(sql: str, dialect: str = "postgres") -> ProcedureParseResult:
+    """Procedure-aware column-level lineage extraction (N3). See the module
+    docstring for the algorithm and its explicit, code-derived limitations.
+
+    The SQL is never executed. Literal values are never inspected for
+    anything but statement-hashing (`_compute_sql_hash`, which itself
+    redacts first).
+    """
+    sql_hash = _compute_sql_hash(sql)
+    if dialect not in _SQLGLOT_DIALECT_MAP:
+        return ProcedureParseResult(
+            confidence=Confidence.LOW.value, dialect=dialect, sql_hash=sql_hash,
+            errors=[f"unsupported dialect: {dialect}"],
+        )
+    if not _SQLGLOT_AVAILABLE:
+        return ProcedureParseResult(
+            confidence=Confidence.LOW.value, dialect=dialect, sql_hash=sql_hash,
+            errors=["sqlglot library is not available"],
+        )
+
+    statements = walk_procedure_statements(sql, dialect)
+    if not statements:
+        return ProcedureParseResult(
+            confidence=Confidence.LOW.value, dialect=dialect, sql_hash=sql_hash,
+            errors=["no statements found in procedure body"],
+        )
+
+    edges = [edge for statement in statements for edge in statement.edges]
+    edges.extend(_propagate_intermediate_hops(edges))
+    edges = _dedupe_edges(edges)
+
+    unparsed_reasons = [
+        s.unparsed_reason for s in statements if s.is_unparsed and s.unparsed_reason
+    ]
+    is_fully_parsed = not unparsed_reasons
+    has_write = any(s.is_write for s in statements)
+    has_real_statement = any(not s.is_no_lineage for s in statements)
+    is_read_only = is_fully_parsed and not has_write and has_real_statement
+
+    if not is_fully_parsed:
+        confidence = Confidence.LOW.value if not edges else Confidence.PARTIAL.value
+    elif edges:
+        confidence = (
+            Confidence.FULL.value
+            if all(e.confidence == Confidence.FULL.value for e in edges)
+            else Confidence.PARTIAL.value
+        )
+    else:
+        confidence = Confidence.PARTIAL.value
+
+    return ProcedureParseResult(
+        edges=edges,
+        statement_count=len(statements),
+        confidence=confidence,
+        dialect=dialect,
+        sql_hash=sql_hash,
+        errors=list(unparsed_reasons),
+        is_fully_parsed=is_fully_parsed,
+        is_read_only=is_read_only,
+    )

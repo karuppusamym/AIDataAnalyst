@@ -5,7 +5,11 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from aida import envelope_models, models  # noqa: F401
+# `envelope_models`/`procedure_lineage_models` are imported for their side effect of
+# registering additional tables on `aida.db.Base.metadata` (Group I's
+# `DeepProcedureLineageEdge`/`ProcedureToolGenerationRecord`, same pattern
+# envelope_models already used) so autogenerate/create_all see them.
+from aida import envelope_models, models, procedure_lineage_models  # noqa: F401
 from aida.config import get_settings
 from aida.db import Base
 
