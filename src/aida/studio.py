@@ -18,7 +18,7 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 
-from aida.schemas import ToolParameterDefinition
+from aida.schemas import ContextProductDefinition, ToolParameterDefinition
 from aida.tool_rendering import ToolParameterError, render_tool_sql, template_placeholders
 
 ObjectType = Literal["METRIC", "TOOL", "TERM", "CONTEXT_PRODUCT"]
@@ -366,6 +366,136 @@ def validate_parameter_contract(
 
     return ParameterContractValidation(
         valid=True, definitions=serialized, sample_rendered_sql=rendered.sql
+    )
+
+
+@dataclass
+class ContextProductContractValidation:
+    """Result of validating a Studio CONTEXT_PRODUCT change item's shape (ST-A7).
+
+    Mirrors ``ParameterContractValidation`` (ST-A4): the snapshot is parsed as
+    a real ``ContextProductDefinition`` -- module 19's own pydantic contract
+    for a context product's editable fields -- instead of a hand-rolled
+    dict-shape check, so a Studio author sees exactly the constraints
+    ``context_product_api.py`` enforces at submission time. Reference
+    existence (tables, semantic model versions, glossary terms, tool
+    versions) is deliberately *not* checked here -- that requires an
+    organization-scoped DB lookup the pure test harness does not have, and it
+    is re-checked for real at materialization time
+    (``aida.studio_context_product``, reusing
+    ``validate_context_product_references`` unchanged) before anything is
+    written, so nothing here is a shortcut around it.
+    """
+
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    definition: dict[str, Any] | None = None
+    product_key: str | None = None
+    project_id: str | None = None
+
+
+def _pydantic_errors(exc: ValidationError) -> list[str]:
+    errors: list[str] = []
+    for error in exc.errors():
+        field_path = ".".join(str(part) for part in error["loc"]) or "<root>"
+        errors.append(f"{field_path}: {error['msg']} (got {error.get('input')!r})")
+    return errors
+
+
+def validate_context_product_contract(
+    *,
+    operation: Operation,
+    object_id: str,
+    snapshot: dict[str, Any] | None,
+) -> ContextProductContractValidation:
+    """Validate a Studio CONTEXT_PRODUCT change item's shape (ST-A7).
+
+    - ``DELETE``: no snapshot is required (matching every other object
+      type's DELETE handling in the test harness); ``object_id`` must be the
+      UUID of an existing ``ContextProduct`` so materialization can resolve
+      what to request deprecation of.
+    - ``CREATE``: ``snapshot`` must carry a string ``product_key`` (which
+      must equal ``object_id`` -- the same "the item's own key names the
+      object" convention every other change-item type follows) and a string
+      ``project_id`` UUID (a context product does not exist without a
+      project scope, and a Studio change item carries no project field of
+      its own), plus every ``ContextProductDefinition`` field.
+    - ``UPDATE``: ``object_id`` must be the UUID of an existing
+      ``ContextProduct``; ``snapshot`` must carry every
+      ``ContextProductDefinition`` field (the new draft version's content).
+    """
+    if operation == "DELETE":
+        errors: list[str] = []
+        try:
+            UUID(object_id)
+        except ValueError:
+            errors.append(
+                f"object_id must be an existing context product UUID for DELETE: {object_id!r}"
+            )
+        return ContextProductContractValidation(valid=not errors, errors=errors)
+
+    if snapshot is None:
+        return ContextProductContractValidation(
+            valid=False,
+            errors=["context product definition missing: no after_snapshot provided"],
+        )
+
+    if operation == "CREATE":
+        payload = dict(snapshot)
+        product_key = payload.pop("product_key", None)
+        project_id = payload.pop("project_id", None)
+        errors = []
+        if not isinstance(product_key, str) or not product_key:
+            errors.append("CREATE requires a non-empty string product_key in after_snapshot")
+        elif product_key != object_id:
+            errors.append(
+                f"object_id ({object_id!r}) must equal after_snapshot.product_key "
+                f"({product_key!r})"
+            )
+        if not isinstance(project_id, str) or not project_id:
+            errors.append("CREATE requires a non-empty string project_id in after_snapshot")
+        else:
+            try:
+                UUID(project_id)
+            except ValueError:
+                errors.append(f"project_id is not a valid UUID: {project_id!r}")
+
+        try:
+            definition = ContextProductDefinition.model_validate(payload)
+        except ValidationError as exc:
+            errors.extend(_pydantic_errors(exc))
+            return ContextProductContractValidation(valid=False, errors=errors)
+
+        if errors:
+            return ContextProductContractValidation(valid=False, errors=errors)
+
+        return ContextProductContractValidation(
+            valid=True,
+            definition=definition.model_dump(mode="json"),
+            product_key=product_key,
+            project_id=project_id,
+        )
+
+    # UPDATE
+    errors = []
+    try:
+        UUID(object_id)
+    except ValueError:
+        errors.append(
+            f"object_id must be an existing context product UUID for UPDATE: {object_id!r}"
+        )
+
+    try:
+        definition = ContextProductDefinition.model_validate(snapshot)
+    except ValidationError as exc:
+        errors.extend(_pydantic_errors(exc))
+        return ContextProductContractValidation(valid=False, errors=errors)
+
+    if errors:
+        return ContextProductContractValidation(valid=False, errors=errors)
+
+    return ContextProductContractValidation(
+        valid=True, definition=definition.model_dump(mode="json")
     )
 
 

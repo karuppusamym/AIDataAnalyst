@@ -23171,6 +23171,175 @@
         "title": "StudioConflict",
         "type": "object"
       },
+      "StudioContextProductMaterializationRead": {
+        "additionalProperties": false,
+        "description": "One `StudioContextProductMaterialization` row -- the durable link from\na CONTEXT_PRODUCT change-set item to the real `ContextProduct`/\n`ContextProductVersion`/`GovernanceReview` it produced on submission.",
+        "properties": {
+          "change_item_id": {
+            "format": "uuid",
+            "title": "Change Item Id",
+            "type": "string"
+          },
+          "change_set_id": {
+            "format": "uuid",
+            "title": "Change Set Id",
+            "type": "string"
+          },
+          "context_product_id": {
+            "format": "uuid",
+            "title": "Context Product Id",
+            "type": "string"
+          },
+          "context_product_version_id": {
+            "format": "uuid",
+            "title": "Context Product Version Id",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "title": "Created By",
+            "type": "string"
+          },
+          "governance_review_id": {
+            "format": "uuid",
+            "title": "Governance Review Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "operation": {
+            "title": "Operation",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "change_set_id",
+          "change_item_id",
+          "operation",
+          "context_product_id",
+          "context_product_version_id",
+          "governance_review_id",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "StudioContextProductMaterializationRead",
+        "type": "object"
+      },
+      "StudioContextProductValidateRequest": {
+        "additionalProperties": false,
+        "description": "Stateless shape-validation request for a CONTEXT_PRODUCT change-set\nitem, mirroring `StudioParameterContractValidateRequest` (ST-A4). Lets an\nauthor validate a draft context product definition incrementally, without\nan existing change set or change item -- the exact same check the\nCONTEXT_PRODUCT item's own test gate runs (`_validate_context_product_item`\n-> `validate_context_product_contract`, `studio.py`).",
+        "properties": {
+          "object_id": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Object Id",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "CREATE",
+              "UPDATE",
+              "DELETE"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "snapshot": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot"
+          }
+        },
+        "required": [
+          "operation",
+          "object_id"
+        ],
+        "title": "StudioContextProductValidateRequest",
+        "type": "object"
+      },
+      "StudioContextProductValidateResult": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Definition"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "product_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Key"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "valid": {
+            "title": "Valid",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "valid",
+          "errors"
+        ],
+        "title": "StudioContextProductValidateResult",
+        "type": "object"
+      },
       "StudioDiffRead": {
         "additionalProperties": false,
         "properties": {
@@ -77291,6 +77460,139 @@
         ]
       }
     },
+    "/v1/studio/change-sets/{change_set_id}/context-product-materializations": {
+      "get": {
+        "description": "List the real `ContextProduct`/`ContextProductVersion`/`GovernanceReview`\nobjects a submitted change set's CONTEXT_PRODUCT items produced -- the\ndurable evidence trail for `submit_change_set`'s ST-A7 materialization\nstep. Empty for a change set with no CONTEXT_PRODUCT items, or one not\nyet submitted.",
+        "operationId": "list_context_product_materializations_v1_studio_change_sets__change_set_id__context_product_materializations_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "change_set_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Change Set Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StudioContextProductMaterializationRead"
+                  },
+                  "title": "Response List Context Product Materializations V1 Studio Change Sets  Change Set Id  Context Product Materializations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Context Product Materializations",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
     "/v1/studio/change-sets/{change_set_id}/detect-conflicts": {
       "post": {
         "description": "Detect conflicts between a change set and the current published state.\n\nThe caller may supply `current_state` mapping \"OBJECT_TYPE:object_id\" to the\ncurrent published snapshot.  If omitted, an empty state is used (no conflicts).",
@@ -78236,7 +78538,7 @@
     },
     "/v1/studio/change-sets/{change_set_id}/submit": {
       "post": {
-        "description": "Submit a change set for governance review.\n\nAll items must have passed testing (test gate), and -- ST-A8 -- the most\nrecent eval-regression run for this change set (if any mined questions\nwere touched) must also have passed. A change set that regresses a\nusage-derived question is blocked here exactly like a change set with a\nmalformed item, even when its items individually look well-formed.",
+        "description": "Submit a change set for governance review.\n\nAll items must have passed testing (test gate), and -- ST-A8 -- the most\nrecent eval-regression run for this change set (if any mined questions\nwere touched) must also have passed. A change set that regresses a\nusage-derived question is blocked here exactly like a change set with a\nmalformed item, even when its items individually look well-formed.\n\nST-A7: once the gate passes, every CONTEXT_PRODUCT item is materialized\ninto a real module-19 `ContextProduct`/`ContextProductVersion` and\nsubmitted through the exact same maker-checker `GovernanceReview` queue a\ndirectly-authored context product uses (`aida.studio_context_product`,\n`decide_governance_review`'s `CONTEXT_PRODUCT_VERSION` branch in\n`semantic_api.py`). TOOL/METRIC/TERM items are unaffected -- submission\nstill only flips this change set to SUBMITTED for those, as before. A\nmaterialization failure (an unresolved reference, a duplicate product\nkey, a product in the wrong state) fails the whole submission with the\nsame HTTPException `context_product_api.py` itself would raise for that\nfailure, before this change set's status changes.",
         "operationId": "submit_change_set_v1_studio_change_sets__change_set_id__submit_post",
         "parameters": [
           {
@@ -78487,6 +78789,135 @@
           }
         },
         "summary": "Run Tests",
+        "tags": [
+          "studio"
+        ]
+      }
+    },
+    "/v1/studio/context-products/validate": {
+      "post": {
+        "description": "Validate a CONTEXT_PRODUCT change item's shape as an author designs it.\n\nStateless, matching `POST /v1/studio/parameter-contracts/validate` (ST-A4):\ndoes not require an existing change set or change item, and does not check\nthe database (reference existence is re-checked for real at submission\ntime, when the item is materialized -- see `aida.studio_context_product`).\nReuses the real `ContextProductDefinition` schema (module 19's own\ncontract) via `validate_context_product_contract`, the same check that\nruns automatically as part of the CONTEXT_PRODUCT change-item test gate\n(`run_test_suite`); this endpoint lets an author validate incrementally\nwhile still drafting.",
+        "operationId": "validate_context_product_contract_endpoint_v1_studio_context_products_validate_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StudioContextProductValidateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StudioContextProductValidateResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Validate Context Product Contract Endpoint",
         "tags": [
           "studio"
         ]

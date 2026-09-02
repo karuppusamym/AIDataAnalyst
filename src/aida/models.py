@@ -4788,3 +4788,53 @@ class DocumentClaim(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP H: ST-A7 context product builder ---
+# ---------------------------------------------------------------------------
+
+
+class StudioContextProductMaterialization(Base, TimestampMixin):
+    """Traceability link from a Studio CONTEXT_PRODUCT change-set item (ST-A7)
+    to the real module-19 `ContextProduct`/`ContextProductVersion` and
+    `GovernanceReview` it produced on submission (`aida.studio_context_product`).
+
+    A new row per change item that successfully materializes -- the shared
+    `StudioChangeItem`/`StudioChangeSet` models gain no columns for this;
+    this table is the append-only evidence trail proving a specific Studio
+    change-set item produced a specific governed object, routed through the
+    exact same maker-checker queue a directly-authored context product uses
+    (`decide_governance_review`'s `CONTEXT_PRODUCT_VERSION` branch in
+    `semantic_api.py`) -- never bypassed or reimplemented here.
+    """
+
+    __tablename__ = "studio_context_product_materialization"
+    __table_args__ = (
+        CheckConstraint(
+            "operation IN ('CREATE', 'UPDATE', 'DELETE')",
+            name="ck_studio_cp_materialization_operation",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_change_set.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_item_id: Mapped[UUID] = mapped_column(
+        ForeignKey("studio_change_item.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    operation: Mapped[str] = mapped_column(String(30), nullable=False)
+    context_product_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    context_product_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("context_product_version.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    governance_review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)

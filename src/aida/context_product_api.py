@@ -93,9 +93,12 @@ def _can_read_lifecycle(context: SecurityContext) -> bool:
     return not context.roles.isdisjoint(CONTEXT_PRODUCT_LIFECYCLE_READERS)
 
 
-async def _replace_role_bindings(
+async def replace_context_product_role_bindings(
     session: AsyncSession, version: ContextProductVersion
 ) -> None:
+    """Public: reused by `aida.studio_context_product` (ST-A7) to materialize a
+    Studio CONTEXT_PRODUCT change-set item through this exact same code path,
+    rather than a parallel reimplementation."""
     await session.execute(
         delete(ContextProductRoleBinding).where(
             ContextProductRoleBinding.context_product_version_id == version.id
@@ -132,9 +135,11 @@ def _definition_from_version(version: ContextProductVersion) -> ContextProductDe
     )
 
 
-def _apply_definition(
+def apply_context_product_definition(
     version: ContextProductVersion, body: ContextProductDefinition
 ) -> ContextProductVersion:
+    """Public: reused by `aida.studio_context_product` (ST-A7) -- see
+    `replace_context_product_role_bindings` above."""
     payload = body.model_dump(mode="json")
     version.name = body.name
     version.description = body.description
@@ -244,11 +249,13 @@ async def _require_exact_ids(
         )
 
 
-async def _validate_references(
+async def validate_context_product_references(
     session: AsyncSession,
     project: Project,
     body: ContextProductDefinition,
 ) -> None:
+    """Public: reused by `aida.studio_context_product` (ST-A7) -- see
+    `replace_context_product_role_bindings` above."""
     await _require_exact_ids(
         session,
         select(MetadataTable.id)
@@ -310,7 +317,7 @@ async def create_context_product(
     session: AsyncSession = Depends(get_session),
 ) -> ContextProductRead:
     project = await _project_scope(session, project_id, context)
-    await _validate_references(session, project, body)
+    await validate_context_product_references(session, project, body)
     existing = await session.scalar(
         select(ContextProduct.id).where(
             ContextProduct.organization_id == project.organization_id,
@@ -328,7 +335,7 @@ async def create_context_product(
     )
     session.add(product)
     await session.flush()
-    version = _apply_definition(
+    version = apply_context_product_definition(
         ContextProductVersion(
             organization_id=project.organization_id,
             product_id=product.id,
@@ -339,7 +346,7 @@ async def create_context_product(
     )
     session.add(version)
     await session.flush()
-    await _replace_role_bindings(session, version)
+    await replace_context_product_role_bindings(session, version)
     audit_context = replace(context, organization_id=project.organization_id)
     record_audit(
         session,
@@ -733,7 +740,7 @@ async def create_context_product_version(
     if product.lifecycle_status != "ACTIVE":
         raise HTTPException(status_code=409, detail="context product is not active")
     project = await _project_scope(session, product.project_id, context)
-    await _validate_references(session, project, body)
+    await validate_context_product_references(session, project, body)
     if body.based_on_version_id is not None:
         base = await session.get(ContextProductVersion, body.based_on_version_id)
         if base is None or base.product_id != product.id:
@@ -743,7 +750,7 @@ async def create_context_product_version(
             ContextProductVersion.product_id == product.id
         )
     )
-    version = _apply_definition(
+    version = apply_context_product_definition(
         ContextProductVersion(
             organization_id=product.organization_id,
             product_id=product.id,
@@ -755,7 +762,7 @@ async def create_context_product_version(
     )
     session.add(version)
     await session.flush()
-    await _replace_role_bindings(session, version)
+    await replace_context_product_role_bindings(session, version)
     record_audit(
         session,
         replace(context, organization_id=product.organization_id),
@@ -799,9 +806,9 @@ async def update_context_product_version(
     if version.status != "DRAFT":
         raise HTTPException(status_code=409, detail="only draft context products can be changed")
     project = await _project_scope(session, product.project_id, context)
-    await _validate_references(session, project, body)
-    _apply_definition(version, body)
-    await _replace_role_bindings(session, version)
+    await validate_context_product_references(session, project, body)
+    apply_context_product_definition(version, body)
+    await replace_context_product_role_bindings(session, version)
     record_audit(
         session,
         replace(context, organization_id=product.organization_id),
@@ -840,7 +847,7 @@ async def submit_context_product_version(
     if version.status != "DRAFT":
         raise HTTPException(status_code=409, detail="only a draft context product can be submitted")
     project = await _project_scope(session, product.project_id, context)
-    await _validate_references(session, project, _definition_from_version(version))
+    await validate_context_product_references(session, project, _definition_from_version(version))
     review = GovernanceReview(
         organization_id=product.organization_id,
         object_type="CONTEXT_PRODUCT_VERSION",
