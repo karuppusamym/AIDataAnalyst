@@ -430,3 +430,30 @@ export async function fetchLineageImpact(
     signal,
   );
 }
+
+/* ---------------------------------------------------------------------------
+   Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses
+   `fetchOrgDatasources` above for the fleet list (see that function's own
+   comment for the `DataSourceRead`/`DataSourceSummaryRead` shape note this
+   screen also relies on -- `credential_reference` is typed but not actually
+   present on this endpoint's wire response; this screen never reads it). The
+   only new call this screen needs is per-source health.
+--------------------------------------------------------------------------- */
+
+import type { ConnectorHealthScoreRead } from "./types";
+import { makeFixtureDatasourceHealth } from "./fixtures";
+
+/** `GET /v1/datasources/{datasource_id}/health` (`operational_api.py::get_datasource_health`,
+ *  `:266`) — a composite, explainable 0-100 score over the connector's recent
+ *  run history (`aida.connector_health.compute_connector_health`): run success
+ *  rate, staleness, failure streak, profiling coverage and datasource
+ *  enablement, each its own weighted factor with a human-readable `reason` and
+ *  `evidence`, plus any `blockers` (e.g. `NO_RUN_HISTORY`, `DATASOURCE_DISABLED`,
+ *  `REPEATED_FAILURES`) explaining why the status is what it is. */
+export async function fetchDatasourceHealth(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<ConnectorHealthScoreRead> {
+  if (USE_FIXTURES) return makeFixtureDatasourceHealth(datasourceId);
+  return get<ConnectorHealthScoreRead>(`/v1/datasources/${datasourceId}/health`, signal);
+}
