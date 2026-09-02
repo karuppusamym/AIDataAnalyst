@@ -72,8 +72,8 @@ _DROP_OLD_UNIQUE_BY_SIGNATURE = sa.text(
           AND tc.table_name = 'glossary_term'
           AND tc.constraint_type = 'UNIQUE'
         GROUP BY tc.constraint_name
-        HAVING array_agg(kcu.column_name ORDER BY kcu.ordinal_position)
-               = ARRAY['organization_id', 'term_key']
+        HAVING array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position)
+               = ARRAY['organization_id', 'term_key']::text[]
         LIMIT 1;
 
         IF found_name IS NOT NULL THEN
