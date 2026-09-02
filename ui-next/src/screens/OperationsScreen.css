@@ -1,0 +1,68 @@
+.ops{display:flex;flex-direction:column;min-height:0;height:100%;gap:18px;padding:22px 24px;overflow-y:auto}
+.ops__head{flex:none}
+.ops__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.ops__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
+
+.ops__skeleton{flex:none;display:flex;align-items:center;justify-content:center;min-height:80px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px}
+
+/* --- dashboard tiles (fleet-summary) --- */
+.ops__tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;flex:none;position:relative}
+@media (max-width:900px){.ops__tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.tile{border:1px solid var(--line);border-top-width:3px;border-radius:var(--radius);background:var(--surface);padding:13px 15px}
+.tile--ok{border-top-color:var(--ok)}
+.tile--info{border-top-color:var(--info)}
+.tile--warn{border-top-color:var(--warn)}
+.tile--bad{border-top-color:var(--bad)}
+.tile__n{font-size:26px;font-weight:600;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.tile--ok .tile__n{color:var(--ok)}
+.tile--info .tile__n{color:var(--info)}
+.tile--bad .tile__n{color:var(--bad)}
+.tile__l{font-size:12.5px;color:var(--ink-3);margin-top:2px}
+.ops__sub{font-size:11.5px;color:var(--ink-3);margin-top:6px}
+.ops__generated{grid-column:1/-1;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);text-align:right}
+
+.ops__bd{display:flex;flex-wrap:wrap;gap:5px 10px;margin-top:8px}
+.ops__bd_item{font-size:11px;color:var(--ink-3)}
+.ops__bd_item b{color:var(--ink-2);font-family:var(--mono)}
+.ops__bd_empty{font-size:11px;color:var(--ink-3);display:block;margin-top:8px}
+
+.tnum{font-variant-numeric:tabular-nums}
+
+/* --- sections (analysis runs / outbox / ingestion batches) --- */
+.ops__sec{display:flex;flex-direction:column;gap:10px;flex:1;min-height:280px}
+.ops__sec--small{flex:none;min-height:0}
+.ops__sechead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.ops__h2{font-size:14px;font-weight:600;margin:0;letter-spacing:-.008em;display:flex;align-items:center;gap:8px}
+.ops__filters{display:flex;align-items:flex-end;gap:10px}
+.ops__filters .field{width:170px}
+.ops__gap{margin:-2px 0 0;font-size:12px;color:var(--ink-3);max-width:76ch}
+
+.ops__runlist{flex:1;min-height:220px;display:flex}
+.ops__runlist .vlist{flex:1}
+
+.oprow{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:10px 13px;height:100%;box-sizing:border-box}
+.oprow__lead{min-width:0;flex:1}
+.oprow__badges{display:flex;gap:5px;margin-bottom:6px}
+.oprow__title{font-size:13.5px;font-weight:600;letter-spacing:-.006em}
+.oprow__meta{font-size:11.5px;color:var(--ink-3);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
+.oprow__err{margin-top:6px;font-size:11.5px;color:var(--bad);font-family:var(--mono)}
+.oprow__time{flex:none;text-align:right;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:flex;flex-direction:column;gap:3px;align-items:flex-end}
+.oprow__wf{color:var(--ink-3);opacity:.85}
+
+.ops__bxlist{display:flex;flex-direction:column;gap:8px}
+.opbx{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:10px 13px}
+.opbx__lead{min-width:0;flex:1}
+.opbx__badges{display:flex;gap:5px;margin-bottom:6px}
+.opbx__title{font-size:13px;font-weight:600;font-family:var(--mono)}
+.opbx__meta{font-size:11.5px;color:var(--ink-3);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
+.opbx__err{margin-top:6px;font-size:11.5px;color:var(--bad);font-family:var(--mono)}
+
+.opbatch{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:10px 13px}
+.opbatch__badges{display:flex;gap:5px;margin-bottom:6px}
+.opbatch__title{font-size:13px;font-weight:600;font-family:var(--mono)}
+.opbatch__meta{font-size:11.5px;color:var(--ink-3);margin-top:5px;display:flex;gap:6px;flex-wrap:wrap}
+
+@media (max-width:1100px){
+  .ops{height:auto;min-height:100%;overflow-y:visible}
+  .ops__runlist .vlist{height:56vh}
+}
