@@ -32,6 +32,7 @@
  *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
  *  OpenAPI document (see the file banner above). */
 export type { CursorPage } from "./types";
+import type { DataProductVersionRead } from "./types";
 
 export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
 export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
@@ -104,4 +105,34 @@ export type IdentityProvider = "OIDC" | "DEVELOPMENT";
 
 export function asIdentityProvider(value: string | null | undefined): IdentityProvider | null {
   return value === "OIDC" || value === "DEVELOPMENT" ? value : null;
+}
+
+/** UX-15: `Page` (./types.ts) is generated un-parameterized (`items: unknown[]`)
+ *  for every route that declares `response_model=Page` without a generic
+ *  argument -- the same reachability gap this file's banner documents for
+ *  `CatalogRowRead`/`MetadataTableRead`. `search_marketplace`,
+ *  `list_refusals` and `list_organization_datasources` (`product_marketplace_api.py`,
+ *  `ai_decision_lineage_api.py`, `operational_api.py`) all return one of
+ *  these; this narrows `items` to the item type each endpoint actually
+ *  returns, exactly as front-end-only convenience, not a claim the server's
+ *  own OpenAPI schema types it this way. */
+export interface PageOf<T> {
+  items: T[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** `MarketplaceProductRead` -- `platform_schemas.py:170`. Extends
+ *  `DataProductVersionRead` (./types.ts, reachable) with the three CX-9
+ *  ranking/access fields `search_marketplace` (`product_marketplace_api.py`)
+ *  adds per requester. Not itself reachable from the live OpenAPI document:
+ *  its route declares `response_model=Page` un-parameterized (see `PageOf`
+ *  above), so FastAPI's schema walker never names this subclass -- only its
+ *  base `DataProductVersionRead` is reachable, via other routes that use it
+ *  directly. Hand-written for the same reason `CatalogRowRead` is. */
+export interface MarketplaceProductRead extends DataProductVersionRead {
+  access_status: "ROLE_GRANTED" | "REQUEST_APPROVED" | "REQUEST_PENDING" | "NOT_REQUESTED";
+  domain_affinity: boolean;
+  role_affinity: boolean;
 }
