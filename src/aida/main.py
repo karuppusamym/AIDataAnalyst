@@ -33,6 +33,7 @@ from aida.db import session_factory
 from aida.dbt_api import router as dbt_router
 from aida.delegation_api import router as delegation_router
 from aida.detokenization_api import router as detokenization_router
+from aida.document_ingestion_api import router as document_ingestion_router
 from aida.glossary_api import router as glossary_router
 from aida.graph_perspectives_api import router as graph_perspectives_router
 from aida.ingestion_api import router as ingestion_router
@@ -331,6 +332,7 @@ app.include_router(tool_plans_router)
 app.include_router(table_family_router)
 app.include_router(token_revocation_router)
 app.include_router(detokenization_router)
+app.include_router(document_ingestion_router)
 app.include_router(delegation_router)
 app.include_router(persona_router)
 app.include_router(playbooks_router)

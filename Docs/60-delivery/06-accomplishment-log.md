@@ -10268,3 +10268,374 @@ Honest gap: `test_event_catalog_gate.py` fails in this sandbox on an unrelated `
 (cp1252 decode of a `PG-5` edition-entitlement source file that contains a non-cp1252 byte) that predates
 and is untouched by this row -- confirmed by running the same gate against `HEAD` before this row's
 changes; not attempted here, same standing environment limitation other rows have hit and left alone.
+
+---
+
+## 2026-09-02 — N4 closed: impact-ordered, diff-based relationship-candidate review queue, wired to negative knowledge
+
+Composed four pieces already built on this branch rather than reimplementing any of them: SM-7's diff
+engine, EA.14's bounded lineage traversal, EE.3/N16's negative-knowledge mechanism, and RL-6's
+bulk-decision endpoint (already `DONE` for `RelationshipCandidate` specifically, confirmed by reading
+`intelligence_api.py` first per this row's own instruction). Only three of the four pieces needed new
+wiring; RL-4 (projection) and RL-6 (bulk decisions) were already real and untouched.
+
+**Impact-ordering.** New `GET /v1/datasources/{datasource_id}/relationship-candidates/review-queue`
+(`aida.relationship_candidate_review.compose_relationship_candidate_review_queue`) loads up to
+`REVIEW_QUEUE_SCAN_LIMIT=200` PENDING candidates, computes a real impact score for each via
+`compute_relationship_candidate_impact` -- which calls EA.14's `unified_lineage_api.
+build_unified_lineage_impact_payload` verbatim (the identical function `GET .../unified-lineage/
+impact/{node_id}` and TL-7's deprecation preview call) at *both* endpoints the candidate's edge would
+connect (`source_table_impact` + `target_table_impact`, summed = `impact_score`) -- and sorts the
+queue by that score descending, confidence/id only breaking real ties. A `PENDING` candidate's edge is
+not yet in the graph (`build_unified_lineage_impact_payload` only ever traverses `APPROVED` edges), so
+this measures the blast radius already sitting behind each endpoint -- how much is at stake in the
+decision, in either direction, not a prediction of which way it should go. Defaults mirror TL-7's own
+(`DEFAULT_IMPACT_DEPTH=3`, `DEFAULT_IMPACT_NODE_LIMIT=100`) rather than inventing new bounds.
+
+**Diff representation, decided and justified.** SM-7's `diff_semantic_object` already handles exactly
+this case: called with `before=None` (its own docstring: "a semantic object's very first submission,
+which has no published predecessor to diff against"), every key of the `after` snapshot reports as one
+`added` `FieldDelta` -- semantically correct for "nothing -> this edge," since every fact about a
+not-yet-approved edge is indeed new. No new diff engine or representation was built. The only new work
+is `relationship_candidate_diff_snapshot`, a curated flat dict (source/target table qualified name +
+column name, `detection_rule`, `confidence`, AT-15's `confidence_signals` pulled from the candidate's
+already-stored `evidence["signals"]`) -- deliberately excluding `id`/`organization_id`/`status`/
+timestamps/`reviewed_*`, mirroring `semantic_api.py`'s own `_semantic_model_version_snapshot`/
+`_glossary_term_version_snapshot` curation precedent, so the diff reports one entry per fact a reviewer
+actually cares about rather than one per ORM column.
+
+**Bulk decisions, reused not reimplemented.** RL-6's `bulk_decide_relationship_candidates` and the
+single-item `decide_relationship_candidate` are unchanged in mechanism -- same maker-checker rule, same
+PENDING-only rule, same partial-success reporting. Both now call
+`record_relationship_candidate_rejection` when a decision resolves to `REJECTED`, so a rejection reaches
+negative knowledge identically regardless of which surface rejected it.
+
+**Rejection -> negative knowledge.** `record_relationship_candidate_rejection` calls EE.3/N16's real
+`negative_knowledge.record_negative` (never a parallel rejection-tracking mechanism): `assertion_type=
+"RELATIONSHIP_REJECTED"`, `subject_id="relationship:<source_column_id>:<target_column_id>"` (following
+`negative_knowledge._scope_predicate`'s own documented colon-delimited convention), `predicate={
+"source_column_id", "target_column_id"}` -- deliberately excluding `detection_rule`/`confidence` so an
+edge re-detected by a different or improved rule is still recognized as the same rejected edge. Both
+discovery endpoints (`discover_relationship_candidates`, `discover_cross_source_relationship_candidates`)
+now call `load_suppressed_relationship_predicate_hashes` once up front (bulk-prefetch, mirroring the
+existing `existing_fk_pairs`/`existing_candidate_pairs` precedent already in both loops -- one query,
+then an in-memory membership check per candidate scanned, not a `check_re_proposal` round trip per
+candidate) and skip a suppressed pair; each discovery's audit `details` now reports
+`suppressed_by_negative_knowledge` for transparency.
+
+**No `models.py`/`schemas.py`/migration touched**, per this row's hard constraint: the new module
+`src/aida/relationship_candidate_review.py` defines its own local `ApiModel` response classes
+(`RelationshipCandidateReviewQueueRead` etc.), following `semantic_api.py`'s own precedent for SM-7's
+diff endpoint (`GovernanceReviewDiffRead` defined in `semantic_api.py`, not `schemas.py`) -- `evidence`
+was already free-form JSON on `RelationshipCandidate`, `RelationshipCandidate.status`/`reviewed_*` were
+already the only persisted decision state needed, and `NegativeAssertionRecord` already existed with no
+change.
+
+Tests (`tests/test_relationship_candidate_review.py`, 3 new, real in-memory sqlite via the actual FastAPI
+endpoint functions, no mocks):
+
+* `test_review_queue_orders_by_real_impact_not_by_confidence` -- a "hub" table with three APPROVED edges
+  vs. two fully isolated tables; the PENDING candidate touching the hub has confidence 0.55, the isolated
+  one has confidence 0.95 (deliberately backwards), and the queue still returns the hub candidate first,
+  with `impact_score >= 3 > 0`. Also asserts the diff's field set and that every entry is `added`.
+* `test_bulk_decision_approve_becomes_a_real_edge_reject_becomes_negative_knowledge` -- a mixed
+  approve/reject bulk batch; the approved candidate's edge is confirmed present (via
+  `build_unified_lineage_graph_payload`, not re-derived) in the unified lineage graph as a
+  `SUGGESTED_RELATIONSHIP`/`APPROVED` edge, and the rejected one produces exactly one
+  `NegativeAssertionRecord` with `suppression_active=True`, matched back via `negative_knowledge.
+  check_re_proposal` on the same predicate -- and confirms the approved candidate produces *no* negative
+  assertion.
+* `test_rejected_candidate_is_suppressed_from_re_proposal_even_after_row_is_gone` -- the re-proposal
+  proof this row asked for: discover a candidate, reject it, then **delete the decided
+  `RelationshipCandidate` row itself** (simulating housekeeping/archival) before re-running discovery.
+  `existing_candidate_pairs` alone, freshly re-queried, no longer knows this pair was ever proposed --
+  only the negative-knowledge check can block re-creation, and `re_discovery.total == 0` confirms it does.
+  The audit trail's `suppressed_by_negative_knowledge == 1` names why.
+
+`ruff check` and `mypy src` clean on every touched file (`src/aida/relationship_candidate_review.py`,
+`src/aida/intelligence_api.py`) -- the 44 pre-existing `"object" not callable"` findings elsewhere in
+`src` are unrelated and untouched by this row, same standing finding several other rows this branch
+confirmed against `origin` before their own changes. `AIDA_ENVIRONMENT=development pytest
+tests/test_doc_claims.py` green. One new HTTP route added, so `scripts/openapi_diff.py --accept-baseline`
+and `scripts/generate_ui_types.py --accept-baseline` were run and both `Docs/90-reference/
+openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed;
+`tests/test_openapi_diff_gate.py` green against the regenerated baseline. No new `event_type=` was
+introduced (both decision endpoints already emitted `relationship_candidate.approved.v1`/`.rejected.v1`;
+`record_negative` does not emit an outbox event), so `tests/test_event_catalog_gate.py` needed no catalog
+change and passes (4 passed) unmodified.
+
+## 2026-09-02 — N15 closed: evaluation-gated agent publication, wired into the real shared publish transition
+
+Makes "production-grade agent" evidenced rather than asserted, by adding a real precondition to the one
+place an `AiAssetVersion` (EA.10c AI registry) actually moves to its published/production `APPROVED`
+state -- a direct extension of two things landed earlier the same day: N17's exemplar replay
+(`exemplar_store.py`/`tests/context_path_eval/exemplars.py`) and UX-19's honesty finding that `AgentRun`
+carries no FK back to `AiAsset` (`agent_roster.py`).
+
+**Corrected finding, checked directly rather than assumed from the tracker row's own title:**
+`ai_registry_api.py` never itself flips a version to `APPROVED`. `submit_ai_asset_version` only moves
+DRAFT -> REVIEW_REQUIRED and opens a `GovernanceReview`; the actual APPROVE decision that publishes it is
+applied by `semantic_api._apply_governance_review_decision`, the single shared dispatcher every governed
+object type's maker-checker decision already goes through (both the single-item `decide_governance_review`
+and PG-3's `bulk_decide_governance_reviews` call it, so the two paths cannot drift). Gating publication for
+real meant editing that shared dispatcher's `AI_ASSET_VERSION` branch -- an even better reuse than the
+row's own phrasing implied, since every AI asset version approval already flows through exactly one place.
+
+**Scoping investigated and found honestly absent, not fabricated.** Checked `models.py` (read-only for this
+row) directly: `AiAssetVersion` carries `context_product_version_ids`/`model_route_ids`/`policy_control_ids`
+(dependency references) but no data-domain/table/project scope field, and `AgentRun` has no FK to
+`AiAsset`/`AiAssetVersion` at all -- confirming UX-19's own finding rather than assuming it. So this gate
+is **organization-wide**, labelled and explained exactly as `agent_roster.py` already labels its own
+identical gap, never claimed to be one agent's private evaluation history.
+
+**`src/aida/agent_eval_gate.py`** (new, pure core + one production-safe async replay path):
+* `evaluate_agent_eval_gate(verdicts, threshold, minimum_exemplars=1)` -- pure, DB-free -- computes
+  PASS/FAIL/INSUFFICIENT_DATA from a list of `ExemplarVerdict`s. Fewer than `minimum_exemplars` (default 1)
+  total verdicts is always `INSUFFICIENT_DATA`, including zero -- never a silent pass. Every contributing
+  verdict stays visible on `AgentEvalGateResult.verdicts`, and a `FAIL`'s `reason` names every failing
+  `case_id`.
+* `replay_confirmed_run_corpus` -- the one exemplar-replay path this module can run automatically and
+  synchronously inside a real governance decision: no seeded scenario, no live orchestrator run, just N17's
+  own `find_confirmed_agent_runs`/`promote_confirmed_agent_run` over the organization's currently
+  human-confirmed `AgentRun`s. Documented honestly in the module's own docstring exactly what a
+  `CONFIRMED_RUN` `matched=True` does and does not prove: `derive_context_path` is a pure function of only
+  the fields already on one immutable `AgentRun` row, so comparing a freshly-promoted exemplar against the
+  very same row it was promoted from can never show drift -- `matched=True` proves the run is still
+  genuinely confirmed and its context path still derives cleanly right now, not that the governed catalog
+  has been unchanged since.
+* N17's `STEWARD_AUTHORED` replay (`tests/context_path_eval/exemplars.py::replay_steward_exemplar`) re-drives
+  a real `GovernedAgentOrchestrator.run()` against a seeded `ContextPathEvalScenario` that deliberately lives
+  under `tests/` -- production code under `src/aida` must never import from `tests/` (the same
+  one-directional boundary AT-8/N17 already keep), so this module never computes `STEWARD_AUTHORED` verdicts
+  itself. A caller with a live-replay-capable environment (a steward running the suite by hand today; N17's
+  own docstring already names "wiring the replay into a literal CI gate" as its own documented next step)
+  submits the resulting verdicts through `record_agent_eval_gate_evidence`'s `extra_verdicts`/
+  `steward_authored_verdicts`, persisted into `evaluation_evidence["agent_eval_gate"]
+  ["steward_authored_verdicts"]` so a later publish decision folds them back in via `stored_steward_verdicts`
+  without ever running a live replay itself.
+* `record_agent_eval_gate_evidence` persists into the exact `AiAssetVersion.evaluation_evidence` JSON field
+  `ai_registry.compute_ai_trust_score` already reads (`evaluation_evidence["pass_rate"]`/`["evidence_id"]`
+  feed its EVALUATION_POSTURE trust-score factor) -- so a passing N15 gate run now actually feeds that field
+  for platform-native agents, with no migration and no new column -- and calls the existing `record_audit`,
+  never a parallel audit mechanism.
+
+**Wired into the real publish precondition** (`semantic_api._apply_governance_review_decision`,
+`AI_ASSET_VERSION` branch, `decision == "APPROVE"`, `ai_asset.asset_kind == "AGENT"`): runs
+`compute_agent_eval_gate` live (always recomputes the `CONFIRMED_RUN` half fresh from the database, folds in
+whatever `STEWARD_AUTHORED` verdicts were most recently stored) before allowing the transition. A verdict
+other than `PASS` raises `HTTPException(409, ...)` naming the verdict, the reason, and every failing
+exemplar by `case_id` -- deliberately *before* `ai_version.status = "APPROVED"` is ever set, and deliberately
+without persisting evidence on that path: a raise this deep in the shared dispatcher unwinds without a
+commit in the single-decision path and rolls back inside a `SAVEPOINT` in the bulk path (verified directly:
+`bulk_decide_governance_reviews` wraps each item's dispatch in `session.begin_nested()`), exactly like every
+other precondition failure already raised elsewhere in that same function -- an early inner `session.commit()`
+to force-persist a blocked attempt's evidence was considered and rejected, since it would also commit the
+review's unconditionally-pre-set `status="APPROVED"` mutation, leaving a review neither properly decided nor
+re-decidable, and would corrupt the bulk path's per-item `SAVEPOINT` batching. Only a genuine `PASS` survives
+to the real commit, recorded right alongside the approval it justified.
+
+**Two new endpoints** (`ai_registry_api.py`, same router, no new router registration needed) let a steward
+see the gate's state before ever attempting to publish (this row's third deliverable): `GET
+/v1/ai-asset-versions/{id}/eval-gate` is a live, read-only preview -- no side effect -- that calls the
+*identical* `compute_agent_eval_gate` the real publish decision calls, so the preview can never show a
+different answer than reality. `POST .../eval-gate/evaluate` runs the gate and persists the result either
+way (unlike the automatic publish-time check, an explicit steward action's result is real evidence worth
+keeping whether it passes or fails), accepting externally-submitted `STEWARD_AUTHORED` verdicts -- the
+request schema has no `source` field at all, so a caller can never inject a fabricated `CONFIRMED_RUN`
+verdict; that source is only ever produced by this module's own live database read. Both endpoints 409 for a
+non-`AGENT`-kind asset.
+
+**Tests** (`tests/test_agent_eval_gate.py`, 16 new): pure gate-logic (zero exemplars -> INSUFFICIENT_DATA
+even with nothing to fail; below-minimum-exemplars stays INSUFFICIENT_DATA even at a perfect rate, so a
+thin sample can never pass by accident; enough passes -> PASS with every verdict still visible; too many
+failures -> FAIL naming every failing case; pass-rate-exactly-at-threshold passes; invalid threshold/minimum
+rejected; determinism), `replay_confirmed_run_corpus` and `record_agent_eval_gate_evidence`/
+`stored_steward_verdicts` against a real in-memory sqlite database (N17's own promotion machinery, not a
+mock), and six real integration tests driving the actual `semantic_api.decide_governance_review`: a publish
+attempt is blocked with `INSUFFICIENT_DATA` against zero confirmed runs; blocked with `FAIL` naming a
+specific `steward-fail-1` exemplar when a steward previously submitted a mostly-failing corpus (even with a
+passing confirmed run also present); allowed, `AiAssetVersion.status` becoming `APPROVED` with `PASS`
+evidence recorded, against a real passing confirmed-run corpus; the preview endpoint proven to match what the
+real decision then does; and one case that drives a real `GovernedAgentOrchestrator.run()` through N17's own
+`replay_steward_exemplar` (against AT-8's `TOOL_MISSING_PARAMETER_REACHES_CLARIFICATION` case) and confirms
+that real replay verdict genuinely contributes to a real publish being allowed -- the literal "based on real
+exemplar replay results" proof.
+
+`ruff check`/`mypy src` clean on every touched file; the 44 pre-existing `"object" not callable"` findings
+elsewhere in `src` are unrelated and untouched by this row (confirmed against `origin` before this row's own
+changes, same standing finding several other rows this branch have already reported).
+`AIDA_ENVIRONMENT=development pytest tests/test_doc_claims.py` green (all cases). Two new HTTP routes added,
+so `scripts/openapi_diff.py --accept-baseline` and `scripts/generate_ui_types.py --accept-baseline` were run
+twice (once before this row's own final rebase, once after picking up other concurrently-landed routes) and
+both `Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed,
+each time confirmed purely additive via `git diff --stat` before committing; `tests/test_openapi_diff_gate.py`
+green against the regenerated baseline. `cd ui-next && npm run typecheck`/`test`/`build` not run in this
+environment -- `node_modules` was never installed here (`ui-next/node_modules` does not exist), so those
+commands cannot execute at all regardless of this row's changes; noted honestly rather than claimed clean.
+No new `event_type=` was introduced (this row only calls the existing `record_audit`, never `record_outbox`
+for the gate itself), so `tests/test_event_catalog_gate.py` needed no catalog change and passes unmodified.
+Full regression pass across every test file that exercises the shared governance-review dispatcher this row
+edits (`test_asset_description.py`, `test_asset_description_sample_review.py`,
+`test_bulk_governance_decisions.py`, `test_context_products.py`, `test_delegation.py`,
+`test_leaver_reassignment.py`, `test_metric_suggestions.py`, `test_semantic_glossary_binding.py`,
+`test_tier0_invariants.py`, `test_consumer_footer.py`, `test_metric_formula_collision_endpoint.py`,
+`test_review_queue_read_model.py`, `test_semantic_diff_endpoint.py`) green -- no regression to any other
+governed object type's approval path.
+
+---
+
+## 2026-09-01 — N8 (document ingestion): the data-dictionary-spreadsheet special case, end to end
+
+A second genuinely new feature this session, picked up the same way AT-1 was: a "no foundation
+existed" tracker row (`Docs/review-2026-08/gap/02-gap-diff-and-plan.md` line 84, `Docs/60-delivery/
+03-tracker.md`'s N8), not a bugfix or a tracker-consistency closure. N8's own note says to "build [the
+data-dictionary spreadsheet] path first" -- this row does exactly that, completely, and is honest in the
+tracker about the much larger remaining scope (general document parsing, object storage, semantic
+mapping, the wiki) it does not attempt.
+
+### What it is
+
+Per `Docs/review-2026-08/target/01-metadata-graph-wiki.md` §3 (the review's own design brief for
+document ingestion), a bank's data dictionary -- `schema | table | column | description` rows in a
+spreadsheet -- is "the highest-value special case ... covers a large share of real bank documents" and
+should be recognised and mapped directly rather than chunked as prose. This row builds that one path,
+completely, rather than a thin slice of the much larger general-document pipeline the design brief also
+describes (PDF/DOCX/BRD parsing, object storage, virus scanning, semantic/embedding mapping) -- those are
+real, separate builds, explicitly left as this row's own stated remaining scope rather than half-attempted.
+
+**Flow**: upload a CSV data dictionary -> parse into ordered sections -> resolve each section against
+the live catalog by exact name (deterministic, no model) -> extract a reviewable `DESCRIBES` claim for
+every structurally-mapped section -> a checker approves or rejects each claim through the platform's
+existing unified `GovernanceReview` queue, the same one every other proposal on this platform goes
+through.
+
+### Design decisions and why
+
+- **CSV only, not the general parsers.** A data dictionary is already tabular; Python's stdlib `csv`
+  module needed no new dependency. PDF/DOCX/XLSX structure-preserving extraction is a real parsing-library
+  build this sandbox does not carry -- honestly deferred, not stubbed.
+- **Raw file bytes are never persisted.** The design brief itself says uploaded documents should be
+  "stored in object storage, never in a table." No object-storage integration exists in this codebase to
+  route through yet, so the honest choice was to hold nothing rather than fake compliance with a plain
+  `raw_bytes` column -- only `sha256` (proof of what was processed) and the already-extracted, already-small
+  `DocumentSection` field text survive past the parse.
+- **Structural mapping only, never a guess.** The design brief's three mapping routes are explicit
+  (Explicit at upload, Structural by exact name, Semantic by embedding similarity, "never auto-applied").
+  This row builds only Structural. Semantic mapping is deliberately not attempted here: N5 (hybrid
+  retrieval) owns this codebase's one embedding-provider integration and is itself still IN PROGRESS on a
+  different worktree -- forking a second, parallel embedding integration from this row was the wrong
+  call, both for correctness and for this session's own "should not impact other parallel sessions"
+  mandate. A structural match that resolves to more than one live candidate (e.g. two datasources in the
+  same project both have a `public.customers` table) is recorded `UNMATCHED` rather than guessed --
+  proven by a dedicated test (`test_resolve_structural_mappings_refuses_ambiguous_table_names`).
+- **One `GovernanceReview` per claim, not a batch.** Unlike AT-1's playbooks (where a large match count
+  queues one bulk operation), a document claim's whole value is that a steward can read *this specific
+  row's* source text before deciding -- batching claims from unrelated sections into one decision would
+  defeat that. Mirrors GL-9's `AssetDescriptionDraft` (one review per draft) rather than AT-1/GL-2's bulk
+  shape.
+- **`predicate` constrained to `DESCRIBES` only.** The design brief's `claim` object model names
+  description, grain, and PII-classification claims. Only description claims are built here -- the exact
+  shape a `schema | table | column | description` dictionary actually produces; grain/PII claims are a
+  later pass over the same `DocumentClaim` table (the `predicate` CHECK constraint is the one place a
+  follow-up row needs to touch to add them), not attempted here.
+- **An approved claim's terminal state is the claim row itself.** No existing column-level description
+  surface in this codebase consumes an approved claim (the table-level equivalent, GL-9's
+  `AssetDocumentationVersion`, doesn't fit a single column claim, and a genuine column-level
+  "description of record" store or N10's knowledge-compilation wiki is later, larger, separate work).
+  Documented explicitly on `DocumentClaim`'s own docstring as a stated gap, matching AT-1's "describe"
+  precedent from earlier today -- this row delivers a working, fully-cited ingest -> parse -> map ->
+  claim -> review pipeline with durable provenance back to the exact source row, not universal
+  propagation of an approved claim everywhere "description" might later be read from.
+- **Citation is structural, not a UI.** Every `DocumentMapping`/`DocumentClaim` carries its
+  `document_section_id`, and every `DocumentSection` keeps its own raw text -- the design brief's "any
+  annotation derived from a document carries the document_section reference" (§3.5) is satisfied at the
+  data-model level; no click-through UI is built this pass.
+
+### New files / models
+
+- `src/aida/models.py`: `Document` (project-scoped, `media_type` CHECK-constrained to `CSV`),
+  `DocumentSection` (ordered, one row per parsed dictionary row), `DocumentMapping` (one per section,
+  `mapping_kind` CHECK-constrained to `STRUCTURAL`/`SUGGESTED`/`UNMATCHED` -- `SUGGESTED` reserved for the
+  future semantic-mapping pass), `DocumentClaim` (`predicate` CHECK-constrained to `DESCRIBES`,
+  `governance_review_id` 1:1 to a `GovernanceReview`). Polymorphic `subject_id` fields follow this
+  codebase's own established convention (`OwnershipAssignment.subject_id`: a `String(100)`, not a typed
+  UUID column, since a `DocumentMapping`/`DocumentClaim` can point at either a table or a column).
+- `migrations/versions/ca56d6ce3f18_n8_document_ingestion.py`: creates all four tables. Verified both
+  directions offline (`alembic upgrade`/`downgrade 62341fa9f017:ca56d6ce3f18 --sql`) against a Postgres
+  dialect target -- no live Postgres in this sandbox, same standing limitation as every other migration
+  landed on this branch. `alembic heads` confirms a single head.
+- `src/aida/document_ingestion.py` (new): `parse_csv_data_dictionary` (pure, DB-free -- header matching
+  case-insensitive and order-independent, a row missing `table`/`description` is dropped and counted as
+  an error rather than failing the whole upload, capped at `DOCUMENT_MAX_SECTIONS`=5,000 rows),
+  `create_document_from_csv` (upload + parse in one step -- a data dictionary is already tabular, so
+  unlike the general prose-parsing flow there is no separate async parse stage to wait on; 413 over a
+  1MB content cap), `resolve_structural_mappings`, `extract_description_claims`,
+  `apply_document_claim`/`reject_document_claim` (the review-decision publish/reject pair,
+  `semantic_api.py`'s new dispatch branch calls into these directly, mirroring
+  `asset_description_service.apply_asset_description_draft`'s own shape).
+- `src/aida/document_ingestion_api.py` (new): REST -- `POST/GET /v1/projects/{project_id}/documents`,
+  `GET /v1/documents/{id}`, `GET .../sections`, `POST .../map`, `GET .../mappings`, `POST
+  .../extract-claims`, `GET .../claims`. Deliberately its own file with locally-scoped Pydantic schemas,
+  same reasoning as AT-1's `playbooks_api.py` -- kept out of the shared, hot `aida.api`/`aida.schemas`
+  under heavy concurrent edit on this branch.
+- `src/aida/semantic_api.py`: one new `elif review.object_type == "DOCUMENT_CLAIM":` branch in the
+  existing `_apply_governance_review_decision` dispatch (the same function GL-9/AT-1/every other
+  reviewable proposal type already extends), calling `apply_document_claim`/`reject_document_claim`.
+  Deliberately did **not** extend `review_queue_read_model.py`'s per-type confidence/evidence composition
+  (UX-17) -- that module's own docstring explicitly documents that an object type absent from its
+  dispatch still gets a full row in the queue (`confidence=None`, `evidence=[]`,
+  `diffable=False` via SM-7's fallback) rather than being dropped, so `DOCUMENT_CLAIM` reviews already
+  work correctly there with zero code changes; adding native confidence/evidence composition for it is a
+  real, contained follow-up, not a functional gap, and skipping it kept this row's diff out of a file with
+  a very actively-maintained, detailed scoping docstring.
+- `src/aida/main.py`: one import + one `app.include_router(document_ingestion_router)` in the existing
+  alphabetical import order.
+- `Docs/30-contracts/04-event-catalog.md`: `document.uploaded.v1`, `document.mapped.v1`,
+  `document.claims_extracted.v1`, `document.claim.approved.v1`/`.rejected.v1`.
+
+### Tests
+
+New file `tests/test_document_ingestion.py`, 17 tests, real-sqlite-engine pattern (matching
+`test_playbooks.py`): `parse_csv_data_dictionary` (table+column rows, case-insensitive headers,
+malformed-row counting, the section-count cap); `create_document_from_csv` (persists sections, 413 over
+the size cap); `resolve_structural_mappings` (matches table+column, `UNMATCHED` when nothing matches,
+`UNMATCHED` -- not a guess -- when a table name is ambiguous across two datasources in the same project);
+`extract_description_claims` (only structurally-mapped sections produce a claim, one `GovernanceReview`
+per claim); the full governance-decision round trip through the real `semantic_api.decide_governance_review`
+entry point (not just the underlying pure function) -- approve publishes one claim, reject leaves the
+other `REJECTED`, and a maker deciding their own claim is refused with 409, proving the new
+`DOCUMENT_CLAIM` dispatch branch is wired correctly end to end, not just that `apply_document_claim`
+itself works in isolation; REST-layer endpoint registration and a full upload -> map -> extract-claims ->
+list pipeline called through the actual route functions in-process, plus 409s for an out-of-order call
+(mapping twice, extracting claims before mapping) and a 403 for cross-organization access.
+
+### Verification
+
+`ruff check --fix` clean on every new/touched file (real findings caught: a loop-variable-closure bug
+(`B023`) in the CSV field-lookup helper -- would have made every parsed row silently read the *last*
+row's values for any missing/optional header -- fixed by passing the row explicitly rather than closing
+over the loop variable; one long line). `mypy --strict` clean on `document_ingestion.py`,
+`document_ingestion_api.py`, `models.py`, `semantic_api.py`, and `main.py` beyond the same pre-existing,
+already-on-`HEAD` `session_factory()` "object not callable" finding AT-1 documented earlier today (not
+reintroduced by this row -- confirmed present identically on unmodified `main.py`).
+
+`pytest tests/test_document_ingestion.py`: 17 passed on the first real run (the ambiguous-table-name and
+maker-cannot-check-their-own-claim cases both needed no fix once written -- the underlying logic was
+already correct). Regression sweep, zero failures: `pytest tests/test_document_ingestion.py
+tests/test_asset_description.py tests/test_asset_description_sample_review.py
+tests/test_leaver_reassignment.py tests/test_playbooks.py tests/test_delegation.py` -- 66 passed.
+`AIDA_ENVIRONMENT=development python -c "from aida.main import app"` imports cleanly, 394 routes (was
+386 before this row's seven new endpoints).
+
+`scripts/openapi_diff.py` (no flag): seven new paths, three new schemas, zero breaking changes, zero
+removed paths/schemas (diffed old-vs-new baseline by key set, not just by line count, since the raw
+`git diff` line count looked disproportionate to seven added paths -- confirmed it was JSON
+key-reordering noise, not a hidden regression). `--accept-baseline` run and both
+`Docs/90-reference/openapi-baseline.json` and `ui-next/src/lib/types.ts` regenerated and committed, same
+as AT-1 earlier today; this time genuinely clean (no unrelated `ValidationError.ctx` drift riding along,
+since AT-1's own regeneration earlier today had already absorbed that).
+
+Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in this sandbox on the
+pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
+rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
+failure.

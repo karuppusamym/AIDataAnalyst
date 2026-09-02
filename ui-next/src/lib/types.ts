@@ -82,6 +82,41 @@ export interface AgentAutoApplyRead {
   evidence: string;
 }
 
+/** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
+export interface AgentEvalGateEvaluateRequest {
+  steward_authored_verdicts?: AgentEvalGateVerdictInput[];
+}
+
+/** The gate's current state -- deliverable 3: what a steward reads, */
+export interface AgentEvalGateRead {
+  verdict: "PASS" | "FAIL" | "INSUFFICIENT_DATA";
+  threshold: number;
+  minimum_exemplars: number;
+  total_exemplars: number;
+  passed_exemplars: number;
+  pass_rate: number | null;
+  failing_case_ids: string[];
+  verdicts: AgentEvalGateVerdictRead[];
+  reason: string;
+  evaluated_at: string;
+}
+
+/** One externally-computed `STEWARD_AUTHORED` replay verdict, submitted */
+export interface AgentEvalGateVerdictInput {
+  case_id: string;
+  matched: boolean;
+  drift?: string[];
+  detail?: string;
+}
+
+export interface AgentEvalGateVerdictRead {
+  case_id: string;
+  source: "CONFIRMED_RUN" | "STEWARD_AUTHORED";
+  matched: boolean;
+  drift: string[];
+  detail: string;
+}
+
 export interface AgentEvaluationRunRead {
   id: string;
   organization_id: string;
@@ -1764,6 +1799,32 @@ export interface DetokenizeRequest {
   datasource_id?: string | null;
 }
 
+export interface DocumentCreate {
+  filename: string;
+  content: string;
+}
+
+export interface DocumentMappingSummaryRead {
+  document_id: string;
+  matched_count: number;
+  unmatched_count: number;
+}
+
+export interface DocumentRead {
+  id: string;
+  organization_id: string;
+  project_id: string;
+  filename: string;
+  media_type: string;
+  sha256: string;
+  status: string;
+  section_count: number;
+  parse_error_count: number;
+  uploaded_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as */
 export interface DomainLineageGraphRead {
   data_domain_id: string;
@@ -3308,8 +3369,24 @@ export interface RelationshipCandidateDecision {
   reason?: string | null;
 }
 
+/** One field-level entry of a candidate's ``nothing -> this edge`` diff. */
+export interface RelationshipCandidateDiffEntryRead {
+  field: string;
+  change: "added" | "removed" | "changed";
+  after?: unknown;
+}
+
 export interface RelationshipCandidateDiscoveryRequest {
   max_candidates?: number;
+}
+
+export interface RelationshipCandidateImpactRead {
+  impact_score: number;
+  source_table_impact: number;
+  target_table_impact: number;
+  depth: number;
+  node_limit: number;
+  truncated: boolean;
 }
 
 export interface RelationshipCandidateRead {
@@ -3331,6 +3408,22 @@ export interface RelationshipCandidateRead {
   reviewed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface RelationshipCandidateReviewItemRead {
+  candidate: RelationshipCandidateRead;
+  diff: RelationshipCandidateDiffEntryRead[];
+  impact: RelationshipCandidateImpactRead;
+}
+
+export interface RelationshipCandidateReviewQueueRead {
+  datasource_id: string;
+  items: RelationshipCandidateReviewItemRead[];
+  limit: number;
+  offset: number;
+  scanned_count: number;
+  total_pending_count: number;
+  truncated: boolean;
 }
 
 export interface RenameCandidateDecision {

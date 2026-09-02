@@ -372,6 +372,178 @@
         "title": "AgentAutoApplyRead",
         "type": "object"
       },
+      "AgentEvalGateEvaluateRequest": {
+        "additionalProperties": false,
+        "description": "Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts`\nis the caller's assertion of the *current, complete* externally-replayed\ncorpus (see `record_agent_eval_gate_evidence`'s docstring: each call\nreplaces, never merges, what was previously stored); omit it (or send an\nempty list) to evaluate the CONFIRMED_RUN corpus alone, or to\ndeliberately clear a previously-submitted steward-authored set.",
+        "properties": {
+          "steward_authored_verdicts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentEvalGateVerdictInput"
+            },
+            "maxItems": 1000,
+            "title": "Steward Authored Verdicts",
+            "type": "array"
+          }
+        },
+        "title": "AgentEvalGateEvaluateRequest",
+        "type": "object"
+      },
+      "AgentEvalGateRead": {
+        "additionalProperties": false,
+        "description": "The gate's current state -- deliverable 3: what a steward reads,\nbefore ever attempting to publish, to see whether an agent would pass.\nEvery contributing verdict is visible on `verdicts`, never collapsed to\na bare boolean.",
+        "properties": {
+          "evaluated_at": {
+            "format": "date-time",
+            "title": "Evaluated At",
+            "type": "string"
+          },
+          "failing_case_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Failing Case Ids",
+            "type": "array"
+          },
+          "minimum_exemplars": {
+            "title": "Minimum Exemplars",
+            "type": "integer"
+          },
+          "pass_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pass Rate"
+          },
+          "passed_exemplars": {
+            "title": "Passed Exemplars",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "total_exemplars": {
+            "title": "Total Exemplars",
+            "type": "integer"
+          },
+          "verdict": {
+            "enum": [
+              "PASS",
+              "FAIL",
+              "INSUFFICIENT_DATA"
+            ],
+            "title": "Verdict",
+            "type": "string"
+          },
+          "verdicts": {
+            "items": {
+              "$ref": "#/components/schemas/AgentEvalGateVerdictRead"
+            },
+            "title": "Verdicts",
+            "type": "array"
+          }
+        },
+        "required": [
+          "verdict",
+          "threshold",
+          "minimum_exemplars",
+          "total_exemplars",
+          "passed_exemplars",
+          "pass_rate",
+          "failing_case_ids",
+          "verdicts",
+          "reason",
+          "evaluated_at"
+        ],
+        "title": "AgentEvalGateRead",
+        "type": "object"
+      },
+      "AgentEvalGateVerdictInput": {
+        "additionalProperties": false,
+        "description": "One externally-computed `STEWARD_AUTHORED` replay verdict, submitted\nby a caller with a live-replay-capable environment (see module\ndocstring) -- there is deliberately no `source` field here: every\nverdict submitted through this shape is forced to `STEWARD_AUTHORED` by\nthe endpoint itself, so a caller can never inject a fabricated\n`CONFIRMED_RUN` verdict (that source is only ever produced by this\nmodule's own live database read).",
+        "properties": {
+          "case_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Case Id",
+            "type": "string"
+          },
+          "detail": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Detail",
+            "type": "string"
+          },
+          "drift": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Drift",
+            "type": "array"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "case_id",
+          "matched"
+        ],
+        "title": "AgentEvalGateVerdictInput",
+        "type": "object"
+      },
+      "AgentEvalGateVerdictRead": {
+        "additionalProperties": false,
+        "properties": {
+          "case_id": {
+            "title": "Case Id",
+            "type": "string"
+          },
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "drift": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Drift",
+            "type": "array"
+          },
+          "matched": {
+            "title": "Matched",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "CONFIRMED_RUN",
+              "STEWARD_AUTHORED"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "case_id",
+          "source",
+          "matched",
+          "drift",
+          "detail"
+        ],
+        "title": "AgentEvalGateVerdictRead",
+        "type": "object"
+      },
       "AgentEvaluationRunRead": {
         "additionalProperties": false,
         "properties": {
@@ -10595,6 +10767,127 @@
         "title": "DetokenizeRequest",
         "type": "object"
       },
+      "DocumentCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "filename": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Filename",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filename",
+          "content"
+        ],
+        "title": "DocumentCreate",
+        "type": "object"
+      },
+      "DocumentMappingSummaryRead": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "matched_count": {
+            "title": "Matched Count",
+            "type": "integer"
+          },
+          "unmatched_count": {
+            "title": "Unmatched Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "document_id",
+          "matched_count",
+          "unmatched_count"
+        ],
+        "title": "DocumentMappingSummaryRead",
+        "type": "object"
+      },
+      "DocumentRead": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "parse_error_count": {
+            "title": "Parse Error Count",
+            "type": "integer"
+          },
+          "project_id": {
+            "format": "uuid",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "section_count": {
+            "title": "Section Count",
+            "type": "integer"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "uploaded_by": {
+            "title": "Uploaded By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "project_id",
+          "filename",
+          "media_type",
+          "sha256",
+          "status",
+          "section_count",
+          "parse_error_count",
+          "uploaded_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DocumentRead",
+        "type": "object"
+      },
       "DomainLineageGraphRead": {
         "additionalProperties": false,
         "description": "Same merged FK + suggested + dbt + OpenLineage + view/procedure graph as\nUnifiedLineageGraphRead, federated across every datasource in one\ndata_domain (ADR-0017 SS3/SS6) instead of scoped to a single datasource.\n\nThis is a federated bounded view, not a global graph query: each\ncontributing datasource's graph is built and capped by the existing,\nunchanged single-datasource builder, then merged under the domain's\ncombined node_limit/edge_limit -- ADR-0010's bounded/lazy/value-free\ncontract holds at this wider scope exactly as it does at the narrower\none. Node and edge ids are prefixed per-datasource to guarantee no\nfalse merge between two different datasources' same-named synthetic\n(unmatched dbt/OpenLineage) nodes.\n\nA candidate relationship reaching across a data_domain boundary only\never renders as an edge here when an ACTIVE cross_boundary_grant permits\nthis domain to see into the other one (ADR-0017 SS4, INV-5: deny-by-\ndefault, never inherited) -- `withheld_cross_boundary_domain_ids` names\nany domain that has such a candidate but no covering grant, reported\nrather than silently dropped, mirroring the withheld:\"no_grant\"\ntransparency this ADR requires everywhere it applies.",
@@ -19951,6 +20244,34 @@
         "title": "RelationshipCandidateDecision",
         "type": "object"
       },
+      "RelationshipCandidateDiffEntryRead": {
+        "additionalProperties": false,
+        "description": "One field-level entry of a candidate's ``nothing -> this edge`` diff.\nMirrors ``semantic_api.SemanticFieldDeltaRead``'s own wire shape (kept\nindependent of ``aida.semantic_diff``'s internals, same reasoning).",
+        "properties": {
+          "after": {
+            "title": "After"
+          },
+          "change": {
+            "enum": [
+              "added",
+              "removed",
+              "changed"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "change"
+        ],
+        "title": "RelationshipCandidateDiffEntryRead",
+        "type": "object"
+      },
       "RelationshipCandidateDiscoveryRequest": {
         "additionalProperties": false,
         "properties": {
@@ -19963,6 +20284,45 @@
           }
         },
         "title": "RelationshipCandidateDiscoveryRequest",
+        "type": "object"
+      },
+      "RelationshipCandidateImpactRead": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "title": "Depth",
+            "type": "integer"
+          },
+          "impact_score": {
+            "title": "Impact Score",
+            "type": "integer"
+          },
+          "node_limit": {
+            "title": "Node Limit",
+            "type": "integer"
+          },
+          "source_table_impact": {
+            "title": "Source Table Impact",
+            "type": "integer"
+          },
+          "target_table_impact": {
+            "title": "Target Table Impact",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "impact_score",
+          "source_table_impact",
+          "target_table_impact",
+          "depth",
+          "node_limit",
+          "truncated"
+        ],
+        "title": "RelationshipCandidateImpactRead",
         "type": "object"
       },
       "RelationshipCandidateRead": {
@@ -20095,6 +20455,79 @@
           "updated_at"
         ],
         "title": "RelationshipCandidateRead",
+        "type": "object"
+      },
+      "RelationshipCandidateReviewItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/RelationshipCandidateRead"
+          },
+          "diff": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateDiffEntryRead"
+            },
+            "title": "Diff",
+            "type": "array"
+          },
+          "impact": {
+            "$ref": "#/components/schemas/RelationshipCandidateImpactRead"
+          }
+        },
+        "required": [
+          "candidate",
+          "diff",
+          "impact"
+        ],
+        "title": "RelationshipCandidateReviewItemRead",
+        "type": "object"
+      },
+      "RelationshipCandidateReviewQueueRead": {
+        "additionalProperties": false,
+        "properties": {
+          "datasource_id": {
+            "format": "uuid",
+            "title": "Datasource Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RelationshipCandidateReviewItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "scanned_count": {
+            "title": "Scanned Count",
+            "type": "integer"
+          },
+          "total_pending_count": {
+            "title": "Total Pending Count",
+            "type": "integer"
+          },
+          "truncated": {
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "items",
+          "limit",
+          "offset",
+          "scanned_count",
+          "total_pending_count",
+          "truncated"
+        ],
+        "title": "RelationshipCandidateReviewQueueRead",
         "type": "object"
       },
       "RenameCandidateDecision": {
@@ -27573,6 +28006,274 @@
           }
         },
         "summary": "Get Ai Dependency Graph",
+        "tags": [
+          "ai-registry"
+        ]
+      }
+    },
+    "/v1/ai-asset-versions/{version_id}/eval-gate": {
+      "get": {
+        "description": "N15: the evaluation gate's *current* state -- live, read-only, no\nside effect -- for an AGENT-kind AI asset version, so a steward can see\nbefore ever attempting to publish whether this agent would pass.\nRecomputes exactly what the real publish precondition\n(`semantic_api._apply_governance_review_decision`) would compute at this\nmoment: the organization's current confirmed-run exemplar corpus, plus\nwhichever `STEWARD_AUTHORED` verdicts were most recently submitted via\n`POST .../eval-gate/evaluate` -- the two can never show a different\nanswer, since both call `aida.agent_eval_gate.compute_agent_eval_gate`.",
+        "operationId": "get_agent_eval_gate_v1_ai_asset_versions__version_id__eval_gate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvalGateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Agent Eval Gate",
+        "tags": [
+          "ai-registry"
+        ]
+      }
+    },
+    "/v1/ai-asset-versions/{version_id}/eval-gate/evaluate": {
+      "post": {
+        "description": "N15: run the evaluation gate now and persist the result into\n`evaluation_evidence` (evidenced via the existing audit trail --\n`record_audit`, never a parallel mechanism), regardless of the outcome\n-- unlike the automatic check the real publish transition runs (which\nonly persists a PASS, see that function's own comment for why), this is\nan explicit steward action and its result -- pass or fail -- is real\nevidence worth keeping either way.\n\n`body.steward_authored_verdicts`, when given, REPLACES whatever\n`STEWARD_AUTHORED` verdict set was previously stored for this version\n(see `AgentEvalGateEvaluateRequest`'s own docstring) -- submit the\ncaller's current, complete externally-replayed corpus each time, not an\nincremental diff. A later publish attempt reuses whatever was most\nrecently stored here for its own `STEWARD_AUTHORED` half; the\n`CONFIRMED_RUN` half is always recomputed fresh regardless.",
+        "operationId": "evaluate_agent_eval_gate_endpoint_v1_ai_asset_versions__version_id__eval_gate_evaluate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentEvalGateEvaluateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentEvalGateRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Evaluate Agent Eval Gate Endpoint",
         "tags": [
           "ai-registry"
         ]
@@ -43588,6 +44289,158 @@
         ]
       }
     },
+    "/v1/datasources/{datasource_id}/relationship-candidates/review-queue": {
+      "get": {
+        "description": "N4: PENDING relationship candidates for one datasource, sorted by\nreal computed impact (EA.14's bounded lineage traversal against each\ncandidate's two endpoints, descending -- never a fake priority number),\neach carrying a structured ``nothing -> this edge`` diff (SM-7's diff\nengine, reused verbatim) with AT-15's per-signal confidence breakdown.\n\nA richer read than `GET .../relationship-candidates` (which sorts by\nconfidence and returns the raw row): this is the surface a reviewer\ntriaging a backlog should open first, since it orders the queue by how\nmuch is actually at stake in each decision. Deciding a candidate --\nsingly or in RL-6's bulk-decision endpoint below -- is unchanged; this\nendpoint is read-only.",
+        "operationId": "get_relationship_candidate_review_queue_v1_datasources__datasource_id__relationship_candidates_review_queue_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipCandidateReviewQueueRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Relationship Candidate Review Queue",
+        "tags": [
+          "intelligence-governance"
+        ]
+      }
+    },
     "/v1/datasources/{datasource_id}/rename-candidates": {
       "get": {
         "operationId": "list_rename_candidates_v1_datasources__datasource_id__rename_candidates_get",
@@ -46478,6 +47331,843 @@
         "summary": "Revoke Delegation",
         "tags": [
           "delegation"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}": {
+      "get": {
+        "operationId": "get_document_v1_documents__document_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Document",
+        "tags": [
+          "document-ingestion"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}/claims": {
+      "get": {
+        "operationId": "list_document_claims_v1_documents__document_id__claims_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Document Claims",
+        "tags": [
+          "document-ingestion"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}/extract-claims": {
+      "post": {
+        "operationId": "extract_claims_v1_documents__document_id__extract_claims_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Extract Claims",
+        "tags": [
+          "document-ingestion"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}/map": {
+      "post": {
+        "operationId": "map_document_v1_documents__document_id__map_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentMappingSummaryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Map Document",
+        "tags": [
+          "document-ingestion"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}/mappings": {
+      "get": {
+        "operationId": "list_document_mappings_v1_documents__document_id__mappings_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Document Mappings",
+        "tags": [
+          "document-ingestion"
+        ]
+      }
+    },
+    "/v1/documents/{document_id}/sections": {
+      "get": {
+        "operationId": "list_document_sections_v1_documents__document_id__sections_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Document Sections",
+        "tags": [
+          "document-ingestion"
         ]
       }
     },
@@ -68699,6 +70389,293 @@
         "summary": "Create Dbt Project",
         "tags": [
           "dbt-transformations"
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/documents": {
+      "get": {
+        "operationId": "list_documents_v1_projects__project_id__documents_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Documents",
+        "tags": [
+          "document-ingestion"
+        ]
+      },
+      "post": {
+        "operationId": "upload_document_v1_projects__project_id__documents_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DocumentCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload Document",
+        "tags": [
+          "document-ingestion"
         ]
       }
     },
