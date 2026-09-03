@@ -188,8 +188,19 @@ export function CatalogScreen() {
         {checked.size > 0 ? (
           <div className="cat__bulk" role="status">
             <Pill tone="accent">{nf.format(checked.size)} selected</Pill>
-            <Button variant="primary">Describe…</Button>
-            <Button>Certify…</Button>
+            <Button
+              variant="primary"
+              disabled
+              title="Bulk describe is not available yet — describe an asset from its detail pane, or use Studio change sets."
+            >
+              Describe…
+            </Button>
+            <Button
+              disabled
+              title="Bulk certify is not available yet — certification is managed per asset in stewardship."
+            >
+              Certify…
+            </Button>
             <Button onClick={() => setChecked(new Set())}>Clear</Button>
           </div>
         ) : null}
