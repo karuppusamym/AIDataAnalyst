@@ -319,6 +319,25 @@ services:
       - "3001:80"
     restart: unless-stopped
 
+  # Opt-in demonstration seed. Runs only when explicitly requested:
+  #   docker compose --profile seed run --rm seed
+  # It populates a value-free sample banking estate through the API so the
+  # catalog, knowledge graph and unified lineage render non-empty on a fresh
+  # install. Never enabled by a plain `docker compose up`.
+  seed:
+    build: .
+    profiles: ["seed"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      AIDA_BASE_URL: http://api:8000
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: ["python", "scripts/seed_sample_estate.py"]
+    restart: "no"
+
   metadata-worker:
     build: .
     depends_on:
