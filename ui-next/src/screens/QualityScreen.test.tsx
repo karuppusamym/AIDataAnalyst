@@ -206,6 +206,39 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
     expect(transitionQualityIncident).not.toHaveBeenCalled();
   });
 
+  it("shows the runtime-coupling note for an open CRITICAL incident, and omits it once resolved (DQ-3)", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+    await waitFor(() => expect(screen.getByText("raw_sales")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "raw_sales" }));
+    const panel = await screen.findByLabelText("Incident detail for raw_sales");
+    expect(within(panel).getByText("Runtime coupling (DQ-3)")).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/blocks governed tools that depend on this table/),
+    ).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Close incident detail" }));
+
+    fetchQualityIncidents.mockResolvedValue(
+      incidentsPage([
+        {
+          ...INCIDENT,
+          status: "RESOLVED",
+          resolved_by: "me@tenant.example",
+          resolved_at: "2026-09-02T06:00:00Z",
+          resolution_reason: "False positive from a backfill.",
+        },
+      ]),
+    );
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "RESOLVED" } });
+    await waitFor(() => expect(fetchQualityIncidents).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "raw_sales" }));
+    const resolvedPanel = await screen.findByLabelText("Incident detail for raw_sales");
+    expect(within(resolvedPanel).queryByText("Runtime coupling (DQ-3)")).not.toBeInTheDocument();
+  });
+
   it("opens a permalinkable detail panel for a selected incident", async () => {
     history.replaceState(null, "", "/?ds=ds_1");
     const QualityScreen = await loadScreen();

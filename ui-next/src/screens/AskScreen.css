@@ -36,6 +36,11 @@
 .histrow__meta{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);display:flex;gap:6px}
 .histrow__fail{font-size:12px;color:var(--bad);margin:6px 0 0}
 
+.ask__trustwarn{border:1px solid var(--bad);border-left:3px solid var(--bad);border-radius:var(--radius);background:var(--surface);padding:12px 14px;display:flex;flex-direction:column;gap:8px;margin:0 0 12px}
+.ask__trustwarn_head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ask__trustscore{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.ask__trustwarn_list{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px;font-size:12.5px;color:var(--ink);line-height:1.45}
+
 .ask__explain{margin:0 0 10px;font-size:13.5px;color:var(--ink);line-height:1.55}
 .ask__noexplain{margin:0 0 10px;font-size:12.5px;color:var(--ink-3);font-style:italic;line-height:1.5}
 .ask__exec{margin:0 0 10px;display:grid;grid-template-columns:repeat(2,1fr);gap:8px 14px}

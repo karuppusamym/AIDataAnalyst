@@ -1059,6 +1059,97 @@ export async function makeFixtureAgentAnalysis(
     throw new ApiError(502, "agent analysis execution failed");
   }
 
+  // DQ-3 (module 11 §9): a question that touches a table with an open quality
+  // incident still SUCCEEDS (a WARNING-severity incident only warns; only a
+  // CRITICAL one blocks, and that is the 422/`policy` branch above) -- but
+  // the answer's own retrieval evidence and plan evidence carry the same
+  // machine-readable `quality_trust_demotion`/`trust.warnings` shapes
+  // `retrieval.py`/`agent_orchestrator.py` attach for real, so this screen's
+  // trust-warning banner and demotion-reason display are reachable in
+  // fixture mode without a real backend.
+  if (question.includes("quality") || question.includes("incident")) {
+    const runId = nextAgentRunId();
+    const execution = {
+      execution_id: `qe_${runId}`,
+      status: "SUCCEEDED",
+      normalized_sql:
+        "SELECT date_trunc('month', order_date) AS month, SUM(net_amount) AS net_revenue\nFROM analytics.core.orders_raw\nGROUP BY 1\nORDER BY 1",
+      referenced_tables: ["analytics.core.orders_raw"],
+      referenced_columns: ["order_date", "net_amount"],
+      column_lineage: [],
+      plan_cost: 12.4,
+      warehouse_query_id: `wh_${runId}`,
+      row_count: 3,
+      elapsed_ms: 310,
+      masked_columns: [],
+      rows: [
+        { month: "2026-06-01", net_revenue: 1_276_400 },
+        { month: "2026-07-01", net_revenue: 1_190_200 },
+        { month: "2026-08-01", net_revenue: 1_244_800 },
+      ],
+    };
+    const response: AgentAnalysisResponse = {
+      agent_run_id: runId,
+      status: "SUCCEEDED",
+      generation_source: "FREEFORM_SQL",
+      semantic_version: "sm_2026_09@4",
+      policy_version: "pol_2026_09@2",
+      step_trace: [
+        { stage: "RETRIEVED", strategy: "DETERMINISTIC", retrieval_evidence_count: 1 },
+        { stage: "RESOLVED", semantic_version: "sm_2026_09@4" },
+        { stage: "PLANNED", strategy: "FREEFORM_SQL", confidence: 0.87 },
+        { stage: "EXECUTED", strategy: "FREEFORM_SQL" },
+      ],
+      retrieval_evidence: [
+        {
+          object_type: "TABLE",
+          object_id: "t_orders_raw",
+          score: 0.71,
+          reason: "direct match on 'orders' and 'revenue' in the question",
+          metadata: {
+            quality_trust_demotion: {
+              reason: "OPEN_QUALITY_INCIDENT",
+              demoted_table_ids: ["t_orders_raw"],
+              worst_factor: 0.3,
+            },
+          },
+        },
+      ],
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        confidence: 0.87,
+        trust: {
+          trust_score: 58,
+          trust_grade: "C",
+          factors: [
+            { factor: "quality", score: 30, weight: 0.4 },
+            { factor: "freshness", score: 80, weight: 0.2 },
+          ],
+          warnings: [
+            {
+              asset_id: "t_orders_raw",
+              message:
+                "orders_raw has 1 active quality incident (highest severity: CRITICAL). Results may be unreliable.",
+              severity: "CRITICAL",
+              incident_ids: ["inc_orders_raw_volume"],
+            },
+          ],
+        },
+      },
+      execution,
+      explanation: `Net revenue by month for the last 3 months, computed from analytics.core.orders_raw using the governed "Net Revenue" definition. TRUST WARNING: orders_raw has an open CRITICAL quality incident -- treat this answer with caution.`,
+    };
+    const run = agentRunRead(runId, datasourceId, "SUCCEEDED", {
+      step_trace: response.step_trace,
+      retrieval_evidence: response.retrieval_evidence,
+      plan_evidence: response.plan_evidence,
+      query_execution_id: execution.execution_id,
+    });
+    FIXTURE_AGENT_RUNS[datasourceId] = [run, ...(FIXTURE_AGENT_RUNS[datasourceId] ?? [])];
+    FIXTURE_GROUNDING_RECEIPTS[runId] = groundingReceiptsFor(runId, "orders_raw");
+    return response;
+  }
+
   const runId = nextAgentRunId();
   const execution = {
     execution_id: `qe_${runId}`,

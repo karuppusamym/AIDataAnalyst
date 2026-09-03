@@ -407,6 +407,19 @@ export function QualityScreen() {
                       </li>
                     ) : null}
                   </ol>
+                  {selected.status !== "RESOLVED" ? (
+                    <div className="qual__coupling">
+                      <div className="evp__sub">Runtime coupling (DQ-3)</div>
+                      <p className="qual__couplingtext">
+                        While {humanize(selected.status)}, this incident
+                        {selected.severity === "CRITICAL"
+                          ? " blocks governed tools that depend on this table and refuses agent answers grounded in it (fail-closed), and heavily demotes it in retrieval ranking"
+                          : " demotes this table in retrieval ranking and flags (but does not block) governed tools that depend on it"}
+                        , attaches a trust warning to any agent answer that uses it, and shows on this
+                        table&rsquo;s lineage impact graph — not just here.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="qual__evjson">
                     <div className="evp__sub">Evidence</div>
                     <pre className="qual__evpre">{JSON.stringify(selected.evidence, null, 2)}</pre>

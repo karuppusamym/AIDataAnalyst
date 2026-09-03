@@ -189,6 +189,18 @@ function AnswerPanel({
   const policyVersion = isFresh ? askResult.policy_version : (detail?.policy_version ?? null);
   const modelRoute = isFresh ? null : (detail?.model_route ?? null);
 
+  // DQ-3 (module 11 §9): `agent_orchestrator.py`'s EXPLAINED checkpoint folds
+  // every open-incident `quality_coupling.TrustWarning` this answer's own
+  // tables carry into `plan_evidence.trust` -- a machine-readable list, not
+  // prose, so this reads the same `{asset_id, message, severity,
+  // incident_ids}` shape directly rather than parsing it out of the
+  // explanation text below.
+  const trust = record(planEvidence, "trust");
+  const trustWarningsRaw = trust ? record(trust, "warnings") : null;
+  const trustWarnings = Array.isArray(trustWarningsRaw) ? trustWarningsRaw : [];
+  const trustScore = trust ? record(trust, "trust_score") : null;
+  const trustGrade = trust ? record(trust, "trust_grade") : null;
+
   const permalink = `${location.origin}${location.pathname}?run=${runId}`;
 
   return (
@@ -216,6 +228,25 @@ function AnswerPanel({
           </div>
         ) : (
           <>
+            {trustWarnings.length > 0 ? (
+              <div className="ask__trustwarn" role="alert" aria-label="Quality trust warning">
+                <div className="ask__trustwarn_head">
+                  <Pill tone="bad">quality trust warning</Pill>
+                  {typeof trustScore === "number" ? (
+                    <span className="ask__trustscore">
+                      trust score {trustScore.toFixed(0)}
+                      {trustGrade ? ` (${String(trustGrade)})` : ""}
+                    </span>
+                  ) : null}
+                </div>
+                <ul className="ask__trustwarn_list">
+                  {trustWarnings.map((w, i) => (
+                    <li key={i}>{String(record(w, "message") ?? "")}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             {explanation ? (
               <p className="ask__explain">{explanation}</p>
             ) : (
@@ -315,8 +346,16 @@ function AnswerPanel({
                             ? String(score)
                             : null;
                       const reason = record(ev, "reason") ?? record(ev, "reason_codes");
+                      // DQ-3 (RT-7): `retrieval.py`'s Stage 4 attaches this to
+                      // any candidate whose own or a dependency table has an
+                      // open incident -- the concrete reason this candidate
+                      // ranked lower than it otherwise would have, not just a
+                      // number.
+                      const metadata = record(ev, "metadata");
+                      const demotion = metadata ? record(metadata, "quality_trust_demotion") : null;
+                      const worstFactor = demotion ? record(demotion, "worst_factor") : null;
                       return (
-                        <li key={i} className="evi evi--info">
+                        <li key={i} className={`evi ${demotion ? "evi--warn" : "evi--info"}`}>
                           <div className="evi__label">
                             {String(record(ev, "object_type") ?? "evidence")}
                             {scoreText ? ` · ${scoreText}` : ""}
@@ -325,6 +364,14 @@ function AnswerPanel({
                           {reason != null ? (
                             <div className="evi__source">
                               {Array.isArray(reason) ? reason.join(", ") : String(reason)}
+                            </div>
+                          ) : null}
+                          {demotion ? (
+                            <div className="evi__source">
+                              demoted in ranking — {String(record(demotion, "reason") ?? "OPEN_QUALITY_INCIDENT")
+                                .replace(/_/g, " ")
+                                .toLowerCase()}
+                              {typeof worstFactor === "number" ? ` (factor ${worstFactor.toFixed(2)})` : ""}
                             </div>
                           ) : null}
                         </li>

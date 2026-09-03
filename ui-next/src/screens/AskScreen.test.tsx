@@ -186,6 +186,76 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     expect(screen.getByText(ANALYSIS_RESPONSE.semantic_version!)).toBeInTheDocument();
     expect(screen.getByText(ANALYSIS_RESPONSE.policy_version)).toBeInTheDocument();
     expect(screen.getByText("shown on the saved run")).toBeInTheDocument();
+
+    // DQ-3: no open quality incident on this answer's tables means no trust
+    // warning at all -- not an empty/hidden one, absent from the DOM.
+    expect(screen.queryByRole("alert", { name: "Quality trust warning" })).not.toBeInTheDocument();
+  });
+
+  it("renders a machine-readable trust warning and the retrieval demotion reason when the answer's tables have an open quality incident (DQ-3)", async () => {
+    runAgentAnalysis.mockResolvedValue({
+      ...ANALYSIS_RESPONSE,
+      agent_run_id: "run_dq3_1",
+      retrieval_evidence: [
+        {
+          object_type: "TABLE",
+          object_id: "t_orders_raw",
+          score: 0.71,
+          metadata: {
+            quality_trust_demotion: {
+              reason: "OPEN_QUALITY_INCIDENT",
+              demoted_table_ids: ["t_orders_raw"],
+              worst_factor: 0.3,
+            },
+          },
+        },
+      ],
+      plan_evidence: {
+        strategy: "FREEFORM_SQL",
+        confidence: 0.87,
+        trust: {
+          trust_score: 58,
+          trust_grade: "C",
+          warnings: [
+            {
+              asset_id: "t_orders_raw",
+              message:
+                "orders_raw has 1 active quality incident (highest severity: CRITICAL). Results may be unreliable.",
+              severity: "CRITICAL",
+              incident_ids: ["inc_orders_raw_volume"],
+            },
+          ],
+        },
+      },
+    });
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: "run_dq3_1",
+      fragment_count: 0,
+      fragments: [],
+    });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "what was net revenue for a table with a quality incident" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+
+    const warning = await screen.findByRole("alert", { name: "Quality trust warning" });
+    expect(within(warning).getByText("quality trust warning")).toBeInTheDocument();
+    expect(within(warning).getByText(/trust score 58/)).toBeInTheDocument();
+    expect(
+      within(warning).getByText(
+        "orders_raw has 1 active quality incident (highest severity: CRITICAL). Results may be unreliable.",
+      ),
+    ).toBeInTheDocument();
+
+    // Not shown at all when there is no incident -- proven by the plain
+    // success-path test above, which asserts the explanation renders with
+    // no assertion needed here beyond this one carrying the warning.
+    fireEvent.click(screen.getByText("How this was answered"));
+    expect(screen.getByText(/demoted in ranking — open quality incident \(factor 0\.30\)/)).toBeInTheDocument();
   });
 
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {
