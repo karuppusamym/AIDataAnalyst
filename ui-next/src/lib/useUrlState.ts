@@ -17,7 +17,12 @@ export function useUrlState() {
         if (v === null || v === "") next.delete(k);
         else next.set(k, v);
       }
-      history.replaceState(null, "", `${location.pathname}?${next}`);
+      const query = next.toString();
+      history.replaceState(
+        null,
+        "",
+        `${location.pathname}${query ? `?${query}` : ""}${location.hash}`,
+      );
       return next;
     });
   }, []);

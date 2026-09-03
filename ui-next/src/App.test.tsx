@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { MeRead } from "./lib/types";
 
 /* ---------------------------------------------------------------------------
@@ -25,6 +25,7 @@ async function loadApp() {
 beforeEach(() => {
   fetchMe.mockReset();
   vi.resetModules();
+  history.replaceState(null, "", "/");
 });
 
 describe("App shell persona gating", () => {
@@ -72,5 +73,57 @@ describe("App shell persona gating", () => {
     render(<App />);
 
     expect(screen.queryByTestId("persona-nav")).not.toBeInTheDocument();
+  });
+
+  it("offers keyboard-friendly quick navigation across the full product", async () => {
+    fetchMe.mockResolvedValue({
+      principal_id: "dev-fixture-user",
+      principal_type: "USER",
+      organization_id: null,
+      roles: ["Analyst"],
+      persona: null,
+      identity_provider: "DEVELOPMENT",
+    });
+    const App = await loadApp();
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    const input = screen.getByRole("textbox", { name: "Search pages" });
+    fireEvent.change(input, { target: { value: "context compile" } });
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Quick navigation" })).getByRole("button", { name: /Context products/ }));
+
+    expect(location.hash).toBe("#/context");
+    expect(screen.queryByRole("dialog", { name: "Quick navigation" })).not.toBeInTheDocument();
+  });
+
+  it("provides an ordered in-page menu for the active product section", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    const section = screen.getByRole("navigation", { name: "Discover pages" });
+    expect(within(section).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Catalog",
+      "Marketplace",
+      "Relationships",
+    ]);
+    expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
+
+    fireEvent.click(within(section).getByRole("button", { name: "Marketplace" }));
+    expect(location.hash).toBe("#/marketplace");
+  });
+
+  it("restores the correct page on browser history navigation", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    history.replaceState(null, "", "/#/operations");
+    fireEvent(window, new PopStateEvent("popstate"));
+
+    await waitFor(() => expect(screen.getByRole("navigation", { name: "Operate pages" })).toBeInTheDocument());
+    expect(screen.getByText("Operations", { selector: ".topbar__trail strong" })).toBeInTheDocument();
   });
 });

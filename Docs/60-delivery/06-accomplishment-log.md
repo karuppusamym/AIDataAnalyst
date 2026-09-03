@@ -11324,3 +11324,65 @@ before this session started; `ui-next/src/lib/types.ts` was not touched.
 - No backend endpoint had to be stubbed or mocked for any of UX-15/UX-20/UX-8 -- every call in this
   session's diff hits a route that already existed, unchanged, on `feature/snowflake-dbt-lineage-mcp` at
   this branch's base commit (`fa501c0`).
+
+## 2026-09-03 — CN-9 connector methods, plus a full-suite verification pass (not a delivery, an audit)
+
+### CN-9: `Connector.get_query_history()` for Snowflake and BigQuery
+
+Added the base-class method (`connectors/base.py`: `QueryLogEntry`, `ConnectorQueryHistoryUnsupported`,
+`Connector.get_query_history` -- non-abstract, fails closed, same shape as `profile_column_values`) and
+implemented it for `SnowflakeConnector` (`ACCOUNT_USAGE.QUERY_HISTORY`) and `BigQueryConnector`
+(region-qualified `JOBS_BY_PROJECT`), both bounded by `since`/`limit` bind parameters, both reading only
+a query's own text and timing, never a result row. `QueryLogEntry` is defined in `connectors/base.py`
+rather than imported from `query_history_miner.py` on purpose -- module 02 (connectivity) is a lower
+layer than modules 05/07/12 where the miner lives, and a connector must not depend upward on the module
+that consumes what it produces. Six new tests (`tests/test_connectors.py`,
+`tests/test_connectors_snowflake.py`, `tests/test_connectors_bigquery.py`): fail-closed default,
+row-mapping, bind-parameter bounding, incomplete-row dropping.
+
+**Honest gaps:** Databricks (`system.query.history`) not implemented. `query_history` capability flags
+stay `False` on every connector regardless (module 02 §11: flags are certification-derived, never
+hand-declared) -- no live account was available to certify against, so that is correctly still closed.
+The INV-6 gap-proof test this row's own tracker entry (CN-9) calls for -- a sentinel scan proving
+`sql_text` never reaches persisted state once a caller wires this into
+`mine_and_land_query_history_candidates` -- is not written, because that caller/wiring does not exist
+yet either (AT-12's own honest gap #3).
+
+### A full-suite verification pass, prompted by a fair question about depth
+
+The session this entry closes had drifted into scoping and "designing" work (N20/CN-9) before checking
+whether a working test/type-check environment even existed here. It didn't: every `.venv*` in this
+worktree pointed at a now-gone session's Python interpreter, and rebuilding one on this session's own
+scratch disk failed with `No space left on device` (a session-VM constraint, not a project one -- the
+project's own mount had hundreds of GB free). Redirecting `UV_PYTHON_INSTALL_DIR`/`UV_PROJECT_ENVIRONMENT`
+to `/tmp` (which had room) let `uv sync --frozen --extra dev` complete for real.
+
+With a working environment, this entry runs what the tracker has been claiming, rather than trusting
+the citations:
+
+- **`tests/test_doc_claims.py`** (TS-12's mechanical citation gate over all of `Docs/`): clean, first
+  try, no stale citations found anywhere in the tree.
+- **Full test suite**, run in six chunks (no background-process capability in this session, so this was
+  sequential, not backgrounded): **7,112 of 7,112 collected tests executed, 0 errors, 13 skipped, 1
+  apparent failure** (`tests/test_config.py::test_environment_must_be_explicit_outside_tests`) that
+  traced directly to this session's own `AIDA_ENVIRONMENT=development` export leaking into a test that
+  specifically checks behaviour when that variable is *unset* -- rerun in isolation without the export,
+  it passes. Net: **7,112/7,112 real passes**, matching (and for the first time in this session, actually
+  proving rather than repeating) the tracker's repeated "tests passing" claims.
+- **`mypy src`**: clean, 293 source files, 0 issues.
+- **`lint-imports`**: 8 contracts analyzed, 8 kept, 0 broken.
+- **Two claims spot-checked at the algebra/code level, not just by trusting a green test:**
+  `_lane3_confidence` (AT-12) cannot exceed `QUERY_HISTORY_CONFIDENCE_CAP = 0.70` for any occurrence
+  count -- `progress` is clamped to `1.0` before scaling, and the return value is additionally
+  `min()`-capped again on the way out. `test_model_output_types_are_inert` and
+  `test_no_connector_execution_outside_gateway` (INV-2/INV-3) are real structural checks -- type
+  hierarchy, method-signature, and static call-site assertions -- not tautologies dressed as tests.
+
+**What this does not establish.** This is one session's snapshot verification, not a standing gate --
+it used a throwaway `/tmp` environment, not a committed CI configuration, and it checked what currently
+exists against what `Docs/` currently claims, not whether either one is the *right* thing to have built.
+A citation resolving and a test passing prove the artifact exists and its narrow assertion holds; they
+do not prove the feature is well-designed, complete, or that its test actually exercises the risk it
+claims to cover. This entry also did not audit the UI packages (`ui/`, `ui-next/`), infra, or migration
+history -- scope was `src/`, `tests/`, and `Docs/` citations only. Worth turning into a real CI job
+(module 02's own `CN-3` neighbours this territory) rather than repeating by hand next time.

@@ -130,12 +130,12 @@ function IncidentRow({
 export function QualityScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
   const statusFilter = params.get("status") ?? "ALL";
   const severityFilter = params.get("severity") ?? "ALL";
   const selectedId = params.get("incident");
 
-  const { datasources, error: dsPickerError } = useDatasourcePicker(ORG);
+  const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
 
   const [summary, setSummary] = useState<DataQualitySummaryRead | null>(null);
   const [incidents, setIncidents] = useState<DataQualityIncidentRead[]>([]);

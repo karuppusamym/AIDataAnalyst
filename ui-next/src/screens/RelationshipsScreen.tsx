@@ -174,10 +174,10 @@ function CandidateCard({
 export function RelationshipsScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const ds = params.get("ds");
   const focusedId = params.get("candidate");
 
-  const { datasources, error: datasourcesError } = useDatasourcePicker(ORG);
+  const { datasources, error: datasourcesError, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const ds = params.get("ds") ?? preferredDatasourceId;
 
   const [data, setData] = useState<RelationshipCandidateReviewQueueRead | null>(null);
   const [loading, setLoading] = useState(false);

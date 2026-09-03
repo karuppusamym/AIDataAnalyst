@@ -1,0 +1,38 @@
+.cplx{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px;overflow-y:auto}
+
+.cplx__head{flex:none}
+.cplx__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.cplx__h2{margin:0 0 10px;font-size:16px;letter-spacing:-.01em}
+.cplx__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch}
+
+.cplx__panel{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow-1);padding:16px;flex:none}
+.cplx__panel--grow{flex:1;min-height:0;display:flex;flex-direction:column}
+
+.cplx__grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px 12px;margin-bottom:12px}
+.cplx__grid .field{width:100%}
+.cplx__grid input,.cplx__grid select{width:100%;box-sizing:border-box}
+
+.cplx__status{margin-top:10px;border-radius:var(--radius-sm);padding:8px 12px;font-size:12.5px;border:1px solid var(--line-soft)}
+.cplx__status--success{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.cplx__status--error{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+
+.cplx__loading{color:var(--ink-3);font-size:13px;padding:10px 0}
+
+.cplx__tablewrap{flex:1;min-height:0;overflow:auto}
+.cplx__table{width:100%;border-collapse:collapse;font-size:12.5px}
+.cplx__table th{text-align:left;font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--ink-3);padding:6px 8px;border-bottom:1px solid var(--line)}
+.cplx__table td{padding:8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.cplx__table tr:last-child td{border-bottom:none}
+
+.cpk__name{display:block;font-weight:500;color:var(--ink)}
+.cpk__id{display:block;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px}
+
+.cpk__pre{font-family:var(--mono);font-size:11px;background:var(--sunk);border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:10px;overflow-x:auto;max-height:320px;overflow-y:auto;margin:0;white-space:pre-wrap;word-break:break-word}
+.cpk__err{color:var(--bad);font-size:12.5px;padding:4px 0}
+
+@media (max-width:900px){
+  .cplx__grid{grid-template-columns:1fr 1fr}
+}
+@media (max-width:600px){
+  .cplx__grid{grid-template-columns:1fr}
+}

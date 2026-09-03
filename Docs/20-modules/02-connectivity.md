@@ -123,3 +123,4 @@ Certification v1 records six deterministic control-plane checks: implementation 
 | CN-6 | Public connector SDK + docs (whitespace W6) | P1 |
 | CN-7 | Per-connector health scoring in the fleet view | P1 |
 | CN-8 | Index and partition extraction across adapters | P1 |
+| CN-9 | `Connector.get_query_history()` for Snowflake/BigQuery/Databricks -- the input `aida.query_history_miner` (AT-12) already consumes but that no connector produces yet. Certification (§11) proves a live end-to-end call before `query_history` flips from `False` (AT-D3) | P1 |

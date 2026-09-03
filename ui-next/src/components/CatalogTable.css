@@ -24,6 +24,7 @@
 .cc--owner{width:128px;flex:none;white-space:nowrap;text-overflow:ellipsis;display:block;line-height:38px}
 .cc--state{width:104px;flex:none}
 .cc--rows{width:92px;flex:none;justify-content:flex-end;font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;color:var(--ink-2)}
+.cc--updated{width:76px;flex:none;justify-content:flex-end;font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 
 .cname{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cpath{font-family:var(--mono);font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:0}
@@ -33,6 +34,9 @@
 
 /* Progressive disclosure by priority: the columns that decide whether an agent
    may use an asset (certification, quality) are the last to go. */
+@container ctable (max-width: 1000px) {
+  .cc--updated{display:none}
+}
 @container ctable (max-width: 900px) {
   .cc--owner{display:none}
   .cpath{display:none}

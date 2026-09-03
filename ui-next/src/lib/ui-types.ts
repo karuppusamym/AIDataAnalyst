@@ -160,3 +160,23 @@ export interface MarketplaceProductRead extends DataProductVersionRead {
   domain_affinity: boolean;
   role_affinity: boolean;
 }
+
+/** `ViolationRead` -- `runtime_contracts_api.py:41` (Phase E runtime data
+ *  contract enforcement). That file defines its response models inline
+ *  rather than in `schemas.py`, so -- like `CatalogRowRead`/`MetadataTableRead`
+ *  above -- it has no counterpart in `types.ts`'s generated OpenAPI mirror;
+ *  hand-written here for the same reason. One row per detected contract
+ *  violation, returned by `GET /v1/data-contracts/{contract_id}/violations`. */
+export interface ViolationRead {
+  id: string;
+  organization_id: string;
+  contract_id: string;
+  violation_type: string;
+  severity: string;
+  evidence: Record<string, unknown>;
+  detected_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}

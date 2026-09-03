@@ -1,8 +1,10 @@
 import inspect
+from datetime import UTC, datetime
 
 import pytest
 
 from aida.connectors import postgres
+from aida.connectors.base import ConnectorQueryHistoryUnsupported
 from aida.connectors.discovery import (
     apply_column_descriptions,
     apply_table_descriptions,
@@ -253,3 +255,18 @@ def test_a_schema_with_only_routines_survives_assembly() -> None:
 
     assert [schema.name for schema in catalogs[0].schemas] == ["batch"]
     assert catalogs[0].schemas[0].routines[0].name == "nightly_close"
+
+
+# --- CN-9: get_query_history() default is fail-closed -----------------------
+#
+# No connector overrides this yet (that is the whole point of CN-9). PostgresConnector
+# is the plain stand-in for "any connector that hasn't implemented it" -- the point
+# under test is the base `Connector` default, not anything Postgres-specific.
+
+
+@pytest.mark.asyncio
+async def test_get_query_history_default_fails_closed() -> None:
+    connector = postgres.PostgresConnector("postgresql://user:pass@localhost/db")
+
+    with pytest.raises(ConnectorQueryHistoryUnsupported):
+        await connector.get_query_history(since=datetime(2026, 1, 1, tzinfo=UTC))

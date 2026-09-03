@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { UnifiedLineageImpactNodeRead, UnifiedLineageImpactRead } from "../lib/types";
+import type { UnifiedLineageGraphRead, UnifiedLineageImpactNodeRead, UnifiedLineageImpactRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
 import {
   ApiError,
   fetchCatalogRows,
   fetchLineageImpact,
-  fetchOrgDatasources,
+  fetchLineageGraph,
 } from "../lib/api";
 import { Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { LineageGraph } from "../components/LineageGraph";
+import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import type { Tone } from "../components/primitives";
 import "./NarratedLineageScreen.css";
 
@@ -67,7 +69,8 @@ function useUrlState() {
         if (v === null || v === "") next.delete(k);
         else next.set(k, v);
       }
-      history.replaceState(null, "", `${location.pathname}?${next}`);
+      const query = next.toString();
+      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
       return next;
     });
   }, []);
@@ -111,7 +114,7 @@ function NarratedStep({ hop, index, focusLabel }: { hop: Hop; index: number; foc
   );
 }
 
-function Swimlanes({ impact }: { impact: UnifiedLineageImpactRead }) {
+export function Swimlanes({ impact }: { impact: UnifiedLineageImpactRead }) {
   const maxDepth = Math.max(1, ...impact.upstream.map((n) => n.depth), ...impact.downstream.map((n) => n.depth));
   const lanesUpstream = Array.from({ length: maxDepth }, (_, i) => maxDepth - i).map((d) =>
     impact.upstream.filter((n) => n.depth === d),
@@ -156,12 +159,12 @@ function Swimlanes({ impact }: { impact: UnifiedLineageImpactRead }) {
 export function NarratedLineageScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
+  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
   const nodeId = params.get("node");
   const depth = Number(params.get("depth") ?? "5");
   const view = params.get("view") === "graph" ? "graph" : "narrated";
 
-  const [datasources, setDatasources] = useState<{ id: string; name: string }[]>([]);
   const [search, setSearch] = useState("");
   const [candidates, setCandidates] = useState<CatalogRowRead[]>([]);
   const [searching, setSearching] = useState(false);
@@ -170,19 +173,34 @@ export function NarratedLineageScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [visibleSteps, setVisibleSteps] = useState(0);
+  const [graph, setGraph] = useState<UnifiedLineageGraphRead | null>(null);
+  const [graphLoading, setGraphLoading] = useState(false);
+  const [graphError, setGraphError] = useState<string | null>(null);
+  const [graphRevision, setGraphRevision] = useState(0);
 
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
 
-  useEffect(() => {
-    fetchOrgDatasources(ORG)
-      .then((page) => setDatasources(page.items.map((d) => ({ id: d.id, name: d.name }))))
-      .catch(() => {
-        /* the datasource picker degrades to "paste a datasource id" -- ds is still URL-settable directly */
-      });
-  }, []);
-
   const selectedDatasourceName = datasources.find((d) => d.id === dsId)?.name ?? null;
+
+  useEffect(() => {
+    if (!dsId) {
+      setGraph(null);
+      return;
+    }
+    const ac = new AbortController();
+    setGraphLoading(true);
+    setGraphError(null);
+    fetchLineageGraph(dsId, ac.signal)
+      .then((result) => { if (!ac.signal.aborted) setGraph(result); })
+      .catch((reason: unknown) => {
+        if (!ac.signal.aborted) {
+          setGraphError(reason instanceof ApiError ? reason.detail : (reason as Error).message);
+        }
+      })
+      .finally(() => { if (!ac.signal.aborted) setGraphLoading(false); });
+    return () => ac.abort();
+  }, [dsId, graphRevision]);
 
   const runSearch = useCallback(async () => {
     if (!search.trim()) {
@@ -254,11 +272,11 @@ export function NarratedLineageScreen() {
   return (
     <div className="narrscreen">
       <header className="narrscreen__head">
-        <h1 className="narrscreen__h1">Lineage, narrated</h1>
+        <h1 className="narrscreen__h1">Lineage explorer</h1>
         <p className="narrscreen__lede">
           Ask a root-cause question about one asset — every hop is real traversal
-          evidence (UX-20), not a hand-written story. The full graph is one tab away,
-          not the front door.
+          evidence, not a hand-written story. The relationship graph distinguishes
+          declared keys, inferred links, transformation dependencies and procedures.
         </p>
       </header>
 
@@ -313,47 +331,61 @@ export function NarratedLineageScreen() {
         </div>
       ) : null}
 
+      {dsId ? (
+        <div className="narrscreen__tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={view === "graph"}
+            className={`narrscreen__tab${view === "graph" ? " narrscreen__tab--active" : ""}`}
+            onClick={() => setParams({ view: "graph" })}
+          >
+            Graph (supporting view)
+          </button>
+          <button
+            role="tab"
+            aria-selected={view === "narrated"}
+            className={`narrscreen__tab${view === "narrated" ? " narrscreen__tab--active" : ""}`}
+            onClick={() => setParams({ view: null })}
+          >
+            Narrated
+          </button>
+        </div>
+      ) : null}
+
       {!dsId ? (
         <Empty title="Pick a datasource to begin" hint="The unified-lineage endpoints are scoped per datasource." />
+      ) : view === "graph" ? (
+        graphError ? (
+          <ErrorState title="The lineage graph could not be loaded" detail={graphError} onRetry={() => setGraphRevision((value) => value + 1)} />
+        ) : graphLoading || !graph ? (
+          <div className="narrscreen__skeleton" role="status" aria-live="polite">Building the bounded lineage graphâ€¦</div>
+        ) : graph.nodes.length === 0 ? (
+          <Empty title="No graph evidence yet" hint="Ingest constraints, dbt artifacts or OpenLineage events to connect this source's assets." />
+        ) : (
+          <LineageGraph
+            graph={graph}
+            focusNodeId={nodeId}
+            onSelectNode={(id) => setParams({ node: id, view: null })}
+          />
+        )
       ) : !nodeId ? (
-        <Empty title="Search for the asset you're asking about" hint="e.g. the table you suspect is the root cause." />
+        <Empty title="Choose an asset for impact" hint="Search above, or open the relationship graph and select any table or model." />
       ) : error ? (
         <ErrorState title="Lineage impact could not be loaded" detail={error} onRetry={() => void load()} />
       ) : loading || !impact ? (
         <div className="narrscreen__skeleton" role="status" aria-live="polite">Tracing lineage…</div>
       ) : (
         <>
-          <div className="narrscreen__tabs" role="tablist">
-            <button
-              role="tab"
-              aria-selected={view === "narrated"}
-              className={`narrscreen__tab${view === "narrated" ? " narrscreen__tab--active" : ""}`}
-              onClick={() => setParams({ view: null })}
-            >
-              Narrated
-            </button>
-            <button
-              role="tab"
-              aria-selected={view === "graph"}
-              className={`narrscreen__tab${view === "graph" ? " narrscreen__tab--active" : ""}`}
-              onClick={() => setParams({ view: "graph" })}
-            >
-              Graph (supporting view)
-            </button>
-          </div>
-
-          {view === "narrated" ? (
-            hops.length === 0 ? (
-              <Empty title="No traversal from this asset" hint="This node has no upstream or downstream edges within the selected depth." />
-            ) : (
+          {hops.length === 0 ? (
+            <Empty title="No traversal from this asset" hint="This node has no upstream or downstream edges within the selected depth." />
+          ) : (
+            <>
               <ol className="narr" aria-live="polite" aria-label={`Traversal from ${impact.focus_label}`}>
                 {hops.slice(0, visibleSteps || 1).map((hop, i) => (
-                  <NarratedStep key={hop.node.node_id} hop={hop} index={i} focusLabel={impact.focus_label} />
+                  <NarratedStep key={`${hop.direction}-${hop.node.node_id}`} hop={hop} index={i} focusLabel={impact.focus_label} />
                 ))}
               </ol>
-            )
-          ) : (
-            <Swimlanes impact={impact} />
+            </>
           )}
 
           {impact.upstream_truncated || impact.downstream_truncated ? (

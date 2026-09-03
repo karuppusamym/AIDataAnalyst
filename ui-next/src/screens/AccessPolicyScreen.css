@@ -1,0 +1,56 @@
+.apscreen{display:flex;flex-direction:column;min-height:0;height:100%;gap:14px;padding:22px 24px;overflow-y:auto}
+.apscreen__head{flex:none;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.apscreen__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.apscreen__h1{margin:2px 0 0;font-size:22px;letter-spacing:-.015em}
+.apscreen__lede{margin:4px 0 0;color:var(--ink-2);font-size:13.5px;max-width:70ch}
+
+.apscreen__status{flex:none;border-radius:var(--radius-sm);padding:8px 12px;font-size:12.5px;border:1px solid var(--line-soft)}
+.apscreen__status--info{background:var(--sunk);color:var(--ink-2)}
+.apscreen__status--success{background:var(--ok-soft);color:var(--ok);border-color:transparent}
+.apscreen__status--error{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+
+.apscreen__body{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+.apscreen__main{display:flex;flex-direction:column;gap:14px;flex:1 1 60%;min-width:320px}
+.apscreen__rail{display:flex;flex-direction:column;gap:14px;flex:0 0 400px;min-width:320px}
+.apscreen__skeleton{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);color:var(--ink-3);font-size:13px;padding:24px;text-align:center}
+
+.aplist,.apform,.apsim{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow-1);padding:16px}
+
+.aplist{display:flex;flex-direction:column;gap:10px}
+.aplist__head{flex:none}
+.aplist__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.aplist__h2{margin:2px 0 0;font-size:16px;letter-spacing:-.01em}
+
+.aptable{overflow-x:auto}
+.aptable table{width:100%;border-collapse:collapse;font-size:12.5px}
+.aptable th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink-3);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+.aptable td{padding:7px 8px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.aptable__code{font-family:var(--mono);font-size:11.5px}
+.aptable__actions{font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+
+.apform{display:flex;flex-direction:column;gap:10px}
+.apform__head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
+.apform__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.apform__h2{margin:2px 0 0;font-size:16px;letter-spacing:-.01em}
+.apform__lede{margin:4px 0 0;color:var(--ink-2);font-size:12.5px;max-width:44ch}
+.apform__grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px 12px}
+.apform__jsongrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px 12px}
+.apform__jsongrid textarea{font-family:var(--mono);font-size:11.5px}
+.apform__toggle{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--ink-2)}
+.apform__toggle input{width:auto}
+
+.apsim{display:flex;flex-direction:column;gap:10px;flex:none}
+.apsim__head{flex:none}
+.apsim__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.apsim__h2{margin:2px 0 0;font-size:16px;letter-spacing:-.01em}
+.apsim__lede{margin:4px 0 0;color:var(--ink-2);font-size:12.5px}
+.apsim__grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px 12px;margin-bottom:10px}
+
+.apform textarea,.apsim textarea{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--ink);width:100%;box-sizing:border-box;resize:vertical}
+.apform input,.apform select,.apsim input,.apsim select{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--ink)}
+
+@media(max-width:720px){
+  .apscreen{padding:16px}
+  .apscreen__main,.apscreen__rail{flex-basis:100%;min-width:0;width:100%}
+  .apform__grid,.apform__jsongrid,.apsim__grid{grid-template-columns:1fr}
+}

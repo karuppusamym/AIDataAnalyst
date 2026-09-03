@@ -338,12 +338,12 @@ function BusinessMapTab({ organizationId }: { organizationId: string }) {
 export function BusinessMeaningScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
   const q = params.get("q") ?? "";
   const selectedId = params.get("asset");
   const view = params.get("view") === "map" ? "map" : "annotations";
 
-  const { datasources } = useDatasourcePicker(ORG);
+  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDsName = datasourceName(datasources, dsId);
 
   const [items, setItems] = useState<MetadataBusinessAnnotationRead[]>([]);

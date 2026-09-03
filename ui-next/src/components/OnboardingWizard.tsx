@@ -48,20 +48,22 @@ export const PERSONA_CHECKLISTS: Record<Persona, ChecklistItem[]> = {
     { navId: "catalog", label: "Catalog", ready: true, blurb: "Bulk-describe and certify the undocumented/uncertified assets this screen surfaces first." },
     { navId: "governance", label: "Review queue", ready: true, blurb: "Decide the proposals waiting on a person — every one carries its diff, confidence and evidence." },
     { navId: "studio", label: "Studio change sets", ready: true, blurb: "Author and submit governed changes to metrics, tools, terms and context products." },
+    { navId: "context", label: "Context products", ready: true, blurb: "Package governed context for a specific audience, policy, and delivery target." },
   ],
   Reviewer: [
     { navId: "governance", label: "Review queue", ready: true, blurb: "This is your primary surface — maker-checker decisions with the diff and evidence right there, no separate lookup." },
     { navId: "refusals", label: "Lineage refusals", ready: true, blurb: "See what an agent run refused to do and why, when a decision needs to be checked against the record." },
   ],
   Operator: [
-    { navId: "sources", label: "Sources", ready: false, blurb: "Connector health and configuration — still served by the existing portal." },
-    { navId: "operations", label: "Operations", ready: false, blurb: "Run and job monitoring — still served by the existing portal." },
+    { navId: "sources", label: "Sources", ready: true, blurb: "Review connector health and configuration across the active source fleet." },
+    { navId: "operations", label: "Operations", ready: true, blurb: "Monitor analysis runs, ingestion batches, and delivery exceptions." },
     { navId: "catalog", label: "Catalog", ready: true, blurb: "Check what the platform can currently see once a source is connected." },
+    { navId: "administration", label: "Administration", ready: true, blurb: "Set up organizations, lines of business, projects, and governed source connections." },
   ],
   Auditor: [
     { navId: "refusals", label: "Lineage refusals", ready: true, blurb: "Every recorded refusal decision and the control that produced it — a real, queryable record, not a narrative." },
     { navId: "governance", label: "Review queue", ready: true, blurb: "Decided proposals carry who decided, when, and why." },
-    { navId: "audit", label: "Audit ledger", ready: false, blurb: "The full event ledger — still served by the existing portal." },
+    { navId: "audit", label: "Audit ledger", ready: true, blurb: "Inspect the full event ledger with evidence and decision history." },
   ],
 };
 
@@ -87,6 +89,7 @@ function saveDone(persona: string, done: Set<string>) {
 export function OnboardingWizard({
   persona,
   onNavigate,
+  compact = false,
 }: {
   /** `null` while `/v1/me` is loading, or when OIDC derived no persona for
    *  this principal's groups -- the wizard renders a persona-agnostic
@@ -94,6 +97,7 @@ export function OnboardingWizard({
    *  `PersonaNav` applies. */
   persona: Persona | null;
   onNavigate: (navId: string) => void;
+  compact?: boolean;
 }) {
   const [done, setDone] = useState<Set<string>>(() => (persona ? loadDone(persona) : new Set()));
 
@@ -122,9 +126,9 @@ export function OnboardingWizard({
 
   if (!persona) {
     return (
-      <div className="onb">
+      <div className={`onb${compact ? " onb--compact" : ""}`}>
         <header className="onb__head">
-          <h1 className="onb__h1">Get started</h1>
+          {compact ? <><span className="onb__eyebrow">Next steps</span><h2 className="onb__h1">Get started</h2></> : <h1 className="onb__h1">Get started</h1>}
           <p className="onb__lede">
             No persona is mapped for your account yet, so there is no persona-specific
             checklist to show. Once your identity provider reports one (or you pick one
@@ -138,14 +142,13 @@ export function OnboardingWizard({
   const completedCount = checklist.filter((c) => done.has(c.navId)).length;
 
   return (
-    <div className="onb">
+    <div className={`onb${compact ? " onb--compact" : ""}`}>
       <header className="onb__head">
-        <h1 className="onb__h1">Get started, {persona}</h1>
-        <p className="onb__lede">
-          Everything below is real — each step opens the actual screen, not a preview.
-          Steps still marked <Pill tone="mute">legacy</Pill> open in the existing portal
-          until they migrate onto this shell.
-        </p>
+        {compact ? (
+          <><span className="onb__eyebrow">Your progress</span><h2 className="onb__h1">{persona} setup</h2></>
+        ) : (
+          <><h1 className="onb__h1">Get started, {persona}</h1><p className="onb__lede">Everything below opens a working area, not a preview. Steps marked <Pill tone="mute">legacy</Pill> stay in the existing portal until they migrate.</p></>
+        )}
         <div className="onb__progress" role="status">
           <div className="onb__bar">
             <div
@@ -181,9 +184,7 @@ export function OnboardingWizard({
                 </div>
                 <p className="onb__blurb">{item.blurb}</p>
               </div>
-              <Button variant="primary" onClick={() => onNavigate(item.navId)}>
-                Open
-              </Button>
+              <Button variant={compact ? undefined : "primary"} onClick={() => onNavigate(item.navId)}>Open</Button>
             </li>
           );
         })}

@@ -60,6 +60,7 @@ The observable condition under which this should be reconsidered.
 | [0019](ADR-0019-vector-index-without-pgvector.md) | Nearest-neighbour search is a port; the default adapter needs no PostgreSQL extension | Accepted | Post-filter candidate sets are routinely above a few thousand, or the estate's database standard adopts `pgvector` |
 | [0020](ADR-0020-graph-store-decision.md) | The classification tree and the lineage graph both live in PostgreSQL; no separate graph store | Accepted | Measured p95 lineage traversal exceeds ~200 ms at real depth, or all-paths enumeration / graph algorithms become requirements |
 | [0022](ADR-0022-open-semantic-interchange-target.md) | Open Semantic Interchange stays a thin export target, not the internal semantic model | Accepted | A named customer/partner needs OSI conformance, OSI reaches a stable public schema, or OSI becomes a real deal-level buying criterion |
+| [0023](ADR-0023-deterministic-jobs-vs-generative-producers.md) | Deterministic jobs vs. confidence-gated generative producers for catalog enrichment | Proposed | A capability exists where the deterministic/generative line is genuinely ambiguous at design time |
 
 ## Superseded decision history
 

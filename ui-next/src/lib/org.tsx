@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { fetchOrganizations } from "./api";
 import type { OrganizationRead } from "./types";
@@ -27,6 +27,7 @@ export interface OrgSelection {
   orgId: string;
   organizations: OrganizationRead[];
   setOrgId: (id: string) => void;
+  addOrganization: (organization: OrganizationRead) => void;
   loading: boolean;
   error: string | null;
 }
@@ -41,14 +42,38 @@ function readStoredOrgId(): string {
   }
 }
 
+/* Mirrors the selected org id outside React so `api.ts`'s `identityHeaders()`
+ * can attach `X-Organization-Id` to every request without threading an
+ * organization id through hundreds of call sites. A handful of backend
+ * routes (observability/SLO, notification-rules, tool-plans) take no
+ * `{organization_id}` path segment at all and resolve it purely from this
+ * header server-side (`security.py`'s `get_security_context`) -- so without
+ * this, those specific routes 400 under a live backend even though every
+ * path-scoped route works fine. Safe to read lazily from `api.ts` despite
+ * the circular import (this module already imports `fetchOrganizations`
+ * from `./api`): neither side touches the other's export at module-eval
+ * time, only inside a function body invoked well after both modules load. */
+let currentOrgId: string = readStoredOrgId();
+
+/** The current organization id, readable outside React. */
+export function getCurrentOrgId(): string {
+  return currentOrgId;
+}
+
 export function OrgProvider({ children }: { children: ReactNode }) {
   const [organizations, setOrganizations] = useState<OrganizationRead[]>([]);
   const [orgId, setOrgIdState] = useState<string>(readStoredOrgId);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const addOrganization = useCallback((organization: OrganizationRead) => {
+    setOrganizations((items) => items.some((item) => item.id === organization.id) ? items : [...items, organization]);
+    setOrgIdState(organization.id);
+  }, []);
 
-  // Persist every choice so a returning viewer lands on the same estate.
+  // Persist every choice so a returning viewer lands on the same estate, and
+  // mirror it to the module-level variable `identityHeaders()` reads.
   useEffect(() => {
+    currentOrgId = orgId;
     try {
       localStorage.setItem(STORAGE_KEY, orgId);
     } catch {
@@ -81,8 +106,8 @@ export function OrgProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo<OrgSelection>(
-    () => ({ orgId, organizations, setOrgId: setOrgIdState, loading, error }),
-    [orgId, organizations, loading, error],
+    () => ({ orgId, organizations, setOrgId: setOrgIdState, addOrganization, loading, error }),
+    [orgId, organizations, addOrganization, loading, error],
   );
 
   return <OrgContext.Provider value={value}>{children}</OrgContext.Provider>;

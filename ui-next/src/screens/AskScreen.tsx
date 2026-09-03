@@ -426,10 +426,10 @@ function AnswerPanel({
 export function AskScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
   const runId = params.get("run");
 
-  const { datasources } = useDatasourcePicker(ORG);
+  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDatasourceName = datasourceName(datasources, dsId);
 
   const [question, setQuestion] = useState("");

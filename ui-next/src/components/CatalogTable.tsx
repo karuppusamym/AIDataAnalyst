@@ -26,6 +26,19 @@ const qualityTone = (q: CatalogRowRead["quality"]): Tone =>
 
 const nf = new Intl.NumberFormat("en-US");
 
+// Same relative-time convention QualityScreen already uses (relTime) --
+// copied rather than shared, matching this codebase's existing pattern of
+// small per-file formatters (nf itself is already redefined per-screen).
+const relTime = (iso: string): string => {
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
+};
+
 export interface CatalogTableProps {
   rows: CatalogRowRead[];
   totalCount: number | null;
@@ -97,6 +110,7 @@ export function CatalogTable({
         <div className="cc cc--state">Certification</div>
         <div className="cc cc--state">Quality</div>
         <div className="cc cc--rows">Rows</div>
+        <div className="cc cc--updated">Updated</div>
       </div>
 
       <div
@@ -181,6 +195,10 @@ export function CatalogTable({
                   ) : (
                     nf.format(row.row_count_estimate)
                   )}
+                </div>
+
+                <div className="cc cc--updated tnum" role="gridcell" title={new Date(row.updated_at).toLocaleString()}>
+                  {relTime(row.updated_at)}
                 </div>
               </div>
             );

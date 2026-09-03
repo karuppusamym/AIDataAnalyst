@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -24,6 +25,7 @@ from aida.connectors.base import (
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
     QueryEstimate,
+    QueryLogEntry,
     QueryResult,
     TableProfileSnapshot,
 )
@@ -1086,3 +1088,67 @@ class SnowflakeConnector(SqlExecutor):
                 conn.close()
 
         return await asyncio.to_thread(_sync_execute)
+
+    async def get_query_history(
+        self,
+        *,
+        since: datetime,
+        limit: int = 5_000,
+        timeout_seconds: int = 30,
+    ) -> tuple[QueryLogEntry, ...]:
+        """CN-9. Read this account's own query log from
+        `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`.
+
+        Deliberately reads only `QUERY_ID`, `QUERY_TEXT`, and `START_TIME` --
+        never a result row -- and scopes to this connector's own database and
+        to successful queries only, so a failed/cancelled statement (which
+        may be a truncated or malformed fragment) never reaches the parser.
+        Bounded on both axes the module docstring requires: `since` bounds
+        the time window, `limit` caps the row count, enforced by the query
+        itself (`LIMIT`) rather than trusted to a caller that might not
+        apply one.
+
+        `ACCOUNT_USAGE` requires the connector's role to hold `IMPORTED
+        PRIVILEGES` on the `SNOWFLAKE` database -- a broader grant than
+        discovery needs. A role without it gets Snowflake's own permission
+        error; this method does not catch it and fail closed to an empty
+        result, because that would look identical to "the warehouse ran
+        nothing in this window" and CN-9's exit condition requires that
+        distinction stay visible to certification.
+        """
+
+        def _sync_get_query_history() -> tuple[QueryLogEntry, ...]:
+            conn = self._get_connection()
+            try:
+                cur = conn.cursor()
+                try:
+                    database = (self._params.database or "").upper()
+                    cur.execute(
+                        """
+                        SELECT query_id, query_text, start_time
+                        FROM snowflake.account_usage.query_history
+                        WHERE start_time >= %(since)s
+                          AND execution_status = 'SUCCESS'
+                          AND (%(database)s = '' OR upper(database_name) = %(database)s)
+                        ORDER BY start_time DESC
+                        LIMIT %(limit)s
+                        """,
+                        {"since": since, "database": database, "limit": limit},
+                    )
+                    rows = _rows_to_dicts(cur, cur.fetchall())
+                finally:
+                    cur.close()
+            finally:
+                conn.close()
+
+            return tuple(
+                QueryLogEntry(
+                    query_id=str(row["query_id"]),
+                    sql_text=str(row["query_text"]),
+                    executed_at=row.get("start_time"),
+                )
+                for row in rows
+                if row.get("query_id") is not None and row.get("query_text") is not None
+            )
+
+        return await asyncio.to_thread(_sync_get_query_history)
