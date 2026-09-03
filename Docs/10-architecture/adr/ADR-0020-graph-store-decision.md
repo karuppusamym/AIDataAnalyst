@@ -196,7 +196,8 @@ The graph port is the same pattern, second application:
 | `disabled` | Lineage exploration returns a refusal with a reason code rather than a degraded answer (INV-4) |
 
 The surface is small, which is the main reason this is cheap: three modules read Neo4j
-today (`api.py`, `lineage_graph_store.py`, `unified_lineage_api.py`), and a boolean
+today (`api.py`, lineage_graph_store.py -- since implemented as `graph_store.py`, see
+the status note below — `unified_lineage_api.py`), and a boolean
 (`lineage_neo4j_read_enabled`, default `false`) already gates the read path. This
 amendment turns that boolean into a three-valued per-organization setting and gives it a
 conformance suite.
@@ -229,3 +230,21 @@ Tracker `C7` changes from "remove Neo4j" to "make the graph store a configurable
 `E5` is promoted from a deferred drill to a prerequisite of shipping the `neo4j` backend.
 The two overdue drills that removal would have eliminated are back on the list — that is
 the price of the option, and it is worth naming rather than absorbing quietly.
+
+### Implementation status, 2026-09-02 — C7 built, E5 still open
+
+`src/aida/graph_store.py` is the port: `PostgresGraphStore` (default, certified),
+`Neo4jGraphStore` (uncertified per INV-9 below) and `DisabledGraphStore`, plus
+`GraphStoreOrganizationSetting` (migration `8396592b30e0`) for the per-organization
+choice. lineage_graph_store.py no longer exists — its Neo4j read logic moved into
+`Neo4jGraphStore` and `api.py`'s inline Neo4j query moved into the same adapter's
+`graph_summary`, so every Cypher statement on the request-path read surface now lives
+in this one module (`tests/test_inv1_single_authoritative_store.py`'s closed reader
+list was updated to match). Conformance suite: `tests/test_graph_store_conformance.py`
+— building it found the `neo4j` adapter's UPSTREAM/DOWNSTREAM Cypher pattern swapped
+relative to `PostgresGraphStore`'s direction convention, fixed in the same pass (see
+that module's docstring and `Neo4jGraphStore.lineage_impact`'s inline comment). E5 has
+still not run — no Neo4j reachable in this environment or in CI — so the `neo4j`
+backend remains uncertified and is only reachable when both an organization's setting
+and the process-wide `lineage_neo4j_read_enabled` operator flag select it. See tracker
+row `C7` for the full exit-criteria accounting.

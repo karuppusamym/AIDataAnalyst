@@ -1,6 +1,7 @@
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.business_annotation_versions import AnnotationVersionContent, write_annotation_version
+from aida.business_graph import ancestor_closure, classification_scope
 from aida.classification import SENSITIVE_CLASSES
 from aida.config import Settings
 from aida.model_gateway import (
@@ -20,6 +22,8 @@ from aida.model_gateway import (
 from aida.models import (
     BusinessDomain,
     BusinessEntity,
+    GlossaryTerm,
+    GlossaryTermVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
     MetadataConstraint,
@@ -634,3 +638,200 @@ async def apply_enrichment_proposal(
     proposal.reviewed_by = reviewer
     proposal.reviewed_at = now
     return annotation
+
+
+# =============================================================================
+# Group K / AT-9: scope-aware term/metric definitions, refusal on ambiguity.
+#
+# `GlossaryTerm` uniqueness is `(organization_id, term_key, business_node_id)`
+# with a nullable `business_node_id` standing in for an enterprise-wide
+# default (see the model docstring in `models.py`). This is the resolution
+# side: given the term_key a question's evidence surfaced and the *asking
+# context* -- which business-graph node(s) the datasource being queried is
+# itself scoped to -- pick the most specific governed definition, or report
+# that the context does not disambiguate.
+#
+# "Most specific" reuses N9's own business-graph primitives
+# (`aida.business_graph.classification_scope` / `ancestor_closure`, the
+# recursive-CTE walk over `business_node`) rather than re-deriving ancestry:
+# a node-scoped definition is more specific than another candidate exactly
+# when the other candidate's node is one of *its* ancestors. Two candidates
+# where neither is an ancestor of the other (the datasource is scoped to two
+# unrelated business nodes, each carrying its own definition of the same
+# term) are genuinely incomparable -- that is the refusal case, not a bug to
+# work around by guessing.
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedDefinitionCandidate:
+    """One governed definition of a term, in the shape a refusal message or
+    a resolved-answer caller needs: which term row, which business node it is
+    scoped to (``None`` = the enterprise default), and its approved content.
+    """
+
+    term_id: UUID
+    business_node_id: UUID | None
+    display_name: str
+    definition: str
+    owner_principal: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ScopedDefinitionResolution:
+    """The outcome of resolving one term_key against an asking context.
+
+    ``RESOLVED``: exactly one governed definition applies -- ``resolved`` is
+    set, ``alternatives`` empty. ``AMBIGUOUS``: two or more equally specific
+    definitions apply and neither is more specific than the other --
+    ``resolved`` is ``None``, ``alternatives`` carries every tied candidate
+    (both definitions, both owners) for the caller to surface in a refusal.
+    ``NOT_FOUND``: no governed definition applies to this scope at all (not
+    an error -- the caller simply has no scoped grounding for this term).
+    """
+
+    status: Literal["RESOLVED", "AMBIGUOUS", "NOT_FOUND"]
+    resolved: ScopedDefinitionCandidate | None
+    alternatives: tuple[ScopedDefinitionCandidate, ...]
+
+
+async def _most_specific_business_node_ids(
+    session: AsyncSession,
+    organization_id: UUID,
+    candidate_node_ids: frozenset[UUID],
+) -> frozenset[UUID]:
+    """Of several business-graph node ids, the subset that is not a strict
+    ancestor of any other candidate -- the "most specific" survivors
+    most-specific-wins resolution keeps.
+
+    Reuses `business_graph.ancestor_closure` (self-inclusive: a node is
+    always in its own closure) per candidate rather than querying
+    `BusinessNodeClosure` directly, so this is correct even when that
+    materialised projection is empty -- `ancestor_closure` already falls back
+    to the authoritative recursive-CTE walk in that case (see its own
+    docstring), and this function must never silently under-count ancestry
+    just because a projection has not been (re)built yet.
+    """
+    if len(candidate_node_ids) <= 1:
+        return candidate_node_ids
+    ancestors_of: dict[UUID, frozenset[UUID]] = {
+        node_id: await ancestor_closure(session, organization_id, [node_id])
+        for node_id in candidate_node_ids
+    }
+    survivors = set(candidate_node_ids)
+    for node_id in candidate_node_ids:
+        for other_id in candidate_node_ids:
+            if node_id != other_id and node_id in ancestors_of[other_id]:
+                # node_id is a strict ancestor of other_id -> other_id is the
+                # more specific of the two, so node_id is dominated.
+                survivors.discard(node_id)
+    return frozenset(survivors)
+
+
+async def resolve_scoped_glossary_term(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    term_key: str,
+    datasource_id: UUID,
+) -> ScopedDefinitionResolution:
+    """Resolve one term_key to a governed definition for the given datasource's scope.
+
+    The "asking context" is the datasource being queried: its own business-graph
+    scope (directly assigned nodes plus their ancestors, `classification_scope`)
+    is what a node-scoped definition must fall within to apply at all.
+    Most-specific-wins among the definitions that do apply; ties are the
+    refusal case. Only `ACTIVE` terms with an `APPROVED` version are
+    considered -- a deprecated term or a still-`DRAFT` definition is not
+    governed evidence.
+    """
+    scope = await classification_scope(
+        session, organization_id, "DATASOURCE", str(datasource_id)
+    )
+    rows = (
+        await session.execute(
+            select(GlossaryTerm, GlossaryTermVersion)
+            .join(GlossaryTermVersion, GlossaryTermVersion.term_id == GlossaryTerm.id)
+            .where(
+                GlossaryTerm.organization_id == organization_id,
+                GlossaryTerm.term_key == term_key,
+                GlossaryTerm.lifecycle_status == "ACTIVE",
+                GlossaryTermVersion.status == "APPROVED",
+            )
+        )
+    ).all()
+
+    # A term may have accumulated more than one APPROVED version historically;
+    # only the highest-numbered one per term_id is the currently governed
+    # content, mirroring how every other versioned object on this platform
+    # (`MetadataBusinessAnnotationVersion`, `SemanticMetricVersion`, ...)
+    # treats "APPROVED" as a status a re-approval supersedes, not a set.
+    latest_by_term: dict[UUID, tuple[GlossaryTerm, GlossaryTermVersion]] = {}
+    for term, version in rows:
+        current = latest_by_term.get(term.id)
+        if current is None or version.version > current[1].version:
+            latest_by_term[term.id] = (term, version)
+
+    candidates = [
+        ScopedDefinitionCandidate(
+            term_id=term.id,
+            business_node_id=term.business_node_id,
+            display_name=version.display_name,
+            definition=version.definition,
+            owner_principal=version.owner_principal,
+        )
+        for term, version in latest_by_term.values()
+        if term.business_node_id is None or term.business_node_id in scope
+    ]
+    if not candidates:
+        return ScopedDefinitionResolution(status="NOT_FOUND", resolved=None, alternatives=())
+
+    node_scoped = [c for c in candidates if c.business_node_id is not None]
+    enterprise = [c for c in candidates if c.business_node_id is None]
+
+    if not node_scoped:
+        # The partial-unique index on glossary_term caps the enterprise
+        # default at exactly one row per term_key, so this is unambiguous.
+        return ScopedDefinitionResolution(
+            status="RESOLVED", resolved=enterprise[0], alternatives=()
+        )
+    if len(node_scoped) == 1:
+        # Most-specific-wins: a single node-scoped definition beats the
+        # enterprise default even when one also exists.
+        return ScopedDefinitionResolution(
+            status="RESOLVED", resolved=node_scoped[0], alternatives=()
+        )
+
+    most_specific_ids = await _most_specific_business_node_ids(
+        session,
+        organization_id,
+        frozenset(c.business_node_id for c in node_scoped if c.business_node_id is not None),
+    )
+    survivors = [c for c in node_scoped if c.business_node_id in most_specific_ids]
+    if len(survivors) == 1:
+        return ScopedDefinitionResolution(
+            status="RESOLVED", resolved=survivors[0], alternatives=()
+        )
+    return ScopedDefinitionResolution(
+        status="AMBIGUOUS", resolved=None, alternatives=tuple(survivors)
+    )
+
+
+def format_ambiguous_definition_refusal(
+    term_key: str, alternatives: tuple[ScopedDefinitionCandidate, ...]
+) -> str:
+    """Render an AMBIGUOUS resolution as the refusal message the orchestrator
+    raises `AgentClarificationRequired` with -- both definitions, both
+    owners, never a guess.
+    """
+    parts = [
+        f"the term '{term_key}' resolves to {len(alternatives)} equally applicable governed "
+        "definitions for this datasource's scope; specify which business area you mean:"
+    ]
+    for candidate in alternatives:
+        owner = candidate.owner_principal or "no owner recorded"
+        parts.append(
+            f" [business_node={candidate.business_node_id}] '{candidate.display_name}' "
+            f"(owner: {owner}) -- {candidate.definition}"
+        )
+    return "".join(parts)

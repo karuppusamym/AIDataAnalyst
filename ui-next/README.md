@@ -28,7 +28,13 @@ The full legacy portal stays available at <http://localhost:3000>; edits under
 `ui/` are served straight from the bind mount after a browser refresh. The
 overlay uses polling so HMR also works reliably with Windows bind mounts.
 Use `docker compose up --build -d` (without the overlay) to return to the
-production-like setup.
+production-like setup; the built React portal is then available at
+<http://localhost:3001>, alongside the legacy portal at <http://localhost:3000>.
+
+The production-like `ui-next` image builds the React app and proxies `/v1/*` to
+the API container. It uses live API calls by default. Set
+`UI_NEXT_USE_FIXTURES=1` before `docker compose up --build` if a fixture-backed
+image is needed for local UI work.
 
 Fixtures are on by default, so the Catalog runs without a backend: it generates a
 1,000,000-row catalog lazily and mirrors the server's keyset cursor contract.

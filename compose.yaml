@@ -305,6 +305,20 @@ services:
       - "3000:80"
     restart: unless-stopped
 
+  # Keep the React rebuild deployable beside the legacy portal during the
+  # strangle migration. Remove this service when ui/ is retired.
+  ui-next:
+    build:
+      context: ./ui-next
+      args:
+        VITE_USE_FIXTURES: ${UI_NEXT_USE_FIXTURES:-0}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3001:80"
+    restart: unless-stopped
+
   metadata-worker:
     build: .
     depends_on:

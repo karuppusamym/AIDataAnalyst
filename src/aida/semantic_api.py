@@ -23,6 +23,7 @@ from aida.asset_description_service import (
     reject_asset_description_draft,
 )
 from aida.classification_propagation import apply_classification_promotion
+from aida.config import Settings, get_settings
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -65,9 +66,13 @@ from aida.models import (
     TermSemanticBinding,
 )
 from aida.product_marketplace_api import approve_access_request
+from aida.query_history_miner import apply_query_history_metric_candidate_decision
+from aida.retrieval import hybrid_retrieve_cross_source
 from aida.schemas import (
     GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS,
     ApiModel,
+    GlobalSearchHitRead,
+    GlobalSearchResponse,
     GlossaryConflictRead,
     GovernanceDecisionRequest,
     GovernanceReviewBulkDecisionItemRead,
@@ -2093,6 +2098,19 @@ async def _apply_governance_review_decision(
         event_type, aggregate_type, aggregate_id, payload = await apply_classification_promotion(
             session, review, decision=decision, context=context, now=now
         )
+    elif review.object_type == "QUERY_HISTORY_METRIC_CANDIDATE":
+        # Group K / AT-12: a metric candidate mined from value-free query-log
+        # structure becomes a real, published SemanticMetric only under an
+        # independent APPROVE -- see
+        # `query_history_miner.apply_query_history_metric_candidate_decision`.
+        (
+            event_type,
+            aggregate_type,
+            aggregate_id,
+            payload,
+        ) = await apply_query_history_metric_candidate_decision(
+            session, review, decision=decision, context=context, now=now
+        )
     else:
         raise HTTPException(status_code=422, detail="unsupported governance object type")
     return event_type, aggregate_type, aggregate_id, payload
@@ -2399,4 +2417,103 @@ async def bulk_decide_governance_reviews(
         failed_count=failed,
         truncated=truncated,
         results=results,
+    )
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP A: RT-5 (API half) / RT-9 -- cross-source global search ---
+# ---------------------------------------------------------------------------
+#
+# `search_api.py`'s `GET /v1/search` (RT-4/RT-5, module 12/21) is the
+# lightweight, lexical-only, command-palette-facing global search -- it
+# already spans every datasource in an org, but only on a `ts_query`-style
+# text match, with a single flat "lexical" evidence factor. It stays exactly
+# as-is here (that module belongs to a different owner in this delivery
+# slice; not edited).
+#
+# `aida.retrieval.hybrid_retrieve_enhanced` (RT-1/RT-2/RT-3, this same
+# module's neighbour) is the richer engine -- lexical + vector + graph +
+# quality/usage fusion with a fully inspectable per-factor evidence trail --
+# but until now it only ever took a single `DataSource`, so nothing exposed
+# it as a genuine *cross-source* search. `hybrid_retrieve_cross_source`
+# (RT-9) closes that gap in `retrieval.py`; this endpoint is its API surface
+# (RT-5's "API half" -- the palette UI itself is a different group's row).
+# The two endpoints are complementary, not duplicates: this one trades
+# `/v1/search`'s lower latency for a fully-ranked, evidence-rich answer.
+
+
+@router.get(
+    "/organizations/{organization_id}/global-search",
+    response_model=GlobalSearchResponse,
+)
+async def global_semantic_search(
+    organization_id: UUID,
+    q: str = Query(min_length=1, max_length=500, description="Search query"),
+    project_id: UUID | None = Query(default=None, description="Optional project filter"),
+    datasource_ids: list[UUID] | None = Query(
+        default=None, description="Optional explicit datasource scope"
+    ),
+    limit: int = Query(default=25, ge=1, le=100),
+    fusion_method: Literal["rrf", "weighted_linear"] = Query(default="rrf"),
+    include_vector: bool = Query(default=True),
+    include_graph: bool = Query(default=True),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> GlobalSearchResponse:
+    """RT-9: one query, genuinely spanning every datasource in scope, ranked
+    by the same lexical + vector + graph + quality/usage fusion pipeline
+    `hybrid_retrieve_enhanced` uses within one datasource (RT-1/RT-2/RT-3).
+
+    Policy filtering happens before any ranking runs: `enforce_organization`
+    gates the whole call, and the candidate datasource set itself is always
+    a query scoped to `organization_id` (narrowed further by `project_id`/
+    `datasource_ids` when supplied) -- never a caller-supplied source list
+    taken on faith.
+    """
+    enforce_organization(context, organization_id)
+
+    datasource_stmt = select(DataSource).where(DataSource.organization_id == organization_id)
+    if project_id is not None:
+        datasource_stmt = datasource_stmt.where(DataSource.project_id == project_id)
+    if datasource_ids:
+        datasource_stmt = datasource_stmt.where(DataSource.id.in_(datasource_ids))
+    datasources = (await session.scalars(datasource_stmt.limit(200))).all()
+
+    hits = await hybrid_retrieve_cross_source(
+        session,
+        organization_id=organization_id,
+        datasources=list(datasources),
+        question=q,
+        settings=settings,
+        fusion_method=fusion_method,
+        include_vector=include_vector,
+        include_graph=include_graph,
+        limit=limit,
+    )
+
+    items = [
+        GlobalSearchHitRead(
+            object_type=hit.object_type,
+            object_id=hit.object_id,
+            display_name=hit.display_name,
+            score=hit.score,
+            datasource_id=UUID(hit.metadata["datasource_id"]),
+            reason_codes=hit.reason_codes,
+            evidence=hit.metadata.get("retrieval_evidence", {}),
+            metadata={k: v for k, v in hit.metadata.items() if k != "retrieval_evidence"},
+        )
+        for hit in hits
+    ]
+
+    return GlobalSearchResponse(
+        items=items,
+        total=len(items),
+        datasource_count=len(datasources),
+        limit=limit,
+        fusion_method=fusion_method,
+        vector_enabled=include_vector,
+        graph_enabled=include_graph,
     )

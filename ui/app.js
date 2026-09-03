@@ -73,7 +73,6 @@ async function loadOrganizationData() {
   Object.assign(state, {fleet, runs, reviews, runtime, evaluations});
   state.fleetHealth = new Map(fleetHealth.map(item => [item.datasource_id, item]));
   await loadIntegrationPolicy();
-  state.audit = [];
   renderCore();
   const activeView = document.querySelector(".view.active")?.id?.replace(/-view$/, "") || location.hash.slice(1) || "home";
   await loadViewData(activeView);
@@ -335,18 +334,51 @@ function renderStewardship() {
   renderTable("bulk-stewardship-operations", ["Operation","Status","Applied","Decision"], operationRows, "No bulk stewardship activity");
 }
 
-async function loadAudit() {
-  if (!state.organizationId) return;
+/* UX-3 / CT-2: the audit ledger is the one governed record set genuinely
+ * unbounded over time (every attributable decision, forever) -- it is
+ * wired to virtual-table.js's remote/windowed mode instead of `fetchAll`,
+ * so browsing it never pulls the full history into memory regardless of
+ * how large the organization's audit trail has grown. `state.audit` is no
+ * longer populated; row detail reuses the generic `data-record` pane
+ * (state.semanticMetrics's own "Details" button already establishes this
+ * pattern) so no full in-memory array is needed to resolve a click. */
+function auditFilterParams() {
   const params = new URLSearchParams();
   [["action", $("#audit-action")?.value], ["resource_type", $("#audit-resource")?.value], ["correlation_id", $("#audit-correlation")?.value]].forEach(([key,value]) => { if (value?.trim()) params.set(key, value.trim()); });
-  const suffix = params.toString() ? `?${params}` : "";
-  state.audit = await fetchAll(`/v1/organizations/${state.organizationId}/audit-events${suffix}`);
+  return params;
+}
+
+function renderAuditRow(event) {
+  return `<tr><td><button class="row-action" data-record-title="Audit event" data-record='${esc(JSON.stringify(event))}'>${esc(human(event.action))}</button><span class="secondary-cell">${esc(event.correlation_id)}</span></td><td>${esc(event.principal_id)}<span class="secondary-cell">${esc(event.principal_type)}</span></td><td>${esc(human(event.resource_type))}<span class="secondary-cell">${esc(event.resource_id || "Not recorded")}</span></td><td>${badge(event.outcome)}</td><td>${when(event.occurred_at)}</td></tr>`;
+}
+
+async function loadAudit() {
+  if (!state.organizationId) { state.auditTotal = 0; state.auditFetchPage = null; return renderAudit(); }
+  setHtml("audit-table", '<div class="loading">Loading a bounded audit page</div>');
+  /* A fresh closure per load (rather than one shared function reference)
+   * means renderRemoteTable's own identity check treats a filter change as
+   * a new session -- clearing the stale page cache and resetting scroll
+   * instead of mixing pages fetched under different filters. */
+  const params = auditFilterParams();
+  const fetchPage = (offset, limit) => {
+    const pageParams = new URLSearchParams(params);
+    pageParams.set("limit", String(limit));
+    pageParams.set("offset", String(offset));
+    return api(`/v1/organizations/${state.organizationId}/audit-events?${pageParams}`);
+  };
+  const first = await fetchPage(0, 200);
+  state.auditTotal = first.total;
+  state.auditFetchPage = fetchPage;
   renderAudit();
 }
 
 function renderAudit() {
-  const rows = state.audit.map(event => `<tr><td><button class="link-button" data-audit-detail="${event.id}">${esc(human(event.action))}</button><span class="secondary-cell">${esc(event.correlation_id)}</span></td><td>${esc(event.principal_id)}<span class="secondary-cell">${esc(event.principal_type)}</span></td><td>${esc(human(event.resource_type))}<span class="secondary-cell">${esc(event.resource_id || "Not recorded")}</span></td><td>${badge(event.outcome)}</td><td>${when(event.occurred_at)}</td></tr>`);
-  renderTable("audit-table", ["Action / correlation","Principal","Resource","Outcome","Occurred"], rows, "No audit events match these filters");
+  window.AtlasUI.renderRemoteTable("audit-table", ["Action / correlation","Principal","Resource","Outcome","Occurred"], {
+    totalCount: state.auditTotal || 0,
+    fetchPage: state.auditFetchPage || (() => Promise.resolve({items:[], total:0})),
+    rowRenderer: renderAuditRow,
+    emptyText: "No audit events match these filters"
+  });
 }
 
 function renderRuntime() {
@@ -532,19 +564,149 @@ function populateCatalogFilters() {
 }
 
 function renderTables() {
-  const cards = state.tables.map(item => `<button class="asset-card ${state.selectedTableId === item.id ? "active" : ""}" data-table="${item.id}" type="button"><span class="asset-kind">${esc(String(item.object_type || "TB").slice(0, 2).toUpperCase())}</span><span class="asset-card-copy"><strong>${esc(item.name)}</strong><small>${esc(human(item.object_type))} / ${esc(item.source_description || "Technical metadata asset")}</small><span class="asset-card-meta"><i>${esc(human(item.status))}</i><i>${esc(String(item.id).slice(0, 8))}</i></span></span><span class="asset-chevron">&rsaquo;</span></button>`).join("");
+  /* UX-4: each row is a checkbox sibling next to the existing open-asset
+   * button, not nested inside it -- a <button> cannot legally contain
+   * another interactive control (the checkbox), so the two stay separate
+   * elements in an .asset-row wrapper rather than changing what clicking
+   * the card itself does. */
+  const cards = state.tables.map(item => `<div class="asset-row"><label class="asset-select-box"><input type="checkbox" data-select-table="${item.id}" ${state.bulkSelection?.has(item.id) ? "checked" : ""} aria-label="Select ${esc(item.name)} for bulk actions" /></label><button class="asset-card ${state.selectedTableId === item.id ? "active" : ""}" data-table="${item.id}" type="button"><span class="asset-kind">${esc(String(item.object_type || "TB").slice(0, 2).toUpperCase())}</span><span class="asset-card-copy"><strong>${esc(item.name)}</strong><small>${esc(human(item.object_type))} / ${esc(item.source_description || "Technical metadata asset")}</small><span class="asset-card-meta"><i>${esc(human(item.status))}</i><i>${esc(String(item.id).slice(0, 8))}</i></span></span><span class="asset-chevron">&rsaquo;</span></button></div>`).join("");
   setHtml("tables-table", cards || empty("No assets match", "Adjust the search or clear one of the filters."));
   const start = state.catalogTotal ? state.catalogOffset + 1 : 0;
   const end = Math.min(state.catalogOffset + state.tables.length, state.catalogTotal);
   setHtml("catalog-count", `<span><strong>${start}-${end}</strong> of ${state.catalogTotal.toLocaleString()} assets</span><span class="catalog-pager"><button class="icon-button" type="button" data-catalog-page="previous" aria-label="Previous asset page" ${state.catalogOffset === 0 ? "disabled" : ""}>&lsaquo;</button><button class="icon-button" type="button" data-catalog-page="next" aria-label="Next asset page" ${end >= state.catalogTotal ? "disabled" : ""}>&rsaquo;</button></span>`);
+  renderBulkToolbar();
+}
+
+/* UX-4: bulk selection toolbar (up to state.bulkSelection.max = 10,000
+ * items, selectable across multiple catalog pages -- the selection is
+ * intentionally not cleared on pagination/filter changes). */
+function renderBulkToolbar() {
+  const container = document.getElementById("catalog-bulk-toolbar");
+  if (!container) return;
+  const selection = state.bulkSelection;
+  const count = selection ? selection.size() : 0;
+  if (!count) { container.hidden = true; container.innerHTML = ""; return; }
+  container.hidden = false;
+  const pageIds = state.tables.map(item => item.id);
+  const allOnPageSelected = pageIds.length > 0 && pageIds.every(id => selection.has(id));
+  container.innerHTML = `<span class="bulk-count" role="status" aria-live="polite">${count.toLocaleString()} selected${count >= selection.max ? ` (limit ${selection.max.toLocaleString()})` : ""}</span><button type="button" class="button small secondary" data-bulk-select-page>${allOnPageSelected ? "Deselect page" : "Select page"}</button><button type="button" class="button small secondary" data-bulk-clear-selection>Clear</button><span class="bulk-actions"><button type="button" class="button small" data-bulk-open="TAG">Tag&hellip;</button><button type="button" class="button small" data-bulk-open="CLASSIFY">Classify&hellip;</button><button type="button" class="button small" data-bulk-open="OWN">Assign owner&hellip;</button><button type="button" class="button small" data-bulk-open="CERTIFY">Certify&hellip;</button></span>`;
+}
+
+const BULK_FIELD_GROUPS = {TAG:"bulk-field-tag", CLASSIFY:"bulk-field-classify", OWN:"bulk-field-own", CERTIFY:"bulk-field-certify"};
+const BULK_TITLES = {TAG:"Bulk tag assets", CLASSIFY:"Bulk classify columns", OWN:"Bulk assign owner", CERTIFY:"Bulk certify assets"};
+const BULK_ENDPOINTS = {
+  TAG: () => `/v1/organizations/${state.organizationId}/tables/bulk-tag`,
+  CLASSIFY: () => `/v1/organizations/${state.organizationId}/tables/bulk-classify`,
+  OWN: () => `/v1/organizations/${state.organizationId}/tables/bulk-own`,
+  CERTIFY: () => `/v1/organizations/${state.organizationId}/tables/bulk-certify`,
+};
+
+function openBulkDialog(action) {
+  if (!state.bulkSelection.size()) return;
+  state.bulkActionMode = action;
+  const form = $("#bulk-action-form");
+  form.reset();
+  $$(".bulk-field-group").forEach(group => group.hidden = true);
+  const groupId = BULK_FIELD_GROUPS[action];
+  if (groupId) $(`#${groupId}`).hidden = false;
+  $("#bulk-action-title").textContent = BULK_TITLES[action] || "Bulk action";
+  const count = state.bulkSelection.size();
+  $("#bulk-action-summary").textContent = `Applies to ${count.toLocaleString()} selected asset${count === 1 ? "" : "s"}, in batches of up to ${window.AtlasUI.BULK_DEFAULT_CHUNK_SIZE}.`;
+  $("#bulk-progress").hidden = true;
+  $("#bulk-action-submit").hidden = false;
+  $("#bulk-action-cancel-run").hidden = true;
+  $("#bulk-action-cancel-close").hidden = false;
+  $("#bulk-action-dialog").showModal();
+}
+
+function bulkBuildBodyFor(action, formData) {
+  if (action === "TAG") return ids => ({table_ids: ids, tag_key: formData.get("tag_key"), tag_value: formData.get("tag_value") || null});
+  if (action === "CLASSIFY") return ids => ({table_ids: ids, column_name_pattern: formData.get("column_name_pattern") || "*", classification: formData.get("classification")});
+  if (action === "OWN") return ids => ({table_ids: ids, owner_type: formData.get("owner_type"), owner_principal: formData.get("owner_principal")});
+  if (action === "CERTIFY") return ids => ({table_ids: ids, rationale: formData.get("rationale"), expires_at: new Date(formData.get("expires_at")).toISOString()});
+  return () => ({});
+}
+
+function renderBulkProgress(progress) {
+  const pct = progress.total ? Math.round((progress.processed / progress.total) * 100) : 0;
+  const bar = $("#bulk-progress-bar"); if (bar) bar.style.width = `${pct}%`;
+  const text = $("#bulk-progress-text");
+  if (text) text.textContent = `${progress.processed.toLocaleString()} of ${progress.total.toLocaleString()} processed (batch ${progress.chunksDone} of ${progress.chunksTotal}) — ${progress.succeeded.toLocaleString()} succeeded, ${progress.failed.toLocaleString()} failed${progress.cancelled ? ", cancelled" : ""}`;
+}
+
+function cancelBulkRun() {
+  if (state.bulkRunController) state.bulkRunController.aborted = true;
+}
+
+async function submitBulkDialog(form) {
+  const action = state.bulkActionMode;
+  const formData = new FormData(form);
+  const ids = state.bulkSelection.list();
+  $("#bulk-action-submit").hidden = true;
+  $("#bulk-action-cancel-close").hidden = true;
+  $("#bulk-action-cancel-run").hidden = false;
+  $("#bulk-progress").hidden = false;
+  const controller = {aborted: false};
+  state.bulkRunController = controller;
+  const endpoint = BULK_ENDPOINTS[action]?.();
+  if (!endpoint) return;
+  const buildBody = bulkBuildBodyFor(action, formData);
+  const final = await window.AtlasUI.runBulkOperation({endpoint, buildBody, ids, signal: controller, onProgress: renderBulkProgress});
+  state.bulkRunController = null;
+  $("#bulk-action-cancel-run").hidden = true;
+  $("#bulk-action-cancel-close").hidden = false;
+  if (final.cancelled) notify(`Bulk action stopped after ${final.processed.toLocaleString()} of ${final.total.toLocaleString()} items (${final.succeeded.toLocaleString()} succeeded).`);
+  else notify(`Bulk action complete: ${final.succeeded.toLocaleString()} succeeded, ${final.failed.toLocaleString()} failed.`, final.failed === 0);
+  state.bulkSelection.clear();
+  renderTables();
+  if (state.selectedTableId) showTable(state.selectedTableId).catch(() => {});
+}
+
+/* UX-7: resolves an asset permalink hash (#catalog/<uuid>) on load. Returns
+ * the table id, or null if the current hash is not a deep link. */
+function parseDeepLinkHash() {
+  const match = location.hash.slice(1).match(/^catalog\/([0-9a-fA-F-]{36})$/);
+  return match ? match[1] : null;
+}
+
+/* UX-7: exports one asset's evidence as a downloadable artifact via the
+ * governed `.../evidence/export` route (AT-20/UX-7's Content-Disposition +
+ * X-Artifact-SHA256 attachment idiom). A plain <a href> would skip the
+ * X-Principal-Id/X-Roles/X-Organization-Id headers every other request in
+ * this app carries (api.js's baseHeaders()), so this fetches with those
+ * headers explicitly and hands the browser a same-origin blob URL to save
+ * instead -- the actual filename still comes from the server's own
+ * Content-Disposition header, not guessed client-side. */
+async function exportAssetEvidence(id) {
+  try {
+    const response = await fetch(`/api/v1/metadata/tables/${id}/evidence/export`, { headers: window.AtlasUI.baseHeaders() });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `Export failed (${response.status})`);
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("Content-Disposition") || "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `table-${id}-evidence.json`;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url; link.download = filename;
+    document.body.appendChild(link); link.click(); link.remove();
+    URL.revokeObjectURL(url);
+    notify("Evidence exported.", true);
+  } catch (error) { notify(error.message); }
 }
 
 async function showTable(id) {
   state.selectedTableId = id;
   renderTables();
+  /* UX-7: a shareable, resolvable permalink. showTable() always fetches
+   * this asset's evidence by id directly (never relies on it being present
+   * in the currently-loaded catalog page), so this hash resolves standalone
+   * on a fresh load -- see parseDeepLinkHash()/initialize() below. */
+  history.replaceState(null, "", `#catalog/${id}`);
   setHtml("table-detail", '<div class="loading">Loading table evidence</div>');
   try {
-    const [columnPage,constraints,impact,profile,annotation,documentation,termLinks,ownership] = await Promise.all([api(`/v1/tables/${id}/columns?limit=500`), fetchAll(`/v1/tables/${id}/constraints`), api(`/v1/metadata/tables/${id}/impact`), api(`/v1/tables/${id}/profile`).catch(() => null), api(`/v1/metadata/tables/${id}/business-annotation`).catch(error => error.status === 404 ? null : Promise.reject(error)), api(`/v1/metadata/tables/${id}/documentation`).catch(error => error.status === 404 ? null : Promise.reject(error)), fetchAll(`/v1/metadata/tables/${id}/glossary-links`), fetchAll(`/v1/organizations/${state.organizationId}/ownership-assignments?subject_type=TABLE&subject_id=${id}`)]);
+    const [columnPage,constraints,impact,profile,annotation,documentation,termLinks,ownership,evidence] = await Promise.all([api(`/v1/tables/${id}/columns?limit=500`), fetchAll(`/v1/tables/${id}/constraints`), api(`/v1/metadata/tables/${id}/impact`), api(`/v1/tables/${id}/profile`).catch(() => null), api(`/v1/metadata/tables/${id}/business-annotation`).catch(error => error.status === 404 ? null : Promise.reject(error)), api(`/v1/metadata/tables/${id}/documentation`).catch(error => error.status === 404 ? null : Promise.reject(error)), fetchAll(`/v1/metadata/tables/${id}/glossary-links`), fetchAll(`/v1/organizations/${state.organizationId}/ownership-assignments?subject_type=TABLE&subject_id=${id}`), api(`/v1/metadata/tables/${id}/evidence`).catch(error => ({__error: error}))]);
     const columns = columnPage.items;
     state.selectedAssetDocumentation = documentation;
     state.selectedAssetLinks = termLinks;
@@ -560,7 +722,21 @@ async function showTable(id) {
     const ownershipSection = `<section><div class="section-heading"><div><span class="section-icon mint">OW</span><div><strong>Accountability and trust</strong><small>Reviewed individual/group ownership and time-bound certification</small></div></div><div class="record-actions"><button class="button small" data-assign-asset-owner="${id}">Assign owner</button><button class="button secondary small" data-certify-asset="${id}">Certify</button></div></div><div class="linked-terms">${ownership.map(item => `<div><span><strong>${esc(item.owner_principal)}</strong><small>${esc(human(item.owner_type))} / ${esc(human(item.assignment_kind))}</small></span>${badge(item.status)}</div>`).join("") || empty("No accountable owner")}</div></section>`;
     const qualityForTable = state.qualityIncidents.filter(record => record.table_id === id);
     const tab = state.selectedAssetTab || "overview";
-    setHtml("table-detail", `<div class="asset-detail-head"><div class="asset-title"><span class="asset-kind large">${esc(String(item?.object_type || "TB").slice(0, 2).toUpperCase())}</span><div><p class="asset-path">${esc(human(item?.object_type))} / governed source</p><h2>${esc(item?.name)}</h2></div></div><div class="asset-head-actions">${badge(item?.status)}<button class="icon-button" type="button" title="Asset identifier">&#9432;</button></div></div><div class="asset-statbar"><span><strong>${columns.length}</strong> columns</span><span><strong>${sensitive}</strong> sensitive</span><span><strong>${constraints.length}</strong> constraints</span><span><strong>${profile ? profile.sampled_row_count : 0}</strong> profiled rows</span><span><strong>${impact.downstream_object_count}</strong> downstream</span></div><div class="asset-tabs" role="tablist" aria-label="Asset detail sections">${[["overview","Overview"],["columns",`Columns ${columns.length}`],["lineage","Lineage"],["intelligence","Intelligence"],["quality","Data quality"]].map(([key,label]) => `<button class="${tab === key ? "active" : ""}" id="asset-tab-${key}" role="tab" aria-selected="${tab === key}" aria-controls="asset-pane-${key}" tabindex="${tab === key ? 0 : -1}" data-asset-tab="${key}" type="button">${label}</button>`).join("")}</div><div class="asset-tab-panel ${tab === "overview" ? "active" : ""}" role="tabpanel" id="asset-pane-overview" aria-labelledby="asset-tab-overview" data-asset-pane="overview"><section><div class="section-heading"><div><span class="section-icon blue">OV</span><div><strong>Description</strong><small>Technical and approved business context</small></div></div></div><p>${esc(item?.source_description || annotation?.business_description || "No source description has been provided for this asset.")}</p></section>${businessOverview}<section><div class="section-heading"><div><span class="section-icon sand">RS</span><div><strong>Relationships</strong><small>Declared structural evidence</small></div></div></div>${constraintRows || empty("No declared relationships")}</section></div><div class="asset-tab-panel ${tab === "columns" ? "active" : ""}" role="tabpanel" id="asset-pane-columns" aria-labelledby="asset-tab-columns" data-asset-pane="columns"><div class="column-list-head"><strong>Column name</strong><span>Classification</span></div>${columnRows || empty("No columns discovered")}</div><div class="asset-tab-panel ${tab === "lineage" ? "active" : ""}" role="tabpanel" id="asset-pane-lineage" aria-labelledby="asset-tab-lineage" data-asset-pane="lineage"><section><div class="section-heading"><div><span class="section-icon mint">LN</span><div><strong>Downstream impact</strong><small>Governed dependencies connected to this asset</small></div></div></div><div class="impact-grid"><div><strong>${impact.semantic_metric_version_ids.length}</strong><span>Semantic metrics</span></div><div><strong>${impact.governed_tool_version_ids.length}</strong><span>Governed tools</span></div><div><strong>${impact.dbt_resource_ids.length}</strong><span>dbt resources</span></div><div><strong>${impact.approved_relationship_candidate_ids.length}</strong><span>Approved links</span></div></div><button class="button secondary small" data-go="relationships">Explore knowledge graph</button></section></div><div class="asset-tab-panel ${tab === "intelligence" ? "active" : ""}" role="tabpanel" id="asset-pane-intelligence" aria-labelledby="asset-tab-intelligence" data-asset-pane="intelligence">${annotation ? `<section><div class="section-heading"><div><span class="section-icon coral">IN</span><div><strong>Business intelligence</strong><small>Approved semantic context</small></div></div>${badge("APPROVED")}</div><div class="definition-grid"><div><span>Domain</span><strong>${esc(annotation.domain_name)}</strong></div><div><span>Entity</span><strong>${esc(annotation.entity_name)}</strong></div><div><span>Role</span><strong>${esc(human(annotation.table_role))}</strong></div></div><p class="form-note spaced">Synonyms: ${esc(annotation.synonyms.join(", ") || "None")}</p>${questionRows ? `<div class="question-list"><h3>Suggested questions</h3>${questionRows}</div>` : ""}</section>` : businessOverview}</div><div class="asset-tab-panel ${tab === "quality" ? "active" : ""}" role="tabpanel" id="asset-pane-quality" aria-labelledby="asset-tab-quality" data-asset-pane="quality"><section><div class="section-heading"><div><span class="section-icon mint">DQ</span><div><strong>Quality evidence</strong><small>Value-free profile baseline and durable incidents</small></div></div>${qualityForTable.length ? badge("WARNING") : badge(profile ? "HEALTHY" : "NOT_CONFIGURED")}</div><div class="impact-grid"><div><strong>${profile ? profile.sampled_row_count : 0}</strong><span>Profiled rows</span></div><div><strong>${qualityForTable.length}</strong><span>Incidents</span></div><div><strong>${sensitive}</strong><span>Sensitive fields</span></div></div><button class="button secondary small" data-go="quality">Open quality workbench</button></section></div>`);
+    /* UX-7: evidence tab, grouped by category with each claim's traceable
+     * source (AssetEvidenceRead / EvidenceItemRead, UX-13). A 403 (or any
+     * other fetch failure) renders an explicit denial/error state here
+     * rather than leaving the tab silently empty. */
+    const evidenceSection = (() => {
+      if (evidence?.__error) {
+        const denied = evidence.__error.status === 403;
+        return `<section>${empty(denied ? "Not authorized" : "Evidence unavailable", denied ? "You do not have permission to view this asset's evidence." : evidence.__error.message)}</section>`;
+      }
+      const grouped = {};
+      (evidence?.items || []).forEach(entry => { (grouped[entry.category] ||= []).push(entry); });
+      const groups = Object.keys(grouped).sort().map(category => `<div class="evidence-group"><h3>${esc(human(category))}</h3>${grouped[category].map(entry => `<div class="evidence-claim-row"><p>${esc(entry.claim)}</p><span class="secondary-cell">${esc(entry.source)}${entry.occurred_at ? ` &middot; ${esc(when(entry.occurred_at))}` : ""}</span></div>`).join("")}</div>`).join("");
+      return `<section><div class="section-heading"><div><span class="section-icon blue">EV</span><div><strong>Evidence</strong><small>Every claim on this asset, with its traceable source</small></div></div><div class="record-actions"><button class="button small secondary" type="button" data-copy-permalink="${id}">Copy permalink</button><button class="button small secondary" type="button" data-evidence-export="${id}">Export evidence</button></div></div>${groups || empty("No evidence recorded yet")}</section>`;
+    })();
+    setHtml("table-detail", `<div class="asset-detail-head"><div class="asset-title"><span class="asset-kind large">${esc(String(item?.object_type || "TB").slice(0, 2).toUpperCase())}</span><div><p class="asset-path">${esc(human(item?.object_type))} / governed source</p><h2>${esc(item?.name || evidence?.table_name || "")}</h2></div></div><div class="asset-head-actions">${badge(item?.status)}<button class="icon-button" type="button" title="Asset identifier">&#9432;</button></div></div><div class="asset-statbar"><span><strong>${columns.length}</strong> columns</span><span><strong>${sensitive}</strong> sensitive</span><span><strong>${constraints.length}</strong> constraints</span><span><strong>${profile ? profile.sampled_row_count : 0}</strong> profiled rows</span><span><strong>${impact.downstream_object_count}</strong> downstream</span></div><div class="asset-tabs" role="tablist" aria-label="Asset detail sections">${[["overview","Overview"],["columns",`Columns ${columns.length}`],["lineage","Lineage"],["intelligence","Intelligence"],["quality","Data quality"],["evidence","Evidence"]].map(([key,label]) => `<button class="${tab === key ? "active" : ""}" id="asset-tab-${key}" role="tab" aria-selected="${tab === key}" aria-controls="asset-pane-${key}" tabindex="${tab === key ? 0 : -1}" data-asset-tab="${key}" type="button">${label}</button>`).join("")}</div><div class="asset-tab-panel ${tab === "overview" ? "active" : ""}" role="tabpanel" id="asset-pane-overview" aria-labelledby="asset-tab-overview" data-asset-pane="overview"><section><div class="section-heading"><div><span class="section-icon blue">OV</span><div><strong>Description</strong><small>Technical and approved business context</small></div></div></div><p>${esc(item?.source_description || annotation?.business_description || "No source description has been provided for this asset.")}</p></section>${businessOverview}<section><div class="section-heading"><div><span class="section-icon sand">RS</span><div><strong>Relationships</strong><small>Declared structural evidence</small></div></div></div>${constraintRows || empty("No declared relationships")}</section></div><div class="asset-tab-panel ${tab === "columns" ? "active" : ""}" role="tabpanel" id="asset-pane-columns" aria-labelledby="asset-tab-columns" data-asset-pane="columns"><div class="column-list-head"><strong>Column name</strong><span>Classification</span></div>${columnRows || empty("No columns discovered")}</div><div class="asset-tab-panel ${tab === "lineage" ? "active" : ""}" role="tabpanel" id="asset-pane-lineage" aria-labelledby="asset-tab-lineage" data-asset-pane="lineage"><section><div class="section-heading"><div><span class="section-icon mint">LN</span><div><strong>Downstream impact</strong><small>Governed dependencies connected to this asset</small></div></div></div><div class="impact-grid"><div><strong>${impact.semantic_metric_version_ids.length}</strong><span>Semantic metrics</span></div><div><strong>${impact.governed_tool_version_ids.length}</strong><span>Governed tools</span></div><div><strong>${impact.dbt_resource_ids.length}</strong><span>dbt resources</span></div><div><strong>${impact.approved_relationship_candidate_ids.length}</strong><span>Approved links</span></div></div><button class="button secondary small" data-go="relationships">Explore knowledge graph</button></section></div><div class="asset-tab-panel ${tab === "intelligence" ? "active" : ""}" role="tabpanel" id="asset-pane-intelligence" aria-labelledby="asset-tab-intelligence" data-asset-pane="intelligence">${annotation ? `<section><div class="section-heading"><div><span class="section-icon coral">IN</span><div><strong>Business intelligence</strong><small>Approved semantic context</small></div></div>${badge("APPROVED")}</div><div class="definition-grid"><div><span>Domain</span><strong>${esc(annotation.domain_name)}</strong></div><div><span>Entity</span><strong>${esc(annotation.entity_name)}</strong></div><div><span>Role</span><strong>${esc(human(annotation.table_role))}</strong></div></div><p class="form-note spaced">Synonyms: ${esc(annotation.synonyms.join(", ") || "None")}</p>${questionRows ? `<div class="question-list"><h3>Suggested questions</h3>${questionRows}</div>` : ""}</section>` : businessOverview}</div><div class="asset-tab-panel ${tab === "quality" ? "active" : ""}" role="tabpanel" id="asset-pane-quality" aria-labelledby="asset-tab-quality" data-asset-pane="quality"><section><div class="section-heading"><div><span class="section-icon mint">DQ</span><div><strong>Quality evidence</strong><small>Value-free profile baseline and durable incidents</small></div></div>${qualityForTable.length ? badge("WARNING") : badge(profile ? "HEALTHY" : "NOT_CONFIGURED")}</div><div class="impact-grid"><div><strong>${profile ? profile.sampled_row_count : 0}</strong><span>Profiled rows</span></div><div><strong>${qualityForTable.length}</strong><span>Incidents</span></div><div><strong>${sensitive}</strong><span>Sensitive fields</span></div></div><button class="button secondary small" data-go="quality">Open quality workbench</button></section></div><div class="asset-tab-panel ${tab === "evidence" ? "active" : ""}" role="tabpanel" id="asset-pane-evidence" aria-labelledby="asset-tab-evidence" data-asset-pane="evidence">${evidenceSection}</div>`);
     $("#table-detail [data-asset-pane=\"intelligence\"]")?.insertAdjacentHTML("afterbegin", `${ownershipSection}${documentationSection}${termsSection}`);
   } catch (error) { setHtml("table-detail", empty("Table evidence unavailable", error.message)); }
 }
@@ -1086,6 +1262,54 @@ function prepareAccessibility() {
   });
 }
 
+/* UX-5: arrow-key roving navigation for the primary nav rail, matching the
+ * roving-tabindex pattern bindTabKeyboardNav() already gives every
+ * role="tablist" in the app (asset detail tabs, operations tabs, etc.).
+ * Up/Down/Home/End move focus among the *currently visible* nav items
+ * (persona- and integration-filtered), never a hidden one. */
+function bindNavRovingTabindex() {
+  const nav = document.querySelector(".sidebar nav");
+  if (!nav) return;
+  nav.addEventListener("keydown", event => {
+    if (!["ArrowDown","ArrowUp","Home","End"].includes(event.key)) return;
+    if (!event.target.classList.contains("nav-item")) return;
+    const items = $$(".nav-item").filter(node => !node.classList.contains("persona-hidden") && !node.classList.contains("integration-hidden"));
+    if (!items.length) return;
+    const currentIndex = items.indexOf(event.target);
+    if (currentIndex === -1) return;
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowDown") nextIndex = (currentIndex + 1) % items.length;
+    else if (event.key === "ArrowUp") nextIndex = (currentIndex - 1 + items.length) % items.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = items.length - 1;
+    event.preventDefault();
+    items[nextIndex].focus();
+  });
+}
+
+/* UX-5: restores keyboard focus to whatever triggered a <dialog> once it
+ * closes, for every dialog in the app uniformly -- a single showModal()
+ * patch rather than a per-dialog close handler (the command palette's own
+ * bespoke restore-to-#palette-trigger keeps working alongside this; both
+ * resolve to the same element in the normal case). Native <dialog> does not
+ * guarantee this itself across browsers. */
+function bindDialogFocusRestore() {
+  if (typeof HTMLDialogElement === "undefined" || HTMLDialogElement.prototype._agFocusRestorePatched) return;
+  const nativeShowModal = HTMLDialogElement.prototype.showModal;
+  HTMLDialogElement.prototype.showModal = function agShowModal(...args) {
+    this._agReturnFocusTo = document.activeElement;
+    if (!this._agFocusRestoreBound) {
+      this.addEventListener("close", () => {
+        const target = this._agReturnFocusTo;
+        if (target && document.body.contains(target) && typeof target.focus === "function") target.focus();
+      });
+      this._agFocusRestoreBound = true;
+    }
+    return nativeShowModal.apply(this, args);
+  };
+  HTMLDialogElement.prototype._agFocusRestorePatched = true;
+}
+
 function showView(name) {
   if (!viewVisible(name)) name = "administration";
   const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -1154,6 +1378,8 @@ function bindDirectEvents() {
   });
   $("#catalog-type-filter").addEventListener("change", () => loadTables({reset:true})); $("#catalog-status-filter").addEventListener("change", () => loadTables({reset:true}));
   $("#clear-catalog-filters").addEventListener("click", () => { $("#catalog-search").value = ""; $("#catalog-type-filter").value = "ALL"; $("#catalog-status-filter").value = "ALL"; loadTables({reset:true}); });
+  $("#bulk-action-form").addEventListener("submit", event => { event.preventDefault(); submitBulkDialog(event.target).catch(error => notify(error.message)); });
+  $("#bulk-action-cancel-run").addEventListener("click", cancelBulkRun);
   $("#new-glossary-term").addEventListener("click", () => $("#glossary-term-dialog").showModal());
   $("#new-glossary-category").addEventListener("click", () => $("#glossary-category-dialog").showModal());
   $("#new-ownership-rule").addEventListener("click", () => $("#ownership-rule-dialog").showModal());
@@ -1487,6 +1713,29 @@ function bindDelegatedEvents() {
     const graphFocus = event.target.closest("[data-graph-focus]"); if (graphFocus) return loadRelationships({focusId:graphFocus.dataset.graphFocus, pushHistory:true}).catch(error => notify(error.message));
     const graphCatalog = event.target.closest("[data-graph-catalog]"); if (graphCatalog) { $("#catalog-source").value = state.graphDatasourceId; await loadTables(); showView("catalog"); return showTable(graphCatalog.dataset.graphCatalog); }
     const tableNode = event.target.closest("[data-table]"); if (tableNode) return showTable(tableNode.dataset.table);
+    const copyPermalink = event.target.closest("[data-copy-permalink]"); if (copyPermalink) {
+      const url = `${location.origin}${location.pathname}#catalog/${copyPermalink.dataset.copyPermalink}`;
+      try { await navigator.clipboard.writeText(url); notify("Permalink copied to clipboard.", true); }
+      catch { notify(`Permalink: ${url}`); }
+      return;
+    }
+    const exportEvidence = event.target.closest("[data-evidence-export]"); if (exportEvidence) return exportAssetEvidence(exportEvidence.dataset.evidenceExport);
+    const selectTableBox = event.target.closest("[data-select-table]"); if (selectTableBox) {
+      const boxId = selectTableBox.dataset.selectTable;
+      const result = state.bulkSelection.toggle(boxId);
+      if (result.capped) { selectTableBox.checked = false; notify(`Selection limit reached (${state.bulkSelection.max.toLocaleString()} items).`); }
+      renderBulkToolbar();
+      return;
+    }
+    const bulkSelectPage = event.target.closest("[data-bulk-select-page]"); if (bulkSelectPage) {
+      const pageIds = state.tables.map(tableItem => tableItem.id);
+      const allSelected = pageIds.length > 0 && pageIds.every(pageId => state.bulkSelection.has(pageId));
+      if (allSelected) pageIds.forEach(pageId => state.bulkSelection.remove(pageId));
+      else { const result = state.bulkSelection.addMany(pageIds); if (result.capped) notify(`Selection limit reached (${state.bulkSelection.max.toLocaleString()} items).`); }
+      return renderTables();
+    }
+    const bulkClear = event.target.closest("[data-bulk-clear-selection]"); if (bulkClear) { state.bulkSelection.clear(); return renderTables(); }
+    const bulkOpen = event.target.closest("[data-bulk-open]"); if (bulkOpen) return openBulkDialog(bulkOpen.dataset.bulkOpen);
     const model = event.target.closest("[data-model]"); if (model) return selectSemantic(model.dataset.model);
     const tool = event.target.closest("[data-tool]"); if (tool) return selectTool(tool.dataset.tool);
     const dbtProject = event.target.closest("[data-dbt-project]"); if (dbtProject) return selectDbtProject(dbtProject.dataset.dbtProject).catch(error => notify(error.message));
@@ -1521,7 +1770,6 @@ function bindDelegatedEvents() {
     const relationship = event.target.closest("[data-relationship]"); if (relationship) return openDecision("relationship", relationship.dataset.relationship, relationship.dataset.decision);
     const record = event.target.closest("[data-record]"); if (record) return showRecord(record.dataset.recordTitle || "Record detail", JSON.parse(record.dataset.record));
     const runDetail = event.target.closest("[data-run-detail]"); if (runDetail) return showRecord("Analysis run evidence", state.runs.find(item => item.id === runDetail.dataset.runDetail));
-    const auditDetail = event.target.closest("[data-audit-detail]"); if (auditDetail) return showRecord("Audit event", state.audit.find(item => String(item.id) === auditDetail.dataset.auditDetail));
     const evaluation = event.target.closest("[data-evaluation]"); if (evaluation) return showRecord("Evaluation findings", state.evaluations.find(item => item.id === evaluation.dataset.evaluation));
     const trace = event.target.closest("[data-trace]"); if (trace) { const run = await api(`/v1/agent-runs/${trace.dataset.trace}`); renderTrace(run.step_trace); showView("analyst"); return; }
     const qualityDetail = event.target.closest("[data-quality-detail]"); if (qualityDetail) { const records = qualityDetail.dataset.qualityKind === "incident" ? state.qualityIncidents : state.qualityObservations; return showRecord(qualityDetail.dataset.qualityKind === "incident" ? "Quality incident evidence" : "Quality observation evidence", records.find(item => item.id === qualityDetail.dataset.qualityDetail)); }
@@ -1545,11 +1793,16 @@ function bindDelegatedEvents() {
 }
 
 async function initialize() {
-  state.persona = localStorage.getItem("aida-persona") || "all";
-  $("#persona-select").value = state.persona;
-  applyPersona();
+  state.bulkSelection = window.AtlasUI.createSelectionState();
+  state.bulkActionMode = null;
+  state.bulkRunController = null;
+  /* UX-1: persona derives from the server's own OIDC-group-claim mapping
+   * (GET /v1/me) when a real identity provider is active; the browser
+   * <select> remains only as a development fallback (see persona-nav.js). */
+  const personaMode = await window.AtlasUI.loadPersonaFromIdentity();
+  window.AtlasUI.applyPersonaMode(personaMode, applyPersona);
   prepareAccessibility();
-  bindDirectEvents(); bindDelegatedEvents(); bindPaletteEvents(); bindTabKeyboardNav();
+  bindDirectEvents(); bindDelegatedEvents(); bindPaletteEvents(); bindTabKeyboardNav(); bindNavRovingTabindex(); bindDialogFocusRestore();
   const ingestionForm = $("#metadata-ingestion-form");
   if (ingestionForm) {
     ingestionForm.elements.snapshot_type.value = "INCREMENTAL";
@@ -1563,7 +1816,13 @@ async function initialize() {
   try {
     await loadOrganizations();
     if (state.organizationId) await loadOrganizationData(); else { renderHierarchy(); showView("administration"); }
-    const requested = location.hash.slice(1); if (document.getElementById(`${requested}-view`)) showView(requested);
+    /* UX-7: an asset permalink (#catalog/<uuid>) takes priority over a
+     * plain view hash and resolves standalone -- showTable() fetches this
+     * asset's own evidence directly by id, independent of whether it is on
+     * the currently-loaded catalog page. */
+    const deepLinkTableId = parseDeepLinkHash();
+    if (deepLinkTableId) { showView("catalog"); await showTable(deepLinkTableId); }
+    else { const requested = location.hash.slice(1); if (document.getElementById(`${requested}-view`)) showView(requested); }
   } catch (error) { notify(`Atlas could not load: ${error.message}`); }
 }
 

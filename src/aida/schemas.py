@@ -2642,6 +2642,89 @@ class ProcedureLineageEdgeRead(ApiModel):
     updated_at: datetime
 
 
+# ---------------------------------------------------------------------------
+# Group I addition (Atlas Wave-2, tracker N3/N12): API schemas for
+# `procedure_lineage_api.py`'s routine-identity-aware, procedure-aware
+# lineage parse (`aida.procedure_lineage`/`aida.procedure_lineage_models`).
+# Purely additive -- nothing above this block is changed.
+# ---------------------------------------------------------------------------
+
+
+class DeepProcedureLineageEdgeRead(ApiModel):
+    """One edge from the procedure-aware parser (N3) -- richer than
+    `LineageEdgeRead`/`ProcedureLineageEdgeRead`: carries the statement it
+    came from, whether that statement was a write, whether either side is an
+    intermediate (temp table/variable) local to the procedure body, and,
+    for a construct the parser could not resolve, the named reason why
+    (never a silently dropped statement -- see `aida.procedure_lineage`'s
+    module docstring)."""
+
+    source_table: str
+    source_column: str
+    target_table: str
+    target_column: str
+    transformation_type: str
+    confidence: str
+    dialect: str
+    source_resolved: bool
+    statement_ordinal: int
+    is_write: bool
+    is_intermediate: bool
+    control_flow_context: str | None = None
+    unparsed_reason: str | None = None
+    via_temp_table: str | None = None
+
+
+class DeepProcedureLineageParseResponse(ApiModel):
+    edges: list[DeepProcedureLineageEdgeRead]
+    statement_count: int
+    confidence: str
+    dialect: str
+    sql_hash: str
+    errors: list[str] = Field(default_factory=list)
+    # True iff every statement chunk in the body resolved to a concrete
+    # DML/DDL shape or a genuinely lineage-free one (DECLARE/SET/structural
+    # control-flow) -- zero UNPARSED chunks. N12 eligibility requires this.
+    is_fully_parsed: bool
+    # True iff `is_fully_parsed` AND no statement touched INSERT/UPDATE/
+    # DELETE/MERGE/CREATE -- proven read-only, not merely "no write found".
+    is_read_only: bool
+    persisted_edge_count: int = 0
+
+
+class ProcedureCapabilityConstructRead(ApiModel):
+    """One row of the AT-22 parser capability matrix -- see
+    `aida.procedure_capability_matrix`'s module docstring for how every
+    field here is derived from the parsers' own dispatch code, not
+    hand-typed. `construct_name`, not `construct` -- the latter shadows
+    pydantic `BaseModel.construct`."""
+
+    construct_name: str
+    view_parser_status: str
+    procedure_parser_status: str
+    evidence: str
+
+
+class ProcedureCapabilityMatrixRead(ApiModel):
+    """AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`,
+    generated at request time from `sql_lineage_parser.py`'s and
+    `procedure_lineage.py`'s own dispatch code -- the same source
+    `scripts/generate_procedure_capability_matrix.py` uses to publish
+    `Docs/90-reference/procedure-lineage-capability-matrix.md`, so the
+    published page is verifiably backed by a live, callable source rather
+    than only a one-off script."""
+
+    generated_at: str
+    dialects: list[str]
+    constructs: list[ProcedureCapabilityConstructRead]
+    unparsed_reasons: list[str]
+
+
+# ---------------------------------------------------------------------------
+# End Group I addition.
+# ---------------------------------------------------------------------------
+
+
 class StudioChangeSetCreate(ApiModel):
     name: str = Field(min_length=2, max_length=200)
 
@@ -3557,5 +3640,87 @@ class AssetCertificationRead(ApiModel):
     certified_by: str
     expires_at: datetime
     is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP A: retrieval (RT-5 / RT-9 global-search endpoint) ---
+# ---------------------------------------------------------------------------
+
+
+class GlobalSearchHitRead(ApiModel):
+    """One ranked hit from ``GET /v1/organizations/{organization_id}/global-search``
+    (RT-5's API half, RT-9's genuine cross-source retrieval).
+
+    ``evidence`` is the *real* per-signal fusion breakdown
+    (``aida.retrieval.hybrid_retrieve_enhanced``'s output for the datasource
+    this hit came from) -- lexical/vector/graph/quality_trust/usage_popularity,
+    whichever signals actually fired -- not a synthesized summary. Every
+    ranking factor stays inspectable (RT-3).
+    """
+
+    object_type: str
+    object_id: str
+    display_name: str
+    score: float
+    datasource_id: UUID
+    reason_codes: list[str]
+    evidence: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+class GlobalSearchResponse(ApiModel):
+    """Response for ``GET /v1/organizations/{organization_id}/global-search``."""
+
+    items: list[GlobalSearchHitRead]
+    total: int
+    datasource_count: int
+    limit: int
+    fusion_method: str
+    vector_enabled: bool
+    graph_enabled: bool
+
+
+# ---------------------------------------------------------------------------
+# --- GROUP H: ST-A7 context product builder ---
+# ---------------------------------------------------------------------------
+
+
+class StudioContextProductValidateRequest(ApiModel):
+    """Stateless shape-validation request for a CONTEXT_PRODUCT change-set
+    item, mirroring `StudioParameterContractValidateRequest` (ST-A4). Lets an
+    author validate a draft context product definition incrementally, without
+    an existing change set or change item -- the exact same check the
+    CONTEXT_PRODUCT item's own test gate runs (`_validate_context_product_item`
+    -> `validate_context_product_contract`, `studio.py`)."""
+
+    operation: Literal["CREATE", "UPDATE", "DELETE"]
+    object_id: str = Field(min_length=1, max_length=100)
+    snapshot: dict[str, Any] | None = None
+
+
+class StudioContextProductValidateResult(ApiModel):
+    valid: bool
+    errors: list[str]
+    definition: dict[str, Any] | None = None
+    product_key: str | None = None
+    project_id: str | None = None
+
+
+class StudioContextProductMaterializationRead(ApiModel):
+    """One `StudioContextProductMaterialization` row -- the durable link from
+    a CONTEXT_PRODUCT change-set item to the real `ContextProduct`/
+    `ContextProductVersion`/`GovernanceReview` it produced on submission."""
+
+    id: UUID
+    organization_id: UUID
+    change_set_id: UUID
+    change_item_id: UUID
+    operation: str
+    context_product_id: UUID
+    context_product_version_id: UUID
+    governance_review_id: UUID
+    created_by: str
     created_at: datetime
     updated_at: datetime

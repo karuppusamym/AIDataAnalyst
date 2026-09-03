@@ -188,8 +188,8 @@ See `40-engineering/03-coding-standards.md`.
 
 **Resolved 2026-08-30 (tracker ST-11).** Verified against the code before deciding: there is
 no cycle, and there never was one. `src/aida/query_gateway.py` imports no lineage module, and
-no lineage module (`unified_lineage.py`, `lineage_cache.py`, `lineage_graph_store.py`,
-`openlineage.py`) imports the gateway. `extract_column_lineage` — the function that made the
+no lineage module (`unified_lineage.py`, `lineage_cache.py`, `graph_store.py` (formerly
+lineage_graph_store.py), `openlineage.py`) imports the gateway. `extract_column_lineage` — the function that made the
 relationship look bidirectional — is defined *inside* `query_gateway.py` and is called only
 there. The mutual edge existed in the register table below, not in the import graph.
 

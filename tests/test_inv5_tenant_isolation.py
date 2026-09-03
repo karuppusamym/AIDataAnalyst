@@ -64,6 +64,12 @@ _TENANT_FREE_ROUTES: dict[str, str] = {
     "GET /v1/connectors/capability-matrix": (
         "the connector registry's own definitions; process-global, not per-tenant"
     ),
+    "GET /v1/procedure-lineage/capability-matrix": (
+        "AT-22: derived purely from the parser modules' own dispatch code via AST "
+        "introspection (aida.procedure_capability_matrix.build_capability_matrix) -- "
+        "no session parameter, no datasource_id, reads no governed table; identical "
+        "for every tenant, same as the connector capability matrix above"
+    ),
     "POST /v1/context-compiler/validate": (
         "pure validation of a caller-supplied artifact; takes no session and "
         "persists nothing"
@@ -71,6 +77,10 @@ _TENANT_FREE_ROUTES: dict[str, str] = {
     "POST /v1/studio/parameter-contracts/validate": (
         "pure validation of a caller-supplied tool parameter contract (ST-A4); "
         "takes no session and persists nothing"
+    ),
+    "POST /v1/studio/context-products/validate": (
+        "pure validation of a caller-supplied context product change-item shape "
+        "(ST-A7); takes no session and persists nothing"
     ),
     "POST /v1/organizations": (
         "creates the organization boundary itself, so there is no prior boundary "

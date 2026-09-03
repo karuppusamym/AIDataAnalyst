@@ -222,6 +222,14 @@ class Settings(BaseSettings):
     lineage_projection_max_nodes: int = Field(default=20_000, ge=100, le=100_000)
     lineage_projection_max_edges: int = Field(default=100_000, ge=500, le=500_000)
     lineage_neo4j_read_enabled: bool = False
+    # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
+    # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
+    # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and
+    # is certified by the port's own conformance suite (`tests/test_graph_store_conformance.py`);
+    # `neo4j` is additionally gated by `lineage_neo4j_read_enabled` above (INV-9 -- E5,
+    # the projection rebuild drill, has not run) regardless of what this or the
+    # per-organization setting says.
+    graph_store_backend: Literal["postgres", "neo4j", "disabled"] = "postgres"
     mcp_budget_enabled: bool = False
     mcp_require_workload_identity: bool = True
     mcp_requests_per_minute: int = Field(default=120, ge=1, le=100_000)
@@ -350,6 +358,20 @@ class Settings(BaseSettings):
     entitlement_webhook_url: str | None = None
     entitlement_webhook_token: SecretStr | None = None
     entitlement_timeout_seconds: int = Field(default=10, ge=1, le=60)
+
+    # --- GROUP C (DQ-1): ITSM webhook emitter for routed quality incidents.
+    # Off by default (`dq_itsm_webhook_enabled=False`) so an unconfigured
+    # deployment's behaviour is unchanged -- a quality incident is still
+    # routed and persisted (`NotificationEventRecord`) even with the emitter
+    # disabled, it just stays in status PENDING rather than attempting an
+    # outbound call. The actual ITSM system (ServiceNow/Jira/...) is an infra
+    # concern; this is a generic, configurable webhook target that receives
+    # `notification_routing.format_itsm_payload`'s JSON body, mirroring
+    # `entitlement_webhook_url`'s shape.
+    dq_itsm_webhook_enabled: bool = False
+    dq_itsm_webhook_url: str | None = None
+    dq_itsm_webhook_token: SecretStr | None = None
+    dq_itsm_webhook_timeout_seconds: int = Field(default=10, ge=1, le=60)
     agent_retrieval_limit: int = Field(default=25, ge=1, le=100)
     agent_retrieval_scan_limit: int = Field(default=5_000, ge=100, le=100_000)
     agent_tool_match_threshold: float = Field(default=0.55, ge=0.0, le=1.0)

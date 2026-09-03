@@ -21,14 +21,17 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    docker compose -f compose.yaml -f compose.dev.yaml up --build -d
    ```
 
-   The complete portal remains at `http://localhost:3000` and reflects `ui/`
-   changes after refresh. The React rebuild is at `http://localhost:5174` with
-   hot-module reload; API changes under `src/` reload automatically.
+   The complete legacy portal remains at `http://localhost:3000`. The React
+   rebuild is also deployed by the default Compose file at
+   `http://localhost:3001`; both use the same API service. With the development
+   overlay, the React rebuild is available at `http://localhost:5174` with
+   hot-module reload, and API changes under `src/` reload automatically.
 
 3. Open:
 
    - API documentation: <http://localhost:8000/docs>
-   - Atlas agentic product portal: <http://localhost:3000>
+   - Legacy Atlas portal: <http://localhost:3000>
+   - React Atlas portal: <http://localhost:3001> (or <http://localhost:5174> with the development overlay)
    - Temporal UI: <http://localhost:8080>
    - Neo4j browser: <http://localhost:7474>
    - MinIO console: <http://localhost:9001>

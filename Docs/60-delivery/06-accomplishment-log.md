@@ -6407,7 +6407,8 @@ and INV-1's closed `permitted_readers` allowlist
 (`tests/test_inv1_single_authoritative_store.py::test_request_path_graph_access_is_read_only_and_closed`)
 does not distinguish request-path from scheduled-background Neo4j readers by directory alone
 outside the `projectors/` package, so `graph_reconciliation.py` needed a reviewed entry — added
-with the same justification style as the existing `api.py`/`lineage_graph_store.py` rows: this
+with the same justification style as the existing `api.py`/lineage_graph_store.py
+(since consolidated into `graph_store.py`, tracker C7) rows: this
 module reads Neo4j only to diff it against PostgreSQL's own selection and alert on disagreement,
 never to answer a request or override PostgreSQL.
 
@@ -10639,3 +10640,687 @@ Honest gap, same as AT-1's own note today: `test_event_catalog_gate.py` fails in
 pre-existing, unrelated `UnicodeDecodeError` already documented above -- this row's four new event-catalog
 rows are additions to a file that gate cannot currently even read in this sandbox, not a cause of the
 failure.
+
+## 2026-09-02 — N3/N12/AT-22 closed: procedure-aware lineage, tool generator C, and a code-derived capability matrix (Atlas Wave-2 Group I)
+
+Three tracker rows, one dependency chain: N3 (real procedure-body parsing) unblocks N12 (procedure ->
+governed tool, eligible only when N3's parse *proves* read-only) and gives AT-22 (the published parser
+capability matrix, blocked on AT-D2 until now) a second, richer parser to introspect alongside
+`sql_lineage_parser.py`. Delivered as five new files plus one Alembic migration; `sql_lineage_parser.py`
+and `view_lineage_api.py` (AT-D2's own files) are untouched -- every one of AT-D2's six fixes is inherited
+by reuse, not at risk of drifting out of sync with a duplicated reimplementation.
+
+### N3: `procedure_lineage.py` is a real, procedure-aware parser -- not `_parse_sql` again
+
+AT-D5 (2026-09-01) established the exact defect this closes: `sql_lineage_parser.parse_procedure_lineage`
+hands a whole procedure body to one `sqlglot.parse` call, which cannot understand T-SQL/PL-SQL control
+flow and silently falls back to an opaque `Command` node at the first unrecognised token -- everything
+after that point is gone, with nothing distinguishing "this procedure genuinely has no more lineage" from
+"the parser gave up here". Proven directly, not just asserted: `tests/test_procedure_lineage.py::test_the_generic_flat_parser_silently_truncates_the_same_body`
+feeds the old path a real `IF...BEGIN...INSERT...END` body and asserts `result.edges == []`.
+
+The new parser never asks sqlglot to parse a whole body in one call. It (1) strips the `CREATE
+[OR REPLACE] PROCEDURE/FUNCTION ... AS/IS` header and the outer `BEGIN...END` (or `$$...$$`) wrapper,
+quote/comment-aware; (2) splits the body into top-level, `;`-delimited chunks, also quote/comment-aware
+so a `;` inside a string literal or comment is never mistaken for a statement boundary; (3) peels a
+recognised control-flow *header* (`IF...BEGIN`, `WHILE...LOOP`, `ELSIF...THEN`, bare `BEGIN`/`END`/`ELSE`,
+T-SQL `BEGIN TRY`/`END CATCH`, and PL/SQL cursor `FOR rec IN (SELECT...) LOOP` -- whose parenthesised
+SELECT genuinely carries lineage and is extracted as its own read) off the front of each chunk, leaving
+the real DML statement, if any, to parse on its own; (4) dispatches by statement kind; (5) resolves
+temp-table/variable intermediate writes through to final targets.
+
+One real, non-obvious bug found and fixed *while building the body-stripper itself*: the first version's
+`BEGIN...END` nesting counter treated any bare `END` as closing the nearest `BEGIN`, but `LOOP`/`IF`/
+`CASE`/`WHILE` are closed by `END LOOP`/`END IF`/`END CASE`/`END WHILE` -- constructs that never
+incremented the counter in the first place. A PL/SQL `FOR...LOOP...END LOOP` nested inside a procedure
+body was closing the *outer* procedure's `BEGIN...END` early, silently truncating everything after the
+loop -- the exact failure mode this module exists to eliminate, just relocated into its own scaffolding.
+Caught by `test_plsql_cursor_for_loop_select_source_is_extracted_as_a_real_read` failing during
+development (a trailing `EXECUTE IMMEDIATE` after the loop went missing entirely); fixed by only
+decrementing on a bare `END` whose next token is not one of `LOOP`/`IF`/`CASE`/`WHILE`.
+
+**The core invariant, extending INV-9 exactly as AT-C4 already scoped it for lineage parsers:** a
+construct this parser cannot resolve -- dynamic SQL (`EXEC(@sql)`, `sp_executesql`,
+`EXECUTE IMMEDIATE`), a nested `EXEC other_proc`/`CALL other_proc(...)` (its own body not fetched or
+analyzed), a sqlglot parse error, or a statement shape sqlglot itself could not parse (its own `Command`
+fallback) -- always produces its own `ProcedureLineageEdgeRecord` with `transformation_type="UNPARSED"`,
+`source_resolved=False`, and `unparsed_reason` naming exactly which of five categories
+(`DYNAMIC_SQL`/`NESTED_PROCEDURE_CALL`/`UNSUPPORTED_STATEMENT_SHAPE`/`PARSE_ERROR`/
+`UNRESOLVED_CONTROL_FLOW`) applies. This is deliberately an *edge*, not a side-channel flag on the parse
+result -- a consumer reading only the edge list, the way `dbt_column_lineage.py` and
+`view_lineage_api.py` both already do for the sibling parser, still sees the gap.
+
+Two real, pre-existing gaps in `sql_lineage_parser.py` were found while building on top of it -- neither
+fixed there (out of this row's file-ownership scope; `sql_lineage_parser.py` is zero-edit this pass) but
+worked around locally in `procedure_lineage.py`: (a) `_extract_target_table`'s `Insert` branch only
+unwraps a bare `exp.Table`, so `INSERT INTO t (a, b) SELECT x, y` (an explicit column list) resolves its
+target to `exp.Schema` and silently produces zero edges; (b) even once resolved, reusing
+`_extract_edges_from_select`'s own alias/name-based target-column naming would be wrong whenever an
+explicit column list reorders or renames relative to the select list. `procedure_lineage._extract_edges_from_insert`
+fixes both locally: resolves `exp.Schema`-wrapped targets, and positionally zips an explicit column list
+against the SELECT's own projections when one is present.
+
+MERGE got genuinely new capability, not a workaround: `sql_lineage_parser._extract_from_statement`'s
+MERGE handling only walks nested `SELECT`s (the `USING` source, when it's itself a subquery) and never
+maps `WHEN MATCHED THEN UPDATE SET`/`WHEN NOT MATCHED THEN INSERT (...) VALUES (...)` at column level at
+all. `procedure_lineage._extract_edges_from_merge` adds that: walks `statement.args["whens"]`, and for
+each `exp.Update`/`exp.Insert` `then` branch, maps target columns to source expressions the same way an
+ordinary UPDATE/INSERT would -- both a `WHEN MATCHED` and a `WHEN NOT MATCHED` branch producing the same
+source->target fact collapse to one edge (`_dedupe_edges`), not two identical rows.
+
+Temp-table propagation: a write to a T-SQL `#temp`/`##temp` table, `@table` variable, or `SELECT...INTO`
+target is tagged `is_intermediate=True`. A later statement reading FROM that same intermediate gets a
+*synthesised transitive* edge too (`via_temp_table` set, confidence capped `PARTIAL`) linking the true
+upstream source straight through to the real final target -- direct hop-by-hop edges are always kept
+alongside it, never replaced, so "what does the final output ultimately depend on" and "what exactly
+happened at each step" are both answerable from the same edge list. Iterated to a fixed point (bounded 5
+passes) so a two-hop chain (`orders -> #a -> #b -> final`) still collapses to one direct fact, proven in
+the T-SQL control-flow integration test.
+
+### N3 persistence: `procedure_lineage_api.py` + `DeepProcedureLineageEdge` -- routine-identity-aware from the start
+
+New `POST/GET /v1/datasources/{datasource_id}/procedures/{routine_id}/lineage[/parse]`, taking a real
+`MetadataRoutine.id` rather than raw SQL text -- closing, for this new table specifically, the identity
+gap AT-19 documented for the existing `ProcedureLineageEdge` ("this endpoint takes only raw SQL, no
+routine-identity parameter, so a standalone SELECT buckets under a shared sentinel"). Eligibility gating
+mirrors `view_tool_blueprint.py`'s `MetadataViewDefinition` gate exactly: a routine that is not
+`ACTIVE`, whose body is `UNAVAILABLE`, whose `redaction_status` is not `PARSED`, or whose
+`screening_status` is quarantined is refused (422) naming the exact reason, never guessed at.
+`DeepProcedureLineageEdge` (new table, own migration -- see below) is a new, dedicated table rather than
+an extension of `models.ProcedureLineageEdge`'s already-declared class body (AT-D2's natural-key unique
+constraint and existing callers stay completely undisturbed); its own unique constraint is scoped to
+`(datasource_id, routine_id, statement_ordinal, source/target, transformation_type, via_temp_table)`, and
+its `source_resolved` column is real and typed (AT-D2 defect 3's fix, applied here from the start rather
+than an `"UNRESOLVED"` string comparison). 8 tests in `tests/test_procedure_lineage_api.py`: the
+eligibility gate (missing/unavailable/quarantined body all refused), `source_table_id`/`target_table_id`
+resolved against the real catalog, re-parsing one routine never touches another routine's rows (mirrors
+AT-D2 defect 5's own re-parse-doesn't-double test), and an UNPARSED chunk persists as an explicit marker
+row, not silently absent.
+
+### N12: `procedure_tool_blueprint.py` + `procedure_tool_api.py` -- "tool generator C", gated on N3's own proof
+
+`POST /v1/projects/{project_id}/tool-blueprints/from-procedure`, following N11's (view-to-tool) exact
+shape: eligibility (`find_single_read_only_result_statement`) requires N3's parse to be fully parsed
+(zero `UNPARSED` chunks -- "no write statement found" because the parser gave up is never accepted as
+proof, pinned directly by a test), zero write statements, and exactly one standalone terminal result
+SELECT. The generated tool's SQL is the procedure's own reconstructed result statement (not a fresh query
+the way N11 builds `SELECT <cols> FROM <view>` -- a procedure has no live, column-typed catalog surface a
+view does), which creates a real correctness risk N11 never had to solve: the only body text this
+platform has for a procedure is already literal-redacted (INV-6), so a redacted `'<REDACTED>'`/`<NUM>`
+left in a reconstructed WHERE clause would render as an executable-looking tool that silently returns
+wrong (usually empty) results. `build_procedure_tool_blueprint` refuses generation outright the moment any
+`exp.Literal` survives in the reconstructed statement -- refuse rather than publish something broken that
+looks fine, the same posture `view_tool_blueprint.py` applies to a missing/unparsed view definition.
+Procedure `IN`/`INOUT` parameters referenced in the result statement are remapped to real
+`ToolParameterDefinition`s (via `MetadataRoutineParameter`, typed through `view_tool_blueprint`'s own
+`_PARAMETER_TYPE_BY_PHYSICAL_FAMILY`); a variable reference that cannot be mapped this way refuses
+generation rather than being left as inert unbound text in the SQL (unlike an unfilterable *column* in
+N11, which stays selected just unparameterized -- a variable the renderer does not resolve to a
+placeholder is not valid SQL at all, not merely a filter not offered).
+
+This route lives in its own new file rather than as an addition to `tool_api.py` -- a large, central
+module under heavy concurrent edit across this Wave-2 pass -- but reuses `tool_api._load_project_and_datasource`
+and `tool_api._persist_tool_version_draft` by direct import, the literal same functions every other
+tool-generator path (hand-authored, SM-5's multi-table join, N11's view-to-tool) already funnels through,
+so this path's maker-checker gate can never quietly diverge from theirs. New
+`ProcedureToolGenerationRecord` (own migration) records the provenance: which routine, which redacted-body
+hash, how many statements the read-only proof covered -- independent of whatever later happens to the
+generated tool version itself. 11 tests in `tests/test_procedure_tool_blueprint.py`: pure eligibility-gate
+tests (a write, an UNPARSED chunk, zero results, and more than one result each refused with a distinct
+named reason), pure builder tests (literal refusal, IN-parameter mapping to a real placeholder, an
+unmapped variable refused, byte-identical determinism), and one real in-memory-SQLite endpoint test
+proving a genuinely read-only procedure (real JOIN + GROUP BY over two seeded tables) produces a `DRAFT`
+`GovernedToolVersion` plus its provenance row, and a second proving a procedure containing a real INSERT
+is refused 422 with no `GovernedTool` row created at all.
+
+### AT-22: the published capability matrix is *generated from the parsers' own code*, not hand-typed
+
+New `src/aida/procedure_capability_matrix.py` + `scripts/generate_procedure_capability_matrix.py`,
+publishing `Docs/90-reference/procedure-lineage-capability-matrix.md` (+ `.json`). Unblocked now that
+AT-D2 is done (publishing a matrix for a parser that degraded silently would have been exactly the
+"marketed vs. actual" drift this codebase criticises elsewhere) -- and this row's own stated purpose is
+that the matrix itself must not become that drift, which is why nothing in it is hand-typed prose:
+
+- **Dialects** are read directly off `sql_lineage_parser._SQLGLOT_DIALECT_MAP` (shared by both parsers).
+- **Which statement shapes each dispatcher recognises** comes from `_dispatched_node_types`, which walks
+  the real Python AST (`inspect.getsource` + the `ast` module) of `sql_lineage_parser._extract_from_statement`
+  and `procedure_lineage._classify_and_extract` and extracts every `isinstance(node, exp.<Type>)` check
+  each one actually makes -- a branch added or removed there changes the published matrix on next
+  regeneration, with no second place to remember to update.
+- **Which of those shapes the procedure parser explicitly degrades on** (rather than silently, or
+  extracting real lineage) comes from `_explicitly_unparsed_node_types`, which walks the same AST and, per
+  `isinstance` branch, checks whether that branch's own body calls `_unparsed_statement(...)` -- N3's one
+  and only path to an UNPARSED marker.
+- **Control-flow and dynamic-SQL recognition** (regex-based text peeling -- sqlglot cannot parse a whole
+  procedure body's control flow as AST nodes at all, see N3's entry above) is enumerated from
+  `procedure_lineage`'s own live module-level `_..._RE` compiled-pattern attribute names, itself proof a
+  recognition rule exists in code, not merely a claim about one.
+
+19 construct rows x 5 dialects, each tagged `SUPPORTED`/`EXPLICIT_UNPARSED`/`RECOGNISED_NO_LINEAGE`/
+`UNSUPPORTED`/`N/A`, plus the 5 named `UnparsedReason` categories read straight off the real enum. The
+AST-derived introspection caught one real, small bug while being built: the `sp_executesql` dispatch
+branch used `type(node).__name__ == "ExecuteSql"` rather than `isinstance`, so the introspection
+(correctly) could not see it and reported it `UNSUPPORTED` rather than `EXPLICIT_UNPARSED` -- fixed in
+`procedure_lineage.py` to `isinstance(node, exp.ExecuteSql)`, matching every other branch's idiom, which
+both corrected the code and made the published matrix accurate. Deliberately **not** derived from "the
+E12 certification corpus" the row's original note named -- no such corpus exists on this branch yet, and
+source-code introspection is the stronger proof this row's own stated purpose needs: a corpus proves what
+real-world SQL happens to hit, source introspection proves what the parser can and cannot do at all,
+independent of what anyone has tried against it yet. 11 tests in `tests/test_procedure_capability_matrix.py`,
+including three that exercise the introspection primitives against small synthetic dispatcher functions --
+one of which changes a throwaway dispatcher and asserts the derived matrix output changes with it, pinning
+the "derived, not hand-typed" claim directly rather than merely asserting the output looks plausible.
+
+### Migration, scope, and verification
+
+One Alembic revision (`466f21849789`, `down_revision="7e6460d905fe"` -- the single head this pass started
+from), creating `deep_procedure_lineage_edge` and `procedure_tool_generation_record`. Both new ORM classes
+live in a new `src/aida/procedure_lineage_models.py` rather than in `models.py`'s already-declared,
+concurrently-edited class bodies -- the same technique `envelope_models.py` already established for
+exactly this reason (registers on the same `Base.metadata` via one import added to `migrations/env.py`,
+so autogenerate/`create_all` see them identically to a `models.py`-declared table). Verified against a
+real local PostgreSQL 16 (started for this pass; none was otherwise available in the sandbox): clean
+`alembic upgrade head` from the pre-existing single head, `alembic downgrade -1` / `upgrade head` round
+trip, and `alembic check` reporting "No new upgrade operations detected" both before and after the round
+trip -- genuine zero ORM/migration drift, not merely "the file exists".
+
+Additive-only edits to three shared files, each narrowly scoped and clearly commented as this pass's own:
+`src/aida/schemas.py` (two new response schemas, `DeepProcedureLineageEdgeRead`/`DeepProcedureLineageParseResponse`,
+in their own marked block -- no existing schema touched), `src/aida/main.py` (one import block + two
+`app.include_router(...)` lines), `migrations/env.py` (one import, mirroring the existing `envelope_models`
+line). `sql_lineage_parser.py`, `view_lineage_api.py`, `unified_lineage_api.py`, `tool_api.py`, and
+`bi_lineage.py` are all untouched -- zero edits, zero collision surface with the other three Wave-2 groups
+editing those files concurrently. `models.py` is untouched.
+
+`ruff check`/`mypy src` (292 files, `--strict`) clean on every new and touched file; `lint-imports`
+reports all 8 contracts kept, unchanged. `scripts/openapi_diff.py` reports the three new routes as
+purely additive (`added path`), zero breaking changes; baseline regenerated and committed
+(`--accept-baseline`). 45 new tests across four new test files (`test_procedure_lineage.py` 15,
+`test_procedure_lineage_api.py` 8, `test_procedure_tool_blueprint.py` 11, `test_procedure_capability_matrix.py`
+11) all green, no mocking of the parser or the persistence layer -- real sqlglot parses, real in-memory
+SQLite ORM sessions. `tests/test_openapi_diff_gate.py` and `tests/test_doc_claims.py` both green against
+the regenerated baseline.
+
+**Honest gaps, stated plainly:**
+
+- **`unified_lineage_api.py` is not wired to the new `DeepProcedureLineageEdge` table.** AT-19 documented
+  that the existing `PROCEDURE_DEFINITION` edges carry no `transformation_reference` because
+  `ProcedureLineageEdge` has no routine identity to point back to -- `DeepProcedureLineageEdge`'s real
+  `routine_id` FK is exactly that missing identity, but wiring it into the unified graph means editing
+  `unified_lineage_api.py`, a file under heavy, active concurrent edit by AT-10/AT-16/AT-19/AT-20 across
+  this same Wave-2 pass. Judged out of scope for this row rather than risk that collision surface; a
+  follow-on pass can close it without any further schema work.
+- **N3's control-flow peeling is regex-based text recognition, not a grammar.** It handles the documented,
+  common shapes (`IF...BEGIN`/`IF...THEN`/`WHILE`/`CASE...WHEN...THEN`/cursor `FOR` loops/`BEGIN TRY`/
+  `END CATCH`) but is not a full T-SQL/PL-SQL parser -- an unrecognised or sufficiently unusual
+  control-flow shape correctly falls through to an `UNRESOLVED_CONTROL_FLOW`/`UNSUPPORTED_STATEMENT_SHAPE`
+  UNPARSED marker rather than silently mis-parsing, but it is not exhaustive. The capability matrix
+  (AT-22) publishes exactly this limitation rather than hiding it.
+- **CTAS/CREATE with an explicit column list** does not get the same positional-remapping fix INSERT got
+  (`_extract_edges_from_insert`) -- it still reuses `sql_lineage_parser._extract_from_statement`'s Create
+  branch as-is. Less common in practice inside a procedure body (`SELECT...INTO`/plain INSERT dominate);
+  noted rather than fixed, since INSERT was the construct explicitly named in scope.
+- **Postgres/PL-pgSQL** dialect support in N3 is present (the `$$...$$` body-extraction path) but was not
+  given dedicated test coverage this pass -- T-SQL and PL/SQL (Oracle) were the explicitly named
+  priorities; Postgres inherits the same statement-level dispatch logic and is exercised indirectly
+  through `sql_lineage_parser.py`'s own existing Postgres coverage, but no `procedure_lineage.py`-specific
+  Postgres procedure-body test exists yet.
+
+## 2026-09-02 — Group I follow-up: AT-22's matrix is also served live, closing a real CI reachability gap
+
+Real CI on PR #19 caught two things the local run above did not check: `ui-next/src/lib/types.ts` was
+stale against the three new N3/N12 response schemas (`UX-14`'s generation gate), and
+`tests/test_reachability_gate.py` (`AU-1`) failed because `aida.procedure_capability_matrix` was reachable
+from nothing but its own test and the standalone `scripts/generate_procedure_capability_matrix.py` --
+real code with zero live callers, exactly what that gate exists to catch.
+
+Fixed by making AT-22's matrix genuinely live-servable rather than only script-generated -- the stronger
+fix, not a workaround: new `GET /v1/procedure-lineage/capability-matrix` on `procedure_lineage_api.py`
+(already a registered router) calls `procedure_capability_matrix.build_capability_matrix()` at request
+time, the identical function the publishing script calls, so the committed
+`Docs/90-reference/procedure-lineage-capability-matrix.md` is now verifiably backed by a live, callable
+source rather than a one-off script no other code path reaches. This closes the reachability gap for real
+(`aida.main` -> `procedure_lineage_api` -> `procedure_capability_matrix`, a genuine import edge, not an
+`ALLOWLIST` entry) rather than declaring the module an accepted, permanent gap. New response schemas
+`ProcedureCapabilityMatrixRead`/`ProcedureCapabilityConstructRead` (Group I's marked schema block, same as
+before) -- caught and fixed a real pydantic footgun while adding them: a field literally named `construct`
+silently shadows `pydantic.BaseModel.construct` (the v2 unvalidated-construction classmethod), which
+`pytest` surfaced immediately as a `UserWarning` on collection; renamed to `construct_name` before it
+became a real API contract. One new test (`TestCapabilityMatrixRoute` in
+`tests/test_procedure_lineage_api.py`) asserts the route returns the identical matrix
+`build_capability_matrix()` produces directly, including at least one `EXPLICIT_UNPARSED` row --
+verifying the live path and the script path can never silently diverge, not just that the route returns
+200.
+
+OpenAPI baseline and `ui-next/src/lib/types.ts` regenerated in the correct order (route added first, then
+both regenerated) -- `scripts/openapi_diff.py` reports the new path as purely additive, zero breaking
+changes; `scripts/generate_ui_types.py` (no flag, the same check-only invocation CI's `UX-14` job runs)
+now reports "matches the current OpenAPI schema" with exit 0. `tests/test_reachability_gate.py` (5/5) and
+`tests/test_openapi_diff_gate.py` (24/24) both green. `ruff check`/`mypy src` (292 files, `--strict`)
+clean; `lint-imports` still 8/8 kept.
+## 2026-09-02 — Group K (AT-9 + AT-12): scope-aware definitions with refusal on ambiguity, semantic mining of warehouse query history
+
+Wave-2 parallel work, branch `feat/atlas-semantic-trust` off `feature/snowflake-dbt-lineage-mcp` at
+`fa501c0`. Sibling groups (I/J/L) worked concurrently on shared files under the same integration; this
+entry's edits to shared files (`models.py`, `semantic_api.py`, `agent_orchestrator.py`) were kept
+append-only/additive and narrowly scoped, per the parallel plan's contract.
+
+### AT-9 — scope-aware term/metric definitions and refusal on ambiguity
+
+`glossary_term` uniqueness widens from `(organization_id, term_key)` to `(organization_id, term_key,
+business_node_id)` (`models.py:1903`) -- a nullable `business_node_id` (ADR-0018's business graph)
+stands in for an enterprise-wide default, so two independently governed definitions of the same
+term_key can coexist, each scoped to a different business node. A bank cannot agree one definition of
+"exposure" across Risk and Retail Banking; before this, the schema structurally forbade the platform
+from holding both.
+
+**The NULL-uniqueness trap, and how it's closed.** Postgres unique constraints treat every NULL as
+distinct, so a bare 3-column constraint would let more than one `business_node_id IS NULL`
+(enterprise-default) row coexist for the same term_key -- silently reopening exactly the ambiguity this
+row exists to close. Two constraints instead: the composite `uq_glossary_term_org_key_node` covers
+every node-scoped pair, and a partial-unique index (`uq_glossary_term_org_key_enterprise_default`,
+`postgresql_where`/`sqlite_where` -- mirroring `ContextProductVersion`'s own
+`uq_context_product_version_one_published`, so the in-memory SQLite test harness enforces the identical
+rule Postgres will) caps the enterprise-default slot at exactly one row. Migration
+`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py` drops the prior 2-column constraint by *column
+signature*, not by a hardcoded name -- it was declared without an explicit `name=` at creation
+(`ab31d7e4c920_glossary_asset_documentation.py`), so its real name in a live database is whatever
+Postgres's own default-naming convention assigned, not the ORM's `NAMING_CONVENTION` (which only
+applies when SQLAlchemy compiles DDL through `Base.metadata`, never through Alembic's unbound
+`op.create_table`) -- a `DO $$ ... $$` block finds it by its `(organization_id, term_key)` column set
+via `information_schema` and drops whatever it's actually called.
+
+**Resolution: most-specific-wins over N9's own business-graph primitives, not a new traversal.**
+`semantic_inference.resolve_scoped_glossary_term` (`semantic_inference.py:731`) resolves one term_key
+against the *asking context* -- the datasource being queried, via `business_graph.classification_scope`
+(the datasource's assigned business nodes plus their ancestors) -- and picks the most specific
+applicable definition using `business_graph.ancestor_closure` (`_most_specific_business_node_ids`,
+`semantic_inference.py:698`) to determine which candidate node is a strict ancestor of another, never a
+new recursive-CTE walk of its own. Three real outcomes, not two: `RESOLVED` (a single node-scoped
+definition beats the enterprise default; a descendant node's definition beats an ancestor node's),
+`AMBIGUOUS` (two node-scoped definitions where neither node is an ancestor of the other -- the
+datasource is scoped to two unrelated business nodes, each with its own definition), and `NOT_FOUND`
+(nothing applies to this scope at all -- not an error). `format_ambiguous_definition_refusal` renders an
+`AMBIGUOUS` resolution as the message an agent run refuses with: both definitions, both owners, by
+business node.
+
+**Wired into the real grounded-question path, not a parallel check.** `retrieval.hybrid_retrieve`
+(read-only, unmodified) already surfaces a `GLOSSARY_TERM` retrieval hit carrying `metadata["term_key"]`
+whenever a term has an `ACTIVE` binding to a real semantic object; `agent_orchestrator._check_definition_ambiguity`
+(`agent_orchestrator.py:147`) runs `resolve_scoped_glossary_term` against every distinct term_key one
+run's own retrieval evidence surfaced, right after grounding-fragment digests are computed inside
+`GovernedAgentOrchestrator.run()` (`agent_orchestrator.py:508`). On `AMBIGUOUS` it persists the run
+`REJECTED` with reason `AMBIGUOUS_DEFINITION` (the same `_persist_rejection` path every other refusal in
+this orchestrator uses, so a `REFUSAL` `AiDecisionRecord` is recorded identically) and raises the
+*existing* `AgentClarificationRequired` -- already caught by `POST
+/datasources/{datasource_id}/agent-analyses` (`api.py:2933`, calling `orchestrator.run()` at
+`api.py:2950`) and mapped to HTTP 409, so the refusal needed zero route or schema changes.
+
+Verified end-to-end against real seeded data, not mocked: `tests/test_at9_scoped_definitions.py` (9
+tests). `test_orchestrator_refuses_on_ambiguous_definition` seeds two sibling `BusinessNode`s (Risk,
+Retail Banking), a datasource assigned to *both* via real `BusinessAssignment` rows, two `GlossaryTerm`
+rows (`term_key='exposure'`) each scoped to one node and each bound to a real `SemanticMetric` via an
+`ACTIVE` `TermSemanticBinding` (required for `retrieval.hybrid_retrieve` to surface either as a
+`GLOSSARY_TERM` hit at all), then runs a real `GovernedAgentOrchestrator.run()` and asserts the raised
+message names both owners, the persisted run is `REJECTED`/`AMBIGUOUS_DEFINITION`, and exactly one
+`REFUSAL` record exists. `test_orchestrator_does_not_refuse_when_scope_disambiguates` proves the
+identical setup, scoped to one node only, never trips the ambiguity refusal (the run still raises
+`AgentClarificationRequired`, but for the unrelated missing-tool-parameter reason -- the same
+scaffolding trick `test_at6_context_receipts.py` uses to reach `RESOLVED` without a real SQL warehouse
+or model route). Direct-unit tests cover `NOT_FOUND`, enterprise-default fallback, and most-specific-wins
+across a real parent/child `BusinessNode` pair.
+
+**Honest gaps.** No HTTP endpoint lets a steward set `business_node_id` on a term yet --
+`GlossaryTermCreate` (`schemas.py:1541`) and the existing glossary CRUD routes are untouched, so scoping
+a term today is a direct DB write, not an API call; adding that field is a natural, low-risk follow-up,
+left out here specifically to minimize collision surface with `glossary_api.py`/`schemas.py` while other
+Wave-2 groups and `ST-05`/`06`/`07` work concurrently. The ambiguity check only considers terms the
+question's own retrieval evidence already surfaced (a `GLOSSARY_TERM` hit requires a bound semantic
+object), not a full-vocabulary scan of every governed term against the question text.
+
+### AT-12 — semantic mining of warehouse query history
+
+New `src/aida/query_history_miner.py`. Mines *value-free* query-log structure -- which tables joined on
+which columns, which columns a query grouped by, which columns it filtered on -- into bounded candidates
+that land in the existing maker-checker review queue, never auto-authoritative. Per INV-6/AT-C3, a
+filter *value* must never reach a candidate or its evidence, only the filter *column*.
+
+**Extraction is provably value-free, not just documented as such.** `extract_query_structure` parses one
+query's SQL text with `sqlglot` and walks only `exp.Column`/`exp.Table`/`exp.Join`/aggregate-function
+nodes; every `exp.Literal` node a filter predicate carries (the actual value someone searched for) is
+walked past and never read into the returned `QueryStructure`. `test_extract_query_structure_never_captures_literal_values`
+seeds a query with `WHERE o.status = 'COMPLETED' AND o.amount > 100` and asserts neither literal appears
+anywhere in the extracted structure's own `repr` -- a real proof, not an assertion about intent. An
+unparseable statement degrades to `None` rather than a guessed structure, mirroring
+`sql_lineage_parser.py`'s own posture exactly.
+
+**Two candidate shapes, one reused unmodified, one genuinely new after checking the existing model
+couldn't represent it.** Join candidates reuse `RelationshipCandidate` verbatim -- a new
+`detection_rule=QUERY_LOG_JOIN_V1` is the only new vocabulary, so the *existing* `decide_relationship_candidate`
+endpoint already reviews them, no new schema or route. Metric candidates needed a real check first:
+`SemanticMetricProposal` (SM-4) requires a `source_annotation_id` pointing at an approved business
+annotation and carries NL-description-quality scores (accuracy/clarity/style/completeness) that simply
+do not apply to a candidate whose only evidence is "this aggregation-over-grain shape recurred N times
+in the query log" -- reusing it would misrepresent provenance. `QueryHistoryMetricCandidate`
+(`models.py:4629`, same migration as AT-9) is the clearly-scoped new type the tracker row anticipated,
+landing in the platform's *other* existing maker-checker queue -- `GovernanceReview`, object_type
+`QUERY_HISTORY_METRIC_CANDIDATE` -- dispatched from `semantic_api._apply_governance_review_decision`
+(`semantic_api.py:2101`) exactly the way AT-11's `COLUMN_CLASSIFICATION_PROMOTION` branch already is.
+`apply_query_history_metric_candidate_decision` (`query_history_miner.py:706`) publishes a real
+`SemanticMetric` + `PUBLISHED SemanticMetricVersion` only on an independent APPROVE (mirrors
+`metric_suggestion_service.apply_metric_suggestion_proposal`'s own auto-created-model-version shape);
+REJECT publishes nothing and retains the candidate as negative evidence, matching every other
+reject-and-retain convention on this platform.
+
+**AT-C2 lane 3, enforced in code, not just asserted.** Every candidate's confidence comes from
+`_lane3_confidence`, which cannot exceed `QUERY_HISTORY_CONFIDENCE_CAP = 0.70` for any occurrence count
+-- swept from 0 to 1,000,000 occurrences in `test_lane3_confidence_never_exceeds_the_cap`. Nothing this
+module creates is ever `APPROVED` at creation time (`test_mined_candidates_are_never_auto_approved`
+checks every row of both types after a real mining run).
+
+**Bounded on two axes, not merely ranked.** `QUERY_HISTORY_MIN_OCCURRENCES = 3` drops a shape seen once
+or twice as noise *before* ranking even considers it; `QUERY_HISTORY_MAX_JOIN_CANDIDATES = 50` /
+`QUERY_HISTORY_MAX_METRIC_CANDIDATES = 25` cap the occurrence-ranked survivors actually landed per
+mining run -- the same rank-then-cap shape `generate_composite_relationship_candidates` (RL-3) already
+uses, not an invented scheme. Re-mining an identical log is idempotent: dedups against existing
+`RelationshipCandidate` pairs (both directions), the AT-C3 negative-knowledge suppression list (reused
+verbatim via `relationship_candidate_review.load_suppressed_relationship_predicate_hashes` --
+`compute_predicate_hash`/`relationship_candidate_negative_predicate` checked both ways so a rejected
+edge can't sneak back in reversed), and existing `QueryHistoryMetricCandidate` shapes by
+`(table, measure_column, aggregation, grain_fingerprint)`.
+
+Tests: `tests/test_at12_query_history_mining.py`, 15 tests -- pure coverage of extraction, frequency
+mining, bounding, and the confidence cap; real in-memory-SQLite seeded data (two tables, real columns,
+real FK-shaped join) for the DB-facing mining pass and the full governance-decision round trip
+(approve publishes a real metric version with the right `source_table_id`/`measure_column_id`/
+`allowed_dimension_column_ids`; reject publishes nothing; deciding an already-decided candidate
+conflicts with a 409).
+
+**Per `Docs/review-2026-08/atlan-context/00-decisions.md` §4, still explicitly not a lineage source.** An
+approved join candidate renders exactly like every other `RelationshipCandidate` -- a
+`SUGGESTED_RELATIONSHIP`-tier candidate in the unified lineage graph -- never an asserted
+`DECLARED`/`VIEW_DDL`-tier edge.
+
+**Honest gaps, and why AT-D3's capability flags were deliberately left alone.** No connector implements
+`get_query_history()` -- this module takes an already-materialized `WarehouseQueryLogEntry` sequence as
+input, connector-agnostic by design, so mining itself is real and tested end-to-end against that input
+contract, but nothing yet calls a live warehouse's `ACCOUNT_USAGE.QUERY_HISTORY` (Snowflake) or
+`system.query.history` (Databricks) to produce it. Per AT-D3's own instruction ("no connector's
+`query_history` capability flag should flip back to advertised-and-consumed until this is real and
+certified"), both flags are checked and left exactly as AT-D3 left them: `query_history=False` in both
+`connectors/snowflake.py:775` and `connectors/databricks.py:328` -- flipping either was explicitly out
+of scope for this pass and was not done. No HTTP endpoint triggers a mining run yet either (the natural
+follow-up mirrors `discover_relationship_candidates`'s own admin-triggered-scan shape); the mining
+function is tested by direct call instead, the same convention `test_at11_classification_propagation.py`
+uses for `_apply_governance_review_decision`, deliberately to avoid a new route/schema/OpenAPI-baseline
+surface while `ST-05`/`06`/`07` split `api.py`/`schemas.py` concurrently. Per INV-9, this entry does not
+claim query-history mining is live against any real connector -- only that the mining/candidate/review
+mechanism itself is real, tested, and ready to receive real query-log rows the moment a connector
+produces them.
+
+### Verification
+
+`ruff check .`: clean across the repo. `mypy src` (the actual gate -- `[tool.mypy]` scopes to
+`packages = ["aida"]`, tests are not part of the strict-mypy surface): 287 source files, zero issues.
+`lint-imports`: 8/8 contracts kept, no new violation (`aida.semantic_inference` stays out of the
+`C4/ST-11` forbidden-`query_gateway` list -- its new `business_graph` import carries no such
+dependency, confirmed by direct import). Exactly one new Alembic revision
+(`c3f7a1b9e2d4_at9_at12_scoped_glossary_terms_and_.py`), branching cleanly off the single prior head
+(`7e6460d905fe`) -- `alembic heads` shows one head. `Base.metadata.create_all` against an in-memory
+SQLite engine succeeds with both new models registered, confirming the ORM side of the schema change is
+internally consistent (no live Postgres in this sandbox to run the real migration against, the same
+standing limitation every other migration on this branch already carries).
+
+`tests/test_at9_scoped_definitions.py` (9) and `tests/test_at12_query_history_mining.py` (15): both
+files pass in full on the first real run after fixing test-scaffolding issues caught along the way (a
+`MetadataColumn.fingerprint` NOT NULL omission; a wrong expected value in a hand-constructed
+`JoinColumnPair` test fixture that skipped the normalization `extract_query_structure` itself performs).
+Full-suite regression run in progress at the time of this entry; see the PR for its final result.
+## 2026-09-02 — C7 closed: graph store as a configurable per-organization port (ADR-0020 amendment)
+
+Atlas Wave-2, Group J, run in parallel with three sibling sessions (Groups I/K/L) integrated separately
+later -- scope was deliberately confined to new files plus narrowly-scoped additive edits to the three
+Neo4j call-sites the ADR names, to keep collision surface with the concurrent ST-05/06/07 `models.py`/
+`schemas.py`/`api.py` split to a minimum.
+
+### The port, copying `vector_store.py`'s shape exactly, as instructed
+
+`src/aida/graph_store.py` is new: `GraphStorePort` (abstract `lineage_impact`/`graph_summary`), three
+adapters -- `PostgresGraphStore` (default, certified), `Neo4jGraphStore` (uncertified per INV-9),
+`DisabledGraphStore` (explicit `GraphStoreUnavailable` refusal, never a silent empty answer) -- and
+`build_graph_store`, the resolving factory. `PostgresGraphStore.lineage_impact` is not a second
+implementation of lineage traversal: it is handed `aida.unified_lineage_api._build_unified_graph` as an
+injected `build_snapshot` dependency and runs `aida.unified_lineage.traverse` over the result, the exact
+machinery the endpoint's own Postgres fallback already used. `graph_summary` is genuinely new SQL --
+seven `COUNT` queries against the relational catalog tables, including `sensitive_columns` (reusing the
+existing `aida.classification.SENSITIVE_CLASSES` leaf constant) and `foreign_key_relationships`, neither
+of which the Postgres side had ever computed before (only the Neo4j side had).
+
+### Two of the three named call-sites rewired; the third module deleted, not shimmed
+
+The ADR names three modules that read Neo4j today: `api.py`, lineage_graph_store.py,
+`unified_lineage_api.py`. `api.py::get_graph_summary` and `unified_lineage_api.py::build_unified_lineage_impact_payload`
+now resolve a backend through `resolve_graph_store_backend` and call the port instead of constructing a
+Neo4j driver inline. lineage_graph_store.py itself is **deleted**, not kept as a backward-compatible
+shim: once its one caller (`unified_lineage_api.py`) moved to the port directly, `tests/test_reachability_gate.py`
+caught it as unreachable from any of the five real entry points with zero remaining callers -- exactly
+the failure mode that gate exists to catch (`Docs/60-delivery/04-end-to-end-audit-2026-08-30.md`'s "code
+that passes its own unit tests with zero live callers") -- and the gate's own stated remedy is delete or
+wire in, not shim around. `pyproject.toml`'s C4/ST-11 import-linter contract updated to name
+`aida.graph_store` in place of the now-nonexistent aida.lineage_graph_store.
+
+`graph_reconciliation.py` (KG-7) is deliberately **not** rewired, despite also reading Neo4j: its entire
+job is diffing Neo4j against PostgreSQL directly to detect projection drift, which a switchable
+single-backend port would make meaningless the moment an organization's setting is `disabled` or
+`postgres`. The ADR's own module list already agrees -- it names three modules, not four.
+
+### A per-organization admin setting that never touches the contested files
+
+`GraphStoreOrganizationSetting` (migration `8396592b30e0_graph_store_organization_setting.py`) is a new,
+standalone table -- `organization_id` unique, `backend` CHECK-constrained to the three valid values --
+declared in `graph_store.py` itself rather than in `models.py`, the same collision-avoidance pattern
+`aida.envelope_models` already established for exactly this situation (a new table landing while
+`models.py` is mid-split). `models.py` is untouched; `migrations/env.py` and
+`tests/test_migration_orm_drift.py` each gained one import (`graph_store` alongside the existing
+`envelope_models`) so Alembic autogenerate/drift detection sees the table -- the same registration
+mechanism `envelope_models` already uses, extended rather than reinvented. No REST admin endpoint was
+added: `api.py` is mid-split under ST-05/06/07, and `get_/set_organization_graph_store_backend` are fully
+functional called directly against the table, the same state `ensure_organization_integration_policy`
+was in before its own endpoint existed.
+
+INV-9 gates `neo4j` twice, not once: an organization can request it, but `resolve_graph_store_backend`
+only actually serves it when the pre-existing process-wide `lineage_neo4j_read_enabled` flag (default
+`false`) is also on -- a request alone is not the same as an operator having certified the backend.
+
+### The conformance suite found a real bug
+
+`tests/test_graph_store_conformance.py` is two layers, so the harness is exercised even without a live
+Neo4j (none is reachable in this sandbox -- no Docker daemon, confirmed by trying). Layer one drives the
+comparison assertion (`_assert_impact_reads_match`) directly against hand-built results, proving it both
+accepts identical output and catches a real divergence (node ordering, truncation disagreement) --
+runnable and run with no database at all. Layer two seeds an identical fixture (a 3-table `a -> b -> c`
+foreign-key chain, fixed UUIDs) into a real SQLite-backed `PostgresGraphStore` and, when reachable, a real
+Neo4j seeded with the exact node/edge property shape `aida.projectors.graph_projector` actually writes,
+then asserts byte-identical `UnifiedLineageImpactRead` results including cap/truncation behaviour under a
+tight `node_limit`. It skips cleanly with a stated reason when Neo4j is unreachable, mirroring
+`tests/test_migration_orm_drift.py`'s own probe-and-skip pattern for PostgreSQL.
+
+Building it surfaced a real, previously-unnoticed bug: `Neo4jGraphStore.lineage_impact`'s UPSTREAM/
+DOWNSTREAM Cypher pattern assignment was inverted relative to `PostgresGraphStore`'s traversal direction
+(and `aida.unified_lineage.UnifiedLink`'s own documented dependent -> dependency edge convention). Traced
+by hand against `aida.projectors.graph_projector`'s real edge-writing code rather than run live (no Neo4j
+reachable here), and fixed in the same pass with an inline comment recording the discovery. Nothing had
+ever run the `neo4j` adapter against a real database to catch this -- precisely the failure mode INV-9
+predicts for an uncertified backend, and precisely the value a conformance suite that actually gets built
+is supposed to have.
+
+### INV-1: proven, not assumed
+
+`tests/test_graph_store_inv1_isolation.py` is two proofs. Static: a breadth-first search over every real
+`import`/`from` statement under `src/` shows `aida.authorization_gate` and `aida.business_graph` cannot
+reach `aida.graph_store` transitively -- not a hand-maintained allowlist, and not merely "doesn't import
+it today"; a future indirect import anywhere in either module's dependency chain fails this test
+immediately. Behavioural: a real `GraphStoreOrganizationSetting` row is seeded alongside the same
+fixtures `gate()` and `rollup()` read (an ENFORCE workspace with a real access rule; a `BusinessNode`
+with real `BusinessAssignment` rows), set to each of the three backends in turn, and both an authorization
+allow, an authorization denial, and a classification roll-up count are asserted byte-identical across all
+three -- proving the setting is inert to these two decisions even when a row for the same organization
+exists in the same database, not merely unimported.
+
+### Verification
+
+35 new/updated tests passed, 2 skipped (both requiring a live Neo4j, stated reason, no fake green):
+`tests/test_graph_store.py` (19, real SQLite -- FK-chain traversal, depth cap, sensitive-column counting,
+the migration's own `CHECK` constraint, per-org setting upsert/resolve, the INV-9 operator-flag gate),
+`tests/test_graph_store_conformance.py` (5, 2 skip), `tests/test_graph_store_inv1_isolation.py` (6),
+`tests/test_graph_summary.py` (7, rewritten in place for the new call path -- same CURRENT/LAGGING/
+NOT_PROJECTED/503 coverage it always had, plus 2 new backend-selection cases). `tests/test_inv1_single_authoritative_store.py`'s
+closed `permitted_readers` list updated to name `graph_store.py` in place of `api.py`/lineage_graph_store.py.
+Full suite green; `ruff check .`, `mypy src sdk/aida_tool_sdk`, `lint-imports` (8 contracts kept, 0
+broken) all clean; exactly one Alembic head (`8396592b30e0`). `Docs/90-reference/openapi-baseline.json`
+regenerated (`get_graph_summary`'s new docstring became its OpenAPI `description` -- purely additive,
+confirmed via `git diff`); `ui-next/src/lib/types.ts` unaffected (`scripts/generate_ui_types.py` confirms
+no schema-shape change); `test_doc_claims.py`/`test_event_catalog_gate.py` (no new `event_type=`) green.
+Five Docs citations of the now-deleted lineage_graph_store.py filename corrected so `test_doc_claims.py`
+keeps resolving every citation to a real file; ADR-0020 gets a 2026-09-02 implementation-status addendum.
+
+Honest gaps, unchanged from the ADR's own accounting: Neo4j does not run in CI, and E5 (the projection
+rebuild drill) has not run -- both were explicitly out of scope for this pass per the parallel-plan
+instruction, and the `neo4j` backend ships advertised as uncertified rather than as though it were
+equally proven, per INV-9. No REST admin endpoint for the per-organization setting exists yet, to avoid
+adding to `api.py`'s collision surface during ST-05/06/07 -- the setting is fully functional at the data
+layer today and an endpoint is a small, natural follow-up once that split lands.
+
+## 2026-09-02 — UX-15/UX-20/UX-8 closed: ui-next migration (review queue, marketplace, lineage
+refusals, Studio change sets, narrated lineage, persona onboarding)
+
+Atlas Wave-2 Group L. `ui-next/`-only (no `src/aida` edit) -- CT-2/UX-11's catalog-screen virtualization
+work, confirmed IN PROGRESS in a sibling session, was left untouched (checked before starting: neither
+`CatalogScreen.tsx` nor `CatalogTable.tsx` has any diff in this branch).
+
+### UX-15: four screens onto the new shell, each on live, already-merged endpoints
+
+Every screen below adopts the Catalog pattern in full: URL-held filter/selection state, one abortable
+request in flight per view, a virtualized list, and an evidence-pane analog (permalinkable via a URL
+param). New `ui-next/src/components/VirtualList.tsx` generalizes `CatalogTable`'s fixed-38px-row
+virtualization to variable-height cards (`@tanstack/react-virtual`'s `measureElement`) rather than each
+screen reinventing windowing.
+
+- **Review queue** (`ReviewQueueScreen.tsx`) rewired off `fetchReviewBatch` (a fixture standing in for a
+  read model that had not shipped) onto the real `GET /v1/governance/reviews/queue` (UX-17, landed
+  2026-09-01) and `POST /v1/governance/reviews/{id}/decision`. Forced an honest redesign: the old
+  "applied automatically" tile had nothing real behind it -- `GovernanceReview.status` is only ever
+  PENDING/APPROVED/REJECTED (confirmed against `models.py`, and against UX-19's own accomplishment-log
+  note that no proposal type in this codebase has a confidence-gated auto-apply branch) -- so the tiles
+  are now the three statuses the real model actually reports. `ProposalCard.tsx`/`Proposal` (the prior
+  fixture-shaped shell primitive) is left in the tree unused by this screen rather than deleted or forced
+  to carry a shape the live API cannot back -- its own docstring already frames it as a shared primitive,
+  not screen-owned. AT-D4's `PropagationLog` gate (`VITE_ENABLE_PROPAGATION_LOG`, default off) is
+  untouched; its three original tests were carried forward with the same intent, still passing.
+- **Marketplace** (new `MarketplaceScreen.tsx`) against CX-9's real `GET /v1/marketplace/products`
+  (`product_marketplace_api.py::search_marketplace`, personalized/catalog ranking) and
+  `POST /v1/marketplace/products/{version_id}/access-requests`. `domain_affinity`/`role_affinity` are
+  surfaced as an honest "why this order," never hidden reordering. `MarketplaceProductRead` is
+  hand-written in `ui-types.ts` for the same reason `CatalogRowRead` already is there: its route declares
+  `response_model=Page` un-parameterized, so FastAPI's schema walker never names the subclass. A new
+  `PageOf<T>` type documents and narrows every endpoint in this row with that same generic-`Page` gap
+  (marketplace search, `list_refusals`, `list_organization_datasources`).
+- **Lineage refusal view** (new `LineageRefusalScreen.tsx`) -- not a re-skin of anything. Checked
+  directly: the legacy shell (`ui/app.js`) has no refusal-specific view at all, no "refus" string anywhere
+  in it. This is the first real surface for LN-3's `GET /v1/ai-decisions/refusals` /
+  `GET /v1/ai-decisions/{run_id}`, honestly scoped to that endpoint's own `PlatformAdmin`/`DataAdmin`-only
+  gate (unchanged) -- a narrower role gets the same 403 `ErrorState` any other gated call renders.
+- **Studio change sets** (new `StudioChangeSetsScreen.tsx`) -- the first ui-next surface for module 19's
+  real authoring API (`studio_api.py`, ST-A7 already landed at this branch's base commit). Lists via
+  `GET /v1/studio/change-sets`; a selected change set's detail pane loads `.../items`, `.../diff` and
+  `.../impact` together; submission calls the real test-gated (ST-A7) / eval-regression-gated (ST-A8)
+  `POST .../submit` -- a 409 from that gate renders the endpoint's own detail string verbatim, proven by a
+  test that asserts no client-side status change happens on failure.
+
+Every migrated screen's `App.tsx` `NAV` entry is `ready: true` with its `legacy` pill removed
+(`refusals`/`studio` are new entries with no prior legacy placeholder to remove).
+
+### UX-20: narrated lineage traversal as the primary lineage surface
+
+New `ui-next/src/screens/NarratedLineageScreen.tsx` replaces the legacy stub behind the "lineage" nav
+entry, built against the real, already-merged `GET /v1/datasources/{id}/unified-lineage/impact/{node_id}`
+(`unified_lineage_api.py::build_unified_lineage_impact_payload` -- the same traversal
+`atlas__get_lineage_impact` serves over MCP). Flow: pick a datasource
+(`GET /v1/organizations/{id}/datasources`, resolving the id `CatalogRowRead` doesn't carry), search for
+the asset in question (reuses `fetchCatalogRows`, client-filtered to the chosen datasource's name), then
+the real impact call runs. Every hop's evidence is real, server-computed data -- `depth` and
+`contributing_edge_sources` read directly off `UnifiedLineageImpactNodeRead` -- rendered as one
+plain-language sentence per hop, never invented narration text. "Streams" is client-side pacing (140ms
+per hop) over the already-fetched, already-bounded response; hops reveal upstream-farthest-to-focus then
+focus-to-downstream-farthest, so the sequence reads as a walked path.
+
+Honest scope line on the DAG half: LN-8's Cytoscape-based virtualized canvas renderer
+(`ui/scripts/graph-engine.js`) stays exactly where it is in the legacy shell -- UX-16 (retiring `ui/`) has
+not happened, and re-implementing that real, already-shipped, already-tested large-DAG renderer inside
+this row would duplicate rather than migrate it. `ui-next`'s own "Graph (supporting view)" tab is a
+lightweight depth-swimlane layout over the SAME impact response the narration reads (real node placement
+by real `depth`), not a fabricated diagram -- but it does not draw connecting edges between hops the way a
+true DAG would. The ordered, explicit narration is what satisfies "highlights the path" for this row, not
+the swimlane. `NarratedLineageScreen.test.tsx` (3 tests) proves the graph tab is reachable but not the
+default/entry view, and that the impact endpoint is never called before a node is chosen.
+
+### UX-8: guided onboarding per persona
+
+New `ui-next/src/components/OnboardingWizard.tsx`, wired as the shell's "Get started" nav entry (now the
+default landing view) and branching on the SAME `Persona` set module 21 §5 already establishes
+(`Analyst`/`Steward`/`Reviewer`/`Operator`/`Auditor`) -- no new backend persona/role concept invented.
+Checked directly for a role/persona-specific "what should a new principal of this persona do first" model
+anywhere in `src/aida` before writing anything: none exists (`persona_api.py`/`security.py` define *who* a
+principal is, never a first-steps checklist for one), so the five checklists are UI-owned content,
+hand-written from what each persona's real screens in this shell do -- not fetched, not fabricated as
+server-curated. Every item points at a real `App.tsx` nav id and is honest about migration state: a
+still-legacy target (Operator's Sources/Operations, Auditor's Audit ledger) renders the same `legacy` pill
+the nav itself uses. Progress (`atlas.onboarding.<persona>.done`) is `localStorage`-only, scoped per
+persona, and degrades safely for a viewer whose browser blocks storage -- there is no backend field for
+onboarding completion, and adding one is outside this ui-next-only item's scope.
+
+### A real, previously-latent test-infrastructure gap found and fixed along the way
+
+Making these screens render under jsdom surfaced a bug that had simply never been exercised: none of
+UX-11/UX-14's prior work included a `CatalogScreen.test.tsx`, so `CatalogTable`'s `useVirtualizer` call had
+never actually been render-tested. `@tanstack/virtual-core`'s `observeElementRect` measures the scroll
+container with a synchronous `element.getBoundingClientRect()` on mount, before the existing no-op
+`ResizeObserver` stub in `test/setup.ts` ever gets a chance to fire -- and jsdom always reports a
+zero-sized box, overriding any `initialRect` estimate. A virtualizer at a permanently zero-height viewport
+renders zero rows regardless of `items.length`. Fixed once, centrally, in `ui-next/src/test/setup.ts`
+(stubs `getBoundingClientRect` to a plausible nonzero box when jsdom reports all-zero), benefiting every
+current and future virtualized screen's tests, `CatalogTable` included.
+
+### Tests
+
+27 new tests: five new files -- `MarketplaceScreen.test.tsx` (5), `LineageRefusalScreen.test.tsx` (4),
+`StudioChangeSetsScreen.test.tsx` (4), `NarratedLineageScreen.test.tsx` (3),
+`OnboardingWizard.test.tsx` (6, component-level) -- plus `ReviewQueueScreen.test.tsx` grown from 3 to 8
+(+5). Suite total: 19 baseline + 27 = 46. Every test mocks the `../lib/api` boundary (matching `EvidencePane.test.tsx`/`App.test.tsx`'s established
+pattern) with real payload shapes and asserts the exact endpoint/params reached, not superficial
+snapshots -- e.g. the marketplace test asserts `sort: "personalized"` reaches the real call by default and
+that a classification-filter change re-fetches with the new value; the Studio test asserts a real 409
+test-gate failure surfaces verbatim with no client-side status mutation.
+
+### Verification
+
+`cd ui-next && npm run typecheck && npm run test && npm run build` all green: 0 typecheck errors, 46/46
+tests passing across 9 test files, `tsc -b && vite build` clean (`dist/assets/index-*.js` 231KB / 71KB
+gzip). This package has no `lint` script (`package.json` scripts are exactly `dev`/`build`/`preview`/
+`typecheck`/`test`) so there is no separate lint gate to run. No `Docs/90-reference/openapi-baseline.json`
+regeneration needed -- every endpoint this row consumes was already reachable (or, for the three
+`response_model=Page`-unparameterized routes, already had its item schema reachable via another route)
+before this session started; `ui-next/src/lib/types.ts` was not touched.
+
+### Honest gaps / follow-ups for other groups
+
+- **UX-16** ("Retire `ui/`") is still open: `sources`, `operations`, `audit`, `semantics`, `meaning`,
+  `relationships`, `quality` and `analyst` remain legacy-served stubs in the nav -- out of this row's
+  scope (UX-15 named four specific screens; those four are the ones migrated).
+- **UX-20's graph view** is a lightweight depth-swimlane layout, not a full interactive DAG with drawn
+  edges -- see the honest-scope note above. If a future row wants a true supporting DAG inside `ui-next`
+  itself (rather than continuing to defer to the legacy `ui/` canvas until UX-16), that is new work, not
+  a gap in what this row claims.
+- No backend endpoint had to be stubbed or mocked for any of UX-15/UX-20/UX-8 -- every call in this
+  session's diff hits a route that already existed, unchanged, on `feature/snowflake-dbt-lineage-mcp` at
+  this branch's base commit (`fa501c0`).

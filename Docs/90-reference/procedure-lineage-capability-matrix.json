@@ -1,0 +1,139 @@
+{
+  "constructs": [
+    {
+      "construct": "SELECT (standalone read)",
+      "evidence": "view: sql_lineage_parser._extract_from_statement dispatches on exp.Select; procedure: procedure_lineage._classify_and_extract dispatches on exp.Select",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "SUPPORTED"
+    },
+    {
+      "construct": "UNION",
+      "evidence": "view: sql_lineage_parser._extract_from_statement dispatches on exp.Union; procedure: procedure_lineage._classify_and_extract dispatches on exp.Union",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "SUPPORTED"
+    },
+    {
+      "construct": "CREATE VIEW / CREATE TABLE AS SELECT",
+      "evidence": "view: sql_lineage_parser._extract_from_statement dispatches on exp.Create; procedure: procedure_lineage._classify_and_extract dispatches on exp.Create",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "SUPPORTED"
+    },
+    {
+      "construct": "INSERT ... SELECT",
+      "evidence": "view: sql_lineage_parser._extract_from_statement dispatches on exp.Insert; procedure: procedure_lineage._classify_and_extract dispatches on exp.Insert",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "SUPPORTED"
+    },
+    {
+      "construct": "UPDATE ... SET / UPDATE ... FROM",
+      "evidence": "view: not a view-definition-shaped construct; procedure: procedure_lineage._classify_and_extract dispatches on exp.Update",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "DELETE",
+      "evidence": "view: not a view-definition-shaped construct; procedure: procedure_lineage._classify_and_extract dispatches on exp.Delete",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "MERGE",
+      "evidence": "view: sql_lineage_parser._extract_from_statement dispatches on exp.Merge; procedure: procedure_lineage._classify_and_extract dispatches on exp.Merge",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "SUPPORTED"
+    },
+    {
+      "construct": "EXEC/EXECUTE (dynamic or nested call)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: procedure_lineage._classify_and_extract recognises exp.Execute and calls _unparsed_statement(...) -- never silently dropped",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "sp_executesql",
+      "evidence": "view: not a view-definition-shaped construct; procedure: procedure_lineage._classify_and_extract recognises exp.ExecuteSql and calls _unparsed_statement(...) -- never silently dropped",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "unrecognised statement shape (sqlglot Command fallback)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: procedure_lineage._classify_and_extract recognises exp.Command and calls _unparsed_statement(...) -- never silently dropped",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "IF ... BEGIN (T-SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._IF_BEGIN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "IF/ELSIF ... THEN (PL/SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._IF_THEN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "WHILE ... BEGIN (T-SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._WHILE_BEGIN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "WHILE ... LOOP (PL/SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._WHILE_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "CASE ... WHEN ... THEN (PL/SQL statement form)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._CASE_WHEN_THEN_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "cursor FOR ... IN (SELECT ...) LOOP (PL/SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._CURSOR_FOR_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "bare FOR ... LOOP (PL/SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._BARE_FOR_LOOP_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "SUPPORTED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "EXECUTE IMMEDIATE / EXEC(...) / sp_executesql (dynamic SQL)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._DYNAMIC_SQL_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "EXEC/CALL <procedure_name> (nested procedure call)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._NESTED_CALL_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "EXPLICIT_UNPARSED",
+      "view_parser_status": "N/A"
+    },
+    {
+      "construct": "DECLARE/SET/OPEN/FETCH/CLOSE/RAISERROR/... (no table lineage)",
+      "evidence": "view: not a view-definition-shaped construct; procedure: recognised via procedure_lineage._NO_LINEAGE_KEYWORDS_RE (text-level, sqlglot cannot parse this as an AST node)",
+      "procedure_parser_status": "RECOGNISED_NO_LINEAGE",
+      "view_parser_status": "N/A"
+    }
+  ],
+  "dialects": [
+    "bigquery",
+    "oracle",
+    "postgres",
+    "snowflake",
+    "tsql"
+  ],
+  "generated_at": "2026-09-02T15:48:45.619696+00:00",
+  "unparsed_reasons": [
+    "DYNAMIC_SQL",
+    "NESTED_PROCEDURE_CALL",
+    "UNSUPPORTED_STATEMENT_SHAPE",
+    "PARSE_ERROR",
+    "UNRESOLVED_CONTROL_FLOW"
+  ]
+}

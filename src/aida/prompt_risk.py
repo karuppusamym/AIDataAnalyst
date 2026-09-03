@@ -74,6 +74,53 @@ RISK_SIGNALS = (
         r"\b(?:dump|export|return|extract)\b.{0,30}\b(?:all|every|entire)\b.{0,35}\b(?:customer|account|transaction|cardholder|patient)\b.{0,20}\b(?:rows?|records?|values?|data)\b",
         0.9,
     ),
+    # --- GROUP D / AG-3 / MG-5: bank-specific model-risk signals -----------
+    # Direct-prompt attacks against bank governance controls this platform's
+    # own maker-checker/audit/regulatory-hold machinery relies on (module 13
+    # Sec. 2's classifier is the pre-retrieval choke point every one of these
+    # would otherwise have to reach the retriever/planner to be caught by).
+    _signal(
+        "MAKER_CHECKER_BYPASS_ATTEMPT",
+        r"\b(?:bypass|skip|override|disable|remove|waive)\b.{0,40}\b"
+        r"(?:maker[- ]checker|dual control|dual approval|four[- ]eyes|"
+        r"second approver|independent review|segregation of duties)\b",
+        1.0,
+    ),
+    _signal(
+        "SELF_APPROVAL_ATTEMPT",
+        r"\b(?:self[- ]approve|approve (?:my|your) own|auto[- ]approve|"
+        r"rubber[- ]stamp)\b.{0,40}\b(?:review|request|change|version|deployment|"
+        r"submission)\b",
+        0.9,
+    ),
+    _signal(
+        "REGULATORY_HOLD_OVERRIDE_ATTEMPT",
+        r"\b(?:override|lift|remove|clear|bypass|release)\b.{0,40}\b"
+        r"(?:aml hold|kyc hold|compliance hold|sanctions hold|watchlist hold|"
+        r"regulatory hold|fraud hold)\b",
+        1.0,
+    ),
+    _signal(
+        "SANCTIONS_SCREENING_BYPASS_ATTEMPT",
+        r"\b(?:bypass|skip|disable|turn off|evade)\b.{0,40}\b"
+        r"(?:sanctions screening|ofac check|watchlist screening|pep screening|"
+        r"aml screening)\b",
+        1.0,
+    ),
+    _signal(
+        "AUDIT_TRAIL_SUPPRESSION_ATTEMPT",
+        r"\b(?:don'?t|do not|avoid|suppress|hide|omit|skip)\b.{0,40}\b"
+        r"(?:log(?:ging)? (?:this|it)|audit trail|audit log|leaving a record|"
+        r"leaving an audit)\b",
+        0.9,
+    ),
+    _signal(
+        "REGULATORY_REPORTING_SUPPRESSION_ATTEMPT",
+        r"\b(?:suppress|hide|don'?t file|do not file|skip|avoid|withhold)\b.{0,40}\b"
+        r"(?:sar filing|suspicious activity report|ctr filing|"
+        r"currency transaction report|regulatory report)\b",
+        1.0,
+    ),
 )
 
 

@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-09-02T05:22:51.341426+00:00",
+  "metrics": {
+    "accuracy_pass_rate": {
+      "value": 1.0
+    },
+    "benign_false_positive_rate": {
+      "value": 0.0
+    },
+    "malicious_block_recall": {
+      "value": 1.0
+    },
+    "sql_safety_pass_rate": {
+      "value": 1.0
+    },
+    "tool_selection_pass_rate": {
+      "value": 1.0
+    }
+  },
+  "threshold_points": 5.0
+}

@@ -60,6 +60,8 @@ from aida.operational_api import router as operational_router
 from aida.persona_api import router as persona_router
 from aida.playbooks_api import router as playbooks_router
 from aida.policy_native_sync_api import router as policy_native_sync_router
+from aida.procedure_lineage_api import router as procedure_lineage_router
+from aida.procedure_tool_api import router as procedure_tool_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
 from aida.review_queue_api import router as review_queue_router
@@ -341,6 +343,9 @@ app.include_router(asset_evidence_router)
 app.include_router(metric_suggestion_router)
 app.include_router(policy_native_sync_router)
 app.include_router(review_queue_router)
+# Group I addition (Atlas Wave-2, tracker N3/N12).
+app.include_router(procedure_lineage_router)
+app.include_router(procedure_tool_router)
 app.include_router(
     mcp_router
 )  # MCP server: POST /mcp — governed tool & catalog access for AI agents

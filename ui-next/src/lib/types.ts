@@ -1764,6 +1764,36 @@ export interface DbtProjectRead {
   updated_at: string;
 }
 
+/** One edge from the procedure-aware parser (N3) -- richer than */
+export interface DeepProcedureLineageEdgeRead {
+  source_table: string;
+  source_column: string;
+  target_table: string;
+  target_column: string;
+  transformation_type: string;
+  confidence: string;
+  dialect: string;
+  source_resolved: boolean;
+  statement_ordinal: number;
+  is_write: boolean;
+  is_intermediate: boolean;
+  control_flow_context?: string | null;
+  unparsed_reason?: string | null;
+  via_temp_table?: string | null;
+}
+
+export interface DeepProcedureLineageParseResponse {
+  edges: DeepProcedureLineageEdgeRead[];
+  statement_count: number;
+  confidence: string;
+  dialect: string;
+  sql_hash: string;
+  errors?: string[];
+  is_fully_parsed: boolean;
+  is_read_only: boolean;
+  persisted_edge_count?: number;
+}
+
 export interface DelegationCreate {
   delegate_principal_id: string;
   delegated_roles: string[];
@@ -2003,6 +2033,29 @@ export interface GeneratePackRequest {
   period_start: string;
   period_end: string;
   name?: string | null;
+}
+
+/** One ranked hit from ``GET /v1/organizations/{organization_id}/global-search`` */
+export interface GlobalSearchHitRead {
+  object_type: string;
+  object_id: string;
+  display_name: string;
+  score: number;
+  datasource_id: string;
+  reason_codes: string[];
+  evidence: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+/** Response for ``GET /v1/organizations/{organization_id}/global-search``. */
+export interface GlobalSearchResponse {
+  items: GlobalSearchHitRead[];
+  total: number;
+  datasource_count: number;
+  limit: number;
+  fusion_method: string;
+  vector_enabled: boolean;
+  graph_enabled: boolean;
 }
 
 export interface GlossaryCategoryCreate {
@@ -3185,6 +3238,22 @@ export interface PortfolioUsageRead {
   governed_tool_executions: number;
 }
 
+/** One row of the AT-22 parser capability matrix -- see */
+export interface ProcedureCapabilityConstructRead {
+  construct_name: string;
+  view_parser_status: string;
+  procedure_parser_status: string;
+  evidence: string;
+}
+
+/** AT-22: served live by `GET /v1/procedure-lineage/capability-matrix`, */
+export interface ProcedureCapabilityMatrixRead {
+  generated_at: string;
+  dialects: string[];
+  constructs: ProcedureCapabilityConstructRead[];
+  unparsed_reasons: string[];
+}
+
 export interface ProcedureLineageEdgeRead {
   id: string;
   organization_id: string;
@@ -3203,6 +3272,17 @@ export interface ProcedureLineageEdgeRead {
   sql_hash: string;
   created_at: string;
   updated_at: string;
+}
+
+/** N12: request a deterministically-rendered procedure-to-tool draft. */
+export interface ProcedureToolBlueprintRequest {
+  slug: string;
+  name: string;
+  description: string;
+  datasource_id: string;
+  semantic_model_version_id?: string | null;
+  routine_id: string;
+  allowed_roles: string[];
 }
 
 export interface ProfilingExceptionDecisionRequest {
@@ -3845,6 +3925,36 @@ export interface StudioConflict {
   field_name: string;
   change_set_value: unknown;
   current_value: unknown;
+}
+
+/** One `StudioContextProductMaterialization` row -- the durable link from */
+export interface StudioContextProductMaterializationRead {
+  id: string;
+  organization_id: string;
+  change_set_id: string;
+  change_item_id: string;
+  operation: string;
+  context_product_id: string;
+  context_product_version_id: string;
+  governance_review_id: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Stateless shape-validation request for a CONTEXT_PRODUCT change-set */
+export interface StudioContextProductValidateRequest {
+  operation: "CREATE" | "UPDATE" | "DELETE";
+  object_id: string;
+  snapshot?: Record<string, unknown> | null;
+}
+
+export interface StudioContextProductValidateResult {
+  valid: boolean;
+  errors: string[];
+  definition?: Record<string, unknown> | null;
+  product_key?: string | null;
+  project_id?: string | null;
 }
 
 export interface StudioDiffRead {

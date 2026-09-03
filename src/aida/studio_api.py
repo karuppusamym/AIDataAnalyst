@@ -16,6 +16,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.context import get_correlation_id
@@ -24,6 +25,7 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     StudioChangeItem,
     StudioChangeSet,
+    StudioContextProductMaterialization,
     StudioEvalQuestion,
     StudioEvalResult,
     StudioEvalRun,
@@ -35,6 +37,9 @@ from aida.schemas import (
     StudioChangeSetCreate,
     StudioChangeSetRead,
     StudioConflict,
+    StudioContextProductMaterializationRead,
+    StudioContextProductValidateRequest,
+    StudioContextProductValidateResult,
     StudioDiffRead,
     StudioEvalMiningResult,
     StudioEvalQuestionRead,
@@ -52,8 +57,10 @@ from aida.studio import (
     compute_diff,
     compute_impact,
     detect_conflicts,
+    validate_context_product_contract,
     validate_parameter_contract,
 )
+from aida.studio_context_product import materialize_context_product_item
 from aida.studio_eval import check_eval_regressions, mine_eval_questions
 from aida.studio_test_harness import run_test_suite
 
@@ -527,6 +534,18 @@ async def submit_change_set(
     were touched) must also have passed. A change set that regresses a
     usage-derived question is blocked here exactly like a change set with a
     malformed item, even when its items individually look well-formed.
+
+    ST-A7: once the gate passes, every CONTEXT_PRODUCT item is materialized
+    into a real module-19 `ContextProduct`/`ContextProductVersion` and
+    submitted through the exact same maker-checker `GovernanceReview` queue a
+    directly-authored context product uses (`aida.studio_context_product`,
+    `decide_governance_review`'s `CONTEXT_PRODUCT_VERSION` branch in
+    `semantic_api.py`). TOOL/METRIC/TERM items are unaffected -- submission
+    still only flips this change set to SUBMITTED for those, as before. A
+    materialization failure (an unresolved reference, a duplicate product
+    key, a product in the wrong state) fails the whole submission with the
+    same HTTPException `context_product_api.py` itself would raise for that
+    failure, before this change set's status changes.
     """
     cs = await _load_change_set(session, context, change_set_id)
     if cs.status not in ("DRAFT", "TESTING"):
@@ -565,9 +584,22 @@ async def submit_change_set(
     if reasons:
         raise HTTPException(status_code=409, detail="; ".join(reasons))
 
+    materializations: list[StudioContextProductMaterialization] = []
+    for db_item in db_items:
+        if db_item.object_type != "CONTEXT_PRODUCT":
+            continue
+        materialization = await materialize_context_product_item(
+            session,
+            context=context,
+            change_set_id=cs.id,
+            item=_to_domain_item(db_item),
+        )
+        materializations.append(materialization)
+
     cs.status = "SUBMITTED"
     await session.flush()
 
+    context_product_review_ids = [str(m.governance_review_id) for m in materializations]
     record_audit(
         session,
         context,
@@ -576,7 +608,10 @@ async def submit_change_set(
         resource_id=str(cs.id),
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
-        details={"item_count": len(db_items)},
+        details={
+            "item_count": len(db_items),
+            "context_product_review_ids": context_product_review_ids,
+        },
     )
     record_outbox(
         session,
@@ -589,8 +624,16 @@ async def submit_change_set(
             "name": cs.name,
             "author": cs.author,
             "item_count": len(db_items),
+            "context_product_review_ids": context_product_review_ids,
         },
     )
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="change set submission conflicted with concurrent state"
+        ) from exc
 
     return StudioChangeSetRead.model_validate(cs)
 
@@ -747,6 +790,71 @@ async def validate_parameter_contract_endpoint(
         definitions=result.definitions,
         sample_rendered_sql=result.sample_rendered_sql,
     )
+
+
+# ---------------------------------------------------------------------------
+# ST-A7: context product builder (module 19 authoring surface)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/studio/context-products/validate",
+    response_model=StudioContextProductValidateResult,
+)
+async def validate_context_product_contract_endpoint(
+    body: StudioContextProductValidateRequest,
+    context: SecurityContext = Depends(require_roles(*_STUDIO_READ_ROLES)),
+) -> StudioContextProductValidateResult:
+    """Validate a CONTEXT_PRODUCT change item's shape as an author designs it.
+
+    Stateless, matching `POST /v1/studio/parameter-contracts/validate` (ST-A4):
+    does not require an existing change set or change item, and does not check
+    the database (reference existence is re-checked for real at submission
+    time, when the item is materialized -- see `aida.studio_context_product`).
+    Reuses the real `ContextProductDefinition` schema (module 19's own
+    contract) via `validate_context_product_contract`, the same check that
+    runs automatically as part of the CONTEXT_PRODUCT change-item test gate
+    (`run_test_suite`); this endpoint lets an author validate incrementally
+    while still drafting.
+    """
+    result = validate_context_product_contract(
+        operation=body.operation,
+        object_id=body.object_id,
+        snapshot=body.snapshot,
+    )
+    return StudioContextProductValidateResult(
+        valid=result.valid,
+        errors=result.errors,
+        definition=result.definition,
+        product_key=result.product_key,
+        project_id=result.project_id,
+    )
+
+
+@router.get(
+    "/studio/change-sets/{change_set_id}/context-product-materializations",
+    response_model=list[StudioContextProductMaterializationRead],
+)
+async def list_context_product_materializations(
+    change_set_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_STUDIO_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> list[StudioContextProductMaterializationRead]:
+    """List the real `ContextProduct`/`ContextProductVersion`/`GovernanceReview`
+    objects a submitted change set's CONTEXT_PRODUCT items produced -- the
+    durable evidence trail for `submit_change_set`'s ST-A7 materialization
+    step. Empty for a change set with no CONTEXT_PRODUCT items, or one not
+    yet submitted.
+    """
+    cs = await _load_change_set(session, context, change_set_id)
+    rows = (
+        await session.scalars(
+            select(StudioContextProductMaterialization)
+            .where(StudioContextProductMaterialization.change_set_id == cs.id)
+            .order_by(StudioContextProductMaterialization.created_at)
+        )
+    ).all()
+    return [StudioContextProductMaterializationRead.model_validate(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

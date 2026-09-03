@@ -525,6 +525,82 @@ async def upsert_freshness_config(
     return FreshnessConfigRead.model_validate(config)
 
 
+# --- GROUP C (DQ-2): maker-checker approval ------------------------------------
+#
+# `upsert_freshness_config` always leaves a config in PENDING_APPROVAL (or
+# resets it there on update) and `evaluate_freshness` refuses to activate
+# freshness for anything but ACTIVE -- by design, per this module's own
+# docstring ("Configuration requires maker-checker approval"). Until now,
+# nothing in the platform ever moved a config out of PENDING_APPROVAL: no
+# endpoint set `status`/`approved_by`/`approved_at`, so every configured
+# table was permanently stuck reporting AWAITING_APPROVAL, never FRESH/STALE.
+# This is the missing checker step.
+@router.post(
+    "/datasources/{datasource_id}/freshness-config/{table_id}/approve",
+    response_model=FreshnessConfigRead,
+)
+async def approve_freshness_config(
+    datasource_id: UUID,
+    table_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "DataAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> FreshnessConfigRead:
+    source = await _source(session, context, datasource_id)
+    config = await session.scalar(
+        select(FreshnessWatermarkConfig).where(
+            FreshnessWatermarkConfig.datasource_id == datasource_id,
+            FreshnessWatermarkConfig.table_id == table_id,
+        )
+    )
+    if config is None:
+        raise HTTPException(status_code=404, detail="freshness configuration not found")
+    if config.status != "PENDING_APPROVAL":
+        raise HTTPException(
+            status_code=409,
+            detail=f"freshness configuration is {config.status}, not PENDING_APPROVAL",
+        )
+    # Maker-checker: the principal approving cannot be the one who last
+    # created/edited the configuration -- same self-approval-by-proxy guard
+    # PG-4's delegated governance decisions enforce.
+    if config.created_by == context.principal_id:
+        raise HTTPException(
+            status_code=403,
+            detail="the configuration's own author cannot approve it",
+        )
+
+    config.status = "ACTIVE"
+    config.approved_by = context.principal_id
+    config.approved_at = datetime.now(UTC)
+    await session.flush()
+    record_audit(
+        session,
+        context,
+        action="data_quality.freshness_config.approve",
+        resource_type="freshness_watermark_config",
+        resource_id=str(config.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "datasource_id": str(source.id),
+            "table_id": str(table_id),
+            "created_by": config.created_by,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=source.organization_id,
+        aggregate_type="freshness_watermark_config",
+        aggregate_id=str(config.id),
+        event_type="data_quality.freshness_config.approved.v1",
+        payload={"datasource_id": str(source.id), "table_id": str(table_id)},
+    )
+    await session.commit()
+    await session.refresh(config)
+    return FreshnessConfigRead.model_validate(config)
+
+
 @router.get(
     "/datasources/{datasource_id}/freshness",
     response_model=Page,
