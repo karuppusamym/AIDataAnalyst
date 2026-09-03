@@ -1069,12 +1069,33 @@ import {
   makeFixtureBulkDecideRelationshipCandidates,
   makeFixtureDecideRelationshipCandidate,
   makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidates,
   makeFixtureRelationshipCandidateReviewQueue,
 } from "./fixtures";
 
 export interface RelationshipCandidateReviewQueueQuery {
   limit?: number;
   offset?: number;
+}
+
+/** `GET /v1/datasources/{datasourceId}/relationship-candidates` (the raw list
+ *  behind the review queue, `list_relationship_candidates`). Unlike the
+ *  review-queue read model this can return candidates in ANY state via
+ *  `candidate_status`, so a reviewer can see what was already approved or
+ *  rejected — the decision history the PENDING-only queue drops. Read-only. */
+export async function fetchRelationshipCandidates(
+  datasourceId: string,
+  opts: { status?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<RelationshipCandidateRead>> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidates(datasourceId, opts.status);
+  const params = new URLSearchParams();
+  if (opts.status && opts.status !== "ALL") params.set("candidate_status", opts.status);
+  params.set("limit", String(opts.limit ?? 200));
+  return get<PageOf<RelationshipCandidateRead>>(
+    `/v1/datasources/${datasourceId}/relationship-candidates?${params}`,
+    signal,
+  );
 }
 
 /** `GET /v1/datasources/{datasourceId}/relationship-candidates/review-queue`

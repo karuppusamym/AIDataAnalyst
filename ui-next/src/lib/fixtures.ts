@@ -2293,6 +2293,41 @@ export async function makeFixtureRelationshipCandidateReviewQueue(
   };
 }
 
+/** `GET /v1/datasources/{id}/relationship-candidates?candidate_status=` — the
+ *  raw list, used here to show decision history (APPROVED/REJECTED) the
+ *  PENDING-only review queue drops. A couple of already-decided candidates so
+ *  the decided-history section has something to render in fixture mode. */
+const DECIDED_RELATIONSHIP_CANDIDATES: RelationshipCandidateRead[] = [
+  relationshipCandidateRead({
+    id: "rc_approved_1",
+    detection_rule: "EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1",
+    confidence: 0.92,
+    status: "APPROVED",
+    reviewed_by: "steward@tenant.example",
+    review_reason: "Confirmed against the source's declared key.",
+    reviewed_at: "2026-08-29T11:04:00Z",
+  }),
+  relationshipCandidateRead({
+    id: "rc_rejected_1",
+    detection_rule: "CANONICAL_NAME_TYPE_FAMILY_TO_PRIMARY_KEY_CROSS_SOURCE_V1",
+    confidence: 0.71,
+    status: "REJECTED",
+    reviewed_by: "steward@tenant.example",
+    review_reason: "Name collision only — these are unrelated identifiers.",
+    reviewed_at: "2026-08-29T11:07:00Z",
+  }),
+];
+
+export async function makeFixtureRelationshipCandidates(
+  datasourceId: string,
+  status?: string,
+): Promise<PageOf<RelationshipCandidateRead>> {
+  await wait(80);
+  const all = datasourceId === "ds_snowflake_prod" ? DECIDED_RELATIONSHIP_CANDIDATES : [];
+  const items = status && status !== "ALL" ? all.filter((c) => c.status === status) : all;
+  return { items, limit: 200, offset: 0, total: items.length };
+}
+
 /** `POST /v1/relationship-candidates/{id}/decision` — mutates the same
  *  in-memory fixture array `makeFixtureRelationshipCandidateReviewQueue`
  *  reads, so a decide-then-refetch in fixture mode drops the decided

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   RelationshipCandidateCalibrationRead,
+  RelationshipCandidateRead,
   RelationshipCandidateReviewItemRead,
   RelationshipCandidateReviewQueueRead,
 } from "../lib/types";
@@ -9,6 +10,7 @@ import {
   bulkDecideRelationshipCandidates,
   decideRelationshipCandidate,
   fetchRelationshipCandidateCalibration,
+  fetchRelationshipCandidates,
   fetchRelationshipCandidateReviewQueue,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
@@ -184,6 +186,11 @@ export function RelationshipsScreen() {
   const [bulkDeciding, setBulkDeciding] = useState(false);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [calibration, setCalibration] = useState<RelationshipCandidateCalibrationRead | null>(null);
+  // Decision history (APPROVED/REJECTED) — the PENDING-only queue drops it.
+  // Lazy-loaded the first time the section is expanded.
+  const [decided, setDecided] = useState<RelationshipCandidateRead[] | null>(null);
+  const [decidedLoading, setDecidedLoading] = useState(false);
+  const [decidedError, setDecidedError] = useState<string | null>(null);
 
   // One in-flight review-queue request at a time — same reason CatalogScreen
   // aborts the previous one: a slow first fetch must not overwrite the
@@ -224,6 +231,27 @@ export function RelationshipsScreen() {
 
   useEffect(() => {
     setChecked(new Set());
+    // Drop cached decision history so expanding the section refetches for the
+    // newly selected datasource rather than showing the previous one's.
+    setDecided(null);
+    setDecidedError(null);
+  }, [ds]);
+
+  const loadDecided = useCallback(async () => {
+    if (!ds) return;
+    setDecidedLoading(true);
+    setDecidedError(null);
+    try {
+      const [approved, rejected] = await Promise.all([
+        fetchRelationshipCandidates(ds, { status: "APPROVED" }),
+        fetchRelationshipCandidates(ds, { status: "REJECTED" }),
+      ]);
+      setDecided([...approved.items, ...rejected.items]);
+    } catch (e) {
+      setDecidedError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setDecidedLoading(false);
+    }
   }, [ds]);
 
   // RL-7: optional secondary info, fetched independently — a failure here
@@ -425,6 +453,65 @@ export function RelationshipsScreen() {
           </>
         )}
       </div>
+
+      {ds ? (
+        <details
+          className="rel__decided"
+          onToggle={(e) => {
+            if (
+              (e.target as HTMLDetailsElement).open &&
+              decided === null &&
+              !decidedLoading
+            ) {
+              void loadDecided();
+            }
+          }}
+        >
+          <summary>Decision history</summary>
+          <div className="rel__decidedinner">
+            {decidedError ? (
+              <ErrorState
+                title="Decision history could not be loaded"
+                detail={decidedError}
+                onRetry={() => void loadDecided()}
+              />
+            ) : decidedLoading || decided === null ? (
+              <p className="rel__load" role="status">
+                Loading decided candidates…
+              </p>
+            ) : decided.length === 0 ? (
+              <Empty
+                title="No decisions yet"
+                hint="Approved and rejected relationships for this datasource will appear here."
+              />
+            ) : (
+              <ol className="evl">
+                {decided.map((c) => (
+                  <li
+                    key={c.id}
+                    className={`evi ${c.status === "APPROVED" ? "evi--ok" : "evi--bad"}`}
+                  >
+                    <div className="evi__label">
+                      <Pill tone={c.status === "APPROVED" ? "ok" : "bad"}>
+                        {c.status.toLowerCase()}
+                      </Pill>
+                      {" "}
+                      {c.detection_rule} · {pct(c.confidence)}
+                    </div>
+                    {c.review_reason ? (
+                      <div className="evi__value">{c.review_reason}</div>
+                    ) : null}
+                    <div className="evi__source">
+                      {c.reviewed_by ?? "unknown"}
+                      {c.reviewed_at ? ` · ${new Date(c.reviewed_at).toLocaleString()}` : ""}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </details>
+      ) : null}
 
       {focused ? (
         <aside className="evp rel__evidence" aria-label="Candidate detail">

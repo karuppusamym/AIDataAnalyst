@@ -67,3 +67,10 @@
 
 .rel__evidence{position:fixed;right:24px;bottom:24px;top:auto;max-height:70vh;z-index:5;box-shadow:0 8px 28px rgba(0,0,0,.18)}
 @media (max-width:900px){.rel__evidence{position:static;width:auto;max-height:none;box-shadow:none;margin-top:14px}}
+
+/* Decision history: a read-only, lazy-loaded audit list of APPROVED/REJECTED
+   candidates the PENDING-only review queue drops. */
+.rel__decided{margin-top:16px;border-top:1px solid var(--line-soft);padding-top:10px}
+.rel__decided>summary{cursor:pointer;font-size:12.5px;color:var(--ink-2);font-weight:600;list-style:revert}
+.rel__decidedinner{margin-top:10px}
+.rel__load{color:var(--ink-3);font-size:12.5px;padding:6px 2px}
