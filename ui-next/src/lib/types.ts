@@ -4360,6 +4360,7 @@ export interface UnifiedLineageImpactNodeRead {
   qualified_name: string;
   depth: number;
   contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION")[];
+  quality_state?: string;
 }
 
 /** Transitive upstream/downstream impact, replacing direct-reference */

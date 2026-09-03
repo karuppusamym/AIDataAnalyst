@@ -31,6 +31,7 @@ it (see `mcp_server.py::_view_definition_transformation_detail`).
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
 
@@ -38,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.catalog_read_model import _latest_observation_at, _open_incident_table_ids, _quality_state
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
@@ -72,6 +74,7 @@ from aida.schemas import (
     DomainLineageGraphRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
+    UnifiedLineageImpactNodeRead,
     UnifiedLineageImpactRead,
     UnifiedLineageNodeRead,
 )
@@ -1027,6 +1030,65 @@ async def build_domain_unified_lineage_graph_payload(
     )
 
 
+async def _enrich_impact_quality(
+    session: AsyncSession, result: UnifiedLineageImpactRead
+) -> UnifiedLineageImpactRead:
+    """DQ-3 (module 11 §9, "Impact surfacing"): attach each TABLE node's
+    quality state so an open incident is visible on the affected asset's
+    impact surface, not just its Catalog row.
+
+    Backend-agnostic on purpose -- called on the result of *either* graph-
+    store backend (postgres or an accelerated one), never inside a specific
+    adapter, because a TABLE node's `node_id` is always the bare
+    `str(table.id)` regardless of which backend produced it (see
+    `_build_unified_graph`'s table-node registration and the neo4j
+    adapter's `platform_id` projection, which mirrors it). Reuses
+    `catalog_read_model`'s exact PASSING/STALE/UNKNOWN/INCIDENT_OPEN states
+    and batched lookups -- the same ones the Catalog screen already shows --
+    rather than a second quality-state vocabulary or a per-node query.
+    """
+    table_ids: list[UUID] = []
+    seen: set[UUID] = set()
+    for node in (*result.upstream, *result.downstream):
+        if node.node_kind != "TABLE":
+            continue
+        try:
+            table_id = UUID(node.node_id)
+        except ValueError:
+            continue
+        if table_id not in seen:
+            seen.add(table_id)
+            table_ids.append(table_id)
+    if not table_ids:
+        return result
+
+    open_incident_ids = await _open_incident_table_ids(session, table_ids)
+    latest_observation_at = await _latest_observation_at(session, table_ids)
+    now = datetime.now(UTC)
+
+    def enrich(node: UnifiedLineageImpactNodeRead) -> UnifiedLineageImpactNodeRead:
+        if node.node_kind != "TABLE":
+            return node
+        try:
+            table_id = UUID(node.node_id)
+        except ValueError:
+            return node
+        state = _quality_state(
+            table_id,
+            open_incident_ids=open_incident_ids,
+            latest_observation_at=latest_observation_at,
+            now=now,
+        )
+        return node.model_copy(update={"quality_state": state})
+
+    return result.model_copy(
+        update={
+            "upstream": [enrich(node) for node in result.upstream],
+            "downstream": [enrich(node) for node in result.downstream],
+        }
+    )
+
+
 async def build_unified_lineage_impact_payload(
     session: AsyncSession,
     datasource: DataSource,
@@ -1080,6 +1142,7 @@ async def build_unified_lineage_impact_payload(
             except GraphStoreUnavailable:
                 projected = None
             if projected is not None:
+                projected = await _enrich_impact_quality(session, projected)
                 if settings.lineage_cache_enabled:
                     await get_lineage_cache(settings.redis_url).set(
                         cache_key,
@@ -1105,6 +1168,7 @@ async def build_unified_lineage_impact_payload(
         raise LineageNodeNotFoundError(
             f"lineage node '{node_id}' not found in this datasource's graph"
         )
+    result = await _enrich_impact_quality(session, result)
     if settings is not None and settings.lineage_cache_enabled:
         await get_lineage_cache(settings.redis_url).set(
             cache_key,

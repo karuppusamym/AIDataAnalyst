@@ -1388,6 +1388,12 @@ class UnifiedLineageImpactNodeRead(ApiModel):
     qualified_name: str
     depth: int
     contributing_edge_sources: list[UnifiedLineageEdgeSource]
+    # DQ-3 (module 11 §9, "Impact surfacing"): the same PASSING/STALE/UNKNOWN/
+    # INCIDENT_OPEN vocabulary `catalog_read_model._quality_state` already
+    # computes for the Catalog screen, not a new one. "NOT_APPLICABLE" for a
+    # non-TABLE node (an unmatched dbt/OpenLineage node has no
+    # `DataQualityIncident.table_id` to look up).
+    quality_state: str = "NOT_APPLICABLE"
 
 
 class UnifiedLineageImpactRead(ApiModel):

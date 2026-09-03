@@ -25893,6 +25893,11 @@
           "qualified_name": {
             "title": "Qualified Name",
             "type": "string"
+          },
+          "quality_state": {
+            "default": "NOT_APPLICABLE",
+            "title": "Quality State",
+            "type": "string"
           }
         },
         "required": [
