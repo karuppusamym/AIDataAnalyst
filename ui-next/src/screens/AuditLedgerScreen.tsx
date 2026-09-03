@@ -46,7 +46,7 @@ import "./AuditLedgerScreen.css";
    routes.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
 
 const outcomeTone = (outcome: string): Tone =>
@@ -197,6 +197,7 @@ function EventDetailPane({ event, onClose }: { event: AuditEventRead; onClose: (
 }
 
 export function AuditLedgerScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
 
   const action = params.get("action") ?? "";

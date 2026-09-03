@@ -25,7 +25,7 @@ import "./MarketplaceScreen.css";
    this order" rather than leaving the ranking unexplained.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const classTone = (c: MarketplaceProductRead["classification"]): Tone =>
   c === "PUBLIC" ? "ok" : c === "INTERNAL" ? "info" : c === "CONFIDENTIAL" ? "warn" : "bad";
@@ -195,6 +195,7 @@ function ProductDetail({
 }
 
 export function MarketplaceScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const q = params.get("q") ?? "";
   const domain = params.get("domain") ?? "";

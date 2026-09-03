@@ -43,7 +43,7 @@ import "./QualityScreen.css";
    MVP here, matching this screen's own transition endpoint shape.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const STATUS_OPTIONS = ["OPEN", "ACKNOWLEDGED", "RESOLVED"] as const;
 const SEVERITY_OPTIONS = ["CRITICAL", "WARNING"] as const;
@@ -128,6 +128,7 @@ function IncidentRow({
 }
 
 export function QualityScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const dsId = params.get("ds");
   const statusFilter = params.get("status") ?? "ALL";

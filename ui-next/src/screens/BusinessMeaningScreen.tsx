@@ -43,7 +43,7 @@ import "./BusinessMeaningScreen.css";
        is LN-8's territory (Cytoscape, in `ui/`), not reimplemented here.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const PAGE_LIMIT = 100;
 
 function matchesQuery(a: MetadataBusinessAnnotationRead, q: string): boolean {
@@ -336,6 +336,7 @@ function BusinessMapTab({ organizationId }: { organizationId: string }) {
 }
 
 export function BusinessMeaningScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const dsId = params.get("ds");
   const q = params.get("q") ?? "";

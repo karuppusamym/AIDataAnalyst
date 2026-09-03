@@ -40,7 +40,7 @@ import "./NarratedLineageScreen.css";
    -- real node placement (grouped by real `depth`), not a fabricated graph.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const EDGE_SOURCE_LABEL: Record<string, string> = {
   FOREIGN_KEY: "a foreign key",
@@ -154,6 +154,7 @@ function Swimlanes({ impact }: { impact: UnifiedLineageImpactRead }) {
 }
 
 export function NarratedLineageScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const dsId = params.get("ds");
   const nodeId = params.get("node");

@@ -6,7 +6,7 @@ import { EvidencePane } from "../components/EvidencePane";
 import { Button, ErrorState, Field, Pill } from "../components/primitives";
 import "./CatalogScreen.css";
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
 
 /** Filters live in the URL so a filtered catalog view is shareable — the same
@@ -28,6 +28,7 @@ function useUrlState() {
 }
 
 export function CatalogScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
 
   const q = params.get("q") ?? "";

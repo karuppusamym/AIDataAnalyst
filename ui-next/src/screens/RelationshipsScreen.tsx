@@ -41,7 +41,7 @@ import "./RelationshipsScreen.css";
    independently and never allowed to block or error out the main queue.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 interface ConfidenceSignal {
@@ -170,6 +170,7 @@ function CandidateCard({
 }
 
 export function RelationshipsScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const ds = params.get("ds");
   const focusedId = params.get("candidate");

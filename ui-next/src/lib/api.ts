@@ -20,6 +20,7 @@ import type {
   MeRead,
   MetadataBusinessAnnotationRead,
   MetadataIngestionBatchRead,
+  OrganizationRead,
   OutboxEventRead,
   ProjectRead,
   ReviewQueueRead,
@@ -58,6 +59,7 @@ import {
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
+  makeFixtureOrganizations,
   makeFixtureOrgProjects,
   makeFixtureOutboxEvents,
   makeFixtureQualityIncidents,
@@ -233,6 +235,18 @@ export async function fetchAssetEvidence(
 export async function fetchMe(signal?: AbortSignal): Promise<MeRead> {
   if (USE_FIXTURES) return makeFixtureMe();
   return get<MeRead>("/v1/me", signal);
+}
+
+/**
+ * `GET /v1/organizations` (api.py) — the tenant list the shell's organization
+ * picker needs. Fixture mode returns the single development organization every
+ * screen historically hard-coded, so pure-frontend iteration is unchanged;
+ * live mode returns the real (e.g. seeded) organizations so one can be chosen.
+ */
+export async function fetchOrganizations(signal?: AbortSignal): Promise<OrganizationRead[]> {
+  if (USE_FIXTURES) return makeFixtureOrganizations();
+  const page = await get<PageOf<OrganizationRead>>("/v1/organizations?limit=200", signal);
+  return page.items;
 }
 
 /* ---------------------------------------------------------------------------

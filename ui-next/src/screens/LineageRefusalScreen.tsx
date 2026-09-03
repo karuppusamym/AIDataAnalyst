@@ -30,7 +30,7 @@ import "./LineageRefusalScreen.css";
    empty list.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 function useUrlState() {
   const [params, setParams] = useState(() => new URLSearchParams(location.search));
@@ -81,6 +81,7 @@ function RefusalRow({
 }
 
 function RunEvidence({ runId, onClose }: { runId: string; onClose: () => void }) {
+  const ORG = useOrgId();
   const [decisions, setDecisions] = useState<AiDecisionRead[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -140,6 +141,7 @@ function RunEvidence({ runId, onClose }: { runId: string; onClose: () => void })
 }
 
 export function LineageRefusalScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const focusedRun = params.get("run");
 

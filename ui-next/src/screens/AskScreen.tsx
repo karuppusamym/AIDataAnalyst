@@ -58,7 +58,7 @@ import "./AskScreen.css";
                          and says so honestly rather than inventing one).
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const MIN_QUESTION_LEN = 3;
 const MAX_QUESTION_LEN = 10000;
 
@@ -319,6 +319,7 @@ function AnswerPanel({
 }
 
 export function AskScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const dsId = params.get("ds");
   const runId = params.get("run");

@@ -14,6 +14,7 @@ import { AuditLedgerScreen } from "./screens/AuditLedgerScreen";
 import { SourcesScreen } from "./screens/SourcesScreen";
 import { OperationsScreen } from "./screens/OperationsScreen";
 import { PersonaNav } from "./components/PersonaNav";
+import { OrgPicker } from "./components/OrgPicker";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { fetchMe } from "./lib/api";
 import type { MeRead } from "./lib/types";
@@ -89,6 +90,8 @@ export default function App() {
           <span className="snav__mark" aria-hidden="true" />
           <span className="snav__name">Atlas</span>
         </div>
+
+        <OrgPicker />
 
         <PersonaNav
           identityProvider={identityProvider}
