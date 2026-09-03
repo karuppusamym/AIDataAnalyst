@@ -178,6 +178,14 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     // The evidence panel reads live rows/status from the response already
     // held in memory -- no run-detail fetch for the run this session just asked.
     expect(fetchAgentRun).not.toHaveBeenCalled();
+
+    // Provenance the answer was pinned to is surfaced, not just the prose:
+    // the semantic model and policy version that grounded it. The model route
+    // is not on the fresh response, so it is honestly deferred to the saved run.
+    expect(screen.getByText("Provenance")).toBeInTheDocument();
+    expect(screen.getByText(ANALYSIS_RESPONSE.semantic_version!)).toBeInTheDocument();
+    expect(screen.getByText(ANALYSIS_RESPONSE.policy_version)).toBeInTheDocument();
+    expect(screen.getByText("shown on the saved run")).toBeInTheDocument();
   });
 
   it("renders a 409 ambiguity refusal as a real, informative refusal state -- both definitions, not a generic error or a success", async () => {

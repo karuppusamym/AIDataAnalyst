@@ -181,6 +181,13 @@ function AnswerPanel({
     : (detail?.retrieval_evidence ?? []);
   const planEvidence = isFresh ? askResult.plan_evidence : (detail?.plan_evidence ?? {});
   const failureReason = isFresh ? null : (detail?.failure_reason ?? null);
+  // Provenance the run pinned its answer to — which published semantic model
+  // and policy version grounded it, and (for a stored run) which approved model
+  // route generated the SQL. The fresh POST response omits the route, so it is
+  // only shown once the run is reopened from history.
+  const semanticVersion = isFresh ? askResult.semantic_version : (detail?.semantic_version ?? null);
+  const policyVersion = isFresh ? askResult.policy_version : (detail?.policy_version ?? null);
+  const modelRoute = isFresh ? null : (detail?.model_route ?? null);
 
   const permalink = `${location.origin}${location.pathname}?run=${runId}`;
 
@@ -242,6 +249,39 @@ function AnswerPanel({
               </dl>
             ) : null}
 
+            <div className="evp__sub">Provenance</div>
+            <dl className="ask__exec">
+              <div>
+                <dt>Semantic model</dt>
+                <dd>{semanticVersion ?? "raw technical metadata"}</dd>
+              </div>
+              <div>
+                <dt>Policy version</dt>
+                <dd>{policyVersion ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Model route</dt>
+                <dd>{modelRoute ?? (isFresh ? "shown on the saved run" : "governed tool · no model")}</dd>
+              </div>
+            </dl>
+
+            {execution?.normalized_sql ? (
+              <details className="ask__trace">
+                <summary>Executed query</summary>
+                <div className="ask__traceinner">
+                  <pre className="ask__json">{execution.normalized_sql}</pre>
+                  {execution.referenced_columns.length > 0 ? (
+                    <>
+                      <div className="evp__sub" style={{ marginTop: 10 }}>
+                        Referenced columns
+                      </div>
+                      <p className="evi__value">{execution.referenced_columns.join(", ")}</p>
+                    </>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
             <details className="ask__trace">
               <summary>How this was answered</summary>
               <div className="ask__traceinner">
@@ -266,12 +306,30 @@ function AnswerPanel({
                   <p className="evp__load">No retrieval evidence recorded.</p>
                 ) : (
                   <ol className="evl">
-                    {retrievalEvidence.map((ev, i) => (
-                      <li key={i} className="evi evi--info">
-                        <div className="evi__label">{String(record(ev, "object_type") ?? "evidence")}</div>
-                        <div className="evi__value">{String(record(ev, "object_id") ?? "")}</div>
-                      </li>
-                    ))}
+                    {retrievalEvidence.map((ev, i) => {
+                      const score = record(ev, "score");
+                      const scoreText =
+                        typeof score === "number"
+                          ? score.toFixed(2)
+                          : score != null
+                            ? String(score)
+                            : null;
+                      const reason = record(ev, "reason") ?? record(ev, "reason_codes");
+                      return (
+                        <li key={i} className="evi evi--info">
+                          <div className="evi__label">
+                            {String(record(ev, "object_type") ?? "evidence")}
+                            {scoreText ? ` · ${scoreText}` : ""}
+                          </div>
+                          <div className="evi__value">{String(record(ev, "object_id") ?? "")}</div>
+                          {reason != null ? (
+                            <div className="evi__source">
+                              {Array.isArray(reason) ? reason.join(", ") : String(reason)}
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
                   </ol>
                 )}
 
