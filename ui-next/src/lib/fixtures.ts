@@ -2531,3 +2531,251 @@ export async function makeFixtureAuditEvents(
     total: filtered.length,
   };
 }
+
+/* ---------------------------------------------------------------------------
+   AI governance fixtures — AI registry, trust scoring and remediation loop.
+   Wire-shape identical to ai_registry_api.py, so VITE_USE_FIXTURES=0 swaps to
+   the real endpoints unchanged. The remediation store is mutable so an
+   update-then-refetch reflects the new status, like the real endpoint.
+--------------------------------------------------------------------------- */
+
+import type {
+  AiAssessmentTemplateRead,
+  AiAssetVersionRead,
+  AiRemediationRead,
+  AiRemediationUpdate,
+  AiTrustFactorRead,
+  AiTrustScoreRead,
+} from "./types";
+
+const FIXTURE_AI_ASSET_ORG = "00000000-0000-0000-0000-000000000001";
+
+const FIXTURE_AI_ASSETS: AiAssetVersionRead[] = [
+  {
+    name: "Revenue Analyst",
+    description: "Governed SQL analyst agent for revenue questions.",
+    intended_use: "Answer revenue-by-LOB questions over governed marts.",
+    owner_principal: "priya@tenant.example",
+    provider_type: "OPENAI",
+    risk_tier: "MEDIUM",
+    documentation_url: null,
+    id: "aiv_revenue_analyst",
+    organization_id: FIXTURE_AI_ASSET_ORG,
+    asset_id: "aia_revenue_analyst",
+    asset_key: "revenue-analyst",
+    asset_kind: "AGENT",
+    version: 3,
+    status: "APPROVED",
+    fingerprint: "sha256:revenue3",
+    created_by: "priya@tenant.example",
+    approved_by: "sam@tenant.example",
+    approved_at: "2026-08-20T10:00:00Z",
+    created_at: "2026-08-18T10:00:00Z",
+    updated_at: "2026-08-20T10:00:00Z",
+  },
+  {
+    name: "Fraud Scoring Model",
+    description: "Third-party fraud propensity model integration.",
+    intended_use: "Score transactions for fraud review triage.",
+    owner_principal: "dev@tenant.example",
+    provider_type: "CUSTOM",
+    risk_tier: "HIGH",
+    documentation_url: null,
+    id: "aiv_fraud_model",
+    organization_id: FIXTURE_AI_ASSET_ORG,
+    asset_id: "aia_fraud_model",
+    asset_key: "fraud-scoring",
+    asset_kind: "MODEL",
+    version: 1,
+    status: "DRAFT",
+    fingerprint: "sha256:fraud1",
+    created_by: "dev@tenant.example",
+    approved_by: null,
+    approved_at: null,
+    created_at: "2026-08-27T09:00:00Z",
+    updated_at: "2026-08-27T09:00:00Z",
+  },
+];
+
+const factor = (name: string, score: number, maximum: number, reason: string): AiTrustFactorRead => ({
+  factor: name,
+  score,
+  maximum,
+  reason,
+});
+
+const FIXTURE_AI_TRUST: Record<string, AiTrustScoreRead> = {
+  aiv_revenue_analyst: {
+    ai_asset_version_id: "aiv_revenue_analyst",
+    score: 0.78,
+    grade: "CONDITIONAL",
+    factors: [
+      factor("approval", 0.2, 0.2, "Version is approved by an independent checker."),
+      factor("assessment", 0.28, 0.4, "NIST AI RMF assessment passed 7 of 10 controls."),
+      factor("evaluation", 0.2, 0.2, "Prompt-risk and grounding evaluations recorded."),
+      factor("open_findings", 0.1, 0.2, "One open remediation of MEDIUM severity."),
+    ],
+    blockers: [],
+    computed_at: "2026-08-29T12:00:00Z",
+  },
+  aiv_fraud_model: {
+    ai_asset_version_id: "aiv_fraud_model",
+    score: 0.36,
+    grade: "UNTRUSTED",
+    factors: [
+      factor("approval", 0, 0.2, "Version is still in DRAFT — not independently approved."),
+      factor("assessment", 0.16, 0.4, "EU AI Act high-risk assessment failed 3 controls."),
+      factor("evaluation", 0.1, 0.2, "No bias/robustness evaluation evidence recorded."),
+      factor("open_findings", 0, 0.2, "Two open HIGH-severity remediations."),
+    ],
+    blockers: [
+      "High-risk asset with an open HIGH-severity remediation",
+      "No independent approval on the current version",
+    ],
+    computed_at: "2026-08-29T12:00:00Z",
+  },
+};
+
+function remediation(overrides: Partial<AiRemediationRead> & { id: string; ai_asset_version_id: string }): AiRemediationRead {
+  return {
+    finding_key: "finding",
+    title: "Finding",
+    description: "",
+    owner_principal: "dev@tenant.example",
+    due_at: null,
+    organization_id: FIXTURE_AI_ASSET_ORG,
+    status: "OPEN",
+    resolution_evidence: {},
+    created_by: "assessor@tenant.example",
+    resolved_by: null,
+    resolved_at: null,
+    created_at: "2026-08-27T10:00:00Z",
+    updated_at: "2026-08-27T10:00:00Z",
+    ...overrides,
+  };
+}
+
+const FIXTURE_AI_REMEDIATIONS: Record<string, AiRemediationRead[]> = {
+  aiv_revenue_analyst: [
+    remediation({
+      id: "rem_rev_1",
+      ai_asset_version_id: "aiv_revenue_analyst",
+      finding_key: "nist.govern.1",
+      title: "Document escalation path for refused answers",
+      description: "Add a documented human escalation path for policy refusals.",
+      status: "OPEN",
+      owner_principal: "priya@tenant.example",
+    }),
+  ],
+  aiv_fraud_model: [
+    remediation({
+      id: "rem_fraud_1",
+      ai_asset_version_id: "aiv_fraud_model",
+      finding_key: "euaiact.bias",
+      title: "Provide bias and fairness evaluation evidence",
+      description: "High-risk model requires a documented bias evaluation before approval.",
+      status: "OPEN",
+      owner_principal: "dev@tenant.example",
+    }),
+    remediation({
+      id: "rem_fraud_2",
+      ai_asset_version_id: "aiv_fraud_model",
+      finding_key: "euaiact.human_oversight",
+      title: "Define human-oversight controls",
+      description: "Document how a reviewer overrides an automated fraud score.",
+      status: "IN_PROGRESS",
+      owner_principal: "dev@tenant.example",
+    }),
+  ],
+};
+
+export async function makeFixtureAiAssets(organizationId: string): Promise<PageOf<AiAssetVersionRead>> {
+  await wait(60);
+  const items = organizationId === FIXTURE_AI_ASSET_ORG ? FIXTURE_AI_ASSETS : [];
+  return { items, limit: 200, offset: 0, total: items.length };
+}
+
+export async function makeFixtureAiTrust(versionId: string): Promise<AiTrustScoreRead> {
+  await wait(50);
+  return (
+    FIXTURE_AI_TRUST[versionId] ?? {
+      ai_asset_version_id: versionId,
+      score: 0,
+      grade: "UNTRUSTED",
+      factors: [],
+      blockers: ["No trust snapshot for this version"],
+      computed_at: "2026-08-29T12:00:00Z",
+    }
+  );
+}
+
+export async function makeFixtureAiRemediations(versionId: string): Promise<PageOf<AiRemediationRead>> {
+  await wait(60);
+  const items = FIXTURE_AI_REMEDIATIONS[versionId] ?? [];
+  return { items, limit: 200, offset: 0, total: items.length };
+}
+
+export async function makeFixtureUpdateAiRemediation(
+  remediationId: string,
+  body: AiRemediationUpdate,
+): Promise<AiRemediationRead> {
+  await wait(80);
+  for (const list of Object.values(FIXTURE_AI_REMEDIATIONS)) {
+    const found = list.find((r) => r.id === remediationId);
+    if (found) {
+      found.status = body.status;
+      found.updated_at = new Date().toISOString();
+      if (body.status === "RESOLVED" || body.status === "ACCEPTED_RISK") {
+        found.resolved_by = "reviewer@tenant.example";
+        found.resolved_at = found.updated_at;
+      } else {
+        found.resolved_by = null;
+        found.resolved_at = null;
+      }
+      if (body.resolution_evidence) found.resolution_evidence = body.resolution_evidence;
+      return { ...found };
+    }
+  }
+  throw new ApiError(404, "AI remediation not found");
+}
+
+export async function makeFixtureAiAssessmentTemplates(): Promise<AiAssessmentTemplateRead[]> {
+  await wait(40);
+  return [
+    {
+      template_key: "eu_ai_act_high_risk",
+      framework: "EU_AI_ACT",
+      framework_version: "2024",
+      title: "EU AI Act — high-risk system",
+      controls: [
+        { control_key: "risk_management", title: "Risk management system", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "data_governance", title: "Data and data governance", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "human_oversight", title: "Human oversight", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "transparency", title: "Transparency to users", weight: 1, outcome: "NOT_APPLICABLE" },
+      ],
+    },
+    {
+      template_key: "nist_ai_rmf_core",
+      framework: "NIST_AI_RMF",
+      framework_version: "1.0",
+      title: "NIST AI RMF — core functions",
+      controls: [
+        { control_key: "govern", title: "Govern", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "map", title: "Map", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "measure", title: "Measure", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "manage", title: "Manage", weight: 1, outcome: "NOT_APPLICABLE" },
+      ],
+    },
+    {
+      template_key: "ai_uc_1",
+      framework: "AI_UC_1",
+      framework_version: "1.0",
+      title: "Enterprise AI use-case approval",
+      controls: [
+        { control_key: "business_purpose", title: "Documented business purpose", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "data_classification", title: "Data classification reviewed", weight: 1, outcome: "NOT_APPLICABLE" },
+        { control_key: "owner_accountable", title: "Accountable owner assigned", weight: 1, outcome: "NOT_APPLICABLE" },
+      ],
+    },
+  ];
+}

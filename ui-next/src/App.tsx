@@ -13,6 +13,7 @@ import { QualityScreen } from "./screens/QualityScreen";
 import { AuditLedgerScreen } from "./screens/AuditLedgerScreen";
 import { SourcesScreen } from "./screens/SourcesScreen";
 import { OperationsScreen } from "./screens/OperationsScreen";
+import { AiRegistryScreen } from "./screens/AiRegistryScreen";
 import { PersonaNav } from "./components/PersonaNav";
 import { OrgPicker } from "./components/OrgPicker";
 import { OnboardingWizard } from "./components/OnboardingWizard";
@@ -52,6 +53,7 @@ const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
   { id: "governance", label: "Review queue", group: "Govern", ready: true },
   { id: "studio", label: "Studio change sets", group: "Govern", ready: true },
   { id: "quality", label: "Quality", group: "Govern", ready: true },
+  { id: "ai", label: "AI registry", group: "Govern", ready: true },
   { id: "refusals", label: "Lineage refusals", group: "Govern", ready: true },
   { id: "audit", label: "Audit ledger", group: "Govern", ready: true },
   { id: "sources", label: "Sources", group: "Operate", ready: true },
@@ -143,6 +145,8 @@ export default function App() {
           <BusinessMeaningScreen />
         ) : view === "quality" ? (
           <QualityScreen />
+        ) : view === "ai" ? (
+          <AiRegistryScreen />
         ) : view === "audit" ? (
           <AuditLedgerScreen />
         ) : view === "sources" ? (

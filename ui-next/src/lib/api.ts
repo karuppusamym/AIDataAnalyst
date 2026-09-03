@@ -151,6 +151,29 @@ async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): P
   return (await res.json()) as T;
 }
 
+/** Same contract as `postJson`, for the few endpoints that mutate an existing
+ *  resource with PUT (e.g. advancing an AI remediation's status). */
+async function putJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: "PUT",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const errBody = (await res.json()) as { detail?: string };
+      if (errBody.detail) detail = errBody.detail;
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
 export interface CatalogQuery {
   organizationId: string;
   q?: string;
@@ -1233,4 +1256,84 @@ export async function fetchAuditEvents(
     `/v1/organizations/${query.organizationId}/audit-events?${params}`,
     signal,
   );
+}
+
+/* ---------------------------------------------------------------------------
+   AI governance (module 15 / CP-7,CP-8) — the AI registry, trust scoring and
+   remediation loop. The backend (ai_registry_api.py) has carried these since
+   the AI-trust slice landed; ui-next had the types but no screen. Same
+   USE_FIXTURES gate and self-contained-block convention as the relationships
+   block above.
+--------------------------------------------------------------------------- */
+
+import type {
+  AiAssessmentTemplateRead,
+  AiAssetVersionRead,
+  AiRemediationRead,
+  AiRemediationUpdate,
+  AiTrustScoreRead,
+} from "./types";
+import {
+  makeFixtureAiAssessmentTemplates,
+  makeFixtureAiAssets,
+  makeFixtureAiRemediations,
+  makeFixtureAiTrust,
+  makeFixtureUpdateAiRemediation,
+} from "./fixtures";
+
+/** `GET /v1/organizations/{org}/ai-assets` — one row per AI asset at its
+ *  latest version (name, provider, risk tier, and the version id the trust and
+ *  remediation calls below are scoped by). */
+export async function fetchAiAssets(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<AiAssetVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureAiAssets(organizationId);
+  return get<PageOf<AiAssetVersionRead>>(
+    `/v1/organizations/${organizationId}/ai-assets?limit=200`,
+    signal,
+  );
+}
+
+/** `GET /v1/ai-asset-versions/{id}/trust` — the deterministic trust score,
+ *  grade, per-factor breakdown and blocking findings for one asset version. */
+export async function fetchAiAssetTrust(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<AiTrustScoreRead> {
+  if (USE_FIXTURES) return makeFixtureAiTrust(versionId);
+  return get<AiTrustScoreRead>(`/v1/ai-asset-versions/${versionId}/trust`, signal);
+}
+
+/** `GET /v1/ai-asset-versions/{id}/remediations` — the findings-to-remediation
+ *  log for one asset version. */
+export async function fetchAiRemediations(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<AiRemediationRead>> {
+  if (USE_FIXTURES) return makeFixtureAiRemediations(versionId);
+  return get<PageOf<AiRemediationRead>>(
+    `/v1/ai-asset-versions/${versionId}/remediations?limit=200`,
+    signal,
+  );
+}
+
+/** `PUT /v1/ai-remediations/{id}` — advance a remediation's status. Moving one
+ *  to ACCEPTED_RISK is enforced server-side to an independent risk role. */
+export async function updateAiRemediation(
+  remediationId: string,
+  body: AiRemediationUpdate,
+  signal?: AbortSignal,
+): Promise<AiRemediationRead> {
+  if (USE_FIXTURES) return makeFixtureUpdateAiRemediation(remediationId, body);
+  return putJson<AiRemediationRead>(`/v1/ai-remediations/${remediationId}`, body, signal);
+}
+
+/** `GET /v1/ai-assessment-templates` — the built-in control checklists
+ *  (EU AI Act, NIST AI RMF, enterprise use-case) an assessment is seeded from. */
+export async function fetchAiAssessmentTemplates(
+  signal?: AbortSignal,
+): Promise<AiAssessmentTemplateRead[]> {
+  if (USE_FIXTURES) return makeFixtureAiAssessmentTemplates();
+  return get<AiAssessmentTemplateRead[]>("/v1/ai-assessment-templates", signal);
 }
