@@ -675,3 +675,97 @@ async def test_a_healthy_table_is_allowed_under_the_same_quality_policy(
     )
 
     assert result is not None
+
+
+# ---------------------------------------------------------------------------
+# 3. AU-11 fail-closed on unresolvable table references (2026-09-03 addendum)
+#
+# The original AU-11 landing documented, but did not test, the empty-`table_ids`
+# silent-fallback: a statement whose guard-parsed referenced tables fail
+# leaf-name lookup against ACTIVE `MetadataTable` produced empty attributes
+# for every axis, so a classification/certification/quality/freshness-keyed
+# DENY was silently bypassed. `QueryExecutionGateway.validate`/`execute` now
+# fail closed (raise `AuthorizationRejected("unresolvable_table_references")`)
+# before calling `resolve_resource_attributes` on that shape, and these tests
+# lock that in.
+# ---------------------------------------------------------------------------
+
+
+async def test_unresolvable_table_reference_fails_closed_on_execute(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The workspace has no `MetadataTable` at all; a query naming a table
+    the catalog does not know about must be REJECTED with the specific
+    `unresolvable_table_references` reason, not silently permitted through
+    the ABAC gate with default-empty axes."""
+    org, datasource, workspace = await _prepare_workspace(session, mode=ENFORCE)
+    # Deliberately NOT calling `_table(session, datasource)` -- the table
+    # referenced by the query below is unknown to the catalog on purpose.
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(AuthorizationRejected) as excinfo:
+        await _gateway().execute(
+            session,
+            datasource=datasource,
+            context=security_context(organization_id=org.id, principal_id="alice"),
+            correlation_id="corr-au11-unresolvable-execute",
+            sql="SELECT id FROM ghost_table",
+            requested_limit=10,
+            semantic_version=None,
+            workspace_id=workspace.id,
+        )
+
+    assert excinfo.value.reason_code == "unresolvable_table_references"
+
+
+async def test_unresolvable_table_reference_fails_closed_on_validate(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same shape on the validate path -- `validate` runs the same
+    guard+resolve+gate pipeline as `execute`, so a statement it accepts
+    against an unresolvable table would set an agent's expectations wrong
+    before it ever tried to run."""
+    org, datasource, workspace = await _prepare_workspace(session, mode=ENFORCE)
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(AuthorizationRejected) as excinfo:
+        await _gateway().validate(
+            session,
+            datasource=datasource,
+            context=security_context(organization_id=org.id, principal_id="alice"),
+            correlation_id="corr-au11-unresolvable-validate",
+            sql="SELECT id FROM ghost_table",
+            requested_limit=10,
+            workspace_id=workspace.id,
+        )
+
+    assert excinfo.value.reason_code == "unresolvable_table_references"
+
+
+async def test_table_less_statement_is_still_permitted_by_the_fail_closed_guard(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: the fail-closed rule triggers only when the guard's
+    referenced-tables list is non-empty. A genuinely table-less statement
+    (whose `referenced_tables` is `[]`) is not what AU-11 was concerned about
+    and must not be swept up by the fix."""
+    org, datasource, workspace = await _prepare_workspace(session, mode=ENFORCE)
+    _patch_executor(monkeypatch)
+
+    # `SELECT 1` has no referenced tables; guard produces an empty list, so
+    # the fail-closed branch is skipped and the empty ResourceAttributes
+    # feeds the ABAC gate normally. The baseline ALLOW seated by
+    # `_prepare_workspace` lets it through -- no policy rule keyed on
+    # classification/certification/quality/freshness would even apply to a
+    # statement that touches no tables.
+    result = await _gateway().validate(
+        session,
+        datasource=datasource,
+        context=security_context(organization_id=org.id, principal_id="alice"),
+        correlation_id="corr-au11-tableless",
+        sql="SELECT 1",
+        requested_limit=10,
+        workspace_id=workspace.id,
+    )
+
+    assert result is not None

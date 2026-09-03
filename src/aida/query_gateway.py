@@ -504,6 +504,31 @@ class QueryExecutionGateway:
         table_ids = await resolve_referenced_table_ids(
             session, datasource, guard_result.referenced_tables
         )
+        # AU-11 fail-closed (2026-09-03): the guard accepted a statement that
+        # references at least one table, but leaf-name lookup against ACTIVE
+        # MetadataTable returned nothing -- the classification/certification/
+        # quality/freshness axes cannot be evaluated for this query. The
+        # earlier behaviour was to default every axis to empty/None, which
+        # silently bypassed any policy rule keyed on those axes. Deny instead.
+        if guard_result.referenced_tables and not table_ids:
+            record_audit(
+                session,
+                context,
+                action="query.validate.gateway",
+                resource_type="datasource",
+                resource_id=str(datasource.id),
+                outcome="DENIED",
+                correlation_id=correlation_id,
+                details={
+                    "reason": "unresolvable_table_references",
+                    "executed": False,
+                    "referenced_tables": list(guard_result.referenced_tables),
+                },
+            )
+            await session.commit()
+            raise AuthorizationRejected(
+                "unresolvable_table_references", workspace_id=workspace_id
+            )
         resource_attributes = await resolve_resource_attributes(session, datasource, table_ids)
         try:
             await gate(
@@ -686,6 +711,14 @@ class QueryExecutionGateway:
             table_ids = await resolve_referenced_table_ids(
                 session, datasource, guard_result.referenced_tables
             )
+            # AU-11 fail-closed (2026-09-03): mirror validate() -- an
+            # unresolvable table reference on the execute path cannot silently
+            # default the ABAC axes to empty/None. Deny with the same reason
+            # code so operators see this consistently in the audit trail.
+            if guard_result.referenced_tables and not table_ids:
+                raise AuthorizationRejected(
+                    "unresolvable_table_references", workspace_id=workspace_id
+                )
             resource_attributes = await resolve_resource_attributes(
                 session, datasource, table_ids
             )

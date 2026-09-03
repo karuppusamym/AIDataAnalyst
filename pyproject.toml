@@ -264,6 +264,12 @@ allowed_importers = [
   "atlas.modules.catalog.tests",
   "aida.models",
   "aida.schemas",
+  # ST-07 Commit A (2026-09-03): the read-model composer + its `_prefixed`
+  # batch helpers moved from `aida.catalog_read_model` into
+  # `atlas.modules.catalog.service`/`.repository`; the old path stays as
+  # a re-export shim (same technique as `aida.models`/`aida.schemas`), so
+  # this contract has to name it too or the shim's own imports fail here.
+  "aida.catalog_read_model",
 ]
 
 [[tool.importlinter.contracts]]

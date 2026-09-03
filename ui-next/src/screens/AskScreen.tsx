@@ -428,7 +428,7 @@ export function AskScreen() {
   const [params, setParams] = useUrlState();
   const runId = params.get("run");
 
-  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
   const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDatasourceName = datasourceName(datasources, dsId);
 
@@ -618,6 +618,9 @@ export function AskScreen() {
               </option>
             ))}
           </select>
+          {dsPickerError ? (
+            <p className="askscreen__pickerr" role="alert">{dsPickerError}</p>
+          ) : null}
         </Field>
         <Field label="Question">
           <textarea
@@ -658,7 +661,7 @@ export function AskScreen() {
             </span>
           </div>
           {!dsId ? (
-            <Empty title="Pick a datasource to see its history" />
+            <Empty title="Pick a datasource to see its history" hint={dsPickerError ?? undefined} />
           ) : historyError ? (
             <ErrorState
               title="History could not be loaded"

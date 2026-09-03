@@ -342,7 +342,7 @@ export function BusinessMeaningScreen() {
   const selectedId = params.get("asset");
   const view = params.get("view") === "map" ? "map" : "annotations";
 
-  const { datasources, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
   const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDsName = datasourceName(datasources, dsId);
 
@@ -464,6 +464,9 @@ export function BusinessMeaningScreen() {
               <option key={d.id} value={d.id}>{d.name}</option>
             ))}
           </select>
+          {dsPickerError ? (
+            <p className="bm__pickerr" role="alert">{dsPickerError}</p>
+          ) : null}
         </Field>
         <Field label="Search">
           <input
@@ -500,7 +503,7 @@ export function BusinessMeaningScreen() {
       ) : !dsId ? (
         <Empty
           title="Pick a datasource to see its business annotations"
-          hint="Business annotations are scoped per datasource."
+          hint={dsPickerError ?? "Business annotations are scoped per datasource."}
         />
       ) : (
         <div className="bm__main">
