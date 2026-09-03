@@ -81,7 +81,7 @@ Incidents are **fingerprinted**, so re-detection reopens the existing incident r
 
 ## 9. Runtime coupling — the differentiator
 
-**Built** (2026-09-03), four of the five rows below; certification expiry is the one still-open gap.
+**Built** (2026-09-03), all five rows below.
 
 | Coupling | Behaviour | Consumer | Status |
 |---|---|---|---|
@@ -89,7 +89,7 @@ Incidents are **fingerprinted**, so re-detection reopens the existing incident r
 | Answer warning | Any answer using an affected table carries a visible trust warning with the incident | 13 agent-runtime | DONE — `agent_orchestrator.py`'s EXPLAINED checkpoint, machine-readable in `plan_evidence.trust.warnings`; `ui-next`'s `AskScreen` renders it as a banner |
 | Tool gating | A governed tool whose dependency has an open incident is flagged or blocked per policy | 14 tool-registry | DONE — `tool_api.py::execute_tool` (HTTP) and `GovernedAgentOrchestrator.run`'s `GOVERNED_TOOL` branch (the path the MCP tool-call handler reaches) both gate on `quality_coupling.check_tool_gate`, fail-closed, before any SQL is rendered or executed |
 | Impact surfacing | Quality incidents appear in the impact graph | 09 lineage, 10 knowledge-graph | DONE — `unified_lineage_api.build_unified_lineage_impact_payload` attaches `quality_state` to every TABLE node |
-| Certification expiry | An asset with a sustained incident loses certification | 08 glossary-stewardship | **TODO** — `quality_coupling.should_expire_certification` is a real, unit-tested pure function with **no call site anywhere in `src/aida`**; nothing invokes it |
+| Certification expiry | An asset with a sustained incident loses certification | 08 glossary-stewardship | DONE, **off by default** — `quality_service.evaluate_analysis_run` calls `quality_coupling.expire_sustained_incident_certifications` when `quality_certification_expiry_enabled` is set; flips the table's `AssetCertification.status` from `ACTIVE` to `EXPIRED` (never deleted or backdated) once it crosses `quality_certification_sustained_threshold` (default 3) unresolved incidents. Off by default because, unlike the other four rows, this one *writes* a real governance action the first time it runs, not just at read time — see the setting's own comment in `atlas/platform/config.py` |
 
 **Why nobody else has it.** Detection vendors do not own the query path; catalog vendors do not either. Atlas is the only product in the competitive matrix that is both the governance plane and the execution plane.
 
@@ -124,7 +124,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 | Freshness | Fails closed as `NOT_CONFIGURED` | Approved connector watermark contracts |
 | Scan-age posture | Implemented and explicitly labelled | Unchanged |
 | Scan integration | Implemented — automatic Temporal integration | Rule scheduling beyond scans |
-| **Runtime coupling** | **Implemented — retrieval demotion, answer trust warnings, fail-closed tool gating (both the HTTP and orchestrator/MCP execution paths), impact-graph surfacing. Certification expiry (`should_expire_certification`) remains unwired** | Wire certification expiry |
+| **Runtime coupling** | **Implemented — retrieval demotion, answer trust warnings, fail-closed tool gating (both the HTTP and orchestrator/MCP execution paths), impact-graph surfacing, and certification expiry (`quality_certification_expiry_enabled`, off by default)** | Unchanged |
 | Notification / escalation | Not implemented | Entry-ticket gap |
 | SLA / SLO on data | Not implemented | Entry-ticket gap |
 
@@ -134,7 +134,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 |---|---|---|
 | DQ-1 | Notification and escalation routing | P0 |
 | DQ-2 | Approved connector watermark contracts → activate freshness | P0 |
-| DQ-3 | **Runtime coupling: retrieval demotion, answer warnings, tool gating, impact surfacing** | P1 (delivered 2026-09-03 -- see `60-delivery/03-tracker.md`; certification expiry still unwired) |
+| DQ-3 | **Runtime coupling: retrieval demotion, answer warnings, tool gating, impact surfacing, certification expiry** | P1 (delivered 2026-09-03 -- see `60-delivery/03-tracker.md`) |
 | DQ-4 | Custom rule packs and rule scheduling | P1 (delivered 2026-08-31, see `60-delivery/03-tracker.md`) |
 | DQ-5 | Data SLA/SLO definitions | P1 |
 | DQ-6 | Seasonality-aware thresholds | P2 |

@@ -276,6 +276,23 @@ class Settings(BaseSettings):
     # exactly as before this flag existed.
     quality_seasonal_month_end_enabled: bool = False
     quality_seasonal_month_end_window_days: int = Field(default=3, ge=1, le=10)
+    # --- Data quality: certification expiry on sustained incidents (DQ-3) ----
+    #
+    # Off by default: unlike the other DQ-3 coupling points (retrieval
+    # demotion, tool gating, answer trust warnings -- all read-time, harmless
+    # to enable unconditionally), this one *writes*, flipping an
+    # `AssetCertification.status` from "ACTIVE" to "EXPIRED" the moment a
+    # table crosses `quality_certification_sustained_threshold` unresolved
+    # incidents. Turning this on for the first time in an estate with
+    # existing certified-but-currently-incident-affected tables would expire
+    # all of them in the very next `evaluate_analysis_run`, not just future
+    # ones -- a real, visible governance action that deserves an explicit,
+    # reviewed opt-in rather than silently taking effect the moment this
+    # code ships (same reasoning `quality_seasonal_thresholds_enabled` above
+    # already applies to a read-time-only behavior; this is the write-time
+    # case that reasoning was written for).
+    quality_certification_expiry_enabled: bool = False
+    quality_certification_sustained_threshold: int = Field(default=3, ge=1, le=50)
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids
