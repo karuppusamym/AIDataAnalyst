@@ -81,22 +81,24 @@ Incidents are **fingerprinted**, so re-detection reopens the existing incident r
 
 ## 9. Runtime coupling — the differentiator
 
-Currently **planned, not built**. This is the highest-leverage unbuilt item in the roadmap.
+**Built** (2026-09-03), four of the five rows below; certification expiry is the one still-open gap.
 
-| Coupling | Behaviour | Consumer |
-|---|---|---|
-| Retrieval demotion | A table with an open high-severity incident ranks lower | 12 retrieval |
-| Answer warning | Any answer using an affected table carries a visible trust warning with the incident | 13 agent-runtime |
-| Tool gating | A governed tool whose dependency has an open incident is flagged or blocked per policy | 14 tool-registry |
-| Impact surfacing | Quality incidents appear in the impact graph | 09 lineage, 10 knowledge-graph |
-| Certification expiry | An asset with a sustained incident loses certification | 08 glossary-stewardship |
+| Coupling | Behaviour | Consumer | Status |
+|---|---|---|---|
+| Retrieval demotion | A table with an open high-severity incident ranks lower | 12 retrieval | DONE — `retrieval.py::hybrid_retrieve_enhanced` Stage 4 |
+| Answer warning | Any answer using an affected table carries a visible trust warning with the incident | 13 agent-runtime | DONE — `agent_orchestrator.py`'s EXPLAINED checkpoint, machine-readable in `plan_evidence.trust.warnings`; `ui-next`'s `AskScreen` renders it as a banner |
+| Tool gating | A governed tool whose dependency has an open incident is flagged or blocked per policy | 14 tool-registry | DONE — `tool_api.py::execute_tool` (HTTP) and `GovernedAgentOrchestrator.run`'s `GOVERNED_TOOL` branch (the path the MCP tool-call handler reaches) both gate on `quality_coupling.check_tool_gate`, fail-closed, before any SQL is rendered or executed |
+| Impact surfacing | Quality incidents appear in the impact graph | 09 lineage, 10 knowledge-graph | DONE — `unified_lineage_api.build_unified_lineage_impact_payload` attaches `quality_state` to every TABLE node |
+| Certification expiry | An asset with a sustained incident loses certification | 08 glossary-stewardship | **TODO** — `quality_coupling.should_expire_certification` is a real, unit-tested pure function with **no call site anywhere in `src/aida`**; nothing invokes it |
 
 **Why nobody else has it.** Detection vendors do not own the query path; catalog vendors do not either. Atlas is the only product in the competitive matrix that is both the governance plane and the execution plane.
 
 ## 10. Public interface
 
+The interface below was the original design sketch. What actually shipped is `src/aida/quality_coupling.py`'s own pure functions (`check_quality_gate`, `demote_in_retrieval`, `get_trust_warning`, `check_tool_gate`, `should_expire_certification`) plus its DB-touching `resolve_table_ids`/`fetch_open_incidents` pair, called directly from `retrieval.py`, `tool_api.py`, and `agent_orchestrator.py` — not a single `get_trust_signal` facade. Each call site resolves its own `IncidentSummary` rows via `fetch_open_incidents` (itself a thin, batched query over `DataQualityIncident`) rather than going through one shared entry point, which is why it stayed fast enough for the retrieval and answer paths without a dedicated caching layer: the query it wraps is already a single indexed `datasource_id` + `table_id IN (...)` + `status IN (...)` lookup.
+
 ```python
-# data_quality/api.py
+# data_quality/api.py -- the original sketch; superseded by quality_coupling.py's own functions (see above)
 def upsert_policy(scope, target: PolicyTarget, policy) -> QualityPolicyDTO
 def get_posture(scope, datasource_id) -> QualityPostureDTO
 def list_incidents(scope, filt, page) -> Page[IncidentDTO]
@@ -104,8 +106,6 @@ def transition_incident(scope, incident_id, action, rationale) -> IncidentDTO
 def get_trust_signal(scope, table_id) -> TrustSignalDTO        # consumed by 12, 13, 14
 def configure_freshness(scope, table_id, contract) -> FreshnessContractDTO  # via module 17
 ```
-
-`get_trust_signal` is the coupling API. It must be fast — it is called on the retrieval and answer paths.
 
 ## 11. Events
 
@@ -124,7 +124,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 | Freshness | Fails closed as `NOT_CONFIGURED` | Approved connector watermark contracts |
 | Scan-age posture | Implemented and explicitly labelled | Unchanged |
 | Scan integration | Implemented — automatic Temporal integration | Rule scheduling beyond scans |
-| **Runtime coupling** | **Not implemented** | **The differentiator — P1** |
+| **Runtime coupling** | **Implemented — retrieval demotion, answer trust warnings, fail-closed tool gating (both the HTTP and orchestrator/MCP execution paths), impact-graph surfacing. Certification expiry (`should_expire_certification`) remains unwired** | Wire certification expiry |
 | Notification / escalation | Not implemented | Entry-ticket gap |
 | SLA / SLO on data | Not implemented | Entry-ticket gap |
 
@@ -134,7 +134,7 @@ Emits `quality.observation_recorded`, `quality.incident_opened|reopened|acknowle
 |---|---|---|
 | DQ-1 | Notification and escalation routing | P0 |
 | DQ-2 | Approved connector watermark contracts → activate freshness | P0 |
-| DQ-3 | **Runtime coupling: retrieval demotion, answer warnings, tool gating** | P1 |
+| DQ-3 | **Runtime coupling: retrieval demotion, answer warnings, tool gating, impact surfacing** | P1 (delivered 2026-09-03 -- see `60-delivery/03-tracker.md`; certification expiry still unwired) |
 | DQ-4 | Custom rule packs and rule scheduling | P1 (delivered 2026-08-31, see `60-delivery/03-tracker.md`) |
 | DQ-5 | Data SLA/SLO definitions | P1 |
 | DQ-6 | Seasonality-aware thresholds | P2 |

@@ -69,8 +69,8 @@ This matrix has one purpose: decide what to build next. It is scored against ven
 | Incident lifecycle | ● | ● | ● | ● | ◐ | ● audited | — | — |
 | Notification / escalation routing | ● | ● | ● | ● | ● | ○ | ENTRY | P0 |
 | SLA / SLO on data | ● | ◐ | ● | ◐ | ● | ○ | PARITY | P1 |
-| **Quality signal gates runtime execution** | ○ | ○ | ○ | ○ | ○ | ○ → planned | **DIFF** | P1 |
-| **Quality signal demotes retrieval ranking** | ○ | ○ | ○ | ○ | ○ | ○ → planned | **DIFF** | P1 |
+| **Quality signal gates runtime execution** | ○ | ○ | ○ | ○ | ○ | ● | **DIFF** | — |
+| **Quality signal demotes retrieval ranking** | ○ | ○ | ○ | ○ | ○ | ● | **DIFF** | — |
 | Value-free evidence (no row retention) | ○ | ○ | ○ | ○ | ◐ | ● | DIFF | — |
 
 ## 6. AI, agents, and execution — the decisive section
