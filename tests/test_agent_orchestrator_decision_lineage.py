@@ -35,6 +35,7 @@ eternally empty table.
 """
 
 import itertools
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -56,6 +57,7 @@ from aida.models import (
     AnalysisRun,
     AuditEvent,
     DataDomain,
+    DataQualityIncident,
     DataSource,
     GovernedTool,
     GovernedToolVersion,
@@ -116,11 +118,19 @@ class _Fixture:
     the one candidate the retriever ranks below the cut.
     """
 
-    def __init__(self, organization: Organization, datasource: DataSource, tool_a_id, tool_b_id):
+    def __init__(
+        self,
+        organization: Organization,
+        datasource: DataSource,
+        tool_a_id,
+        tool_b_id,
+        ledger_table_id,
+    ):
         self.organization = organization
         self.datasource = datasource
         self.tool_a_id = tool_a_id  # matches all 3 terms -- selected
         self.tool_b_id = tool_b_id  # matches 1 of 3 terms, below the match threshold -- rejected
+        self.ledger_table_id = ledger_table_id  # both tools' declared dependency
 
 
 async def _seed(session: AsyncSession) -> _Fixture:
@@ -256,6 +266,7 @@ async def _seed(session: AsyncSession) -> _Fixture:
         description="Approved governed account balance summary report",
         datasource_id=datasource.id,
         sql_template="SELECT party_ref, amount_value FROM retail.settlement_ledger",
+        referenced_tables=["retail.settlement_ledger"],
         parameter_schema=[],
         allowed_roles=["Analyst"],
         fingerprint="fp-tool-a",
@@ -274,6 +285,7 @@ async def _seed(session: AsyncSession) -> _Fixture:
         description="Deprecated ad-hoc balance export, superseded",
         datasource_id=datasource.id,
         sql_template="SELECT party_ref FROM retail.settlement_ledger",
+        referenced_tables=["retail.settlement_ledger"],
         parameter_schema=[],
         allowed_roles=["Analyst"],
         fingerprint="fp-tool-b",
@@ -281,7 +293,7 @@ async def _seed(session: AsyncSession) -> _Fixture:
     )
     session.add_all([tool_a, tool_b])
     await session.commit()
-    return _Fixture(organization, datasource, tool_a.id, tool_b.id)
+    return _Fixture(organization, datasource, tool_a.id, tool_b.id, ledger_table.id)
 
 
 def _orchestrator(
@@ -379,6 +391,112 @@ async def test_governed_tool_run_records_retrieval_and_tool_decisions(
         assert decision.organization_id == fixture.organization.id
         assert "ACC-1" not in str(decision.evidence)
         assert "ACC-1" not in decision.reason
+
+
+async def test_governed_tool_run_blocks_when_dependency_has_critical_incident(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DQ-3/TL-3 parity for the orchestrator's own governed-tool execution
+    path -- the one the MCP tool-call handler (`mcp_server.py::_handle_tools_call`)
+    reaches via `GovernedAgentOrchestrator.run`, not `tool_api.py::execute_tool`'s
+    HTTP route. A CRITICAL open incident on the selected tool's own declared
+    `referenced_tables` dependency blocks the run before any SQL is rendered
+    or reaches the query gateway -- the identical fail-closed BLOCK
+    `test_execute_tool_blocks_when_dependency_has_critical_incident`
+    (tests/test_quality_runtime_coupling.py) already proves for the HTTP
+    route, now proven for this second, previously-ungated surface too."""
+    fixture = await _seed(session)
+    session.add(
+        DataQualityIncident(
+            organization_id=fixture.organization.id,
+            datasource_id=fixture.datasource.id,
+            table_id=fixture.ledger_table_id,
+            fingerprint=f"fp-incident-{uuid4().hex[:8]}",
+            anomaly_type="NULL_RATE_SHIFT",
+            severity="CRITICAL",
+            status="OPEN",
+            summary="Null rate spiked outside the governed baseline.",
+            first_observed_at=datetime.now(UTC),
+            last_observed_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    orchestrator = _orchestrator(monkeypatch)
+    context = security_context(
+        organization_id=fixture.organization.id, roles=frozenset({"Analyst"})
+    )
+    known_run_ids = set((await session.execute(select(AgentRun.id))).scalars().all())
+
+    with pytest.raises(AgentPolicyRejected) as exc_info:
+        await orchestrator.run(
+            session,
+            datasource=fixture.datasource,
+            context=context,
+            correlation_id="corr-tool-quality-block",
+            question=QUESTION_TOOL_MATCH,
+            candidate_sql=None,
+            preferred_tool_version_id=None,
+            tool_parameters={},
+            requested_limit=None,
+        )
+    assert "blocked" in str(exc_info.value).lower()
+
+    run_id = await _new_agent_run_id(session, known_run_ids)
+    run = await session.get(AgentRun, run_id)
+    assert run is not None
+    assert run.status == "REJECTED"
+    assert run.failure_reason is not None
+    assert run.failure_reason.startswith("QUALITY_INCIDENT_BLOCK")
+
+
+async def test_governed_tool_run_warns_but_completes_on_a_warning_incident(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the pair above: a WARNING-severity (non-CRITICAL)
+    open incident on the same dependency does not block -- `check_tool_gate`'s
+    `gate_action` is `WARN`, not `BLOCK` -- but the run's own `plan_evidence`
+    records it, so the same information `ToolExecutionResponse.quality_gate`
+    carries for the HTTP route is not silently dropped on this path."""
+    fixture = await _seed(session)
+    session.add(
+        DataQualityIncident(
+            organization_id=fixture.organization.id,
+            datasource_id=fixture.datasource.id,
+            table_id=fixture.ledger_table_id,
+            fingerprint=f"fp-incident-{uuid4().hex[:8]}",
+            anomaly_type="NULL_RATE_SHIFT",
+            severity="WARNING",
+            status="OPEN",
+            summary="Null rate drifted outside the governed baseline.",
+            first_observed_at=datetime.now(UTC),
+            last_observed_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()
+
+    orchestrator = _orchestrator(monkeypatch)
+    context = security_context(
+        organization_id=fixture.organization.id, roles=frozenset({"Analyst"})
+    )
+
+    result = await orchestrator.run(
+        session,
+        datasource=fixture.datasource,
+        context=context,
+        correlation_id="corr-tool-quality-warn",
+        question=QUESTION_TOOL_MATCH,
+        candidate_sql=None,
+        preferred_tool_version_id=None,
+        tool_parameters={},
+        requested_limit=None,
+    )
+
+    assert result.agent_run.status == "COMPLETED"
+    gate = result.agent_run.plan_evidence.get("tool_quality_gate")
+    assert gate is not None
+    assert gate["action"] == "WARN"
+    assert str(fixture.ledger_table_id) in gate["affected_assets"]
 
 
 async def test_prompt_risk_block_records_a_refusal(

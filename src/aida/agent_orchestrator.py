@@ -46,6 +46,7 @@ from aida.models import (
 from aida.prompt_risk import DeterministicPromptRiskClassifier
 from aida.quality_coupling import (
     check_quality_gate,
+    check_tool_gate,
     demote_in_retrieval,
     fetch_open_incidents,
     get_trust_warning,
@@ -618,6 +619,48 @@ class GovernedAgentOrchestrator:
                     "PLANNED_TOOL_UNAVAILABLE",
                 )
                 raise ModelRouteUnavailable("planned governed tool is unavailable")
+            # DQ-3/TL-3 parity: `tool_api.py::execute_tool` blocks a governed
+            # tool's HTTP execution route on its own dependency's open quality
+            # incidents *before* rendering or executing any SQL. Every path
+            # that can execute a governed tool version -- the MCP tool-call
+            # handler routes here via `GovernedAgentOrchestrator.run`, not
+            # through `execute_tool` -- must reach the identical fail-closed
+            # gate, or the same tool version answers differently depending on
+            # which surface asked for it (ADR-0016: no ambiguity/missing
+            # signal silently passes). Checked on the tool's own declared
+            # `referenced_tables`, the same dependency set `execute_tool`
+            # gates on, not the post-execution `referenced_tables` the
+            # gateway later reports -- catching this before a single row is
+            # read from the source, not after.
+            dependency_table_ids = await resolve_table_ids(
+                session, datasource=datasource, table_names=version.referenced_tables
+            )
+            dependency_incidents = await fetch_open_incidents(
+                session, datasource=datasource, table_ids=list(dependency_table_ids.values())
+            )
+            tool_quality_gate = check_tool_gate(
+                tool_id=str(version.tool_id),
+                dependency_asset_ids=[str(t) for t in dependency_table_ids.values()],
+                incidents=dependency_incidents,
+            )
+            if tool_quality_gate.action == "BLOCK":
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    state,
+                    trace,
+                    context,
+                    correlation_id,
+                    f"QUALITY_INCIDENT_BLOCK:{','.join(tool_quality_gate.affected_assets)}",
+                )
+                raise AgentPolicyRejected(tool_quality_gate.message)
+            if tool_quality_gate.action == "WARN":
+                plan_evidence["tool_quality_gate"] = {
+                    "action": tool_quality_gate.action,
+                    "affected_assets": tool_quality_gate.affected_assets,
+                    "message": tool_quality_gate.message,
+                }
+                agent_run.plan_evidence = plan_evidence
             try:
                 rendered = render_tool_sql(
                     version.sql_template,
