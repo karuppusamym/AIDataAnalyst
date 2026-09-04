@@ -4661,3 +4661,84 @@ export interface ParsedLineageEdgeBulkDecisionResultRead {
   failed_count: number;
   results: ParsedLineageEdgeBulkDecisionItemRead[];
 }
+
+// --- AG-10 / ADR-0027: the agent inbox ------------------------------------
+// Mirrors `aida.agent_contract_api.AgentInboxRead` field for field.
+
+export type AutonomyTier = "T0" | "T1" | "T2" | "T3";
+export type ProposedByKind = "HUMAN" | "AGENT";
+export type PreReviewRecommendation = "APPROVE" | "REJECT" | "NONE";
+export type SampleOutcome = "PENDING" | "AGREED" | "DISAGREED";
+
+export interface AgentInboxSummary {
+  pending_decisions: number;
+  auto_applied_since: number;
+  sampled_for_audit: number;
+  agents_active: number;
+  kill_switch_engaged: boolean;
+}
+
+export interface AgentInboxBudget {
+  daily_token_cap: number | null;
+  daily_tokens_used: number | null;
+}
+
+export interface AgentInboxAgent {
+  ai_asset_id: string;
+  version_id: string | null;
+  name: string;
+  risk_tier: string | null;
+  autonomy_tier: AutonomyTier;
+  runs_recent: number;
+  success_rate: number | null;
+  budget: AgentInboxBudget;
+  kill_scope: "AGENT" | "TIER" | "ALL";
+  kill_engaged: boolean;
+  supervisor_persona: string | null;
+}
+
+export interface AgentInboxPendingItem {
+  review_id: string;
+  object_type: string;
+  object_id: string | null;
+  title: string;
+  proposed_by: string;
+  proposed_by_kind: ProposedByKind;
+  risk_tier: AutonomyTier;
+  confidence: number | null;
+  blast_radius: number | null;
+  negative_knowledge_hits: number;
+  recommendation: PreReviewRecommendation;
+  created_at: string;
+}
+
+export interface AgentInboxAutoApplied {
+  task_id: string;
+  agent_name: string;
+  action: string;
+  object_type: string;
+  object_id: string | null;
+  applied_at: string;
+  sampled_for_audit: boolean;
+  audit_outcome: SampleOutcome | null;
+}
+
+export interface AgentInboxRecentTask {
+  task_id: string;
+  agent_name: string;
+  intent: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface AgentInboxRead {
+  organization_id: string;
+  persona: string;
+  generated_at: string;
+  summary: AgentInboxSummary;
+  agents: AgentInboxAgent[];
+  pending: AgentInboxPendingItem[];
+  auto_applied: AgentInboxAutoApplied[];
+  recent_tasks: AgentInboxRecentTask[];
+}

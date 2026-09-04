@@ -102,16 +102,22 @@ describe("App shell persona gating", () => {
     const App = await loadApp();
     render(<App />);
 
-    const section = screen.getByRole("navigation", { name: "Discover pages" });
+    // UX-20: sections are persona workbenches, so Catalog sits in the
+    // Analyst workbench alongside the rest of an analyst's jobs.
+    const section = screen.getByRole("navigation", { name: "Analyst pages" });
     expect(within(section).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Ask Atlas",
       "Catalog",
-      "Marketplace",
-      "Relationships",
+      "Semantic layer",
+      "Tool registry",
+      "Tool plans",
+      "Lineage",
+      "Unified lineage",
     ]);
     expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
 
-    fireEvent.click(within(section).getByRole("button", { name: "Marketplace" }));
-    expect(location.hash).toBe("#/marketplace");
+    fireEvent.click(within(section).getByRole("button", { name: "Semantic layer" }));
+    expect(location.hash).toBe("#/semantics");
   });
 
   it("restores the correct page on browser history navigation", async () => {
@@ -123,7 +129,7 @@ describe("App shell persona gating", () => {
     history.replaceState(null, "", "/#/operations");
     fireEvent(window, new PopStateEvent("popstate"));
 
-    await waitFor(() => expect(screen.getByRole("navigation", { name: "Operate pages" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("navigation", { name: "Operator pages" })).toBeInTheDocument());
     expect(screen.getByText("Operations", { selector: ".topbar__trail strong" })).toBeInTheDocument();
   });
 });

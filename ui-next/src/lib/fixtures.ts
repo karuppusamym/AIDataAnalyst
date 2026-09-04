@@ -46,6 +46,7 @@ import type {
   UnifiedLineageImpactRead,
   WorkspaceCreate,
   WorkspaceRead,
+  AgentInboxRead,
 } from "./types";
 import type {
   AuditEventRead,
@@ -5456,4 +5457,160 @@ export async function makeFixtureToolPlanEvidence(
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 50;
   return { items: all.slice(offset, offset + limit), limit, offset, total: all.length };
+}
+
+/** AG-10: an agent inbox with one of each state a reviewer must be able to
+ *  tell apart -- a human proposal and an agent proposal, an item the reviewer
+ *  agent recommends approving and one it recommends rejecting on prior
+ *  rejections, an auto-applied task sampled for audit and one not, and an
+ *  agent whose kill switch is engaged. */
+export function makeFixtureAgentInbox(organizationId: string, persona: string): AgentInboxRead {
+  const now = new Date();
+  const iso = (minutesAgo: number) =>
+    new Date(now.getTime() - minutesAgo * 60_000).toISOString();
+  return {
+    organization_id: organizationId,
+    persona,
+    generated_at: now.toISOString(),
+    summary: {
+      pending_decisions: 3,
+      auto_applied_since: 2,
+      sampled_for_audit: 1,
+      agents_active: 2,
+      kill_switch_engaged: true,
+    },
+    agents: [
+      {
+        ai_asset_id: "11111111-1111-1111-1111-111111111111",
+        version_id: "aaaaaaaa-1111-1111-1111-111111111111",
+        name: "Steward agent",
+        risk_tier: "LOW",
+        autonomy_tier: "T1",
+        runs_recent: 148,
+        success_rate: 0.96,
+        budget: { daily_token_cap: 500_000, daily_tokens_used: 214_300 },
+        kill_scope: "AGENT",
+        kill_engaged: false,
+        supervisor_persona: "STEWARD",
+      },
+      {
+        ai_asset_id: "22222222-2222-2222-2222-222222222222",
+        version_id: "aaaaaaaa-2222-2222-2222-222222222222",
+        name: "Lineage agent",
+        risk_tier: "MEDIUM",
+        autonomy_tier: "T1",
+        runs_recent: 32,
+        success_rate: 0.88,
+        budget: { daily_token_cap: 200_000, daily_tokens_used: null },
+        kill_scope: "AGENT",
+        kill_engaged: false,
+        supervisor_persona: "STEWARD",
+      },
+      {
+        ai_asset_id: "33333333-3333-3333-3333-333333333333",
+        version_id: "aaaaaaaa-3333-3333-3333-333333333333",
+        name: "Red-team agent",
+        risk_tier: "HIGH",
+        autonomy_tier: "T3",
+        runs_recent: 0,
+        success_rate: null,
+        budget: { daily_token_cap: null, daily_tokens_used: null },
+        kill_scope: "TIER",
+        kill_engaged: true,
+        supervisor_persona: "OPERATOR",
+      },
+    ],
+    pending: [
+      {
+        review_id: "bbbbbbbb-1111-1111-1111-111111111111",
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        object_id: "cccccccc-1111-1111-1111-111111111111",
+        title: "PUBLISH ASSET_DESCRIPTION_DRAFT",
+        proposed_by: "agent:steward",
+        proposed_by_kind: "AGENT",
+        risk_tier: "T0",
+        confidence: 0.91,
+        blast_radius: 12,
+        negative_knowledge_hits: 0,
+        recommendation: "APPROVE",
+        created_at: iso(35),
+      },
+      {
+        review_id: "bbbbbbbb-2222-2222-2222-222222222222",
+        object_type: "GLOSSARY_LINK_PROPOSAL",
+        object_id: "cccccccc-2222-2222-2222-222222222222",
+        title: "PUBLISH GLOSSARY_LINK_PROPOSAL",
+        proposed_by: "agent:steward",
+        proposed_by_kind: "AGENT",
+        risk_tier: "T1",
+        confidence: 0.42,
+        blast_radius: 3,
+        negative_knowledge_hits: 2,
+        recommendation: "REJECT",
+        created_at: iso(90),
+      },
+      {
+        review_id: "bbbbbbbb-3333-3333-3333-333333333333",
+        object_type: "SEMANTIC_MODEL_VERSION",
+        object_id: "cccccccc-3333-3333-3333-333333333333",
+        title: "PUBLISH SEMANTIC_MODEL_VERSION",
+        proposed_by: "priya.steward",
+        proposed_by_kind: "HUMAN",
+        risk_tier: "T2",
+        confidence: null,
+        blast_radius: 47,
+        negative_knowledge_hits: 0,
+        recommendation: "NONE",
+        created_at: iso(180),
+      },
+    ],
+    auto_applied: [
+      {
+        task_id: "dddddddd-1111-1111-1111-111111111111",
+        agent_name: "Steward agent",
+        action: "agent.analysis",
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        object_id: "cccccccc-4444-4444-4444-444444444444",
+        applied_at: iso(20),
+        sampled_for_audit: true,
+        audit_outcome: "PENDING",
+      },
+      {
+        task_id: "dddddddd-2222-2222-2222-222222222222",
+        agent_name: "Lineage agent",
+        action: "agent.analysis",
+        object_type: "VIEW_LINEAGE_EDGE",
+        object_id: "cccccccc-5555-5555-5555-555555555555",
+        applied_at: iso(55),
+        sampled_for_audit: false,
+        audit_outcome: null,
+      },
+    ],
+    recent_tasks: [
+      {
+        task_id: "dddddddd-1111-1111-1111-111111111111",
+        agent_name: "Steward agent",
+        intent: "agent.analysis",
+        status: "SAMPLED",
+        started_at: iso(21),
+        finished_at: iso(20),
+      },
+      {
+        task_id: "dddddddd-3333-3333-3333-333333333333",
+        agent_name: "Steward agent",
+        intent: "agent.analysis",
+        status: "REJECTED",
+        started_at: iso(70),
+        finished_at: iso(70),
+      },
+      {
+        task_id: "dddddddd-2222-2222-2222-222222222222",
+        agent_name: "Lineage agent",
+        intent: "agent.analysis",
+        status: "APPLIED",
+        started_at: iso(56),
+        finished_at: iso(55),
+      },
+    ],
+  };
 }

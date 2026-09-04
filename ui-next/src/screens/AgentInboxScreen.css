@@ -1,0 +1,47 @@
+/* Agent inbox (UX-21). Deliberately plain: this screen is read first thing in
+   the morning, so density and scannability beat decoration. */
+.agentinbox { display: flex; flex-direction: column; gap: 1rem; }
+.agentinbox__header { display: flex; align-items: flex-end; gap: 1rem; flex-wrap: wrap; }
+.agentinbox__killbanner {
+  margin: 0; padding: 0.5rem 0.75rem; border-radius: 6px;
+  background: var(--bad-bg, #fdecea); color: var(--bad-fg, #8a1c12); font-weight: 600;
+}
+.agentinbox__notice { margin: 0; color: var(--muted, #667); }
+.agentinbox__tiles {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0.75rem;
+}
+.agentinbox__tile {
+  border: 1px solid var(--line, #dde); border-radius: 8px; padding: 0.75rem;
+  display: flex; flex-direction: column; gap: 0.25rem;
+}
+.agentinbox__tilevalue { font-size: 1.6rem; font-weight: 700; line-height: 1; }
+.agentinbox__tilelabel { color: var(--muted, #667); font-size: 0.85rem; }
+.agentinbox h2 { font-size: 1rem; margin: 0.5rem 0 0; }
+.agentinbox__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+.agentinbox__pending { border: 1px solid var(--line, #dde); border-radius: 8px; }
+.agentinbox__pendingbtn {
+  width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+  padding: 0.75rem; display: flex; flex-direction: column; gap: 0.35rem; font: inherit;
+}
+.agentinbox__pendingbtn:hover { background: var(--hover, #f6f7fb); }
+.agentinbox__pendingbtn:focus-visible { outline: 2px solid var(--accent, #3b6fd4); outline-offset: -2px; }
+.agentinbox__pendinghead { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.agentinbox__pendingmeta {
+  display: flex; gap: 0.75rem; flex-wrap: wrap; color: var(--muted, #667); font-size: 0.85rem;
+  align-items: center;
+}
+.agentinbox__recommendation { display: flex; align-items: center; gap: 0.5rem; }
+.agentinbox__negative { color: var(--bad-fg, #8a1c12); font-weight: 600; }
+.agentinbox__applied, .agentinbox__agent, .agentinbox__task {
+  border: 1px solid var(--line, #dde); border-radius: 8px; padding: 0.75rem;
+  display: flex; flex-direction: column; gap: 0.35rem;
+}
+.agentinbox__agenthead { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.agentinbox__muted { color: var(--muted, #667); }
+.agentinbox__budget { display: inline-flex; align-items: center; gap: 0.4rem; }
+.agentinbox__budgetbar {
+  display: inline-block; width: 5rem; height: 0.4rem; border-radius: 999px;
+  background: var(--line, #dde); overflow: hidden;
+}
+.agentinbox__budgetfill { display: block; height: 100%; background: var(--accent, #3b6fd4); }

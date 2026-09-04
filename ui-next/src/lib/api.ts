@@ -1,4 +1,5 @@
 import type {
+  AgentInboxRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
   AgentRunGroundingReceiptsRead,
@@ -51,6 +52,7 @@ import type {
 } from "./ui-types";
 import {
   makeFixtureAgentAnalysis,
+  makeFixtureAgentInbox,
   makeFixtureAgentRun,
   makeFixtureAgentRunGroundingReceipts,
   makeFixtureAgentRuns,
@@ -3243,5 +3245,44 @@ export async function fetchOwnershipAssignments(
   return get<PageOf<OwnershipAssignmentRead>>(
     `/v1/organizations/${organizationId}/ownership-assignments?${params}`,
     signal,
+  );
+}
+
+/**
+ * `GET /v1/organizations/{org}/agent-inbox` (agent_contract_api.py) — the
+ * one screen a supervisor opens: what their agents did, and what is waiting
+ * on a human. Composed server-side in a fixed number of queries, so this is
+ * a single call rather than the five the screen would otherwise make.
+ */
+export async function fetchAgentInbox(
+  organizationId: string,
+  persona: string,
+  signal?: AbortSignal,
+): Promise<AgentInboxRead> {
+  if (USE_FIXTURES) return makeFixtureAgentInbox(organizationId, persona);
+  return get<AgentInboxRead>(
+    `/v1/organizations/${organizationId}/agent-inbox?persona=${encodeURIComponent(persona)}`,
+    signal,
+  );
+}
+
+/**
+ * `POST .../agents/{version}/contract/kill` — engage one agent's kill switch.
+ * Takes effect on that agent's very next run: the orchestrator queries the
+ * switch live rather than caching it. Fixture mode refuses rather than
+ * pretending, because a kill switch that silently did nothing is the worst
+ * possible thing to mock.
+ */
+export async function engageAgentKillSwitch(
+  organizationId: string,
+  versionId: string,
+  reason: string,
+): Promise<void> {
+  if (USE_FIXTURES) {
+    throw new Error("Kill switch is unavailable in fixture mode — run against the API.");
+  }
+  await postJson<unknown>(
+    `/v1/organizations/${organizationId}/agents/${versionId}/contract/kill`,
+    { reason },
   );
 }
