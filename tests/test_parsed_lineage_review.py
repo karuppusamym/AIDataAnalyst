@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import aida.envelope_models  # noqa: F401 -- registers metadata_view_definition
 from aida.db import Base
 from aida.models import (
     DataDomain,
@@ -411,8 +412,8 @@ class TestBulkDecide:
         ]:
             await parse_view_lineage_endpoint(
                 datasource.id,
-                _request(  # noqa: S608 -- view DDL text is this parser test's input
-                    f"CREATE VIEW {view} AS SELECT a.col_a FROM {src} a"
+                _request(
+                    f"CREATE VIEW {view} AS SELECT a.col_a FROM {src} a"  # noqa: S608
                 ),
                 context=author_context,
                 session=session,

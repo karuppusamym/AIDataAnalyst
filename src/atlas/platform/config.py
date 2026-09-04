@@ -289,9 +289,12 @@ class Settings(BaseSettings):
     # reviewer would rubber-stamp anyway lands ACTIVE straight away and
     # never pollutes the review queue).
     lineage_parsed_edges_review_mode: Literal["auto_active", "require_review"] = "auto_active"
-    lineage_high_confidence_auto_active_threshold: float = Field(
-        default=0.9, ge=0.0, le=1.0
-    )
+    #: Deliberately has no upper bound (2026-09-04). The comparison is
+    #: `confidence >= threshold` and the parser's top confidence is FULL (1.0),
+    #: so a value capped at 1.0 left an operator no way to say "review every
+    #: parsed edge" -- the one posture a bank onboarding an untrusted source
+    #: most wants. Any value above 1.0 disables auto-activation entirely.
+    lineage_high_confidence_auto_active_threshold: float = Field(default=0.9, ge=0.0)
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and

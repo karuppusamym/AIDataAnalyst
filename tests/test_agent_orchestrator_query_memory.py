@@ -36,7 +36,7 @@ from aida.agent_orchestrator import GovernedAgentOrchestrator
 from aida.config import Settings
 from aida.connectors.base import QueryEstimate
 from aida.db import Base
-from aida.model_gateway import ModelCallEvidence, SqlGenerationOutput
+from aida.model_gateway import ApprovedModelRoute, ModelCallEvidence, SqlGenerationOutput
 from aida.models import (
     AgentRun,
     AnalysisRun,
@@ -62,6 +62,22 @@ PRIOR_SQL_TEMPLATE = (
 )
 FRESH_SQL = "SELECT customer_id FROM sales.customer_orders"
 MUTATING_SQL = "DELETE FROM sales.customer_orders"
+
+
+
+async def _one_approved_route() -> list[ApprovedModelRoute]:
+    return [
+        ApprovedModelRoute(
+            route_key="test-route",
+            provider_type="OPENAI",
+            model_id="approved-model",
+            endpoint_alias="private-model-endpoint",
+            credential_reference="vault://model-key",
+            max_input_tokens=8000,
+            max_output_tokens=2000,
+            timeout_seconds=30,
+        )
+    ]
 
 
 @pytest.fixture
@@ -305,6 +321,13 @@ def _orchestrator(
     orchestrator = GovernedAgentOrchestrator(settings)
     fake_gateway = _CapturingModelGateway(model_sql)
     orchestrator.model_gateway = fake_gateway  # type: ignore[assignment]
+    # ADR-0024 resolves approved routes from the database before the gateway is
+    # called, so a stubbed gateway alone is no longer enough to reach generation.
+    # These tests are about query memory, not route governance: hand the
+    # orchestrator one approved route and let the fake gateway answer.
+    orchestrator._approved_model_routes = (  # type: ignore[method-assign]
+        lambda session, organization_id: _one_approved_route()
+    )
     executor = FakeSqlExecutor(rows, estimate=estimate)
     monkeypatch.setattr(
         "aida.query_gateway.open_execution_session",
@@ -471,6 +494,13 @@ async def test_memory_adaptation_disabled_by_default_setting(
     orchestrator = GovernedAgentOrchestrator(settings)
     fake_gateway = _CapturingModelGateway(FRESH_SQL)
     orchestrator.model_gateway = fake_gateway  # type: ignore[assignment]
+    # ADR-0024 resolves approved routes from the database before the gateway is
+    # called, so a stubbed gateway alone is no longer enough to reach generation.
+    # These tests are about query memory, not route governance: hand the
+    # orchestrator one approved route and let the fake gateway answer.
+    orchestrator._approved_model_routes = (  # type: ignore[method-assign]
+        lambda session, organization_id: _one_approved_route()
+    )
     executor = FakeSqlExecutor(({"customer_id": "C-1"},))
     monkeypatch.setattr(
         "aida.query_gateway.open_execution_session",
