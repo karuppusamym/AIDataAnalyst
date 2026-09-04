@@ -22,6 +22,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 import aida.models  # noqa: F401  -- registers every table on the metadata
@@ -30,6 +31,7 @@ from aida.db import Base
 from aida.models import (
     AccessPolicy,
     AssetCertification,
+    AuditEvent,
     DataDomain,
     DataQualityIncident,
     DataQualityObservation,
@@ -721,25 +723,48 @@ async def test_unresolvable_table_reference_fails_closed_on_execute(
 async def test_unresolvable_table_reference_fails_closed_on_validate(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Same shape on the validate path -- `validate` runs the same
-    guard+resolve+gate pipeline as `execute`, so a statement it accepts
-    against an unresolvable table would set an agent's expectations wrong
-    before it ever tried to run."""
+    """The validate path records the same DENIED evidence, but reports rather
+    than raises (amended 2026-09-04).
+
+    `validate` opens no connector and returns no row -- its contract is to
+    tell the caller what is wrong with a statement. An unresolvable reference
+    is already refused, precisely, by `UNKNOWN_OR_UNAUTHORIZED_TABLE`, which
+    names the offending table; raising `AuthorizationRejected` instead threw
+    that away and returned a generic authorization error. It also preempted
+    the catalog allowlist check the adversarial corpus depends on, so the
+    whole corpus failed for any dialect whose statements the guard accepts.
+
+    What is asserted here is the property AU-15 actually wanted: the attempt
+    is denied, and it is attributable in the ledger. `execute` still raises --
+    see `test_unresolvable_table_reference_fails_closed_on_execute`, which is
+    the path where an unresolved axis could precede real source contact."""
     org, datasource, workspace = await _prepare_workspace(session, mode=ENFORCE)
     _patch_executor(monkeypatch)
 
-    with pytest.raises(AuthorizationRejected) as excinfo:
-        await _gateway().validate(
-            session,
-            datasource=datasource,
-            context=security_context(organization_id=org.id, principal_id="alice"),
-            correlation_id="corr-au11-unresolvable-validate",
-            sql="SELECT id FROM ghost_table",
-            requested_limit=10,
-            workspace_id=workspace.id,
-        )
+    report = await _gateway().validate(
+        session,
+        datasource=datasource,
+        context=security_context(organization_id=org.id, principal_id="alice"),
+        correlation_id="corr-au11-unresolvable-validate",
+        sql="SELECT id FROM ghost_table",
+        requested_limit=10,
+        workspace_id=workspace.id,
+    )
 
-    assert excinfo.value.reason_code == "unresolvable_table_references"
+    assert not report.valid
+    assert "UNKNOWN_OR_UNAUTHORIZED_TABLE" in report.codes()
+    denied = (
+        await session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.correlation_id == "corr-au11-unresolvable-validate",
+                AuditEvent.outcome == "DENIED",
+            )
+        )
+    ).all()
+    assert len(denied) == 1, "one validation is one audit row"
+    assert denied[0].details.get("reason") == "unresolvable_table_references", (
+        "the unresolvable reference must still be attributable in the ledger"
+    )
 
 
 async def test_table_less_statement_is_still_permitted_by_the_fail_closed_guard(
