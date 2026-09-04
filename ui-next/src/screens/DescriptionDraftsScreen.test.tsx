@@ -33,13 +33,14 @@ vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
-    listAssetDescriptionDrafts: (
-      organizationId: string,
-      filters: unknown,
-      signal?: AbortSignal,
-    ) => listAssetDescriptionDrafts(organizationId, filters, signal),
-    submitAssetDescriptionDraft: (draftId: string, signal?: AbortSignal) =>
-      submitAssetDescriptionDraft(draftId, signal),
+    // Forwarded with a spread so the spy records exactly the arguments the
+    // caller passed. Naming the parameters and re-passing them appended an
+    // explicit `undefined` for every omitted optional, which made
+    // `toHaveBeenCalledWith("d1")` fail against a one-argument call.
+    listAssetDescriptionDrafts: (...args: unknown[]) =>
+      (listAssetDescriptionDrafts as (...a: unknown[]) => unknown)(...args),
+    submitAssetDescriptionDraft: (...args: unknown[]) =>
+      (submitAssetDescriptionDraft as (...a: unknown[]) => unknown)(...args),
   };
 });
 

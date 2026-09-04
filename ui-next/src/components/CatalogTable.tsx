@@ -87,6 +87,10 @@ function GlossaryChipRow({ terms, tableId }: { terms: readonly string[]; tableId
           type="button"
           role="listitem"
           className="cglossary__chip"
+          // `listitem` is not a name-from-content role, so without an explicit
+          // label the accessible name falls through to `title` and a screen
+          // reader announces the instruction instead of the term.
+          aria-label={t}
           title={`Open glossary term: ${t}`}
           onClick={openTerm(t)}
         >
@@ -98,6 +102,7 @@ function GlossaryChipRow({ terms, tableId }: { terms: readonly string[]; tableId
           type="button"
           role="listitem"
           className="cglossary__chip cglossary__chip--more"
+          aria-label={`+${overflow} more`}
           title={`${overflow} more glossary term${overflow === 1 ? "" : "s"}`}
           onClick={openAllForTable}
         >

@@ -342,12 +342,12 @@ export async function listAssetTermLinks(
     return { items: [], limit: query.limit ?? 100, offset: 0, total: 0 };
   }
   const params = new URLSearchParams();
-  if (typeof query.limit === "number") params.set("limit", String(query.limit));
+  // The default is sent rather than left to the server's own: this function
+  // already documents 100 and returns it in the empty-page branch above, so
+  // omitting it made the two paths disagree about the page size.
+  params.set("limit", String(query.limit ?? 100));
   if (query.cursor) params.set("offset", query.cursor);
-  const qs = params.toString();
-  const path = qs
-    ? `/v1/metadata/tables/${query.tableId}/glossary-links?${qs}`
-    : `/v1/metadata/tables/${query.tableId}/glossary-links`;
+  const path = `/v1/metadata/tables/${query.tableId}/glossary-links?${params.toString()}`;
   const page = await apiRequest<Page>(path, { method: "GET" }, signal);
   let items = (page.items as AssetTermLinkRead[]) ?? [];
   if (query.termId) items = items.filter((l) => l.term_id === query.termId);

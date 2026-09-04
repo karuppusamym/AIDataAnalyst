@@ -28,8 +28,11 @@ vi.mock("../lib/api", async (importOriginal) => {
   return {
     ...actual,
     fetchCatalogRows: (query: unknown, signal?: AbortSignal) => fetchCatalogRows(query, signal),
-    generateAssetDescriptionDrafts: (organizationId: string, tableIds: string[], signal?: AbortSignal) =>
-      generateAssetDescriptionDrafts(organizationId, tableIds, signal),
+    // Spread-forwarded so the spy records exactly what the caller passed;
+    // re-passing named parameters appended an explicit `undefined` for the
+    // omitted signal and broke every two-argument assertion.
+    generateAssetDescriptionDrafts: (...args: unknown[]) =>
+      (generateAssetDescriptionDrafts as (...a: unknown[]) => unknown)(...args),
   };
 });
 

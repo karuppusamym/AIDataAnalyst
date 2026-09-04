@@ -294,13 +294,21 @@ describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
     const ReviewQueueScreen = await loadScreen();
     render(<ReviewQueueScreen />);
 
-    // Title carries the term name, not the raw proposal uuid.
+    // Title carries the term name, not the raw proposal uuid. Scoped to the
+    // row's title button: a single-item queue auto-opens its detail panel, so
+    // the name legitimately appears twice.
     await waitFor(() =>
-      expect(screen.getByText(/Monthly Recurring Revenue/)).toBeInTheDocument(),
+      expect(
+        screen.getByText(/Monthly Recurring Revenue/, { selector: ".prop__title" }),
+      ).toBeInTheDocument(),
     );
-    // Subtitle carries the target asset and the confidence percentage.
-    expect(screen.getByText(/finance\.mrr_daily/)).toBeInTheDocument();
-    expect(screen.getByText(/confidence 88%/)).toBeInTheDocument();
+    // Subtitle carries the target asset and the confidence percentage. Same
+    // duplication as the title: the row and the auto-opened panel both show
+    // them, so this asserts the row's own subtitle.
+    expect(
+      screen.getByText(/finance\.mrr_daily/, { selector: ".prop__extra" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/confidence 88%/, { selector: ".prop__extra" })).toBeInTheDocument();
   });
 
   it("GLOSSARY_TERM_VERSION row shows the term name in the title and the definition diff below", async () => {
@@ -308,7 +316,9 @@ describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
     const ReviewQueueScreen = await loadScreen();
     render(<ReviewQueueScreen />);
 
-    await waitFor(() => expect(screen.getByText(/Revenue/)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/Revenue/, { selector: ".prop__title" })).toBeInTheDocument(),
+    );
     // The diff row is emitted by the existing DiffEntries component.
     expect(screen.getByText(/definition/)).toBeInTheDocument();
     expect(screen.getByText(/net inflow attributable to sales/)).toBeInTheDocument();

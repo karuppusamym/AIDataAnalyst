@@ -51,19 +51,18 @@ vi.mock("../lib/_api_append", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/_api_append")>();
   return {
     ...actual,
-    listGlossaryTerms: (organizationId: string, query?: unknown, signal?: AbortSignal) =>
-      listGlossaryTerms(organizationId, query, signal),
-    createGlossaryTerm: (organizationId: string, body: unknown, signal?: AbortSignal) =>
-      createGlossaryTerm(organizationId, body, signal),
-    submitGlossaryTermVersion: (versionId: string, signal?: AbortSignal) =>
-      submitGlossaryTermVersion(versionId, signal),
-    linkTermToTable: (
-      organizationId: string,
-      tableId: string,
-      termId: string,
-      opts?: unknown,
-      signal?: AbortSignal,
-    ) => linkTermToTable(organizationId, tableId, termId, opts, signal),
+    // Spread-forwarded so each spy records exactly the arguments the caller
+    // passed. Re-passing named parameters appended an explicit `undefined`
+    // for every omitted optional, so a two-argument call was recorded as
+    // three and every `toHaveBeenCalledWith` on it failed.
+    listGlossaryTerms: (...args: unknown[]) =>
+      (listGlossaryTerms as (...a: unknown[]) => unknown)(...args),
+    createGlossaryTerm: (...args: unknown[]) =>
+      (createGlossaryTerm as (...a: unknown[]) => unknown)(...args),
+    submitGlossaryTermVersion: (...args: unknown[]) =>
+      (submitGlossaryTermVersion as (...a: unknown[]) => unknown)(...args),
+    linkTermToTable: (...args: unknown[]) =>
+      (linkTermToTable as (...a: unknown[]) => unknown)(...args),
   };
 });
 
@@ -285,12 +284,13 @@ describe("BusinessMeaningScreen Glossary tab (P1-03)", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /Link to finance\.mrr_daily/ }));
 
     await waitFor(() =>
+      // Four arguments, not five: the screen omits the optional signal, and
+      // the mock now forwards exactly what it was given rather than padding.
       expect(linkTermToTable).toHaveBeenCalledWith(
         expect.any(String),
         "t_1",
         "term_1",
         expect.any(Object),
-        undefined,
       ),
     );
   });
