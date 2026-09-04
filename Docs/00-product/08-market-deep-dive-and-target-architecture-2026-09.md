@@ -94,7 +94,7 @@ The lesson: differentiators that live *inside* one execution plane are being abs
 |---|---|---|---|
 | Core commitment | Deterministic authority, models propose (ADR-0001) | Unchanged | **Unchanged and extended to agents**: an agent is a principal with a capability envelope; it never gains authority by being an agent |
 | Stores | PostgreSQL, Neo4j (per-org optional), Redis, Temporal, Kafka, MinIO | Remove Neo4j; defer Kafka; add pgvector and ephemeral DuckDB | Same as 2026-08, plus a **persisted pgvector index wired to the live path** and an **event-sourced agent ledger** table family in PostgreSQL |
-| Modules | 21 target, 5 extracted, flat package for the rest | 16 merged modules | **14 modules**: the 16, with `capability` split into `agent-workforce` (agents, contracts, autonomy tiers, supervision) and `capability` (tools, context products, MCP, model gateway), and `knowledge` folded into `semantics-glossary` until INV-10 is accepted |
+| Modules | 21 target, 5 extracted, flat package for the rest | 16 merged modules | **14 modules**: the 16, with the capability module split into **agent-workforce** (agents, contracts, autonomy tiers, supervision) and **capability** (tools, context products, MCP, model gateway), and **knowledge** folded into **semantics-glossary** until INV-10 is accepted |
 | Agent model | One orchestrator, one operational run type, registry entries not linked to runs | Not addressed | **Named role agents** bound to `AiAsset` versions with an `AgentRun → AiAssetVersion` link, per-agent identity, budget, autonomy tier, eval gate, and kill switch scope |
 | Human roles | Six personas do the work | Same | **Six personas supervise agents**; the persona's workbench becomes an agent inbox plus the residual high-judgement tasks |
 | Review | Unified queue, maker ≠ checker | Same | **Risk-tiered review**: tier-0 and tier-1 proposals may be checked by an independent reviewer agent with sampled human audit; tier-2+ remains human-only. Requires ADR-0027 amending INV-8's wording, not its intent |
@@ -139,7 +139,7 @@ flowchart TB
     L3 -. "every action is a proposal or an approved tool call" .-> L0
 ```
 
-### 4.2 The agent contract (module `agent-workforce`)
+### 4.2 The agent contract (module **agent-workforce**)
 
 Every agent, whether it replaces a role or specialises a task, is an `AiAsset` of kind `AGENT` with a governed version that declares:
 

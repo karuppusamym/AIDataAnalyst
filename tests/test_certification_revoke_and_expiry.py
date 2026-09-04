@@ -57,7 +57,9 @@ async def db() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
-async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, MetadataTable, MetadataColumn]:
+async def _seed_org_and_table(
+    session: AsyncSession,
+) -> tuple[Organization, MetadataTable, MetadataColumn]:
     org = Organization(name="Bank", slug=f"bank-{uuid4().hex[:8]}")
     session.add(org)
     await session.flush()
@@ -92,13 +94,17 @@ async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, Meta
     session.add(datasource)
     await session.flush()
     catalog = MetadataCatalog(
-        organization_id=org.id, datasource_id=datasource.id, name="warehouse",
+        organization_id=org.id,
+        datasource_id=datasource.id,
+        name="warehouse",
         fingerprint="fp",
     )
     session.add(catalog)
     await session.flush()
     schema = MetadataSchema(
-        organization_id=org.id, catalog_id=catalog.id, name="public",
+        organization_id=org.id,
+        catalog_id=catalog.id,
+        name="public",
         fingerprint="fp",
     )
     session.add(schema)
@@ -127,6 +133,29 @@ async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, Meta
     session.add(column)
     await session.flush()
     return org, table, column
+
+
+async def _extra_table(
+    session: AsyncSession, *, org: Organization, schema_id, name: str
+) -> MetadataTable:
+    """Another ACTIVE table in the same schema, for tests that need more than
+    one certifiable asset (see `ix_asset_certification_active_tuple`)."""
+    table = MetadataTable(
+        organization_id=org.id,
+        datasource_id=(
+            await session.scalar(
+                select(MetadataTable.datasource_id).where(MetadataTable.schema_id == schema_id)
+            )
+        ),
+        schema_id=schema_id,
+        name=name,
+        object_type="TABLE",
+        status="ACTIVE",
+        fingerprint="fp",
+    )
+    session.add(table)
+    await session.flush()
+    return table
 
 
 async def _seed_active_cert(
@@ -180,6 +209,7 @@ async def _invoke_revoke(
     table_id,
     reason: str,
     principal_id: str,
+    organization_id=None,
     column_id=None,
     settings=None,
 ):
@@ -190,7 +220,7 @@ async def _invoke_revoke(
     context = SecurityContext(
         principal_id=principal_id,
         principal_type="USER",
-        organization_id=None,
+        organization_id=organization_id,
         roles=frozenset({"DataSteward"}),
     )
     body = CertificationRevokeRequest(reason=reason, column_id=column_id)
@@ -209,7 +239,11 @@ async def test_revoke_by_different_principal_succeeds(db: AsyncSession) -> None:
     cert = await _seed_active_cert(db, org=org, table=table, certified_by="steward-a")
 
     result = await _invoke_revoke(
-        db, table_id=table.id, reason="policy change: quarterly", principal_id="steward-b"
+        db,
+        table_id=table.id,
+        reason="policy change: quarterly",
+        organization_id=org.id,
+        principal_id="steward-b",
     )
 
     assert result.status == "REVOKED"
@@ -223,9 +257,7 @@ async def test_revoke_by_different_principal_succeeds(db: AsyncSession) -> None:
     assert refreshed.revoked_at is not None
 
     audits = (
-        await db.scalars(
-            select(AuditEvent).where(AuditEvent.action == "CERTIFICATION_REVOKED")
-        )
+        await db.scalars(select(AuditEvent).where(AuditEvent.action == "CERTIFICATION_REVOKED"))
     ).all()
     assert len(audits) == 1
     outboxes = (
@@ -247,7 +279,11 @@ async def test_revoke_by_same_principal_is_refused(db: AsyncSession) -> None:
 
     with pytest.raises(HTTPException) as exc:
         await _invoke_revoke(
-            db, table_id=table.id, reason="second thoughts about it", principal_id="steward-a"
+            db,
+            table_id=table.id,
+            reason="second thoughts about it",
+            organization_id=org.id,
+            principal_id="steward-a",
         )
     assert exc.value.status_code == 409
     assert exc.value.detail == "same_principal_cannot_revoke_own_certification"
@@ -262,11 +298,15 @@ async def test_revoke_by_same_principal_is_refused(db: AsyncSession) -> None:
 async def test_revoke_nonexistent_certification_returns_404(db: AsyncSession) -> None:
     from fastapi import HTTPException
 
-    _org, table, _ = await _seed_org_and_table(db)
+    org, table, _ = await _seed_org_and_table(db)
     # no active cert seeded
     with pytest.raises(HTTPException) as exc:
         await _invoke_revoke(
-            db, table_id=table.id, reason="policy change: quarterly", principal_id="steward-b"
+            db,
+            table_id=table.id,
+            reason="policy change: quarterly",
+            organization_id=org.id,
+            principal_id="steward-b",
         )
     assert exc.value.status_code == 404
 
@@ -276,9 +316,7 @@ async def test_revoke_column_leaves_table_certification_untouched(
     db: AsyncSession,
 ) -> None:
     org, table, column = await _seed_org_and_table(db)
-    table_cert = await _seed_active_cert(
-        db, org=org, table=table, certified_by="steward-a"
-    )
+    table_cert = await _seed_active_cert(db, org=org, table=table, certified_by="steward-a")
     column_cert = await _seed_active_cert(
         db, org=org, table=table, column=column, certified_by="steward-c"
     )
@@ -287,6 +325,7 @@ async def test_revoke_column_leaves_table_certification_untouched(
         db,
         table_id=table.id,
         reason="column semantics changed",
+        organization_id=org.id,
         principal_id="steward-b",
         column_id=column.id,
     )
@@ -306,6 +345,7 @@ async def test_maker_checker_can_be_disabled_via_settings(db: AsyncSession) -> N
         db,
         table_id=table.id,
         reason="single-steward deployment revoke",
+        organization_id=org.id,
         principal_id="steward-a",
         settings=_make_settings(certification_revoke_enforce_maker_checker=False),
     )
@@ -322,10 +362,21 @@ async def test_expiry_warning_only_fires_inside_window(db: AsyncSession) -> None
     org, table, _ = await _seed_org_and_table(db)
     now = datetime.now(UTC)
 
+    # One table per certification: `ix_asset_certification_active_tuple`
+    # permits a single ACTIVE row per (table, asset_type, column), and this
+    # test needs three ACTIVE rows to cover in-window / out-of-window /
+    # already-expired. Seeding them on one table asserted nothing about the
+    # warning window -- it just violated the index.
+    warn_table = table
+    far_table = await _extra_table(db, org=org, schema_id=table.schema_id, name="accounts_far")
+    expired_table = await _extra_table(
+        db, org=org, schema_id=table.schema_id, name="accounts_expired"
+    )
+
     # ACTIVE, expires in 3 days -> should warn
     warn_cert = AssetCertification(
         organization_id=org.id,
-        table_id=table.id,
+        table_id=warn_table.id,
         asset_type="TABLE",
         status="ACTIVE",
         rationale="Quarterly certification against the approved data contract.",
@@ -335,7 +386,7 @@ async def test_expiry_warning_only_fires_inside_window(db: AsyncSession) -> None
     # ACTIVE, expires in 10 days -> outside window
     far_cert = AssetCertification(
         organization_id=org.id,
-        table_id=table.id,
+        table_id=far_table.id,
         asset_type="TABLE",
         status="ACTIVE",
         rationale="Longer certification against the approved data contract.",
@@ -345,7 +396,7 @@ async def test_expiry_warning_only_fires_inside_window(db: AsyncSession) -> None
     # ACTIVE but already past its expires_at (query-time EXPIRED) -> skip
     expired_cert = AssetCertification(
         organization_id=org.id,
-        table_id=table.id,
+        table_id=expired_table.id,
         asset_type="TABLE",
         status="ACTIVE",
         rationale="Older certification against the approved data contract.",
@@ -361,17 +412,14 @@ async def test_expiry_warning_only_fires_inside_window(db: AsyncSession) -> None
 
     audits = (
         await db.scalars(
-            select(AuditEvent).where(
-                AuditEvent.action == "CERTIFICATION_EXPIRY_WARNING_SENT"
-            )
+            select(AuditEvent).where(AuditEvent.action == "CERTIFICATION_EXPIRY_WARNING_SENT")
         )
     ).all()
     assert len(audits) == 1
     outboxes = (
         await db.scalars(
             select(OutboxEvent).where(
-                OutboxEvent.event_type
-                == "catalog.asset.certification_expiry_warning.v1"
+                OutboxEvent.event_type == "catalog.asset.certification_expiry_warning.v1"
             )
         )
     ).all()
@@ -479,8 +527,10 @@ def test_revoked_status_has_a_single_writer_in_the_codebase() -> None:
             # assignment landing "REVOKED" on a `.status` attribute. Bare
             # occurrences of the string (frozenset members, docstrings,
             # comments, log details) do not match this pattern.
-            if ".status = \"REVOKED\"" in line or ".status = 'REVOKED'" in line:
-                writers.append((str(pyfile.relative_to(root)), lineno, line.strip()))
+            if '.status = "REVOKED"' in line or ".status = 'REVOKED'" in line:
+                # `as_posix()` so the substring match below is not defeated
+                # by Windows backslash separators.
+                writers.append((pyfile.relative_to(root).as_posix(), lineno, line.strip()))
     # AssetCertification writer is the catalog router; everything else that
     # matches is a *different* domain (delegation, product_marketplace, ...)
     # setting its OWN model's status, not AssetCertification's.
@@ -489,6 +539,6 @@ def test_revoked_status_has_a_single_writer_in_the_codebase() -> None:
         for path, lineno, snippet in writers
         if "atlas/modules/catalog/router.py" in path
     ]
-    assert (
-        len(cert_writers) == 1
-    ), f"expected exactly one AssetCertification REVOKED writer, found {cert_writers}"
+    assert len(cert_writers) == 1, (
+        f"expected exactly one AssetCertification REVOKED writer, found {cert_writers}"
+    )

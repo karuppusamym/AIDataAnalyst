@@ -52,7 +52,7 @@ The policy itself is a governed artifact: creating or changing one goes through 
 
 ### The sweep
 
-`src/aida/auto_approve_sweep.py` (new module, wired into `workflows/scheduler.py` alongside the reaper, hourly cadence, configurable):
+A new module at src/aida/auto_approve_sweep.py (does not exist yet -- this ADR is Proposed), wired into `workflows/scheduler.py` alongside the reaper, hourly cadence, configurable:
 
 ```
 for each active AutoApprovePolicy:
