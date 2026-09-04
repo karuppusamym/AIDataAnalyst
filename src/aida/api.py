@@ -28,6 +28,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled, reserve_analysis_run
+from aida.graph_store import GraphStoreUnavailable, build_graph_store, resolve_graph_store_backend
 from aida.integration_service import ensure_organization_integration_policy
 from aida.model_gateway import SUPPORTED_MODEL_PROVIDERS
 from aida.models import (
@@ -37,16 +38,19 @@ from aida.models import (
     AnalysisTask,
     ColumnProfile,
     DataSource,
+    MetadataCatalog,
     MetadataColumn,
     MetadataConstraint,
     MetadataIndex,
     MetadataPartition,
+    MetadataSchema,
     MetadataTable,
     Organization,
     OrganizationIntegrationPolicy,
     ProfilingExceptionPolicy,
     QueryExecution,
-    TableProfile,)
+    TableProfile,
+)
 from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.prompt_risk import DeterministicPromptRiskClassifier
 from aida.query_gateway import (
@@ -72,6 +76,7 @@ from aida.schemas import (
     ClassificationFeedIngestResponse,
     ColumnProfileRead,
     CursorPage,
+    GraphSummaryRead,
     GroundingFragmentReceiptRead,
     MetadataColumnRead,
     MetadataConstraintRead,
@@ -90,12 +95,12 @@ from aida.schemas import (
     QueryLineageRead,
     SqlValidationRequest,
     SqlValidationResponse,
-    TableProfileRead,)
+    TableProfileRead,
+)
 from aida.secrets import SecretResolver
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.sql_guard import SqlGuard
 from aida.workflows.discovery import DatasourceDiscoveryWorkflow
-
 
 router = APIRouter(prefix="/v1")
 
@@ -1161,8 +1166,7 @@ async def request_profiling_exception_policy(
         raise HTTPException(
             status_code=422,
             detail=(
-                "classification must be one of the sensitive classes: "
-                f"{sorted(SENSITIVE_CLASSES)}"
+                f"classification must be one of the sensitive classes: {sorted(SENSITIVE_CLASSES)}"
             ),
         )
     existing = await session.scalar(
@@ -1277,9 +1281,7 @@ async def decide_profiling_exception_policy(
         raise HTTPException(status_code=404, detail="profiling exception policy not found")
     enforce_organization(context, policy.organization_id)
     if policy.status != "PENDING":
-        raise HTTPException(
-            status_code=409, detail="profiling exception policy is already decided"
-        )
+        raise HTTPException(status_code=409, detail="profiling exception policy is already decided")
     if policy.requested_by == context.principal_id:
         raise HTTPException(status_code=409, detail="maker-checker separation is required")
     now = datetime.now(UTC)
@@ -1381,6 +1383,108 @@ async def revoke_profiling_exception_policy(
 # ---------------------------------------------------------------------------
 # CT-5: asset certification lifecycle with expiry (table or column)
 # ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/datasources/{datasource_id}/graph-summary",
+    response_model=GraphSummaryRead,
+)
+async def get_graph_summary(
+    datasource_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "MetadataAdmin", "Analyst", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> GraphSummaryRead:
+    """Reconciles the configured graph store's projection against PostgreSQL's
+    authoritative counts (C7 / ADR-0020 amendment, Group J: the backend is now
+    a per-organization setting, resolved through `aida.graph_store`, rather
+    than always Neo4j). A `disabled` organization gets an explicit 503, not a
+    zeroed or degraded summary (INV-4)."""
+    datasource = await session.get(DataSource, datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=404, detail="datasource not found")
+    enforce_organization(context, datasource.organization_id)
+
+    backend = await resolve_graph_store_backend(session, datasource.organization_id, settings)
+    if backend == "disabled":
+        raise HTTPException(status_code=503, detail="graph store disabled for this organization")
+    try:
+        summary = await build_graph_store(backend, settings).graph_summary(session, datasource)
+    except GraphStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail="metadata graph unavailable") from exc
+    catalogs = summary.catalogs
+    authoritative = {
+        "catalogs": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(MetadataCatalog)
+                .where(MetadataCatalog.datasource_id == datasource.id)
+            )
+            or 0
+        ),
+        "schemas": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(MetadataSchema)
+                .join(MetadataCatalog, MetadataCatalog.id == MetadataSchema.catalog_id)
+                .where(MetadataCatalog.datasource_id == datasource.id)
+            )
+            or 0
+        ),
+        "tables": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(MetadataTable)
+                .where(MetadataTable.datasource_id == datasource.id)
+            )
+            or 0
+        ),
+        "columns": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(MetadataColumn)
+                .join(MetadataTable, MetadataTable.id == MetadataColumn.table_id)
+                .where(MetadataTable.datasource_id == datasource.id)
+            )
+            or 0
+        ),
+        "constraints": int(
+            await session.scalar(
+                select(func.count())
+                .select_from(MetadataConstraint)
+                .where(MetadataConstraint.datasource_id == datasource.id)
+            )
+            or 0
+        ),
+    }
+    projected = {
+        "catalogs": catalogs,
+        "schemas": summary.schemas,
+        "tables": summary.tables,
+        "columns": summary.columns,
+        "constraints": summary.constraints,
+    }
+    projection_lag = {name: max(authoritative[name] - projected[name], 0) for name in authoritative}
+    if not catalogs:
+        projection_status = "NOT_PROJECTED"
+    elif any(projection_lag.values()):
+        projection_status = "LAGGING"
+    else:
+        projection_status = "CURRENT"
+    return GraphSummaryRead(
+        datasource_id=datasource.id,
+        catalogs=catalogs,
+        schemas=projected["schemas"],
+        tables=projected["tables"],
+        columns=projected["columns"],
+        sensitive_columns=summary.sensitive_columns,
+        constraints=projected["constraints"],
+        foreign_key_relationships=summary.foreign_key_relationships,
+        projection_status=projection_status,
+        projection_lag=projection_lag,
+    )
 
 
 @router.post("/query/validate", response_model=SqlValidationResponse)
@@ -1647,9 +1751,7 @@ async def get_agent_run_grounding_receipts(
                 object_id=fragment.object_id,
                 fragment_digest=fragment.fragment_digest,
                 annotation_version_id=(
-                    UUID(fragment.annotation_version_id)
-                    if fragment.annotation_version_id
-                    else None
+                    UUID(fragment.annotation_version_id) if fragment.annotation_version_id else None
                 ),
                 annotation_version=(
                     fragment.resolved_annotation_version.version
