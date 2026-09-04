@@ -270,6 +270,15 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.product_consumer_binding_set.v1` | Consumer pinned (or moved) to a specific version for staged rollout (AT-7b) | product_key, consumer_principal_id, bound_version |
 | `context.product_consumer_binding_removed.v1` | Consumer unpinned; falls back to the current published version (AT-7b) | product_key, consumer_principal_id |
 
+### Agent workforce (AG-10 / ADR-0027) — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `agent.contract_published.v1` | AG-10: an agent version's contract was created or replaced -- its workload identity, capability envelope, autonomy tier, budget caps and kill scope. The contract is the agent's authority, so a change here is the change an auditor most wants to see | ai_asset_version_id, agent_principal_id, autonomy_tier |
+| `agent.kill_switch_engaged.v1` | AG-10: an agent's kill switch was engaged. Takes effect on the agent's very next run -- the orchestrator queries the switch live rather than caching it | ai_asset_version_id, kill_scope, agent_principal_id |
+| `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
+| `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |
+
 ### AI registry — topic `atlas.governance.v1`
 
 | Event | Trigger | Key payload |

@@ -1119,6 +1119,17 @@ class GovernanceReview(Base, TimestampMixin):
     decided_by: Mapped[str | None] = mapped_column(String(255))
     decision_reason: Mapped[str | None] = mapped_column(String(2000))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # --- ADR-0027 pre-review columns ------------------------------------
+    # Written by `reviewer_agent.pre_review_pending`, read by the agent
+    # inbox and by `auto_decide_tier0_tier1`. All nullable: a review that
+    # has never been pre-reviewed is the pre-ADR-0027 shape exactly, and
+    # every read site treats NULL as "no recommendation".
+    risk_tier: Mapped[str | None] = mapped_column(String(2))
+    pre_review_recommendation: Mapped[str | None] = mapped_column(String(20))
+    pre_review_confidence: Mapped[float | None] = mapped_column(Float)
+    pre_review_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    pre_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pre_reviewed_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class GovernedTool(Base, TimestampMixin):
@@ -5272,3 +5283,79 @@ class AgentTask(Base, TimestampMixin):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# --- ADR-0027: risk-tiered agent checking (reviewer agent) ---
+# ---------------------------------------------------------------------------
+# `GovernanceReview` gains the pre-review columns below rather than a
+# side table, because every one of them is a property *of that review*
+# and every read of the review queue wants them in the same row. The
+# sampled-audit ledger is separate (`ReviewAuditSample`) because a sample
+# has its own lifecycle: it outlives the decision and is resolved by a
+# different principal at a different time.
+
+REVIEW_PRE_REVIEW_RECOMMENDATIONS = ("APPROVE", "REJECT", "NONE")
+REVIEW_AUDIT_SAMPLE_OUTCOMES = ("PENDING", "AGREED", "DISAGREED")
+
+
+class ReviewAuditSample(Base, TimestampMixin):
+    """One agent decision the deterministic sampler routed to a human.
+
+    ADR-0027 condition (b): every agent-approved item is sampled at a
+    configurable rate with a 5% floor. A row here is the open question
+    "was the agent right?"; `human_outcome` is the answer, and the
+    DISAGREED rate per object type is the metric ADR-0027's revisit
+    trigger watches.
+    """
+
+    __tablename__ = "review_audit_sample"
+    __table_args__ = (
+        Index("ix_review_audit_sample_org_outcome", "organization_id", "human_outcome"),
+        UniqueConstraint("governance_review_id", name="uq_review_audit_sample_review"),
+        CheckConstraint(
+            "decision IN ('APPROVED', 'REJECTED')", name="ck_review_audit_sample_decision"
+        ),
+        CheckConstraint(
+            "human_outcome IN ('PENDING', 'AGREED', 'DISAGREED')",
+            name="ck_review_audit_sample_outcome",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    governance_review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(2), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    human_outcome: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    human_principal_id: Mapped[str | None] = mapped_column(String(255))
+    human_rationale: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReviewerAgentState(Base, TimestampMixin):
+    """Per-organization suspension state (ADR-0027 condition (c)).
+
+    Separate from the process-wide `reviewer_agent_suspended` setting so a
+    single human action can stop one organization's agent decisions without
+    a deployment and without affecting any other tenant.
+    """
+
+    __tablename__ = "reviewer_agent_state"
+    __table_args__ = (UniqueConstraint("organization_id", name="uq_reviewer_agent_state_org"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False
+    )
+    suspended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    suspended_by: Mapped[str | None] = mapped_column(String(255))
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suspension_reason: Mapped[str | None] = mapped_column(Text)

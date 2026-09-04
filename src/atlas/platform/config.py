@@ -295,6 +295,30 @@ class Settings(BaseSettings):
     #: parsed edge" -- the one posture a bank onboarding an untrusted source
     #: most wants. Any value above 1.0 disables auto-activation entirely.
     lineage_high_confidence_auto_active_threshold: float = Field(default=0.9, ge=0.0)
+
+    # --- ADR-0027: risk-tiered agent checking -----------------------------
+    # Off by default. An organization that never enables this sees exactly
+    # today's behaviour: every review item waits for a human.
+    reviewer_agent_enabled: bool = False
+    #: The reviewer agent's own workload identity. Must differ from every
+    #: human principal -- `reviewer_agent` refuses to decide an item it
+    #: proposed, and `agent_contracts.validate_contract_definition` refuses a
+    #: contract whose principal collides with its author.
+    reviewer_agent_principal_id: str = "agent:reviewer"
+    #: The tier ceiling. Never widens what the agent may touch beyond what
+    #: `review_risk_tiers` classifies -- the allowlist is derived from the
+    #: tier table, not from this value (ADR-0027 condition (a)).
+    reviewer_agent_max_tier: Literal["T0", "T1", "T2", "T3"] = "T1"
+    #: ADR-0027 condition (b): a hard 5% floor, re-applied at the point of
+    #: use and not only here.
+    reviewer_agent_sampling_rate: float = Field(default=0.05, ge=0.05, le=1.0)
+    #: ADR-0027 condition (c): one human action stops every agent decision.
+    #: This is the process-wide switch; the per-organization one lives in
+    #: `reviewer_agent_state`.
+    reviewer_agent_suspended: bool = False
+    #: Confidence at or above which the agent recommends APPROVE for a
+    #: tier-eligible item that carries a confidence at all.
+    reviewer_agent_approve_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and
