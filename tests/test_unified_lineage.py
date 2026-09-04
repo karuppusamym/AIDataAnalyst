@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.config import Settings
@@ -259,6 +260,26 @@ def _equality_filters(whereclause: Any) -> list[tuple[str, str, Any]]:
     return [(table.name, col_name, value)]
 
 
+def _apply_column_defaults(obj: Any) -> None:
+    """Fill unset columns from their ORM scalar defaults, as a real flush would.
+
+    This store keeps objects exactly as constructed, so a column whose value
+    comes from `mapped_column(default=...)` stayed `None` here while it would
+    be populated against a real database. P1-05 made that visible: it added
+    `review_status` (default "ACTIVE") to the parsed lineage edge tables and a
+    graph filter on `review_status == "ACTIVE"`, so every seeded edge silently
+    dropped out of the graph and tests asserted on an empty result.
+    """
+    mapper = sa_inspect(type(obj))
+    for column in mapper.columns:
+        attr = mapper.get_property_by_column(column).key
+        if getattr(obj, attr, None) is not None:
+            continue
+        default = column.default
+        if default is not None and default.is_scalar:
+            setattr(obj, attr, default.arg)
+
+
 class _FakeScalarsResult:
     def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
@@ -293,6 +314,7 @@ class _FakeUnifiedLineageSession:
     def seed(self, obj: Any) -> Any:
         if getattr(obj, "id", None) is None:
             obj.id = uuid4()
+        _apply_column_defaults(obj)
         self._store[type(obj)][obj.id] = obj
         return obj
 

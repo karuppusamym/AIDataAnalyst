@@ -22,7 +22,6 @@ from sqlalchemy.pool import StaticPool
 import aida.models  # noqa: F401 -- registers every table on Base.metadata
 from aida import ownership_expiry_warning as expiry_module
 from aida.db import Base
-from aida.timeutil import as_utc
 from aida.identity_events import (
     emit_principal_deleted,
     emit_principal_merged,
@@ -53,7 +52,7 @@ from aida.ownership_principal_lifecycle import (
 )
 from aida.security import SecurityContext
 from aida.stewardship_service import apply_bulk_operation
-
+from aida.timeutil import as_utc
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -85,7 +84,9 @@ def _make_settings(**overrides):
     return s
 
 
-async def _seed_org_and_table(session: AsyncSession, *, name: str = "accounts") -> tuple[Organization, MetadataTable]:
+async def _seed_org_and_table(
+    session: AsyncSession, *, name: str = "accounts"
+) -> tuple[Organization, MetadataTable]:
     org = Organization(name="Bank", slug=f"bank-{uuid4().hex[:8]}")
     session.add(org)
     await session.flush()
@@ -93,7 +94,10 @@ async def _seed_org_and_table(session: AsyncSession, *, name: str = "accounts") 
     session.add(lob)
     await session.flush()
     domain = DataDomain(
-        organization_id=org.id, line_of_business_id=lob.id, name="Finance", code=f"F{uuid4().hex[:4]}"
+        organization_id=org.id,
+        line_of_business_id=lob.id,
+        name="Finance",
+        code=f"F{uuid4().hex[:4]}",
     )
     session.add(domain)
     await session.flush()
@@ -119,10 +123,14 @@ async def _seed_org_and_table(session: AsyncSession, *, name: str = "accounts") 
     )
     session.add(datasource)
     await session.flush()
-    catalog = MetadataCatalog(organization_id=org.id, datasource_id=datasource.id, name="w", fingerprint="fp")
+    catalog = MetadataCatalog(
+        organization_id=org.id, datasource_id=datasource.id, name="w", fingerprint="fp"
+    )
     session.add(catalog)
     await session.flush()
-    schema = MetadataSchema(organization_id=org.id, catalog_id=catalog.id, name="public", fingerprint="fp")
+    schema = MetadataSchema(
+        organization_id=org.id, catalog_id=catalog.id, name="public", fingerprint="fp"
+    )
     session.add(schema)
     await session.flush()
     table = MetadataTable(
@@ -199,7 +207,9 @@ async def test_assign_ownership_sets_expires_at_180_days(db, monkeypatch):
     now = datetime.now(UTC)
     await apply_bulk_operation(db, op, reviewer="steward-x", now=now)
     row = (
-        await db.scalars(select(OwnershipAssignment).where(OwnershipAssignment.subject_id == str(table.id)))
+        await db.scalars(
+            select(OwnershipAssignment).where(OwnershipAssignment.subject_id == str(table.id))
+        )
     ).one()
     assert row.expires_at is not None
     # SQLite reads `timestamptz` back naive; normalise before subtracting.
@@ -226,9 +236,7 @@ async def test_reaffirm_extends_expires_at_and_records_audit(db):
         roles=frozenset({"DataSteward"}),
     )
     now = datetime.now(UTC)
-    await _reaffirm_one(
-        db, context=ctx, assignment=assignment, now=now, reaffirm_days=180
-    )
+    await _reaffirm_one(db, context=ctx, assignment=assignment, now=now, reaffirm_days=180)
     await db.flush()
     assert assignment.reaffirmed_at == now
     assert assignment.reaffirmed_by == "alice"
@@ -266,7 +274,9 @@ async def test_warning_sweep_only_hits_rows_inside_window(db):
     now = datetime.now(UTC)
     a5 = await _seed_active_assignment(db, org=org, table=t1, expires_at=now + timedelta(days=5))
     _a20 = await _seed_active_assignment(db, org=org, table=t2, expires_at=now + timedelta(days=20))
-    _a_exp = await _seed_active_assignment(db, org=org, table=t3, expires_at=now - timedelta(days=1))
+    _a_exp = await _seed_active_assignment(
+        db, org=org, table=t3, expires_at=now - timedelta(days=1)
+    )
     _a_leg = await _seed_active_assignment(db, org=org, table=t_legacy, expires_at=None)
 
     warnings = await warn_upcoming_ownership_expiries(db, now=now, warn_days=14)
@@ -290,9 +300,7 @@ async def test_warning_sweep_idempotent_within_cooldown(db):
     first = await warn_upcoming_ownership_expiries(db, now=now, warn_days=14)
     assert len(first) == 1
     # Second run one day later is inside `warn_days * 2` cooldown -- no re-warn.
-    second = await warn_upcoming_ownership_expiries(
-        db, now=now + timedelta(days=1), warn_days=14
-    )
+    second = await warn_upcoming_ownership_expiries(db, now=now + timedelta(days=1), warn_days=14)
     assert second == []
 
 
@@ -365,9 +373,7 @@ async def test_principal_deleted_flips_active_to_lapsed_leaver(db):
     a1 = await _seed_active_assignment(db, org=org, table=t1, owner_principal="alice")
     a2 = await _seed_active_assignment(db, org=org, table=t2, owner_principal="alice")
     settings = _make_settings()
-    result = await handle_principal_deleted(
-        db, settings=settings, principal_id="alice"
-    )
+    result = await handle_principal_deleted(db, settings=settings, principal_id="alice")
     assert set(result.lapsed_assignment_ids) == {a1.id, a2.id}
     r1 = await db.get(OwnershipAssignment, a1.id)
     r2 = await db.get(OwnershipAssignment, a2.id)
@@ -390,9 +396,7 @@ async def test_principal_merged_redirects_active_ownership(db):
     a1 = await _seed_active_assignment(db, org=org, table=t1, owner_principal="alice")
     a2 = await _seed_active_assignment(db, org=org, table=t2, owner_principal="alice")
     # Successor already owns t2 -- that one lapses instead of duplicating
-    _clash = await _seed_active_assignment(
-        db, org=org, table=t2, owner_principal="bob"
-    )
+    _clash = await _seed_active_assignment(db, org=org, table=t2, owner_principal="bob")
     settings = _make_settings()
     result = await handle_principal_merged(
         db,
@@ -420,9 +424,7 @@ async def test_leaver_handler_config_gated_off_is_noop(db):
     org, t1 = await _seed_org_and_table(db, name="t1")
     a = await _seed_active_assignment(db, org=org, table=t1, owner_principal="alice")
     settings = _make_settings(ownership_leaver_auto_reassign=False)
-    result = await handle_principal_deleted(
-        db, settings=settings, principal_id="alice"
-    )
+    result = await handle_principal_deleted(db, settings=settings, principal_id="alice")
     assert result.lapsed_assignment_ids == ()
     row = await db.get(OwnershipAssignment, a.id)
     assert row.status == "ACTIVE"
@@ -444,16 +446,12 @@ async def test_emit_principal_deleted_records_event_and_reconciles(db):
         roles=frozenset({"PlatformAdmin"}),
     )
     settings = _make_settings()
-    await emit_principal_deleted(
-        db, settings=settings, context=ctx, principal_id="alice"
-    )
+    await emit_principal_deleted(db, settings=settings, context=ctx, principal_id="alice")
     row = await db.get(OwnershipAssignment, a.id)
     assert row.status == "LAPSED_LEAVER"
     outbox = (
         await db.scalars(
-            select(OutboxEvent).where(
-                OutboxEvent.event_type == "identity.principal.deleted.v1"
-            )
+            select(OutboxEvent).where(OutboxEvent.event_type == "identity.principal.deleted.v1")
         )
     ).all()
     assert len(outbox) == 1
@@ -481,9 +479,7 @@ async def test_emit_principal_merged_records_event_and_redirects(db):
     assert row.owner_principal == "bob"
     outbox = (
         await db.scalars(
-            select(OutboxEvent).where(
-                OutboxEvent.event_type == "identity.principal.merged.v1"
-            )
+            select(OutboxEvent).where(OutboxEvent.event_type == "identity.principal.merged.v1")
         )
     ).all()
     assert len(outbox) == 1
@@ -497,8 +493,8 @@ async def test_emit_principal_merged_records_event_and_redirects(db):
 
 @pytest.mark.asyncio
 async def test_bulk_reaffirm_savepoint_partial_success(db, monkeypatch):
-    from aida.stewardship_api import bulk_reaffirm_ownership_assignments
     from aida.schemas import OwnershipAssignmentBulkReaffirmRequest
+    from aida.stewardship_api import bulk_reaffirm_ownership_assignments
 
     org, t1 = await _seed_org_and_table(db, name="t1")
     _, t2 = await _seed_org_and_table(db, name="t2")
@@ -519,9 +515,7 @@ async def test_bulk_reaffirm_savepoint_partial_success(db, monkeypatch):
         organization_id=org.id,
         roles=frozenset({"DataSteward"}),
     )
-    body = OwnershipAssignmentBulkReaffirmRequest(
-        assignment_ids=[*ok_ids, bad_id]
-    )
+    body = OwnershipAssignmentBulkReaffirmRequest(assignment_ids=[*ok_ids, bad_id])
     result = await bulk_reaffirm_ownership_assignments(
         body=body, settings=settings, context=ctx, session=db
     )
@@ -541,7 +535,7 @@ async def test_run_ownership_expiry_pass_rate_limited():
     expiry_module._reset_due_state_for_tests()
     # First call runs; second call (0s later) is skipped.
     # We don't need a session -- the second call short-circuits before opening one.
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
     settings = _make_settings(ownership_expiry_warn_interval_seconds=60)
     with patch("aida.ownership_expiry_warning.session_factory", create=True):

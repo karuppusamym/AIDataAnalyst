@@ -48,7 +48,9 @@ from aida.task_tracking import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DISCOVERY_SOURCE = (REPO_ROOT / "src" / "aida" / "workflows" / "discovery.py").read_text(encoding="utf-8")
+DISCOVERY_SOURCE = (
+    REPO_ROOT / "src" / "aida" / "workflows" / "discovery.py"
+).read_text(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Pure functions: identity, status transition, retry-history bookkeeping

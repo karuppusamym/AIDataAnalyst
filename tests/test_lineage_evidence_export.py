@@ -304,6 +304,10 @@ async def test_export_matches_the_live_graph_and_impact_endpoints_for_the_same_a
         node_limit=300,
         edge_limit=1_500,
         suggestion_status="APPROVED",
+        # Passed explicitly: this calls the handler directly, so FastAPI never
+        # resolves its `Query(...)` defaults and P1-05's new parameter would
+        # arrive as the Query object itself.
+        include_pending_edges=False,
         context=ctx,
         session=session,
         settings=_SETTINGS,

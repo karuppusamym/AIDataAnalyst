@@ -28,6 +28,7 @@ from aida.certification_evidence import (
 )
 from aida.db import Base
 from aida.models import (
+    AnalysisRun,
     AssetCertification,
     AssetDocumentation,
     AssetDocumentationVersion,
@@ -39,14 +40,12 @@ from aida.models import (
     GlossaryTermVersion,
     LineOfBusiness,
     MetadataCatalog,
-    MetadataColumn,
     MetadataSchema,
     MetadataTable,
     Organization,
     OwnershipAssignment,
     Project,
     TableProfile,
-    AnalysisRun,
 )
 
 
@@ -95,7 +94,9 @@ async def _seed_estate(session: AsyncSession) -> tuple[Organization, MetadataTab
     )
     session.add(ds)
     await session.flush()
-    cat = MetadataCatalog(organization_id=org.id, datasource_id=ds.id, name="warehouse", fingerprint="fp")
+    cat = MetadataCatalog(
+        organization_id=org.id, datasource_id=ds.id, name="warehouse", fingerprint="fp"
+    )
     session.add(cat)
     await session.flush()
     sch = MetadataSchema(organization_id=org.id, catalog_id=cat.id, name="public", fingerprint="fp")
@@ -116,8 +117,13 @@ async def _seed_estate(session: AsyncSession) -> tuple[Organization, MetadataTab
 
 
 async def _seed_evidence_context(
-    session: AsyncSession, org: Organization, table: MetadataTable,
-    *, owners: int = 2, terms: int = 3, open_incidents: int = 0
+    session: AsyncSession,
+    org: Organization,
+    table: MetadataTable,
+    *,
+    owners: int = 2,
+    terms: int = 3,
+    open_incidents: int = 0,
 ) -> None:
     """Seed the four sources `compute_certification_evidence` reads.
     Approved doc version (v1), N ACTIVE owners, M approved terms, K open
@@ -153,9 +159,7 @@ async def _seed_evidence_context(
             )
         )
     for i in range(terms):
-        term = GlossaryTerm(
-            organization_id=org.id, term_key=f"term_{i}_{uuid4().hex[:4]}"
-        )
+        term = GlossaryTerm(organization_id=org.id, term_key=f"term_{i}_{uuid4().hex[:4]}")
         session.add(term)
         await session.flush()
         session.add(
@@ -178,7 +182,7 @@ async def _seed_evidence_context(
                 linked_by="a",
             )
         )
-    for i in range(open_incidents):
+    for _i in range(open_incidents):
         session.add(
             DataQualityIncident(
                 organization_id=org.id,
@@ -264,9 +268,7 @@ async def test_certify_table_asset_populates_evidence(db: AsyncSession) -> None:
         rationale="approved for quarterly reporting",
         expires_at=datetime.now(UTC) + timedelta(days=90),
     )
-    result = await certify_table_asset(
-        table_id=table.id, body=body, context=ctx, session=db
-    )
+    result = await certify_table_asset(table_id=table.id, body=body, context=ctx, session=db)
     assert result.evidence is not None
     assert len(result.evidence.ownership_assignment_ids) == 1
     assert len(result.evidence.glossary_term_ids) == 2
@@ -341,13 +343,9 @@ async def test_reviewed_bulk_certify_populates_evidence(db: AsyncSession) -> Non
         },
         requested_by="steward-a",
     )
-    await apply_bulk_operation(
-        db, operation=op, reviewer="reviewer-b", now=datetime.now(UTC)
-    )
+    await apply_bulk_operation(db, operation=op, reviewer="reviewer-b", now=datetime.now(UTC))
     cert = (
-        await db.scalars(
-            select(AssetCertification).where(AssetCertification.table_id == table.id)
-        )
+        await db.scalars(select(AssetCertification).where(AssetCertification.table_id == table.id))
     ).first()
     assert cert is not None
     assert cert.evidence is not None
@@ -404,9 +402,7 @@ async def test_playbook_certify_populates_evidence(db: AsyncSession) -> None:
         now=datetime.now(UTC),
     )
     cert = (
-        await db.scalars(
-            select(AssetCertification).where(AssetCertification.table_id == table.id)
-        )
+        await db.scalars(select(AssetCertification).where(AssetCertification.table_id == table.id))
     ).first()
     assert cert is not None
     assert cert.evidence is not None

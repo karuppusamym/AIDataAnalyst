@@ -2688,6 +2688,16 @@
             "title": "Created At",
             "type": "string"
           },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CertificationEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "expires_at": {
             "format": "date-time",
             "title": "Expires At",
@@ -2710,6 +2720,40 @@
           "rationale": {
             "title": "Rationale",
             "type": "string"
+          },
+          "revocation_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revocation Reason"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "revoked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked By"
           },
           "status": {
             "title": "Status",
@@ -5636,6 +5680,129 @@
           "expires_at"
         ],
         "title": "CertificationDecisionRequest",
+        "type": "object"
+      },
+      "CertificationEvidence": {
+        "additionalProperties": false,
+        "description": "P3-09: structured, machine-consumable snapshot of what a certifier\nwas implicitly attesting to at certify time -- populated on every new\nwrite alongside the free-text ``rationale`` field, empty (``None``) on\nevery pre-P3-09 row (the migration adds the column nullable and never\nbackfills historical rows in-place). Shape composed by\n``aida.certification_evidence.compute_certification_evidence``; a\nfuture ``revoke-on-evidence-change`` job keys off these fields.",
+        "properties": {
+          "backfilled": {
+            "default": false,
+            "title": "Backfilled",
+            "type": "boolean"
+          },
+          "backfilled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backfilled At"
+          },
+          "captured_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Captured At"
+          },
+          "certifier_notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Certifier Notes"
+          },
+          "description_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description Version Id"
+          },
+          "glossary_term_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Glossary Term Ids",
+            "type": "array"
+          },
+          "ownership_assignment_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Ownership Assignment Ids",
+            "type": "array"
+          },
+          "quality_snapshot": {
+            "additionalProperties": true,
+            "title": "Quality Snapshot",
+            "type": "object"
+          },
+          "schema_version": {
+            "default": "1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "supporting_dq_check_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Supporting Dq Check Ids",
+            "type": "array"
+          }
+        },
+        "title": "CertificationEvidence",
+        "type": "object"
+      },
+      "CertificationRevokeRequest": {
+        "additionalProperties": false,
+        "description": "P2-08: request body for\n``POST /v1/tables/{table_id}/certification/revoke``.\n\n``column_id`` mirrors ``CertificationDecisionRequest``: absent when\nrevoking the table-level cert, present when revoking a specific column's.\n``reason`` is required and durable -- it is stored as\n``AssetCertification.revocation_reason`` and echoed in the outbox event\nthat downstream policy decisions consume.",
+        "properties": {
+          "column_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column Id"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 10,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "CertificationRevokeRequest",
         "type": "object"
       },
       "ClassificationDecisionRead": {
@@ -18040,6 +18207,213 @@
         "title": "OutboxEventRead",
         "type": "object"
       },
+      "OwnershipAssignmentBulkReaffirmItemResult": {
+        "additionalProperties": false,
+        "properties": {
+          "assignment_id": {
+            "format": "uuid",
+            "title": "Assignment Id",
+            "type": "string"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "outcome": {
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assignment_id",
+          "outcome"
+        ],
+        "title": "OwnershipAssignmentBulkReaffirmItemResult",
+        "type": "object"
+      },
+      "OwnershipAssignmentBulkReaffirmRequest": {
+        "additionalProperties": false,
+        "description": "P2-07: body for `POST /v1/ownership-assignments/bulk-reaffirm`.\n\nBounded at 100 ids per call to match the same limit\n`bulk_decide_relationship_candidates` and other bulk endpoints use --\nkeeps the SAVEPOINT loop's worst-case wall time predictable.",
+        "properties": {
+          "assignment_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Assignment Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "assignment_ids"
+        ],
+        "title": "OwnershipAssignmentBulkReaffirmRequest",
+        "type": "object"
+      },
+      "OwnershipAssignmentBulkReaffirmResult": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OwnershipAssignmentBulkReaffirmItemResult"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "reaffirmed": {
+            "title": "Reaffirmed",
+            "type": "integer"
+          },
+          "skipped": {
+            "title": "Skipped",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "reaffirmed",
+          "skipped",
+          "items"
+        ],
+        "title": "OwnershipAssignmentBulkReaffirmResult",
+        "type": "object"
+      },
+      "OwnershipAssignmentRead": {
+        "additionalProperties": false,
+        "properties": {
+          "assigned_by": {
+            "title": "Assigned By",
+            "type": "string"
+          },
+          "assignment_kind": {
+            "title": "Assignment Kind",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "expiry_warning_emitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiry Warning Emitted At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "owner_principal": {
+            "title": "Owner Principal",
+            "type": "string"
+          },
+          "owner_type": {
+            "title": "Owner Type",
+            "type": "string"
+          },
+          "reaffirmed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reaffirmed At"
+          },
+          "reaffirmed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reaffirmed By"
+          },
+          "source_rule_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Rule Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subject_id": {
+            "title": "Subject Id",
+            "type": "string"
+          },
+          "subject_type": {
+            "title": "Subject Type",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "subject_type",
+          "subject_id",
+          "owner_type",
+          "owner_principal",
+          "assignment_kind",
+          "source_rule_id",
+          "status",
+          "assigned_by",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "OwnershipAssignmentRead",
+        "type": "object"
+      },
       "OwnershipRuleCreate": {
         "additionalProperties": false,
         "properties": {
@@ -18216,6 +18590,378 @@
           "total"
         ],
         "title": "Page",
+        "type": "object"
+      },
+      "ParsedLineageEdgeBulkDecisionItem": {
+        "additionalProperties": false,
+        "properties": {
+          "edge_id": {
+            "format": "uuid",
+            "title": "Edge Id",
+            "type": "string"
+          },
+          "edge_type": {
+            "enum": [
+              "VIEW",
+              "PROCEDURE",
+              "DBT",
+              "OPENLINEAGE_TABLE",
+              "OPENLINEAGE_COLUMN"
+            ],
+            "title": "Edge Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "edge_id",
+          "edge_type"
+        ],
+        "title": "ParsedLineageEdgeBulkDecisionItem",
+        "type": "object"
+      },
+      "ParsedLineageEdgeBulkDecisionItemRead": {
+        "additionalProperties": false,
+        "properties": {
+          "edge_id": {
+            "format": "uuid",
+            "title": "Edge Id",
+            "type": "string"
+          },
+          "edge_type": {
+            "title": "Edge Type",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "enum": [
+              "SUCCEEDED",
+              "FAILED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "edge_id",
+          "edge_type",
+          "status"
+        ],
+        "title": "ParsedLineageEdgeBulkDecisionItemRead",
+        "type": "object"
+      },
+      "ParsedLineageEdgeBulkDecisionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVED",
+              "REJECTED"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedLineageEdgeBulkDecisionItem"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Items",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "decision",
+          "reason"
+        ],
+        "title": "ParsedLineageEdgeBulkDecisionRequest",
+        "type": "object"
+      },
+      "ParsedLineageEdgeBulkDecisionResultRead": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVED",
+              "REJECTED"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "failed_count": {
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "requested_count": {
+            "title": "Requested Count",
+            "type": "integer"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedLineageEdgeBulkDecisionItemRead"
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "succeeded_count": {
+            "title": "Succeeded Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "decision",
+          "requested_count",
+          "succeeded_count",
+          "failed_count",
+          "results"
+        ],
+        "title": "ParsedLineageEdgeBulkDecisionResultRead",
+        "type": "object"
+      },
+      "ParsedLineageEdgeDecisionRead": {
+        "additionalProperties": false,
+        "properties": {
+          "edge_id": {
+            "format": "uuid",
+            "title": "Edge Id",
+            "type": "string"
+          },
+          "edge_type": {
+            "title": "Edge Type",
+            "type": "string"
+          },
+          "review_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Reason"
+          },
+          "review_status": {
+            "title": "Review Status",
+            "type": "string"
+          },
+          "reviewed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed At"
+          },
+          "reviewed_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed By"
+          }
+        },
+        "required": [
+          "edge_id",
+          "edge_type",
+          "review_status",
+          "reviewed_by",
+          "reviewed_at",
+          "review_reason"
+        ],
+        "title": "ParsedLineageEdgeDecisionRead",
+        "type": "object"
+      },
+      "ParsedLineageEdgeDecisionRequest": {
+        "additionalProperties": false,
+        "description": "Decision on one PROPOSED parsed-lineage edge.",
+        "properties": {
+          "decision": {
+            "enum": [
+              "APPROVED",
+              "REJECTED"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "edge_type": {
+            "enum": [
+              "VIEW",
+              "PROCEDURE",
+              "DBT",
+              "OPENLINEAGE_TABLE",
+              "OPENLINEAGE_COLUMN"
+            ],
+            "title": "Edge Type",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "edge_type",
+          "decision",
+          "reason"
+        ],
+        "title": "ParsedLineageEdgeDecisionRequest",
+        "type": "object"
+      },
+      "ParsedLineageEdgeReviewQueueItemRead": {
+        "additionalProperties": false,
+        "description": "One PROPOSED parsed-lineage edge as it appears in the review queue.\n\nDeliberately narrow: enough for the reviewer to judge the edge and\ndereference the source SQL, without loading the raw SQL text into\nthe queue payload itself (source_sql_reference names the tool/id\nthe reviewer's UI dereferences on demand).",
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "edge_id": {
+            "format": "uuid",
+            "title": "Edge Id",
+            "type": "string"
+          },
+          "edge_type": {
+            "enum": [
+              "VIEW",
+              "PROCEDURE",
+              "DBT",
+              "OPENLINEAGE_TABLE",
+              "OPENLINEAGE_COLUMN"
+            ],
+            "title": "Edge Type",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "source_label": {
+            "title": "Source Label",
+            "type": "string"
+          },
+          "source_sql_reference": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Source Sql Reference",
+            "type": "object"
+          },
+          "target_label": {
+            "title": "Target Label",
+            "type": "string"
+          },
+          "transformation_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transformation Type"
+          }
+        },
+        "required": [
+          "edge_id",
+          "edge_type",
+          "organization_id",
+          "created_at",
+          "created_by",
+          "confidence",
+          "source_label",
+          "target_label",
+          "transformation_type",
+          "source_sql_reference"
+        ],
+        "title": "ParsedLineageEdgeReviewQueueItemRead",
+        "type": "object"
+      },
+      "ParsedLineageEdgeReviewQueueRead": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ParsedLineageEdgeReviewQueueItemRead"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "limit",
+          "offset",
+          "total"
+        ],
+        "title": "ParsedLineageEdgeReviewQueueRead",
         "type": "object"
       },
       "PlanBudgetCreate": {
@@ -21066,6 +21812,11 @@
       "RelationshipCandidateReviewItemRead": {
         "additionalProperties": false,
         "properties": {
+          "can_review": {
+            "default": true,
+            "title": "Can Review",
+            "type": "boolean"
+          },
           "candidate": {
             "$ref": "#/components/schemas/RelationshipCandidateRead"
           },
@@ -36654,7 +37405,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Cross Boundary Grants"
+        "summary": "List Cross Boundary Grants",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "description": "Request permission for `body.target_data_domain_id` to see across the\nboundary into `domain_id` (the source, owning domain). Creates the grant in\nPENDING_APPROVAL and files it into the same governance review queue every\nother governed object here uses (ADR-0017 SS4) \u2014 it only becomes ACTIVE once\na *different* principal approves it via POST /governance/reviews/{id}/decision.",
@@ -36788,7 +37542,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Request Cross Boundary Grant"
+        "summary": "Request Cross Boundary Grant",
+        "tags": [
+          "workspaces"
+        ]
       }
     },
     "/v1/data-domains/{domain_id}/cross-source-object-resolution-candidates/discover": {
@@ -37122,6 +37879,18 @@
               ],
               "title": "Suggestion Status",
               "type": "string"
+            }
+          },
+          {
+            "description": "P1-05: opt in to include PROPOSED parsed-lineage edges (view/procedure/dbt/OpenLineage). Default false keeps them in the review queue only, per ADR-0026.",
+            "in": "query",
+            "name": "include_pending_edges",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "P1-05: opt in to include PROPOSED parsed-lineage edges (view/procedure/dbt/OpenLineage). Default false keeps them in the review queue only, per ADR-0026.",
+              "title": "Include Pending Edges",
+              "type": "boolean"
             }
           },
           {
@@ -47406,6 +48175,18 @@
             }
           },
           {
+            "description": "P1-05: opt in to include PROPOSED parsed-lineage edges (view/procedure/dbt/OpenLineage). Default false keeps them in the review queue only, per ADR-0026.",
+            "in": "query",
+            "name": "include_pending_edges",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "P1-05: opt in to include PROPOSED parsed-lineage edges (view/procedure/dbt/OpenLineage). Default false keeps them in the review queue only, per ADR-0026.",
+              "title": "Include Pending Edges",
+              "type": "boolean"
+            }
+          },
+          {
             "in": "header",
             "name": "X-Principal-Id",
             "required": false,
@@ -51934,6 +52715,451 @@
         ]
       }
     },
+    "/v1/lineage/parsed-edges/bulk-decide": {
+      "post": {
+        "description": "Decide up to 100 PROPOSED parsed-lineage edges in one call.\n\nMirrors `bulk_decide_relationship_candidates` exactly: same\nmaker-checker, same PENDING-only rule (already-decided edges are\nmarked FAILED and skipped), and each item runs inside its own\nSAVEPOINT via `session.begin_nested()` so one bad edge does not\nroll back the whole batch. The outbox event is emitted once per\nsuccessful item, not once per batch, so a downstream projector\nreprocesses one edge at a time.",
+        "operationId": "bulk_decide_parsed_lineage_edges_v1_lineage_parsed_edges_bulk_decide_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParsedLineageEdgeBulkDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParsedLineageEdgeBulkDecisionResultRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Decide Parsed Lineage Edges",
+        "tags": [
+          "parsed-lineage-review"
+        ]
+      }
+    },
+    "/v1/lineage/parsed-edges/review-queue": {
+      "get": {
+        "description": "List PROPOSED parsed-lineage edges across the five tables --\nthe review queue itself. Filtered by the caller's own organization,\nordered newest first; `edge_type` narrows to one table, and\n`min_confidence` filters on the coerced 0..1 confidence (string\nenums FULL/PARTIAL/LOW map to 1.0/0.6/0.3).",
+        "operationId": "get_parsed_lineage_review_queue_v1_lineage_parsed_edges_review_queue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "edge_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 40,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Edge Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "min_confidence",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 1.0,
+                  "minimum": 0.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Min Confidence"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParsedLineageEdgeReviewQueueRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Parsed Lineage Review Queue",
+        "tags": [
+          "parsed-lineage-review"
+        ]
+      }
+    },
+    "/v1/lineage/parsed-edges/{edge_id}/decision": {
+      "post": {
+        "description": "Approve or reject one PROPOSED parsed lineage edge.\n\nSame guarantees as `decide_relationship_candidate`: maker-checker\n(creator cannot decide, 409), already-decided rejected (409), audit\n+ outbox emit on success. On APPROVE the edge flips to ACTIVE and\nthe next unified-lineage read / graph-projector run picks it up;\non REJECT it flips to REJECTED and stays out of the graph while\nremaining queryable evidence that a reviewer said no.",
+        "operationId": "decide_parsed_lineage_edge_v1_lineage_parsed_edges__edge_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "edge_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Edge Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParsedLineageEdgeDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParsedLineageEdgeDecisionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Parsed Lineage Edge",
+        "tags": [
+          "parsed-lineage-review"
+        ]
+      }
+    },
     "/v1/lines-of-business/{lob_id}/data-domains": {
       "get": {
         "operationId": "list_data_domains_v1_lines_of_business__lob_id__data_domains_get",
@@ -52079,7 +53305,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Data Domains"
+        "summary": "List Data Domains",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "operationId": "create_data_domain_v1_lines_of_business__lob_id__data_domains_post",
@@ -52212,7 +53441,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Data Domain"
+        "summary": "Create Data Domain",
+        "tags": [
+          "workspaces"
+        ]
       }
     },
     "/v1/lines-of-business/{lob_id}/projects": {
@@ -52360,7 +53592,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Projects"
+        "summary": "List Projects",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "operationId": "create_project_v1_lines_of_business__lob_id__projects_post",
@@ -52493,7 +53728,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Project"
+        "summary": "Create Project",
+        "tags": [
+          "workspaces"
+        ]
       }
     },
     "/v1/marketplace/access-requests": {
@@ -58368,7 +59606,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Organizations"
+        "summary": "List Organizations",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "operationId": "create_organization_v1_organizations_post",
@@ -58491,7 +59732,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Organization"
+        "summary": "Create Organization",
+        "tags": [
+          "workspaces"
+        ]
       }
     },
     "/v1/organizations/{organization_id}/access-policies": {
@@ -58903,7 +60147,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Agent Evaluations"
+        "summary": "List Agent Evaluations",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "operationId": "run_agent_evaluation_v1_organizations__organization_id__agent_evaluations_post",
@@ -65206,7 +66453,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "List Lines Of Business"
+        "summary": "List Lines Of Business",
+        "tags": [
+          "workspaces"
+        ]
       },
       "post": {
         "operationId": "create_line_of_business_v1_organizations__organization_id__lines_of_business_post",
@@ -65339,7 +66589,10 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Line Of Business"
+        "summary": "Create Line Of Business",
+        "tags": [
+          "workspaces"
+        ]
       }
     },
     "/v1/organizations/{organization_id}/metric-conflicts": {
@@ -69234,6 +70487,16 @@
             },
             "description": "Successful Response"
           },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkStewardshipOperationRead"
+                }
+              }
+            },
+            "description": "Request exceeded the bulk-governance threshold or the caller's role requires review; a `BulkStewardshipOperation` has been created and awaits an independent approver (maker != checker)."
+          },
           "422": {
             "content": {
               "application/json": {
@@ -69503,6 +70766,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkStewardshipOperationRead"
+                }
+              }
+            },
+            "description": "Request exceeded the bulk-governance threshold or the caller's role requires review; a `BulkStewardshipOperation` has been created and awaits an independent approver (maker != checker)."
           },
           "422": {
             "content": {
@@ -70206,6 +71479,264 @@
         "summary": "Requeue Outbox Event",
         "tags": [
           "operations"
+        ]
+      }
+    },
+    "/v1/ownership-assignments/bulk-reaffirm": {
+      "post": {
+        "description": "P2-07: the owner (or admin) reaffirms up to 100 ACTIVE assignments in\none call. Per-item SAVEPOINT -- one item failing (missing, wrong org,\nnot-owner, already-LAPSED) doesn't roll the rest back. Same\npartial-success shape as `bulk_decide_relationship_candidates` and\n`bulk_reject_link_proposals`.",
+        "operationId": "bulk_reaffirm_ownership_assignments_v1_ownership_assignments_bulk_reaffirm_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OwnershipAssignmentBulkReaffirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnershipAssignmentBulkReaffirmResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bulk Reaffirm Ownership Assignments",
+        "tags": [
+          "glossary-stewardship"
+        ]
+      }
+    },
+    "/v1/ownership-assignments/{assignment_id}/reaffirm": {
+      "post": {
+        "description": "P2-07: the owner (or admin) reaffirms an ACTIVE assignment. Extends\n`expires_at` by `settings.ownership_reaffirm_days`, records audit +\noutbox.",
+        "operationId": "reaffirm_ownership_assignment_v1_ownership_assignments__assignment_id__reaffirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assignment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assignment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OwnershipAssignmentRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reaffirm Ownership Assignment",
+        "tags": [
+          "glossary-stewardship"
         ]
       }
     },
@@ -80880,6 +82411,142 @@
           }
         },
         "summary": "Certify Table Asset"
+      }
+    },
+    "/v1/tables/{table_id}/certification/revoke": {
+      "post": {
+        "description": "P2-08: manual revocation of an ACTIVE certification.\n\nFlips the currently ACTIVE certification row for the ``(table, asset_type,\ncolumn?)`` tuple to ``status = \"REVOKED\"``, stamping\n``revoked_at`` / ``revoked_by`` / ``revocation_reason`` atomically. This is\nthe ONLY writer of the ``REVOKED`` status; before P2-08 the value existed\nin the state machine (readers in\n``catalog/service.py::_certification_state`` and\n``asset_usage_decision.py`` already gated on it) but no code ever produced\nit, so a revoked-by-policy certification could only be worked around by\nletting it expire.\n\nMaker-checker: by default, the principal who granted the certification\ncannot revoke it -- the same two-person rule module 08 applies to reviewed\nstewardship operations, applied here at the certification itself.\nOff-switchable via ``certification_revoke_enforce_maker_checker`` for\nsingle-steward deployments where the rule would deadlock every revoke.\n\nEmits a ``catalog.asset.certification_revoked.v1`` outbox event so\ndownstream projections (retrieval demotion, policy-decision cache,\n``asset_usage_decision``'s ``REVOKED -> BLOCKED``) invalidate promptly.",
+        "operationId": "revoke_table_certification_v1_tables__table_id__certification_revoke_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CertificationRevokeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetCertificationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Revoke Table Certification"
       }
     },
     "/v1/tables/{table_id}/columns": {

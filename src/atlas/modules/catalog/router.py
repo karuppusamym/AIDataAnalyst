@@ -932,10 +932,10 @@ async def _route_bulk_through_governance(
     from aida.stewardship_api import _create_bulk_operation
 
     body = BulkStewardshipOperationCreate(
-        operation_type=operation_type,  # type: ignore[arg-type]
+        operation_type=operation_type,
         subject_type="TABLE",
         subject_ids=subject_ids,
-        owner_type=owner_type,  # type: ignore[arg-type]
+        owner_type=owner_type,
         owner_principal=owner_principal,
         rationale=rationale,
         expires_at=expires_at,

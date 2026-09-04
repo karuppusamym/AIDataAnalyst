@@ -129,7 +129,7 @@ def _quality_state(
 
 def _certification_state(
     certification: AssetCertification | None, *, now: datetime
-) -> tuple[str, datetime | None, dict | None]:
+) -> tuple[str, datetime | None, dict[str, Any] | None]:
     """Return ``(state, expires_at, evidence_summary)`` for one table's
     latest certification row.
 
@@ -510,7 +510,7 @@ def apply_certify_item(
     rationale: str,
     expires_at: datetime,
     certified_by: str,
-    evidence: dict | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> tuple[AssetCertification, list[AssetCertification]]:
     """Certify one table. Returns ``(new_certification, superseded_priors)``:
     ``superseded_priors`` are the table's prior ACTIVE table-level

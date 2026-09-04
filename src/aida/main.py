@@ -82,8 +82,8 @@ from aida.unified_lineage_api import router as unified_lineage_router
 from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
 from aida.worm_archive import ArchiveConfig, archive_pending_audit_events
-from atlas.modules.catalog.router import router as catalog_router
-from atlas.modules.connectivity.router import router as connectivity_router
+from atlas.modules.catalog.api import router as catalog_router
+from atlas.modules.connectivity.api import router as connectivity_router
 
 settings = get_settings()
 configure_logging(settings.log_level)

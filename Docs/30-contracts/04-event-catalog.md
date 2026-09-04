@@ -64,6 +64,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `secret_reference.rotated` | Reference updated | reference_scheme, path_hash |
 | `organization.integration_policy.updated.v1` | Organization integration policy updated | organization_id, transformation_metadata_integrations |
 | `data_domain.created.v1` | Data domain created under a line of business | data_domain_id, line_of_business_id, parent_domain_id |
+| `identity.principal.deleted.v1` | A principal was removed at the identity provider; consumed by the ownership leaver handler, which flips that principal's ACTIVE ownership rows to LAPSED and routes the ones it orphaned | principal_id, organization_id |
+| `identity.principal.merged.v1` | Two identity-provider principals were merged; active ownership held by the source principal is redirected to the target | source_principal_id, target_principal_id, organization_id |
 
 ### Connectivity — topic `atlas.operational.v1`
 
@@ -106,6 +108,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `catalog.drift.detected` | Run completed with drift | run_id, created, changed, deprecated |
 | `catalog.asset.certified` | Certification granted | object_id, certifier, expires_at |
 | `catalog.asset.certification_expired.v1` | DQ-3: a table's certification expired because it crossed `quality_certification_sustained_threshold` unresolved quality incidents (off by default -- `quality_certification_expiry_enabled`) | table_id, certification_id |
+| `catalog.asset.certification_revoked.v1` | P2-08: a steward manually revoked an active certification. Maker != checker applies -- the principal who certified cannot revoke. Downstream readers (`asset_usage_decision`'s `REVOKED -> BLOCKED`) invalidate promptly | certification_id, table_id, column_id, revoked_by, reason |
+| `catalog.asset.certification_expiry_warning.v1` | A certification inside the expiry-warning window, emitted once per cooldown so a steward can re-certify before it lapses | certification_id, table_id, expires_at, days_until |
 | `rename_candidate.decided.v1` | CT-4: steward approved/rejected a proposed rename | candidate_id, status |
 | `cross_source_resolution_candidate.decided.v1` | CT-6: steward approved/rejected a proposed cross-source match | candidate_id, status |
 | `catalog.table.newly_created.v1` | ING-4 / P0-01: `persist_discovery_snapshot` observed a table this call actually created (as opposed to reactivated/updated); consumed by `aida.newly_created_table_drafter.run_newly_created_table_drafter_consumer` to auto-enqueue an asset-description draft and unblock a semantic-inference proposal without a steward manually POSTing each drafter endpoint | organization_id, datasource_id, table_id, analysis_run_id |
@@ -167,6 +171,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `glossary.term_deprecated.v1` | Approved term deprecation applied | operation_id, applied_count |
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
 | `ownership.leaver_reassigned.v1` | Approved leaver-reassignment bulk operation applied | operation_id, applied_count |
+| `ownership.assignment.expiry_warning.v1` | An ownership assignment is inside its expiry-warning window, emitted once per cooldown so the owner can reaffirm before it lapses | assignment_id, notify_principal, expires_at, days_until |
+| `ownership.assignment.lapsed.v1` | An ownership assignment passed its `expires_at` without being reaffirmed and was flipped to LAPSED; routed for reassignment when it was the subject's last owner | assignment_id, subject_type, subject_id, was_last_owner |
+| `ownership.assignment.reaffirmed.v1` | An owner reaffirmed an assignment before it lapsed, extending `expires_at` by the configured ownership term | assignment_id, subject_type, subject_id, expires_at |
+| `ownership.assignment.lapsed_leaver.v1` | An `identity.principal.deleted.v1` event flipped this principal's ACTIVE ownership to LAPSED. Distinct from `ownership.assignment.lapsed.v1`, which is time-based: this one is identity-driven and carries no grace period | assignment_id, principal_id, subject_type, subject_id |
+| `ownership.assignment.merged.v1` | An `identity.principal.merged.v1` event redirected an active ownership assignment from the source principal to the target | assignment_id, source_principal_id, target_principal_id |
 | `metadata.playbook.created.v1` | AT-1: a saved, scheduled bulk-metadata playbook was created | playbook_id, name, action |
 | `document.uploaded.v1` | N8: a data-dictionary document was uploaded and parsed into sections | document_id, project_id, section_count |
 | `document.mapped.v1` | N8: a document's sections were resolved against the live catalog | document_id, matched_count, unmatched_count |

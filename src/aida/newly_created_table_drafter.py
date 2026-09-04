@@ -185,7 +185,7 @@ async def _completed_analysis_run_id(
     (409 when absent); on the auto-enqueue path we defer instead of
     failing so a later completion event can pick this table back up.
     """
-    return await session.scalar(
+    run_id: UUID | None = await session.scalar(
         select(AnalysisRun.id)
         .where(
             AnalysisRun.datasource_id == datasource_id,
@@ -194,6 +194,7 @@ async def _completed_analysis_run_id(
         .order_by(AnalysisRun.updated_at.desc())
         .limit(1)
     )
+    return run_id
 
 
 async def enqueue_description_draft_for_table(
@@ -421,7 +422,8 @@ async def handle_newly_created_table(
 
 def _decode_event(raw: bytes) -> dict[str, Any]:
     """Same envelope shape `outbox_publisher.serialize_event` writes."""
-    return json.loads(raw)
+    decoded: dict[str, Any] = json.loads(raw)
+    return decoded
 
 
 async def run_newly_created_table_drafter_consumer() -> None:

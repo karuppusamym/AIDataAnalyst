@@ -64,7 +64,7 @@ def _coerce_confidence_to_float(confidence: str | float | int | None) -> float:
     slipped past the parser."""
     if confidence is None:
         return 0.0
-    if isinstance(confidence, (int, float)):
+    if isinstance(confidence, int | float):
         try:
             return max(0.0, min(1.0, float(confidence)))
         except (TypeError, ValueError):

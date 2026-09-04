@@ -377,7 +377,7 @@ def _rate(flags: Iterable[bool]) -> float:
 
 
 def load_retrieval_corpus(path: Path) -> list[RetrievalCase]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return [
         RetrievalCase(
             id=case["id"],
@@ -469,7 +469,7 @@ class ToolSelectionReport:
 
 
 def load_tool_selection_corpus(path: Path) -> list[ToolSelectionCase]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     return [
         ToolSelectionCase(
             id=case["id"],
@@ -624,7 +624,7 @@ def find_regressions(
 
 
 def _load_baseline(path: Path) -> dict[str, float]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     metrics = data.get("metrics")
     if not isinstance(metrics, dict):
         raise ValueError(f"baseline at {path} has no 'metrics' object")
@@ -643,7 +643,7 @@ def _write_baseline(
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -778,7 +778,7 @@ def _write_report(
         lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _metric_row(

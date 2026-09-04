@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -22,7 +21,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 import aida.models  # noqa: F401 -- registers every table on Base.metadata
-from aida import certification_expiry_warning as expiry_module
 from aida.certification_expiry_warning import warn_upcoming_certification_expiries
 from aida.db import Base
 from aida.models import (
@@ -39,7 +37,6 @@ from aida.models import (
     OutboxEvent,
     Project,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -213,9 +210,9 @@ async def _invoke_revoke(
     column_id=None,
     settings=None,
 ):
-    from atlas.modules.catalog.router import revoke_table_certification
     from aida.schemas import CertificationRevokeRequest
     from aida.security import SecurityContext
+    from atlas.modules.catalog.router import revoke_table_certification
 
     context = SecurityContext(
         principal_id=principal_id,

@@ -93,6 +93,23 @@ ALLOWLIST: dict[str, str] = {
         "AG-1/AG-2/TS-6: standalone corpus module, not imported by injection_defense.py "
         "or anything else outside its own test. Known gap."
     ),
+    # --- Identity lifecycle (OW-5, P2-07) ---
+    # `identity_events.emit_principal_deleted` / `emit_principal_merged` are the
+    # *inbound* half of OW-5: they record the identity event and call the
+    # ownership lifecycle handler in one transaction. Their caller is an
+    # identity-provider integration -- an IdP webhook or directory sync -- that
+    # has not been built, so nothing in the five entry points reaches either
+    # module yet. Both are exercised end to end by
+    # tests/test_ownership_expiry_and_leaver.py; the gap is the trigger, not
+    # the behaviour. Remove both entries when the IdP integration lands.
+    "aida.identity_events": (
+        "OW-5: emission half of the identity-lifecycle handler. No IdP webhook or "
+        "directory sync calls it yet. Known gap."
+    ),
+    "aida.ownership_principal_lifecycle": (
+        "OW-5: leaver/merge ownership handler, reached only through aida.identity_events, "
+        "which is itself awaiting the IdP integration. Known gap."
+    ),
 }
 
 

@@ -54,7 +54,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 import structlog
@@ -465,7 +465,7 @@ async def _apply_rule(
     """
     reaped = 0
     for row_id in ids:
-        row = await session.get(rule.model, row_id)
+        row: Any = await session.get(rule.model, row_id)
         if row is None:
             # Raced with another writer -- fine, skip.
             continue
@@ -607,6 +607,7 @@ async def run_reaper_pass(
             except ResourceClosedError:  # pragma: no cover
                 pass
     else:
+        assert session is not None  # narrowed by `owned_session` above
         for rule in rules_to_run:
             report.rules.append(
                 await _run_rule(session, rule, effective_now, overrides)

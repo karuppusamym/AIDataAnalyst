@@ -30,6 +30,7 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.models import AssetCertification
 from aida.security import SecurityContext
@@ -166,7 +167,7 @@ def _due(last_run_at: datetime | None, now: datetime, interval: timedelta) -> bo
 
 
 async def run_certification_expiry_warning_pass(
-    settings, *, now: datetime | None = None
+    settings: Settings, *, now: datetime | None = None
 ) -> list[CertificationExpiryWarning] | None:
     """Scheduler-facing entry: run a warning sweep if the configured cadence
     has elapsed since the last one, otherwise no-op.

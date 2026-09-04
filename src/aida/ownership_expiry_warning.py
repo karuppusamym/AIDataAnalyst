@@ -31,6 +31,7 @@ from uuid import UUID
 from sqlalchemy import exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.models import OwnershipAssignment, UnownedAssetEscalation
 from aida.security import SecurityContext
@@ -305,7 +306,7 @@ def _due(last_run_at: datetime | None, now: datetime, interval: timedelta) -> bo
 
 
 async def run_ownership_expiry_pass(
-    settings, *, now: datetime | None = None
+    settings: Settings, *, now: datetime | None = None
 ) -> tuple[list[OwnershipExpiryWarning], list[OwnershipLapse]] | None:
     """Scheduler-facing entry: run the warning sweep and then the expire
     sweep if the configured cadence has elapsed, otherwise no-op.

@@ -35,6 +35,7 @@ from uuid import UUID
 from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.models import OwnershipAssignment, UnownedAssetEscalation
 from aida.security import SecurityContext
@@ -62,7 +63,7 @@ def _system_context(organization_id: UUID | None) -> SecurityContext:
 async def handle_principal_deleted(
     session: AsyncSession,
     *,
-    settings,
+    settings: Settings,
     principal_id: str,
     organization_id: UUID | None = None,
     now: datetime | None = None,
@@ -183,7 +184,7 @@ async def handle_principal_deleted(
 async def handle_principal_merged(
     session: AsyncSession,
     *,
-    settings,
+    settings: Settings,
     from_principal_id: str,
     into_principal_id: str,
     organization_id: UUID | None = None,

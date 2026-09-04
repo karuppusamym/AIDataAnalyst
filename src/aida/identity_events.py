@@ -23,6 +23,7 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.ownership_principal_lifecycle import (
     PrincipalLeaverResult,
@@ -35,7 +36,7 @@ from aida.security import SecurityContext
 async def emit_principal_deleted(
     session: AsyncSession,
     *,
-    settings,
+    settings: Settings,
     context: SecurityContext,
     principal_id: str,
     organization_id: UUID | None = None,
@@ -81,7 +82,7 @@ async def emit_principal_deleted(
 async def emit_principal_merged(
     session: AsyncSession,
     *,
-    settings,
+    settings: Settings,
     context: SecurityContext,
     from_principal_id: str,
     into_principal_id: str,

@@ -9,3 +9,14 @@ Status: scaffold only (tracker ST-01). No behavior has moved here yet; see
 """
 
 from __future__ import annotations
+
+# ST-07: the module's HTTP surface is part of its public interface. `main.py`
+# is the application's composition root and mounts this router; it must not
+# reach past `api.py` into `router.py`, which the `connectivity module privacy`
+# import-linter contract protects. Re-exported here (rather than adding
+# `aida.main` to that contract's allowed_importers) so the protected boundary
+# keeps meaning exactly what it says: only this module's public face is
+# reachable from outside.
+from atlas.modules.connectivity.router import router as router
+
+__all__ = ["router"]

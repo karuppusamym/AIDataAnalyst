@@ -115,7 +115,7 @@ class CalibrationCase:
 
 
 def load_corpus(path: Path) -> list[CalibrationCase]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     cases: list[CalibrationCase] = []
     for raw in data["cases"]:
         gt = raw["ground_truth"]
@@ -347,7 +347,7 @@ def _results_payload(
 
 def _write_report_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n", encoding="utf-8")
 
 
 def _write_report_markdown(
@@ -497,7 +497,7 @@ def _write_report_markdown(
     lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

@@ -4,6 +4,8 @@ Extracts column-level lineage edges from SQL view definitions and stored
 procedure bodies.  Definitions are parsed only -- never executed.
 """
 
+from collections.abc import Sequence
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -206,7 +208,7 @@ async def _persist_edges(
                 )
             )
         ).all()
-        for row in existing_rows:
+        for row in cast("Sequence[Any]", existing_rows):
             existing_active_keys.add(
                 (
                     row.source_table,
