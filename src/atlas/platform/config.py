@@ -332,6 +332,32 @@ class Settings(BaseSettings):
     #: labelled examples. 0 disables the stage entirely and restores the
     #: single-template behaviour query memory had before AG-11.
     exemplar_fewshot_k: int = Field(default=3, ge=0, le=10)
+
+    # --- NT-1: governance notifications ----------------------------------
+    #: Off by default. With this false nothing is sent and each attempt is
+    #: persisted as SKIPPED_DISABLED, so an operator can tell "not configured"
+    #: from "delivered" in the notification ledger.
+    governance_notifications_enabled: bool = False
+    slack_webhook_url: str | None = None
+    teams_webhook_url: str | None = None
+    governance_notification_timeout_seconds: float = Field(default=5.0, gt=0.0)
+    #: Which of the seven kinds to deliver. Narrowing this is how an
+    #: organization stops a noisy channel without turning the feature off.
+    governance_notification_events: list[str] = Field(
+        default_factory=lambda: [
+            "REVIEW_REQUESTED",
+            "REVIEW_DECIDED",
+            "QUALITY_INCIDENT_OPENED",
+            "QUALITY_INCIDENT_RESOLVED",
+            "KILL_SWITCH_ENGAGED",
+            "KILL_SWITCH_RELEASED",
+            "CERTIFICATION_EXPIRING",
+        ]
+    )
+    #: Base URL of the portal, used to build the deep link in a message. A
+    #: notification without a link is still worth sending, so an unset value
+    #: degrades the message rather than suppressing it.
+    portal_base_url: str | None = None
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and

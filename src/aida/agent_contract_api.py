@@ -36,6 +36,7 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.models import (
     AGENT_SAMPLING_RATE_FLOOR,
     AgentContract,
@@ -482,6 +483,22 @@ async def _set_kill(
         },
     )
     await session.commit()
+    # NT-1: a kill switch is the event an operator most needs pushed to them
+    # rather than discovered on a dashboard. After the commit, and never able
+    # to fail the switch itself.
+    await notify_safely(
+        session,
+        organization_id,
+        "KILL_SWITCH_ENGAGED" if engaged else "KILL_SWITCH_RELEASED",
+        {
+            "object_type": "AGENT_CONTRACT",
+            "object_id": str(ai_asset_version_id),
+            "object_name": contract.agent_principal_id,
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=get_settings(),
+    )
     return _contract_read(contract)
 
 

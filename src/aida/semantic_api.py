@@ -29,6 +29,7 @@ from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.document_ingestion import apply_document_claim, reject_document_claim
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.metric_formula_signature import find_formula_collisions
 from aida.metric_suggestion_service import (
     apply_metric_suggestion_proposal,
@@ -2186,6 +2187,21 @@ async def decide_governance_review(
         raise HTTPException(
             status_code=409, detail="governance decision conflicted with concurrent state"
         ) from exc
+    # NT-1: after the commit, so a chat outage can never roll back a
+    # governance decision. Value-free: object type, id, decider, tier.
+    await notify_safely(
+        session,
+        review.organization_id,
+        "REVIEW_DECIDED",
+        {
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+            "principal_id": context.principal_id,
+            "risk_tier": getattr(review, "risk_tier", None),
+            "occurred_at": now.isoformat(),
+        },
+        settings=get_settings(),
+    )
     return review
 
 

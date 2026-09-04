@@ -1,4 +1,4 @@
-"""RT-1: operator control over the persisted vector index.
+"""RT-1 / NT-1: operator control over the persisted vector index and governance notifications.
 
 No business logic of its own -- it delegates to `vector_index_service`, which
 owns the rules.
@@ -13,17 +13,19 @@ it is deliberately not exposed as a rival endpoint.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.embedding_provider import EmbeddingUnavailable
-from aida.models import Organization
-from aida.schemas import ApiModel
+from aida.governance_notifications import notify_governance_event
+from aida.models import NotificationEventRecord, Organization
+from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.vector_index_service import index_freshness, rebuild_vector_index
 from aida.vector_store import VectorIndexUnavailable
@@ -134,4 +136,113 @@ async def rebuild_vector_index_endpoint(
         considered=result.considered,
         embedded=result.embedded,
         skipped_unchanged=result.skipped_unchanged,
+    )
+
+
+# ---------------------------------------------------------------------------
+# NT-1: governance notifications
+# ---------------------------------------------------------------------------
+
+
+class NotificationRecordRead(ApiModel):
+    id: UUID
+    channel: str
+    status: str
+    dedup_key: str
+    sent_at: datetime | None
+    created_at: datetime
+
+
+class NotificationTestResult(ApiModel):
+    organization_id: UUID
+    enabled: bool
+    outcomes: dict[str, str]
+
+
+@router.get("/organizations/{organization_id}/notifications/governance", response_model=Page)
+async def list_governance_notifications(
+    organization_id: UUID,
+    status_filter: str | None = Query(default=None, alias="status"),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(require_roles(*INDEX_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    """The delivery ledger.
+
+    Every attempt is a row, including the ones that were skipped, so an
+    operator can tell "not configured" from "delivered" without reading logs.
+    """
+    enforce_organization(context, organization_id)
+    base = select(NotificationEventRecord).where(
+        NotificationEventRecord.organization_id == organization_id
+    )
+    counter = (
+        select(func.count())
+        .select_from(NotificationEventRecord)
+        .where(NotificationEventRecord.organization_id == organization_id)
+    )
+    if status_filter:
+        base = base.where(NotificationEventRecord.status == status_filter)
+        counter = counter.where(NotificationEventRecord.status == status_filter)
+    total = int(await session.scalar(counter) or 0)
+    rows = (
+        await session.scalars(
+            base.order_by(NotificationEventRecord.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return Page(
+        items=[
+            NotificationRecordRead(
+                id=row.id,
+                channel=row.channel,
+                status=row.status,
+                dedup_key=row.dedup_key,
+                sent_at=row.sent_at,
+                created_at=row.created_at,
+            ).model_dump(mode="json")
+            for row in rows
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/organizations/{organization_id}/notifications/governance/test",
+    response_model=NotificationTestResult,
+)
+async def send_test_governance_notification(
+    organization_id: UUID,
+    context: SecurityContext = Depends(require_roles(*INDEX_OPERATORS)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> NotificationTestResult:
+    """Send a synthetic REVIEW_REQUESTED to every configured channel.
+
+    The only way to find out that a webhook URL is wrong before a real
+    governance event needs it.
+    """
+    enforce_organization(context, organization_id)
+    outcomes = await notify_governance_event(
+        session,
+        organization_id,
+        "REVIEW_REQUESTED",
+        {
+            "object_type": "TEST",
+            "object_id": str(organization_id),
+            "object_name": "connectivity test",
+            "principal_id": context.principal_id,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
+    await session.commit()
+    return NotificationTestResult(
+        organization_id=organization_id,
+        enabled=settings.governance_notifications_enabled,
+        outcomes={outcome.channel: outcome.status for outcome in outcomes},
     )

@@ -270,6 +270,17 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.product_consumer_binding_set.v1` | Consumer pinned (or moved) to a specific version for staged rollout (AT-7b) | product_key, consumer_principal_id, bound_version |
 | `context.product_consumer_binding_removed.v1` | Consumer unpinned; falls back to the current published version (AT-7b) | product_key, consumer_principal_id |
 
+### Governance notifications (NT-1) — no topic (outbound webhook)
+
+NT-1 does not publish to the outbox. It delivers seven existing governance
+events outward to Slack or Teams and records one `NotificationEventRecord`
+per channel per attempt. The event kinds it renders are
+`REVIEW_REQUESTED`, `REVIEW_DECIDED`, `QUALITY_INCIDENT_OPENED`,
+`QUALITY_INCIDENT_RESOLVED`, `KILL_SWITCH_ENGAGED`, `KILL_SWITCH_RELEASED`
+and `CERTIFICATION_EXPIRING`. Messages are value-free -- object type, id,
+principal, risk tier and a deep link, never a row, SQL, or description text --
+and carry no actions: a notification here is never a control surface.
+
 ### Agent workforce (AG-10 / ADR-0027) — topic `atlas.governance.v1`
 
 | Event | Trigger | Key payload |

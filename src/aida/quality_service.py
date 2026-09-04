@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from aida.config import Settings, get_settings
 from aida.data_quality import QualityProfile, evaluate_quality, normalized_policy
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.models import (
     AnalysisRun,
     ColumnProfile,
@@ -255,6 +256,24 @@ async def route_and_notify_incident(
                 "channels": sorted({record.channel for record in created}),
             },
         )
+    # NT-1: alongside DQ-1's rule-matched channels, push the incident to the
+    # organization's Slack/Teams governance channel. Distinct from the rule
+    # engine above: that routes to the owners a rule names, this is the
+    # broadcast an operator watches.
+    await notify_safely(
+        session,
+        organization_id,
+        "QUALITY_INCIDENT_OPENED"
+        if incident.status in ("OPEN", "REOPENED")
+        else "QUALITY_INCIDENT_RESOLVED",
+        {
+            "object_type": "TABLE",
+            "object_id": str(incident.table_id) if incident.table_id else None,
+            "severity": incident.severity,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
     return created
 
 

@@ -3954,11 +3954,18 @@ class NotificationEventRecord(Base, TimestampMixin):
     # AU-8: no separate `index=True` here -- __table_args__ already declares
     # ix_notification_event_incident on this column; a second, differently
     # named index over the same single column was drift with no migration.
-    incident_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_quality_incident.id", ondelete="CASCADE"), nullable=False
+    # NT-1 (2026-09-04) made both nullable. This table was built for DQ-1,
+    # where every notification is about an incident matched by a rule. A
+    # governance notification -- an approval request, a kill switch, a
+    # certification about to lapse -- has neither, and the alternative was a
+    # second near-identical delivery ledger, which is the duplication this
+    # platform's own research names as a thing not to build. A row with a
+    # NULL incident is a governance notification; a row with one is DQ-1's.
+    incident_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_quality_incident.id", ondelete="CASCADE")
     )
-    rule_id: Mapped[UUID] = mapped_column(
-        ForeignKey("notification_rule.id", ondelete="CASCADE"), nullable=False, index=True
+    rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("notification_rule.id", ondelete="CASCADE"), index=True
     )
     channel: Mapped[str] = mapped_column(String(30), nullable=False)
     recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)

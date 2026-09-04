@@ -30,8 +30,9 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.config import Settings
+from aida.config import Settings, get_settings
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.models import AssetCertification
 from aida.security import SecurityContext
 
@@ -70,6 +71,7 @@ async def warn_upcoming_certification_expiries(
     *,
     now: datetime | None = None,
     warn_days: int = 7,
+    settings: Settings | None = None,
 ) -> list[CertificationExpiryWarning]:
     """Emit an expiry warning for every ACTIVE cert expiring inside ``warn_days``.
 
@@ -82,6 +84,7 @@ async def warn_upcoming_certification_expiries(
     strictly a *heads-up* on soon-to-expire live certifications.
     """
     effective_now = now or datetime.now(UTC)
+    effective_settings = settings or get_settings()
     window_end = effective_now + timedelta(days=warn_days)
     cooldown_boundary = effective_now - timedelta(days=warn_days * 2)
     stmt = select(AssetCertification).where(
@@ -135,6 +138,21 @@ async def warn_upcoming_certification_expiries(
                 "days_until_expiry": days_until,
                 "notify_principal": cert.certified_by,
             },
+        )
+        # NT-1: push the warning to Slack/Teams as well as the outbox, so the
+        # certifier sees it before the certification lapses rather than after.
+        await notify_safely(
+            session,
+            cert.organization_id,
+            "CERTIFICATION_EXPIRING",
+            {
+                "object_type": cert.asset_type,
+                "object_id": str(cert.table_id),
+                "principal_id": cert.certified_by,
+                "expires_at": cert.expires_at.isoformat(),
+                "occurred_at": effective_now.isoformat(),
+            },
+            settings=effective_settings,
         )
         emitted.append(
             CertificationExpiryWarning(
