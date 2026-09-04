@@ -19,8 +19,6 @@ from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
 from aida.ai_registry_api import router as ai_registry_router
 from aida.api import router
-from atlas.modules.catalog.router import router as catalog_router
-from atlas.modules.connectivity.router import router as connectivity_router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
 from aida.bi_api import router as bi_router
@@ -84,6 +82,8 @@ from aida.unified_lineage_api import router as unified_lineage_router
 from aida.view_lineage_api import router as view_lineage_router
 from aida.workspace_api import router as workspace_router
 from aida.worm_archive import ArchiveConfig, archive_pending_audit_events
+from atlas.modules.catalog.router import router as catalog_router
+from atlas.modules.connectivity.router import router as connectivity_router
 
 settings = get_settings()
 configure_logging(settings.log_level)

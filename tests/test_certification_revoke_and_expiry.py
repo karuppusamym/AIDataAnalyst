@@ -85,16 +85,21 @@ async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, Meta
         project_id=project.id,
         name="core-warehouse",
         connector_type="POSTGRES",
+        dialect="dialect",
+        environment="environment",
+        credential_reference="credential_reference",
     )
     session.add(datasource)
     await session.flush()
     catalog = MetadataCatalog(
-        organization_id=org.id, datasource_id=datasource.id, name="warehouse"
+        organization_id=org.id, datasource_id=datasource.id, name="warehouse",
+        fingerprint="fp",
     )
     session.add(catalog)
     await session.flush()
     schema = MetadataSchema(
-        organization_id=org.id, catalog_id=catalog.id, name="public"
+        organization_id=org.id, catalog_id=catalog.id, name="public",
+        fingerprint="fp",
     )
     session.add(schema)
     await session.flush()
@@ -105,6 +110,7 @@ async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, Meta
         name="accounts",
         object_type="TABLE",
         status="ACTIVE",
+        fingerprint="fp",
     )
     session.add(table)
     await session.flush()
@@ -112,9 +118,11 @@ async def _seed_org_and_table(session: AsyncSession) -> tuple[Organization, Meta
         organization_id=org.id,
         table_id=table.id,
         name="balance_usd",
-        ordinal=1,
-        data_type="NUMERIC",
+        ordinal_position=1,
+        physical_type="NUMERIC",
         status="ACTIVE",
+        nullable=False,
+        fingerprint="fp",
     )
     session.add(column)
     await session.flush()
@@ -466,7 +474,7 @@ def test_revoked_status_has_a_single_writer_in_the_codebase() -> None:
     root = pathlib.Path(__file__).resolve().parents[1] / "src"
     writers: list[tuple[str, int, str]] = []
     for pyfile in root.rglob("*.py"):
-        for lineno, line in enumerate(pyfile.read_text().splitlines(), start=1):
+        for lineno, line in enumerate(pyfile.read_text(encoding="utf-8").splitlines(), start=1):
             # Signature of a WRITE to an AssetCertification row: an
             # assignment landing "REVOKED" on a `.status` attribute. Bare
             # occurrences of the string (frozenset members, docstrings,

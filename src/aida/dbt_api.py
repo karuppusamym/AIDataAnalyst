@@ -21,9 +21,6 @@ from aida.dbt_quality_bridge import reconcile_dbt_test_quality
 from aida.events import record_audit, record_outbox
 from aida.integration_catalog import transformation_metadata_integration_enabled
 from aida.integration_service import ensure_organization_integration_policy
-from aida.parsed_lineage_review_service import (
-    resolve_review_status_for_new_edge,
-)
 from aida.models import (
     DataSource,
     DbtArtifactImport,
@@ -34,6 +31,9 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Project,
+)
+from aida.parsed_lineage_review_service import (
+    resolve_review_status_for_new_edge,
 )
 from aida.schemas import (
     DbtArtifactImportRead,

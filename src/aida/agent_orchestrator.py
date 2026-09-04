@@ -9,8 +9,15 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.agent_contracts import (
+    REASON_CONTRACT_MISSING,
+    agent_kill_blocking_reason,
+    envelope_violation,
+    load_agent_contract,
+)
 from aida.agent_intelligence import GovernedPlanner, GovernedRetriever, RetrievalHit
 from aida.agent_runtime import RuntimeStage, RuntimeState
+from aida.agent_tasks import finish_agent_task, record_agent_task, task_for_agent_run
 from aida.ai_decision_lineage import (
     DECISION_LINEAGE_VERSION,
     AiDecisionEdge,
@@ -35,6 +42,7 @@ from aida.models import (
     AgentRun,
     AnalysisRun,
     DataSource,
+    GovernedTool,
     GovernedToolVersion,
     MetadataColumn,
     MetadataConstraint,
@@ -524,6 +532,7 @@ class GovernedAgentOrchestrator:
         preferred_tool_version_id: UUID | None,
         tool_parameters: dict[str, Any],
         requested_limit: int | None,
+        agent_asset_version_id: UUID | None = None,
     ) -> AgentOrchestrationResult:
         agent_run = AgentRun(
             organization_id=datasource.organization_id,
@@ -538,6 +547,55 @@ class GovernedAgentOrchestrator:
         )
         session.add(agent_run)
         await session.flush()
+
+        # AG-10: when the caller runs *as* a registered agent, its contract is
+        # the authority for this run. Fail closed in both directions -- a named
+        # version with no contract is refused rather than run unconstrained,
+        # and an engaged kill switch (this agent's, its tier's, the
+        # organization's) stops the run before any retrieval or generation.
+        agent_contract = None
+        if agent_asset_version_id is not None:
+            agent_contract = await load_agent_contract(
+                session,
+                organization_id=datasource.organization_id,
+                ai_asset_version_id=agent_asset_version_id,
+            )
+            reject_reason: str | None = (
+                REASON_CONTRACT_MISSING
+                if agent_contract is None
+                else await agent_kill_blocking_reason(session, agent_contract)
+            )
+            if reject_reason is not None:
+                agent_run.generation_source = "POLICY_BLOCK"
+                await self._persist_rejection(
+                    session,
+                    agent_run,
+                    RuntimeState(request_id=str(agent_run.id)),
+                    [],
+                    context,
+                    correlation_id,
+                    reject_reason,
+                )
+                raise AgentPolicyRejected(reject_reason)
+            assert agent_contract is not None  # narrowed by the branch above
+            agent_run.ai_asset_version_id = agent_asset_version_id
+            await record_agent_task(
+                session,
+                organization_id=datasource.organization_id,
+                agent_principal_id=agent_contract.agent_principal_id,
+                intent="agent.analysis",
+                # Value-free (INV-6): the question is already an HMAC on the
+                # run, and only parameter *names* are fingerprinted.
+                inputs={
+                    "question_hash": agent_run.question_hash,
+                    "datasource_id": str(datasource.id),
+                    "preferred_tool_version_id": str(preferred_tool_version_id or ""),
+                    "tool_parameter_names": sorted(tool_parameters),
+                },
+                ai_asset_version_id=agent_asset_version_id,
+                agent_run_id=agent_run.id,
+                sampling_rate=agent_contract.sampling_rate,
+            )
 
         state = RuntimeState(request_id=str(agent_run.id))
         trace = [_trace(state, "DETERMINISTIC")]
@@ -764,6 +822,21 @@ class GovernedAgentOrchestrator:
                     "PLANNED_TOOL_UNAVAILABLE",
                 )
                 raise ModelRouteUnavailable("planned governed tool is unavailable")
+            # AG-10: the capability envelope is checked against the tool the
+            # planner actually selected, not against what the caller asked
+            # for -- an agent may only execute governed tools its contract
+            # names. An unparseable envelope allows nothing (fail closed).
+            if agent_contract is not None:
+                # The slug lives on the parent `GovernedTool`, not the version.
+                parent_tool = await session.get(GovernedTool, version.tool_id)
+                violation = envelope_violation(
+                    agent_contract, tool_slug=parent_tool.slug if parent_tool else ""
+                )
+                if violation is not None:
+                    await self._persist_rejection(
+                        session, agent_run, state, trace, context, correlation_id, violation
+                    )
+                    raise AgentPolicyRejected(violation)
             # DQ-3/TL-3 parity: `tool_api.py::execute_tool` blocks a governed
             # tool's HTTP execution route on its own dependency's open quality
             # incidents *before* rendering or executing any SQL. Every path
@@ -1203,6 +1276,10 @@ class GovernedAgentOrchestrator:
                 "datasource_id": str(datasource.id),
             },
         )
+        # AG-10: the run succeeded, so the agent's task is APPLIED -- and if
+        # the deterministic sampler picked it, `finish_agent_task` re-labels
+        # it SAMPLED with a PENDING human audit outcome.
+        await self._close_agent_task(session, agent_run, status="APPLIED")
         await session.commit()
         return AgentOrchestrationResult(agent_run, gateway_result, explanation)
 
@@ -1263,7 +1340,35 @@ class GovernedAgentOrchestrator:
             correlation_id=correlation_id,
             details={"reason": reason},
         )
+        # AG-10: every rejection funnels through here, so this is the one
+        # place that closes an open agent task on the refusal paths. Looked
+        # up by run rather than passed down, so no caller can forget to.
+        await self._close_agent_task(session, agent_run, status="REJECTED", reason=reason)
         await session.commit()
+
+    async def _close_agent_task(
+        self,
+        session: AsyncSession,
+        agent_run: AgentRun,
+        *,
+        status: str,
+        reason: str | None = None,
+    ) -> None:
+        """Close the `AgentTask` opened for this run, if the run was executing
+        as a registered agent. Value-free evidence only (INV-6).
+        """
+        if agent_run.ai_asset_version_id is None:
+            return
+        task = await task_for_agent_run(session, agent_run_id=agent_run.id)
+        if task is None or task.status != "PROPOSED":
+            return
+        evidence: dict[str, Any] = {
+            "agent_run_id": str(agent_run.id),
+            "generation_source": agent_run.generation_source,
+        }
+        if reason is not None:
+            evidence["reason"] = reason
+        finish_agent_task(task, status=status, evidence=evidence)
 
     async def _checkpoint_validated(
         self,

@@ -44,13 +44,8 @@ import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from atlas.modules.catalog.router import (
-    bulk_assign_ownership,
-    bulk_certify_tables,
-    bulk_classify_columns,
-    bulk_tag_tables,
-)
 from aida.catalog_bulk_actions import CATALOG_BULK_ACTION_MAX_ITEMS
+from aida.config import Settings
 from aida.db import Base
 from aida.models import (
     AssetCertification,
@@ -75,6 +70,12 @@ from aida.schemas import (
     CatalogBulkTagRequest,
 )
 from aida.security_types import SecurityContext
+from atlas.modules.catalog.router import (
+    bulk_assign_ownership,
+    bulk_certify_tables,
+    bulk_classify_columns,
+    bulk_tag_tables,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -240,7 +241,7 @@ def _platform_admin_context(datasource: DataSource) -> SecurityContext:
     )
 
 
-def _high_threshold_settings() -> "Settings":
+def _high_threshold_settings() -> Settings:
     """Settings override for the two CT-1 tests that exercise 40-item and
     500-item direct-write batches. Default threshold is 10 (P0-02), so a
     truncation-cap test needs a threshold well above the cap; the empty

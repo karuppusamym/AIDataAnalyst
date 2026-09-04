@@ -212,7 +212,7 @@ def test_accept_baseline_then_compare_round_trips_clean(tmp_path) -> None:
     assert baseline_path.exists()
     assert report_path.exists()
 
-    data = json.loads(baseline_path.read_text())
+    data = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert set(data["metrics"]) == set(TRACKED_METRICS)
 
     # Same corpus, same seeded catalog, same code -- an exact match, not

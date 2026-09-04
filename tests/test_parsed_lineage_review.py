@@ -26,14 +26,12 @@ from aida.models import (
     MetadataTable,
     Organization,
     OutboxEvent,
-    ProcedureLineageEdge,
     Project,
     ViewLineageEdge,
 )
 from aida.parsed_lineage_review_api import (
     bulk_decide_parsed_lineage_edges,
     decide_parsed_lineage_edge,
-    get_parsed_lineage_review_queue,
 )
 from aida.parsed_lineage_review_service import resolve_review_status_for_new_edge
 from aida.schemas import (
@@ -44,7 +42,7 @@ from aida.schemas import (
 )
 from aida.security_types import SecurityContext
 from aida.view_lineage_api import parse_view_lineage_endpoint
-from atlas.platform.config import Settings, get_settings
+from atlas.platform.config import get_settings
 
 pytestmark = pytest.mark.asyncio
 
@@ -413,7 +411,9 @@ class TestBulkDecide:
         ]:
             await parse_view_lineage_endpoint(
                 datasource.id,
-                _request(f"CREATE VIEW {view} AS SELECT a.col_a FROM {src} a"),
+                _request(  # noqa: S608 -- view DDL text is this parser test's input
+                    f"CREATE VIEW {view} AS SELECT a.col_a FROM {src} a"
+                ),
                 context=author_context,
                 session=session,
             )

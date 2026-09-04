@@ -8,6 +8,7 @@ from temporalio.worker import Worker
 from aida.batch_ingestion import process_metadata_ingestion_batch
 from aida.config import get_settings
 from aida.logging import configure_logging
+
 # ING-4 / P0-01: imported here (rather than only run as its own __main__
 # module) so `tests/test_reachability_gate.py` sees the drafter reachable
 # through the existing `aida.workflows.worker` ENTRY_POINTS row -- and so

@@ -6,13 +6,13 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_certification import asset_certification_is_active
-from aida.certification_evidence import compute_certification_evidence
-from aida.config import get_settings
 from aida.catalog_bulk_actions import (
     CatalogBulkItemError,
     apply_classify_item,
     apply_tag_item,
 )
+from aida.certification_evidence import compute_certification_evidence
+from aida.config import get_settings
 from aida.models import (
     AssetCertification,
     AssetTag,

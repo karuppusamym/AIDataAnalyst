@@ -20,7 +20,6 @@ from sqlalchemy.pool import StaticPool
 from aida.config import Settings
 from aida.db import Base
 from aida.models import (
-    AnalysisRun,
     AssetDescriptionDraft,
     AssetTermLink,
     AuditEvent,

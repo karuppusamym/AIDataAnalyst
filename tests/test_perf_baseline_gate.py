@@ -217,7 +217,7 @@ def test_accept_baseline_then_compare_round_trips_clean(tmp_path, monkeypatch) -
     assert accept_rc == 0
     assert baseline_path.exists()
 
-    data = json.loads(baseline_path.read_text())
+    data = json.loads(baseline_path.read_text(encoding="utf-8"))
     assert "benchmarks" in data
     names = set(data["benchmarks"])
     assert names == {b.name for b in all_benchmarks()}

@@ -116,7 +116,7 @@ class ReaperRule:
     audit_action: str
     retention: timedelta
     action: ReaperAction
-    candidates_stmt: Callable[[datetime, timedelta], "Select[tuple[UUID]]"]
+    candidates_stmt: Callable[[datetime, timedelta], Select[tuple[UUID]]]
     new_status: str | None = None
     batch_size: int = DEFAULT_BATCH_SIZE
     hard_cap: int = DEFAULT_HARD_CAP

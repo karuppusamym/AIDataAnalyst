@@ -56,6 +56,7 @@ from aida.models import (
     GovernanceReview,
     LineOfBusiness,
     Organization,
+    OrganizationIntegrationPolicy,
     Project,
     SourceBinding,
     Workspace,

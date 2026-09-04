@@ -33,7 +33,6 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.certification_evidence import compute_certification_evidence
 from aida.catalog_bulk_actions import (
     CATALOG_BULK_ACTION_MAX_ITEMS,
     CATALOG_BULK_FILTER_SCAN_CAP,
@@ -47,6 +46,7 @@ from aida.catalog_bulk_actions import (
     match_columns_by_pattern,
     match_tables_by_filter,
 )
+from aida.certification_evidence import compute_certification_evidence
 from aida.context import get_correlation_id
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox

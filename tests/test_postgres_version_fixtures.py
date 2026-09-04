@@ -62,7 +62,7 @@ from aida.connectors.postgres import PostgresConnector
 from atlas.platform.config import get_settings
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "postgres_versions"
-FIXTURE_SCHEMA_SQL = (FIXTURE_DIR / "schema.sql").read_text()
+FIXTURE_SCHEMA_SQL = (FIXTURE_DIR / "schema.sql").read_text(encoding="utf-8")
 
 # The schema fixture always lands in this non-`public` schema, regardless of
 # which database/server it's applied to -- see schema.sql's own DROP/CREATE.

@@ -54,12 +54,12 @@ import asyncio
 import contextlib
 import json
 import signal
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from aida.asset_description_service import (
     compose_draft_text,

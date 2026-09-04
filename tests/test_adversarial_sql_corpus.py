@@ -73,7 +73,7 @@ def _load_corpus() -> list[tuple[str, dict[str, Any]]]:
     pairs: list[tuple[str, dict[str, Any]]] = []
     for dialect in sorted(CONNECTOR_TYPE_BY_DIALECT):
         path = CORPUS_DIR / f"{dialect}.json"
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["dialect"] == dialect, f"{path} dialect field does not match filename"
         for case in payload["cases"]:
             pairs.append((dialect, case))

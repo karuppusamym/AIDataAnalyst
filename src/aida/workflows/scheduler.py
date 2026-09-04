@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.certification_expiry_warning import run_certification_expiry_warning_pass
 from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
@@ -26,11 +27,10 @@ from aida.models import (
     ScanPolicy,
     UnownedAssetEscalation,
 )
-from aida.playbooks import run_due_playbooks_pass
-from aida.certification_expiry_warning import run_certification_expiry_warning_pass
 from aida.ownership_expiry_warning import run_ownership_expiry_pass
-from aida.reaper_service import run_reaper_scheduler_pass
+from aida.playbooks import run_due_playbooks_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
+from aida.reaper_service import run_reaper_scheduler_pass
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,

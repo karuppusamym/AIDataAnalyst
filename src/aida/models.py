@@ -914,6 +914,16 @@ class AgentRun(Base, TimestampMixin):
         ForeignKey("governed_tool_version.id", ondelete="SET NULL"), index=True
     )
     failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    # AG-10: which registered agent version (an `AGENT`-kind `AiAsset`'s
+    # `AiAssetVersion`, carrying an `AgentContract`) this run executed as.
+    # Nullable: a run invoked directly by a human principal with no agent
+    # identity stays unlinked, and `aida.agent_roster` keeps reporting those
+    # organization-wide. Set only by `GovernedAgentOrchestrator.run` when the
+    # caller names an agent version, after that version's contract has been
+    # loaded and its kill switch / envelope checked.
+    ai_asset_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="SET NULL"), index=True
+    )
 
 
 class AgentEvaluationRun(Base, TimestampMixin):
@@ -5121,3 +5131,144 @@ class StudioContextProductMaterialization(Base, TimestampMixin):
         ForeignKey("governance_review.id", ondelete="CASCADE"), nullable=False, index=True
     )
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# --- AG-10: agent contract, AgentRun attribution and the agent task ledger ---
+# ---------------------------------------------------------------------------
+# `Docs/00-product/08-market-deep-dive-and-target-architecture-2026-09.md`
+# section 4.2 ("The agent contract"). Two additive schema changes make the
+# contract real: the `AgentRun.ai_asset_version_id` link the roster module
+# (`aida.agent_roster`) documents as missing, and the `agent_task` ledger
+# below. `AgentContract` itself is the governed declaration -- identity,
+# capability envelope, autonomy tier, budget, eval gate, supervisor and
+# kill scope -- keyed one-to-one to an `AGENT`-kind `AiAssetVersion`.
+
+AGENT_AUTONOMY_TIERS = ("T0", "T1", "T2", "T3")
+AGENT_SUPERVISOR_PERSONAS = (
+    "ANALYST",
+    "CONSUMER",
+    "STEWARD",
+    "REVIEWER",
+    "OPERATOR",
+    "AUDITOR",
+)
+AGENT_KILL_SCOPES = ("AGENT", "TIER", "ALL")
+AGENT_WRITE_LANES = ("MEASURED_FACT", "PLATFORM_OBSERVATION", "MODEL_JUDGEMENT_PROPOSAL")
+AGENT_TASK_STATUSES = ("PROPOSED", "APPLIED", "REJECTED", "FAILED", "SAMPLED")
+AGENT_TASK_AUDIT_OUTCOMES = ("PENDING", "AGREED", "DISAGREED")
+#: ADR-0027 (proposed, section 5.5 of the deep dive): every auto-applied
+#: item is sampled to a human at a configurable rate with a floor of 5%.
+AGENT_SAMPLING_RATE_FLOOR = 0.05
+
+
+class AgentContract(Base, TimestampMixin):
+    """The governed contract for one registered agent version (AG-10).
+
+    One row per `AiAssetVersion` of an `AiAsset` whose `asset_kind` is
+    `AGENT` (enforced app-side in `aida.agent_contracts`, since the kind
+    lives on the parent asset). `agent_principal_id` is the agent's own
+    workload identity -- distinct from every human principal, never equal
+    to the human who authored the contract (INV-8: the identity that makes
+    a proposal is never the identity that checks it, and an agent that
+    borrowed its supervisor's identity would collapse that distinction).
+    `capability_envelope` is value-free configuration (`tool_slugs`,
+    `context_product_ids`, `write_lanes`) that `GovernedAgentOrchestrator.run`
+    enforces on every linked run. `kill_engaged` is the current-state
+    half of the per-agent kill switch, same shape as `KillSwitchState`:
+    the immutable engage/release history lives in `AuditEvent`.
+    """
+
+    __tablename__ = "agent_contract"
+    __table_args__ = (
+        UniqueConstraint("ai_asset_version_id", name="uq_agent_contract_ai_asset_version_id"),
+        Index("ix_agent_contract_org_principal", "organization_id", "agent_principal_id"),
+        Index("ix_agent_contract_org_kill", "organization_id", "kill_engaged"),
+        CheckConstraint(
+            "autonomy_tier IN ('T0', 'T1', 'T2', 'T3')", name="ck_agent_contract_autonomy_tier"
+        ),
+        CheckConstraint(
+            "supervisor_persona IN ('ANALYST', 'CONSUMER', 'STEWARD', 'REVIEWER', "
+            "'OPERATOR', 'AUDITOR')",
+            name="ck_agent_contract_supervisor_persona",
+        ),
+        CheckConstraint(
+            "kill_scope IN ('AGENT', 'TIER', 'ALL')", name="ck_agent_contract_kill_scope"
+        ),
+        CheckConstraint("sampling_rate >= 0.05", name="ck_agent_contract_sampling_rate_floor"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_envelope: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    autonomy_tier: Mapped[str] = mapped_column(String(2), default="T0", nullable=False)
+    daily_token_cap: Mapped[int | None] = mapped_column(Integer)
+    per_run_token_cap: Mapped[int | None] = mapped_column(Integer)
+    wall_clock_seconds_cap: Mapped[int | None] = mapped_column(Integer)
+    eval_gate_threshold: Mapped[float | None] = mapped_column(Float)
+    supervisor_persona: Mapped[str] = mapped_column(String(20), nullable=False)
+    kill_scope: Mapped[str] = mapped_column(String(10), default="AGENT", nullable=False)
+    kill_engaged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sampling_rate: Mapped[float] = mapped_column(
+        Float, default=AGENT_SAMPLING_RATE_FLOOR, nullable=False
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class AgentTask(Base, TimestampMixin):
+    """One unit of agent work (AG-10): intent, value-free inputs fingerprint,
+    the proposal it produced (if any), its status and the sampled-audit
+    outcome. Written by `aida.agent_tasks.record_agent_task` /
+    `finish_agent_task`; every `GovernedAgentOrchestrator.run` produces
+    exactly one row. `inputs_fingerprint` is a SHA-256 over a canonical,
+    value-free payload (ids, hashes and parameter *names* -- never a source
+    value, a question, or a parameter value; INV-6). `evidence` carries the
+    same discipline. `agent_run_id` ties an orchestrator-produced task back
+    to its `AgentRun`; `proposal_ref_type`/`proposal_ref_id` name the
+    governed object (typically a `GovernanceReview`) the task proposed.
+    """
+
+    __tablename__ = "agent_task"
+    __table_args__ = (
+        Index("ix_agent_task_org_started", "organization_id", "started_at"),
+        Index("ix_agent_task_org_status", "organization_id", "status"),
+        Index("ix_agent_task_org_sampled", "organization_id", "sampled_for_audit"),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPLIED', 'REJECTED', 'FAILED', 'SAMPLED')",
+            name="ck_agent_task_status",
+        ),
+        CheckConstraint(
+            "audit_outcome IS NULL OR audit_outcome IN ('PENDING', 'AGREED', 'DISAGREED')",
+            name="ck_agent_task_audit_outcome",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="SET NULL"), index=True
+    )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_run.id", ondelete="SET NULL"), index=True
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    intent: Mapped[str] = mapped_column(String(100), nullable=False)
+    inputs_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposal_ref_type: Mapped[str | None] = mapped_column(String(100))
+    proposal_ref_id: Mapped[UUID | None] = mapped_column()
+    status: Mapped[str] = mapped_column(String(20), default="PROPOSED", nullable=False)
+    sampled_for_audit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    audit_outcome: Mapped[str | None] = mapped_column(String(20))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

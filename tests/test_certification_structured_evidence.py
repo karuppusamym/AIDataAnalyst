@@ -89,13 +89,16 @@ async def _seed_estate(session: AsyncSession) -> tuple[Organization, MetadataTab
         project_id=project.id,
         name="warehouse",
         connector_type="POSTGRES",
+        dialect="dialect",
+        environment="environment",
+        credential_reference="credential_reference",
     )
     session.add(ds)
     await session.flush()
-    cat = MetadataCatalog(organization_id=org.id, datasource_id=ds.id, name="warehouse")
+    cat = MetadataCatalog(organization_id=org.id, datasource_id=ds.id, name="warehouse", fingerprint="fp")
     session.add(cat)
     await session.flush()
-    sch = MetadataSchema(organization_id=org.id, catalog_id=cat.id, name="public")
+    sch = MetadataSchema(organization_id=org.id, catalog_id=cat.id, name="public", fingerprint="fp")
     session.add(sch)
     await session.flush()
     table = MetadataTable(
@@ -105,6 +108,7 @@ async def _seed_estate(session: AsyncSession) -> tuple[Organization, MetadataTab
         name="accounts",
         object_type="TABLE",
         status="ACTIVE",
+        fingerprint="fp",
     )
     session.add(table)
     await session.flush()
@@ -193,7 +197,6 @@ async def _seed_evidence_context(
     ar = AnalysisRun(
         organization_id=org.id,
         datasource_id=table.datasource_id,
-        run_kind="PROFILE",
         status="COMPLETED",
     )
     session.add(ar)

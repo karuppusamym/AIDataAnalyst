@@ -34,18 +34,13 @@ against real database state -- never a mocked session.
 
 import itertools
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from fastapi import Response
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from atlas.modules.catalog.router import (
-    bulk_assign_ownership,
-    bulk_certify_tables,
-)
-from atlas.platform.config import Settings
 from aida.db import Base
 from aida.models import (
     AssetCertification,
@@ -68,6 +63,11 @@ from aida.schemas import (
     CatalogBulkOwnRequest,
 )
 from aida.security_types import SecurityContext
+from atlas.modules.catalog.router import (
+    bulk_assign_ownership,
+    bulk_certify_tables,
+)
+from atlas.platform.config import Settings
 
 pytestmark = pytest.mark.asyncio
 
@@ -127,19 +127,21 @@ async def _seed(
         connector_type="postgres",
         dialect="postgres",
         environment="PROD",
+        credential_reference="credential_reference",
     )
     catalog = MetadataCatalog(
         id=uuid4(),
         organization_id=org.id,
         datasource_id=datasource.id,
         name="main",
+        fingerprint="fp",
     )
     schema = MetadataSchema(
         id=uuid4(),
         organization_id=org.id,
-        datasource_id=datasource.id,
         catalog_id=catalog.id,
         name="public",
+        fingerprint="fp",
     )
     session.add_all([org, lob, domain, project, datasource, catalog, schema])
     tables = [
@@ -147,11 +149,11 @@ async def _seed(
             id=uuid4(),
             organization_id=org.id,
             datasource_id=datasource.id,
-            catalog_id=catalog.id,
             schema_id=schema.id,
             name=f"table_{i:04d}",
-            object_kind="TABLE",
+            object_type="TABLE",
             status="ACTIVE",
+            fingerprint="fp",
         )
         for i in range(table_count)
     ]
@@ -433,10 +435,10 @@ async def test_playbook_auto_apply_own_emits_per_subject_audit(session: AsyncSes
             "owner_type": "GROUP",
             "owner_principal": "retail-owners",
         },
-        filter_definition={},
         auto_apply_max_items=100,
         schedule_interval_minutes=60,
         created_by="playbook-author@example.com",
+        match_pattern="match_pattern",
     )
     session.add(playbook)
     await session.flush()

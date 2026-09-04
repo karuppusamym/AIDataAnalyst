@@ -21,22 +21,19 @@ call them via HTTP or via a service function, not via a router import.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from dataclasses import replace
-from datetime import UTC, datetime
-
-from fastapi import status
-
 from aida.asset_certification import asset_certification_is_active, current_asset_certification
-from aida.certification_evidence import compute_certification_evidence
 from aida.authorization_gate import AuthorizationDenied, gate, gate_read
+from aida.certification_evidence import compute_certification_evidence
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
@@ -44,7 +41,6 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     AssetCertification,
     AssetTag,
-    BulkStewardshipOperation,
     CatalogBulkActionRun,
     DataSource,
     MetadataColumn,
@@ -71,7 +67,6 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from atlas.modules.catalog.service import (
-    ALLOWED_CLASSIFICATIONS,
     CATALOG_BULK_ACTION_MAX_ITEMS,
     CATALOG_BULK_FILTER_SCAN_CAP,
     BulkItemResult,

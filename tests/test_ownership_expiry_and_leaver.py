@@ -112,13 +112,16 @@ async def _seed_org_and_table(session: AsyncSession, *, name: str = "accounts") 
         project_id=project.id,
         name=f"src-{uuid4().hex[:6]}",
         connector_type="POSTGRES",
+        dialect="dialect",
+        environment="environment",
+        credential_reference="credential_reference",
     )
     session.add(datasource)
     await session.flush()
-    catalog = MetadataCatalog(organization_id=org.id, datasource_id=datasource.id, name="w")
+    catalog = MetadataCatalog(organization_id=org.id, datasource_id=datasource.id, name="w", fingerprint="fp")
     session.add(catalog)
     await session.flush()
-    schema = MetadataSchema(organization_id=org.id, catalog_id=catalog.id, name="public")
+    schema = MetadataSchema(organization_id=org.id, catalog_id=catalog.id, name="public", fingerprint="fp")
     session.add(schema)
     await session.flush()
     table = MetadataTable(
@@ -128,6 +131,7 @@ async def _seed_org_and_table(session: AsyncSession, *, name: str = "accounts") 
         name=name,
         object_type="TABLE",
         status="ACTIVE",
+        fingerprint="fp",
     )
     session.add(table)
     await session.flush()
