@@ -2073,8 +2073,39 @@ class OwnershipAssignment(Base, TimestampMixin):
     source_rule_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("ownership_rule.id", ondelete="SET NULL"), index=True
     )
+    # Status values (P2-07):
+    #   ACTIVE        -- currently in effect; the only value `_earliest_active_owners`
+    #                    and every other policy-decision reader treats as "the owner".
+    #   REASSIGNED    -- superseded by a GL-7 leaver reassignment (an operator-driven
+    #                    successor now owns the subject).
+    #   LAPSED        -- P2-07: `expires_at + grace_days` passed with no re-affirmation.
+    #                    Written by `ownership_expiry_warning.expire_lapsed_ownership_assignments`
+    #                    and by nothing else. Retained as evidence of who *used to*
+    #                    own the subject; never read as the current owner.
+    #   LAPSED_LEAVER -- P2-07: the owner principal was deleted (identity event) and
+    #                    no successor was named in the merge event. Retained as
+    #                    evidence; never the current owner. Written only by
+    #                    `ownership_principal_lifecycle.handle_principal_deleted`.
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    # P2-07: re-affirmation cadence. Nullable because every pre-P2-07 row was
+    # assigned once and never re-affirmed; the sweep skips rows with
+    # `expires_at IS NULL` -- they carry no expiry until the first re-affirm
+    # (or a fresh assignment under P2-07 code) sets one. New ACTIVE rows
+    # written by `apply_bulk_operation` (ASSIGN_OWNERSHIP) get
+    # `now + ownership_reaffirm_days`.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Idempotency stamp: written by `warn_upcoming_ownership_expiries` when it
+    # emits the "expires in N days" notification, so the same row does not
+    # warn twice inside one cycle.
+    expiry_warning_emitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # Last time an owner (or admin) confirmed the assignment via the
+    # `/reaffirm` endpoint; also extends `expires_at` by
+    # `ownership_reaffirm_days`.
+    reaffirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reaffirmed_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class OwnershipRule(Base, TimestampMixin):
@@ -2178,6 +2209,19 @@ class AssetCertification(Base, TimestampMixin):
     expiry_warning_emitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    # P3-09: structured evidence blob captured at certify time. Nullable
+    # because every pre-P3-09 row was written with only the free-text
+    # ``rationale`` and has no structured evidence to project; the new
+    # ``compute_certification_evidence`` helper populates this on every new
+    # write and the ``rationale`` column stays populated in parallel for
+    # backward-compat human readability. Shape is validated by
+    # ``aida.schemas.CertificationEvidence`` (description_version_id,
+    # ownership_assignment_ids, quality_snapshot, glossary_term_ids,
+    # supporting_dq_check_ids, certifier_notes) and, for legacy backfills, a
+    # ``backfilled: true`` sentinel flag so readers can distinguish an
+    # evidence blob captured at certify time from one reconstructed from
+    # today's state.
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class GlossaryConflict(Base, TimestampMixin):
@@ -2471,6 +2515,13 @@ class OpenLineageTableEdge(Base, TimestampMixin):
             name="uq_openlineage_table_edge_run_input_output",
         ),
         Index("ix_openlineage_table_edge_run", "run_event_id"),
+        # P1-05: parsed-edge review lifecycle -- default ACTIVE preserves the
+        # pre-review-mode contract for every row already in the table and
+        # every row still written under `auto_active` config; only when the
+        # deployment flips `AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE` to
+        # `require_review` does a new row land as PROPOSED and wait for
+        # `parsed_lineage_review_api` to promote or reject it.
+        Index("ix_openlineage_table_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2491,6 +2542,20 @@ class OpenLineageTableEdge(Base, TimestampMixin):
         ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
     )
     edge_kind: Mapped[str] = mapped_column(String(30), default="ETL", nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see the module-level comment
+    # on `OpenLineageColumnEdge` below and ADR-0026 for the full rationale.
+    # Default ACTIVE keeps every existing row and every row written under
+    # `auto_active` mode backward-compatible.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("openlineage_table_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class OpenLineageColumnEdge(Base, TimestampMixin):
@@ -2508,6 +2573,8 @@ class OpenLineageColumnEdge(Base, TimestampMixin):
             name="uq_openlineage_column_edge_run_input_output",
         ),
         Index("ix_openlineage_column_edge_run", "run_event_id"),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_openlineage_column_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2532,6 +2599,17 @@ class OpenLineageColumnEdge(Base, TimestampMixin):
     transformation_type: Mapped[str | None] = mapped_column(String(100))
     transformation_subtype: Mapped[str | None] = mapped_column(String(100))
     edge_kind: Mapped[str] = mapped_column(String(30), default="ETL", nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("openlineage_column_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class DbtProject(Base, TimestampMixin):
@@ -2660,6 +2738,8 @@ class DbtLineageEdge(Base, TimestampMixin):
             "target_column",
             name="uq_dbt_lineage_edge_import_source_target_column",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_dbt_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2680,6 +2760,17 @@ class DbtLineageEdge(Base, TimestampMixin):
     target_column: Mapped[str | None] = mapped_column(String(255), default="", server_default="")
     transformation_type: Mapped[str | None] = mapped_column(String(30))
     confidence: Mapped[str | None] = mapped_column(String(30))
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("dbt_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class ContextProduct(Base, TimestampMixin):
@@ -3500,6 +3591,8 @@ class ViewLineageEdge(Base, TimestampMixin):
             "transformation_type",
             name="uq_view_lineage_edge_natural_key",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_view_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -3529,6 +3622,17 @@ class ViewLineageEdge(Base, TimestampMixin):
     confidence: Mapped[str] = mapped_column(String(30), nullable=False)
     dialect: Mapped[str] = mapped_column(String(50), nullable=False)
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("view_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class ProcedureLineageEdge(Base, TimestampMixin):
@@ -3548,6 +3652,8 @@ class ProcedureLineageEdge(Base, TimestampMixin):
             "transformation_type",
             name="uq_procedure_lineage_edge_natural_key",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_procedure_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -3577,6 +3683,17 @@ class ProcedureLineageEdge(Base, TimestampMixin):
     confidence: Mapped[str] = mapped_column(String(30), nullable=False)
     dialect: Mapped[str] = mapped_column(String(50), nullable=False)
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("procedure_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class StudioChangeSet(Base, TimestampMixin):

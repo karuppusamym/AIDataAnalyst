@@ -138,8 +138,8 @@ async def compose_asset_context_signals(
         owner_source = "asset_documentation_version.owner_principal (GL-9 fallback)"
 
     certification = (await _latest_certifications(session, table_ids)).get(table.id)
-    certification_state, certification_expires_at = _certification_state(
-        certification, now=moment
+    certification_state, certification_expires_at, _cert_evidence_summary = (
+        _certification_state(certification, now=moment)
     )
 
     open_incident_ids = await _open_incident_table_ids(session, table_ids)

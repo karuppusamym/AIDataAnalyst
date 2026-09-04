@@ -33,6 +33,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.certification_evidence import compute_certification_evidence
 from aida.catalog_bulk_actions import (
     CATALOG_BULK_ACTION_MAX_ITEMS,
     CATALOG_BULK_FILTER_SCAN_CAP,
@@ -258,6 +259,17 @@ async def _apply_one_item(
     else:
         assert playbook.action == "CERTIFY"
         expires_at = now + timedelta(days=int(params["expires_after_days"]))
+        # P3-09: capture the structured evidence blob so a playbook-auto-
+        # applied cert writes the same evidence shape as the interactive /
+        # bulk / reviewed-bulk paths do; the four paths cannot drift on
+        # what "evidence" means.
+        evidence_blob = await compute_certification_evidence(
+            session,
+            subject_id,
+            organization_id=playbook.organization_id,
+            now=now,
+            certifier_notes=params["rationale"],
+        )
         new_certification, superseded = apply_certify_item(
             subject_id,
             tables=tables,
@@ -266,6 +278,7 @@ async def _apply_one_item(
             rationale=params["rationale"],
             expires_at=expires_at,
             certified_by=applied_by,
+            evidence=evidence_blob,
         )
         session.add(new_certification)
         await session.flush([new_certification, *superseded])

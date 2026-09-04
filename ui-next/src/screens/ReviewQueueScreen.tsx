@@ -82,6 +82,78 @@ function useUrlState() {
   return [params, update] as const;
 }
 
+/** P1-03: per-object-type row-detail renderers. The queue already ships
+ *  every object_type through the same generic ProposalRow; this map only
+ *  adds a human-readable header + summary for the two glossary object
+ *  types the audit called out. Every other type falls through to the
+ *  existing default renderer, unchanged.
+ *
+ *  Data source: the composed `ReviewQueueProposalRead` already carries
+ *  `evidence: EvidenceItemRead[]` (see `_dict_evidence_items` in
+ *  `review_queue_read_model.py`), which for a `GLOSSARY_LINK_PROPOSAL`
+ *  contains one entry per key of the underlying proposal's evidence dict
+ *  -- `term_display_name`, `table_name`, and any similarity/annotator
+ *  claims. No extra fetch is required. */
+interface RowExtras {
+  /** Human-readable subject line for the row's title (falls back to
+   *  `object_id` when nothing better is available). */
+  subject: string;
+  /** Optional one-liner rendered under the badges, above the diff. */
+  subtitle?: string;
+}
+
+function extractEvidenceValue(
+  proposal: ReviewQueueProposalRead,
+  keyPrefix: string,
+): string | null {
+  for (const e of proposal.evidence ?? []) {
+    // `_dict_evidence_items` claims are formatted as `"<key>: <value>"`;
+    // match on prefix so `term_display_name: MRR` reveals "MRR".
+    if (e.claim.startsWith(keyPrefix + ":")) {
+      return e.claim.slice(keyPrefix.length + 1).trim();
+    }
+  }
+  return null;
+}
+
+function renderRowExtras(proposal: ReviewQueueProposalRead): RowExtras {
+  if (proposal.object_type === "GLOSSARY_LINK_PROPOSAL") {
+    const term =
+      extractEvidenceValue(proposal, "term_display_name") ??
+      extractEvidenceValue(proposal, "term_key") ??
+      proposal.object_id;
+    const table =
+      extractEvidenceValue(proposal, "table_name") ??
+      extractEvidenceValue(proposal, "qualified_name") ??
+      null;
+    const summary = extractEvidenceValue(proposal, "summary");
+    const parts: string[] = [];
+    if (table) parts.push(`for ${table}`);
+    if (summary) parts.push(summary);
+    if (proposal.confidence !== null && proposal.confidence !== undefined) {
+      parts.push(`confidence ${pct(proposal.confidence)}`);
+    }
+    return { subject: `Link "${term}"`, subtitle: parts.join(" — ") || undefined };
+  }
+  if (proposal.object_type === "GLOSSARY_TERM_VERSION") {
+    const term =
+      extractEvidenceValue(proposal, "display_name") ??
+      extractEvidenceValue(proposal, "term_display_name") ??
+      extractEvidenceValue(proposal, "term_key") ??
+      proposal.object_id;
+    const reason = extractEvidenceValue(proposal, "reason");
+    // The definition diff is already rendered by <DiffEntries/> below (the
+    // `definition` field appears in `diff.entries` as a modified field);
+    // no need to duplicate it. Only surface a one-liner reason when the
+    // proposal composed one.
+    return {
+      subject: `Term "${term}"`,
+      subtitle: reason ? `Reason: ${reason}` : undefined,
+    };
+  }
+  return { subject: proposal.object_id };
+}
+
 function DiffEntries({ proposal }: { proposal: ReviewQueueProposalRead }) {
   if (!proposal.diff.diffable) {
     return <p className="prop__nodiff">{proposal.diff.message ?? "No structured diff for this object type."}</p>;
@@ -120,6 +192,7 @@ function ProposalRow({
   deciding: boolean;
 }) {
   const decided = proposal.status !== "PENDING";
+  const extras = renderRowExtras(proposal);
   return (
     <article
       className={`prop prop--${proposal.status.toLowerCase()}${focused ? " prop--focused" : ""}`}
@@ -135,8 +208,11 @@ function ProposalRow({
             <Pill tone="mute">{proposal.object_type.toLowerCase().replace(/_/g, " ")}</Pill>
           </div>
           <button className="prop__title" onClick={onFocus}>
-            {proposal.object_id}
+            {extras.subject}
           </button>
+          {extras.subtitle ? (
+            <div className="prop__extra">{extras.subtitle}</div>
+          ) : null}
           <div className="prop__subject">
             {proposal.requested_by.includes("agent") ? "proposed by " : "raised by "}
             {proposal.requested_by}
@@ -367,7 +443,7 @@ export function ReviewQueueScreen() {
         <aside className="evp rq__evidence" aria-label="Proposal detail">
           <header className="evp__head">
             <div className="evp__title">
-              <div className="evp__name">{focused.object_id}</div>
+              <div className="evp__name">{renderRowExtras(focused).subject}</div>
               <div className="evp__path">{focused.object_type} · {focused.requested_action}</div>
             </div>
             <button className="evp__x" onClick={() => setParams({ review: null })} aria-label="Close">

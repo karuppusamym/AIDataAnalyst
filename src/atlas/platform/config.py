@@ -273,6 +273,25 @@ class Settings(BaseSettings):
     lineage_projection_max_nodes: int = Field(default=20_000, ge=100, le=100_000)
     lineage_projection_max_edges: int = Field(default=100_000, ge=500, le=500_000)
     lineage_neo4j_read_enabled: bool = False
+    # P1-05 / ADR-0026: review lifecycle for the five non-governed
+    # parser-produced lineage edge types (view, procedure, dbt-column,
+    # OpenLineage-table, OpenLineage-column).
+    #
+    # `auto_active` (default) keeps every deployment on the pre-P1-05
+    # contract: a parser writes edges straight to review_status="ACTIVE"
+    # the moment it succeeds, exactly like it did before P1-05 landed.
+    # `require_review` writes new edges as PROPOSED and holds them out of
+    # the unified read model / graph projection until a reviewer flips
+    # them via `/v1/lineage/parsed-edges/{id}/decision`, EXCEPT when
+    # confidence is already at or above
+    # `lineage_high_confidence_auto_active_threshold` (matches the
+    # ADR-0025 auto-approve spirit -- high-confidence output that a
+    # reviewer would rubber-stamp anyway lands ACTIVE straight away and
+    # never pollutes the review queue).
+    lineage_parsed_edges_review_mode: Literal["auto_active", "require_review"] = "auto_active"
+    lineage_high_confidence_auto_active_threshold: float = Field(
+        default=0.9, ge=0.0, le=1.0
+    )
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and
@@ -363,6 +382,52 @@ class Settings(BaseSettings):
         default=86_400, ge=900, le=604_800
     )
     certification_revoke_enforce_maker_checker: bool = True
+    # P3-09: OFF by default. `backfill_certification_evidence_v1` is a best-
+    # effort backfill of the new `AssetCertification.evidence` blob for
+    # pre-P3-09 ACTIVE rows; it snapshots today's description version /
+    # ownership / quality / glossary state (the true state at certify time
+    # is gone) and tags the resulting row with `backfilled=True` so future
+    # readers do not conflate a reconstructed snapshot with an as-of-certify
+    # one. Left OFF at startup because a large estate should backfill via
+    # the `scripts/backfill_certification_evidence.py` CLI on the operator's
+    # own schedule, not lengthen every app boot; a single-tenant / small-
+    # estate dev deployment can flip this true.
+    certification_evidence_backfill_on_startup: bool = False
+    # P2-07: OwnershipAssignment re-affirmation cadence + expiry-warning sweep +
+    # identity-merge/delete leaver flip.
+    #
+    # `ownership_reaffirm_days` is the horizon by which an ACTIVE assignment
+    # must be re-affirmed by its owner; the `/reaffirm` endpoint extends
+    # `expires_at = now + ownership_reaffirm_days` on every call, and a fresh
+    # ASSIGN_OWNERSHIP writes the same expiry. Default 180 days matches
+    # typical steward review-of-scope cadences at regulated financial
+    # institutions -- 90d is too aggressive for slow-moving datasets, 365d is
+    # too long for the audit posture P2-07 addresses. Bounds 30..730 keep both
+    # extremes off the table.
+    #
+    # `ownership_expiry_warn_days` is the horizon the warning job looks ahead
+    # by (`now < expires_at < now + warn_days`), also used doubled as the
+    # per-row idempotency cooldown (matches P2-08's `warn_days * 2` shape).
+    #
+    # `ownership_expiry_warn_interval_seconds` is the scheduler cadence for
+    # the pass itself (daily by default, matching the P2-08 warning pass).
+    #
+    # `ownership_expiry_grace_days` is how long AFTER `expires_at` a still-un-
+    # re-affirmed assignment lingers ACTIVE before the expire sweep flips it
+    # to LAPSED (default 30 -- one warning cycle plus one grace month, so a
+    # notified owner has time to reaffirm before ownership actually drops).
+    #
+    # `ownership_leaver_auto_reassign` is the safety switch on the identity-
+    # merge/delete handler. In tightly-controlled deployments where every
+    # ownership flip must be a governed decision, turn this off and rely on
+    # GL-7 `REASSIGN_LEAVER` operator flow instead.
+    ownership_reaffirm_days: int = Field(default=180, ge=30, le=730)
+    ownership_expiry_warn_days: int = Field(default=14, ge=1, le=90)
+    ownership_expiry_warn_interval_seconds: int = Field(
+        default=86_400, ge=900, le=604_800
+    )
+    ownership_expiry_grace_days: int = Field(default=30, ge=0, le=180)
+    ownership_leaver_auto_reassign: bool = True
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids

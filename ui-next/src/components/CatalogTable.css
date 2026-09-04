@@ -54,3 +54,44 @@
 /* A state pill must never be truncated — a half-rendered "propo…" is worse
    than no pill, because it still reads as a claim. The description yields. */
 .cdesc .pill{flex:none}
+
+/* P1-03: pale glossary-term chips shown under the description snippet.
+   Kept inline (flex row) so a description cell that has no glossary terms
+   pays no vertical cost; when chips are present the description snippet
+   truncates first and the chips stay visible -- glossary_terms are the
+   discovery affordance being introduced here. Theme-neutral: uses accent
+   soft tokens rather than a hard-coded color, so both light and dark
+   themes stay legible without a second rule. */
+.cdesc { flex-wrap: wrap; }
+.cglossary {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 4px;
+  align-items: center;
+  flex: none;
+}
+.cglossary__chip {
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background .12s, border-color .12s;
+}
+.cglossary__chip:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.cglossary__chip--more {
+  background: var(--sunk);
+  color: var(--ink-3);
+}

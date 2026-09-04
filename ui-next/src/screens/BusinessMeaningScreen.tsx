@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetadataBusinessAnnotationRead } from "../lib/types";
-import { ApiError, fetchBusinessAnnotations, fetchBusinessMap, fetchTableBusinessAnnotation } from "../lib/api";
+import { ApiError, fetchBusinessAnnotations, fetchBusinessMap, fetchTableBusinessAnnotation, fetchCatalogRows } from "../lib/api";
+import {
+  createGlossaryTerm,
+  linkTermToTable,
+  listGlossaryTerms,
+  submitGlossaryTermVersion,
+  type GlossaryTermRead,
+} from "../lib/_api_append";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
@@ -238,6 +245,422 @@ function BusinessAnnotationPane({
   );
 }
 
+/** P1-03: Glossary tab -- lists glossary terms scoped to the current
+ *  business node, backed by `GET /organizations/{org}/glossary-terms`.
+ *  Client-side filter for the business-node id (the endpoint has no
+ *  server-side filter for it yet -- see `listGlossaryTerms` for the
+ *  rationale). "Create term" opens a form dialog that calls
+ *  `createGlossaryTerm` + `submitGlossaryTermVersion`; "Link to asset"
+ *  opens a search dialog that calls `linkTermToTable`. */
+function GlossaryTab({
+  organizationId,
+  businessNodeId,
+}: {
+  organizationId: string;
+  businessNodeId: string | null;
+}) {
+  const [terms, setTerms] = useState<GlossaryTermRead[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [q, setQ] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [linkingTerm, setLinkingTerm] = useState<GlossaryTermRead | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const page = await listGlossaryTerms(organizationId, {
+        businessNodeId: businessNodeId ?? undefined,
+        limit: 200,
+      });
+      setTerms(page.items);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [organizationId, businessNodeId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return terms;
+    return terms.filter(
+      (t) =>
+        t.display_name.toLowerCase().includes(needle) ||
+        t.term_key.toLowerCase().includes(needle) ||
+        t.definition.toLowerCase().includes(needle),
+    );
+  }, [terms, q]);
+
+  return (
+    <div className="bmglossary">
+      <div className="bmglossary__toolbar">
+        <Field label="Search">
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="term name, key or definition..."
+          />
+        </Field>
+        <Button variant="primary" onClick={() => setCreating(true)}>
+          Create term
+        </Button>
+      </div>
+
+      {error ? (
+        <ErrorState
+          title="Glossary terms could not be loaded"
+          detail={error}
+          onRetry={() => void load()}
+        />
+      ) : loading ? (
+        <div className="bmglossary__skeleton" role="status" aria-live="polite">
+          Loading glossary terms...
+        </div>
+      ) : filtered.length === 0 ? (
+        <Empty
+          title={terms.length === 0 ? "No glossary terms yet" : "No matches"}
+          hint={
+            terms.length === 0
+              ? "Create the first term with the button above."
+              : "Try a different name or key."
+          }
+        />
+      ) : (
+        <table className="bmglossary__table" aria-label="Glossary terms">
+          <thead>
+            <tr>
+              <th scope="col">Term</th>
+              <th scope="col">Definition</th>
+              <th scope="col">Status</th>
+              <th scope="col" className="tnum">Synonyms</th>
+              <th scope="col">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((t) => (
+              <tr key={t.id}>
+                <td>
+                  <div className="bmglossary__name">{t.display_name}</div>
+                  <div className="bmglossary__key">{t.term_key}</div>
+                </td>
+                <td className="bmglossary__def" title={t.definition}>
+                  {t.definition.length > 140
+                    ? `${t.definition.slice(0, 140)}...`
+                    : t.definition}
+                </td>
+                <td>
+                  <Pill
+                    tone={
+                      t.status === "APPROVED"
+                        ? "ok"
+                        : t.status === "REJECTED"
+                          ? "bad"
+                          : t.status === "REVIEW_REQUIRED"
+                            ? "warn"
+                            : "mute"
+                    }
+                  >
+                    {t.status.toLowerCase().replace(/_/g, " ")}
+                  </Pill>
+                </td>
+                <td className="tnum">{t.synonyms.length}</td>
+                <td className="bmglossary__actions">
+                  <Button
+                    onClick={() => setLinkingTerm(t)}
+                    disabled={t.status !== "APPROVED"}
+                    title={
+                      t.status !== "APPROVED"
+                        ? "Only approved terms can be linked to assets"
+                        : "Link this term to a table"
+                    }
+                  >
+                    Link to asset...
+                  </Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {creating ? (
+        <CreateTermDialog
+          organizationId={organizationId}
+          businessNodeId={businessNodeId}
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            void load();
+          }}
+        />
+      ) : null}
+
+      {linkingTerm ? (
+        <LinkTermDialog
+          organizationId={organizationId}
+          term={linkingTerm}
+          onClose={() => setLinkingTerm(null)}
+          onLinked={() => {
+            setLinkingTerm(null);
+            void load();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function CreateTermDialog({
+  organizationId,
+  businessNodeId,
+  onClose,
+  onCreated,
+}: {
+  organizationId: string;
+  businessNodeId: string | null;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const [displayName, setDisplayName] = useState("");
+  const [termKey, setTermKey] = useState("");
+  const [definition, setDefinition] = useState("");
+  const [synonymsRaw, setSynonymsRaw] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = useCallback(async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const created = await createGlossaryTerm(organizationId, {
+        term_key: termKey.trim(),
+        display_name: displayName.trim(),
+        definition: definition.trim(),
+        business_node_id: businessNodeId ?? undefined,
+        synonyms: synonymsRaw
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+      });
+      // Auto-submit for review -- ADR-0001: models propose, humans decide;
+      // a term that stays in DRAFT forever helps nobody, so the create
+      // form leaves it in REVIEW_REQUIRED so a reviewer can see it.
+      try {
+        await submitGlossaryTermVersion(created.id);
+      } catch {
+        /* If the auto-submit fails, the term still exists in DRAFT and
+         *  the reviewer can submit it manually from the term row. */
+      }
+      onCreated();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [
+    organizationId,
+    businessNodeId,
+    termKey,
+    displayName,
+    definition,
+    synonymsRaw,
+    onCreated,
+  ]);
+
+  const canSubmit =
+    !submitting &&
+    displayName.trim().length >= 2 &&
+    termKey.trim().length >= 2 &&
+    definition.trim().length >= 10;
+
+  return (
+    <div className="bmdialog__backdrop" role="dialog" aria-modal="true" aria-label="Create glossary term">
+      <div className="bmdialog">
+        <header className="bmdialog__head">
+          <h2 className="bmdialog__h2">Create glossary term</h2>
+          <button className="bmdialog__x" onClick={onClose} aria-label="Close">
+            {"×"}
+          </button>
+        </header>
+        <div className="bmdialog__body">
+          <Field label="Display name">
+            <input
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Monthly Recurring Revenue"
+            />
+          </Field>
+          <Field label="Term key">
+            <input
+              value={termKey}
+              onChange={(e) => setTermKey(e.target.value.toLowerCase())}
+              placeholder="mrr"
+            />
+          </Field>
+          <Field label="Definition">
+            <textarea
+              value={definition}
+              onChange={(e) => setDefinition(e.target.value)}
+              rows={4}
+              placeholder="Recurring revenue normalized to a monthly cadence, excluding one-time fees."
+            />
+          </Field>
+          <Field label="Synonyms (comma-separated, optional)">
+            <input
+              value={synonymsRaw}
+              onChange={(e) => setSynonymsRaw(e.target.value)}
+              placeholder="recurring revenue, monthly rev"
+            />
+          </Field>
+          {error ? <p className="bmdialog__err" role="alert">{error}</p> : null}
+        </div>
+        <footer className="bmdialog__foot">
+          <Button onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit}>
+            {submitting ? "Creating..." : "Create and submit for review"}
+          </Button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function LinkTermDialog({
+  organizationId,
+  term,
+  onClose,
+  onLinked,
+}: {
+  organizationId: string;
+  term: GlossaryTermRead;
+  onClose: () => void;
+  onLinked: () => void;
+}) {
+  const [q, setQ] = useState("");
+  const [candidates, setCandidates] = useState<{ id: string; name: string; schema_name: string }[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [selected, setSelected] = useState<{ id: string; name: string } | null>(null);
+  const [reason, setReason] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const search = useCallback(async () => {
+    if (!q.trim()) return;
+    setSearching(true);
+    setError(null);
+    try {
+      const page = await fetchCatalogRows({
+        organizationId,
+        q: q.trim(),
+        objectType: "TABLE",
+        limit: 25,
+      });
+      setCandidates(page.items.map((r) => ({ id: r.id, name: r.name, schema_name: r.schema_name })));
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setSearching(false);
+    }
+  }, [organizationId, q]);
+
+  const submit = useCallback(async () => {
+    if (!selected) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await linkTermToTable(organizationId, selected.id, term.term_id, {
+        reason: reason.trim() || undefined,
+      });
+      onLinked();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [organizationId, selected, term.term_id, reason, onLinked]);
+
+  return (
+    <div className="bmdialog__backdrop" role="dialog" aria-modal="true" aria-label={`Link ${term.display_name}`}>
+      <div className="bmdialog">
+        <header className="bmdialog__head">
+          <h2 className="bmdialog__h2">
+            Link {"“"}{term.display_name}{"”"} to an asset
+          </h2>
+          <button className="bmdialog__x" onClick={onClose} aria-label="Close">
+            {"×"}
+          </button>
+        </header>
+        <div className="bmdialog__body">
+          <Field label="Search asset by name">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void search();
+                }
+              }}
+              placeholder="orders_raw"
+            />
+          </Field>
+          <Button onClick={() => void search()} disabled={searching || !q.trim()}>
+            {searching ? "Searching..." : "Search"}
+          </Button>
+          {candidates.length > 0 ? (
+            <ul className="bmdialog__results" role="listbox" aria-label="Matching tables">
+              {candidates.map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={selected?.id === c.id}
+                    className={`bmdialog__opt${selected?.id === c.id ? " bmdialog__opt--sel" : ""}`}
+                    onClick={() => setSelected({ id: c.id, name: `${c.schema_name}.${c.name}` })}
+                  >
+                    {c.schema_name}.{c.name}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {selected ? (
+            <Field label="Reason (optional)">
+              <input
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                placeholder="why this term applies to this asset"
+              />
+            </Field>
+          ) : null}
+          {error ? <p className="bmdialog__err" role="alert">{error}</p> : null}
+        </div>
+        <footer className="bmdialog__foot">
+          <Button onClick={onClose} disabled={submitting}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            onClick={() => void submit()}
+            disabled={submitting || !selected}
+          >
+            {submitting ? "Linking..." : `Link to ${selected?.name ?? "..."}`}
+          </Button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 /** The business-map tab: a grouped domain → entity → table tree over the
  *  real org-wide `get_business_map` response, plus a plain list of the
  *  cross-domain edges (each one a real `MetadataConstraint` foreign key that
@@ -340,7 +763,9 @@ export function BusinessMeaningScreen() {
   const [params, setParams] = useUrlState();
   const q = params.get("q") ?? "";
   const selectedId = params.get("asset");
-  const view = params.get("view") === "map" ? "map" : "annotations";
+  const viewParam = params.get("view");
+  const view: "annotations" | "map" | "glossary" =
+    viewParam === "map" ? "map" : viewParam === "glossary" ? "glossary" : "annotations";
 
   const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
   const dsId = params.get("ds") ?? preferredDatasourceId;
@@ -496,10 +921,20 @@ export function BusinessMeaningScreen() {
         >
           Business map (supporting view)
         </button>
+        <button
+          role="tab"
+          aria-selected={view === "glossary"}
+          className={`bm__tab${view === "glossary" ? " bm__tab--active" : ""}`}
+          onClick={() => setParams({ view: "glossary", asset: null })}
+        >
+          Glossary
+        </button>
       </div>
 
       {view === "map" ? (
         <BusinessMapTab organizationId={ORG} />
+      ) : view === "glossary" ? (
+        <GlossaryTab organizationId={ORG} businessNodeId={params.get("node")} />
       ) : !dsId ? (
         <Empty
           title="Pick a datasource to see its business annotations"

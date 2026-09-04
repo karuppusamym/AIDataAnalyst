@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from fastapi import status
 
 from aida.asset_certification import asset_certification_is_active, current_asset_certification
+from aida.certification_evidence import compute_certification_evidence
 from aida.authorization_gate import AuthorizationDenied, gate, gate_read
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
@@ -129,6 +130,11 @@ def _asset_certification_read(
         revoked_at=certification.revoked_at,
         revoked_by=certification.revoked_by,
         revocation_reason=certification.revocation_reason,
+        # P3-09: pass the raw dict through; pydantic parses it into the
+        # `CertificationEvidence` model on the read side. `None` on legacy
+        # rows (evidence IS NULL) still projects correctly -- the field on
+        # the schema is `CertificationEvidence | None`.
+        evidence=certification.evidence,
         created_at=certification.created_at,
         updated_at=certification.updated_at,
     )
@@ -321,6 +327,19 @@ async def certify_table_asset(
     ).all()
     for prior in prior_rows:
         prior.status = "SUPERSEDED"
+    # P3-09: capture the structured evidence blob (description version /
+    # active owners / quality snapshot / glossary term ids) alongside the
+    # free-text rationale, so a future revoke-on-evidence-change job has
+    # something machine-consumable to key off. Column-level certs pass the
+    # parent table id -- the composition is table-scoped either way (the
+    # column certification implicitly asserts the same context).
+    evidence_blob = await compute_certification_evidence(
+        session,
+        table.id,
+        organization_id=table.organization_id,
+        now=now,
+        certifier_notes=body.rationale,
+    )
     certification = AssetCertification(
         organization_id=table.organization_id,
         table_id=table.id,
@@ -329,6 +348,7 @@ async def certify_table_asset(
         rationale=body.rationale,
         certified_by=context.principal_id,
         expires_at=body.expires_at,
+        evidence=evidence_blob,
     )
     session.add(certification)
     try:
@@ -1189,9 +1209,20 @@ async def bulk_certify_tables(
     for row in active_certifications:
         grouped_certifications.setdefault(row.table_id, []).append(row)
     results: list[BulkItemResult] = []
+    now = datetime.now(UTC)
     for subject_id in subject_ids:
         try:
             async with session.begin_nested():
+                # P3-09: compute the structured evidence blob per subject
+                # before the SAVEPOINT commits so every catalog-bulk-certify
+                # row carries the same shape the single-certify path writes.
+                evidence_blob = await compute_certification_evidence(
+                    session,
+                    subject_id,
+                    organization_id=organization_id,
+                    now=now,
+                    certifier_notes=body.rationale,
+                )
                 new_certification, superseded_priors = apply_certify_item(
                     subject_id,
                     tables=tables,
@@ -1200,6 +1231,7 @@ async def bulk_certify_tables(
                     rationale=body.rationale,
                     expires_at=body.expires_at,
                     certified_by=context.principal_id,
+                    evidence=evidence_blob,
                 )
                 session.add(new_certification)
                 await session.flush([new_certification, *superseded_priors])

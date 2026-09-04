@@ -81,6 +81,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_certification import asset_certification_is_active
+from aida.certification_evidence import summarize_evidence
 from aida.models import (
     AssetCertification,
     AssetDescriptionDraft,
@@ -123,17 +124,27 @@ def _quality_state(
 
 def _certification_state(
     certification: AssetCertification | None, *, now: datetime
-) -> tuple[str, datetime | None]:
+) -> tuple[str, datetime | None, dict | None]:
+    """Return ``(state, expires_at, evidence_summary)`` for one table's
+    latest certification row.
+
+    P3-09: ``evidence_summary`` is the small counts fold of the row's
+    ``evidence`` blob (``summarize_evidence``) so ``CatalogRowRead`` can
+    surface a "based on" tooltip without every reader re-parsing the JSON;
+    ``None`` for legacy pre-P3-09 rows (``evidence IS NULL``), for the
+    ``NONE`` state, and for the ``EXPIRED`` / ``REVOKED`` states where the
+    catalog row's certification is no longer being asserted.
+    """
     if certification is None:
-        return "NONE", None
+        return "NONE", None, None
     expires_at = _as_aware(certification.expires_at)
     if asset_certification_is_active(
         _CertificationForActiveCheck(status=certification.status, expires_at=expires_at), at=now
     ):
-        return "CERTIFIED", expires_at
+        return "CERTIFIED", expires_at, summarize_evidence(certification.evidence)
     if certification.status == "REVOKED":
-        return "REVOKED", None
-    return "EXPIRED", None
+        return "REVOKED", None, None
+    return "EXPIRED", None, None
 
 
 def _description(
@@ -191,7 +202,11 @@ async def compose_catalog_rows(
         if owner is None:
             doc_version = documentation.get(table.id)
             owner = doc_version.owner_principal if doc_version else None
-        certification, certification_expires_at = _certification_state(
+        (
+            certification,
+            certification_expires_at,
+            certification_evidence_summary,
+        ) = _certification_state(
             certifications.get(table.id), now=moment
         )
         profile = profiles.get(table.id)
@@ -208,6 +223,7 @@ async def compose_catalog_rows(
                 owner=owner,
                 certification=certification,
                 certification_expires_at=certification_expires_at,
+                certification_evidence_summary=certification_evidence_summary,
                 quality=_quality_state(
                     table.id,
                     open_incident_ids=open_incident_ids,
@@ -489,6 +505,7 @@ def apply_certify_item(
     rationale: str,
     expires_at: datetime,
     certified_by: str,
+    evidence: dict | None = None,
 ) -> tuple[AssetCertification, list[AssetCertification]]:
     """Certify one table. Returns ``(new_certification, superseded_priors)``:
     ``superseded_priors`` are the table's prior ACTIVE table-level
@@ -498,6 +515,13 @@ def apply_certify_item(
     a failure can never leave a table with two simultaneously-ACTIVE table
     certifications. Raises ``CatalogBulkItemError`` if the table is missing or
     not ACTIVE.
+
+    P3-09: ``evidence`` is the structured snapshot returned by
+    ``aida.certification_evidence.compute_certification_evidence``; every
+    caller (single-certify, direct-write bulk, reviewed bulk, playbook)
+    passes it so the four paths cannot drift on what "evidence" means.
+    Optional here (default ``None``) so a partial-fixture unit test that
+    does not exercise the composition can still call this helper.
     """
     _require_active_table(tables.get(subject_id))
     priors = list(active_certifications.get(subject_id, ()))
@@ -510,5 +534,6 @@ def apply_certify_item(
         rationale=rationale,
         certified_by=certified_by,
         expires_at=expires_at,
+        evidence=evidence,
     )
     return new_certification, priors

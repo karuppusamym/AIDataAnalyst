@@ -66,3 +66,36 @@
   .evp{width:auto;max-height:none}
 }
 .bm__pickerr{margin:0;font-size:12px;color:var(--bad)}
+
+/* P1-03: Glossary tab -- a compact term table + create/link dialogs.
+   Uses the same visual system as the Annotations tab, so a steward moving
+   between them keeps their orientation. Dialog is a modal-ish overlay
+   rather than a route because it's a one-off write flow, not a screen. */
+.bmglossary{display:flex;flex-direction:column;gap:10px;flex:1;min-height:0}
+.bmglossary__toolbar{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
+.bmglossary__toolbar > *:first-child{flex:1;min-width:220px}
+.bmglossary__skeleton{padding:22px;color:var(--ink-3);text-align:center;font-family:var(--mono);font-size:12px}
+.bmglossary__table{width:100%;border-collapse:collapse;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.bmglossary__table th,.bmglossary__table td{padding:8px 12px;text-align:left;font-size:13px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.bmglossary__table th{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);background:var(--sunk);font-weight:normal}
+.bmglossary__table tr:last-child td{border-bottom:none}
+.bmglossary__name{font-weight:500;color:var(--ink)}
+.bmglossary__key{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px}
+.bmglossary__def{color:var(--ink-2);max-width:520px}
+.bmglossary__actions{white-space:nowrap}
+
+.bmdialog__backdrop{position:fixed;inset:0;background:rgba(0,0,0,.32);display:flex;align-items:center;justify-content:center;z-index:200}
+.bmdialog{background:var(--surface);color:var(--ink);border:1px solid var(--line);border-radius:var(--radius);min-width:min(480px,92vw);max-width:min(560px,94vw);max-height:88vh;display:flex;flex-direction:column;box-shadow:0 24px 64px rgba(0,0,0,.28)}
+.bmdialog__head{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line)}
+.bmdialog__h2{margin:0;font-size:15px;font-weight:600}
+.bmdialog__x{all:unset;cursor:pointer;font-size:20px;color:var(--ink-3);line-height:1;padding:2px 6px;border-radius:4px}
+.bmdialog__x:hover{background:var(--sunk);color:var(--ink)}
+.bmdialog__body{padding:14px 18px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+.bmdialog__foot{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--line);background:var(--sunk)}
+.bmdialog__err{color:var(--bad);font-size:12.5px;margin:0}
+.bmdialog__results{list-style:none;padding:0;margin:0;max-height:220px;overflow-y:auto;border:1px solid var(--line);border-radius:var(--radius-sm)}
+.bmdialog__results li{border-bottom:1px solid var(--line-soft)}
+.bmdialog__results li:last-child{border-bottom:none}
+.bmdialog__opt{all:unset;cursor:pointer;display:block;padding:8px 12px;width:100%;box-sizing:border-box;font-size:13px;font-family:var(--mono)}
+.bmdialog__opt:hover{background:var(--sunk)}
+.bmdialog__opt--sel{background:var(--accent-soft);color:var(--accent)}

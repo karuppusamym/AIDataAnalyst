@@ -126,6 +126,8 @@ const TERMS = [
   "Notional", "Risk Weighted Asset", "Chargeback",
 ] as const;
 
+function row_owner_count_estimate(i: number): number { return (h(i, 71) % 3) + 1; }
+
 function rowAt(i: number): CatalogRowRead {
   const certRoll = h(i, 7) % 100;
   const certification: CertificationStatus =
@@ -156,6 +158,18 @@ function rowAt(i: number): CatalogRowRead {
     certification,
     certification_expires_at:
       certification === "CERTIFIED" ? "2026-12-31T00:00:00Z" : null,
+    // P3-09: sample summary; the real server returns null for legacy /
+    // non-CERTIFIED rows -- mirror that shape so the fixture exercises both.
+    certification_evidence_summary:
+      certification === "CERTIFIED"
+        ? {
+            description_version_id: hasDesc ? "d0000000000000000000000000000000" : null,
+            active_owner_count: row_owner_count_estimate(i),
+            open_incident_count_at_certify: quality === "INCIDENT_OPEN" ? 1 : 0,
+            glossary_term_count: termCount,
+            backfilled: false,
+          }
+        : null,
     quality,
     glossary_terms: Array.from({ length: termCount }, (_, k) => pick(TERMS, i + k, 53)),
     row_count_estimate: h(i, 59) % 7 === 0 ? null : h(i, 61) % 40_000_000,

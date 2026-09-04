@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -6,6 +6,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_certification import asset_certification_is_active
+from aida.certification_evidence import compute_certification_evidence
+from aida.config import get_settings
 from aida.catalog_bulk_actions import (
     CatalogBulkItemError,
     apply_classify_item,
@@ -115,6 +117,12 @@ async def apply_bulk_operation(
     parameters = operation.parameters
     subject_ids = [UUID(value) for value in operation.subject_ids]
     if operation.operation_type == "ASSIGN_OWNERSHIP":
+        # P2-07: new/reactivated OwnershipAssignment rows carry an `expires_at`
+        # sourced from `settings.ownership_reaffirm_days` (default 180). Legacy
+        # rows without `expires_at` are unaffected until they're re-affirmed
+        # or freshly assigned; the expiry-warning sweep skips them explicitly.
+        reaffirm_days = get_settings().ownership_reaffirm_days
+        expires_at = now + timedelta(days=reaffirm_days)
         for subject_id in subject_ids:
             existing = await session.scalar(
                 select(OwnershipAssignment).where(
@@ -129,6 +137,11 @@ async def apply_bulk_operation(
                 if existing.status != "ACTIVE":
                     existing.status = "ACTIVE"
                     existing.assigned_by = reviewer
+                    # A reactivation is treated as a fresh assertion of
+                    # ownership -- extends the expiry and clears any prior
+                    # warning stamp so the row can warn again in its next cycle.
+                    existing.expires_at = expires_at
+                    existing.expiry_warning_emitted_at = None
                     applied += 1
                 continue
             session.add(
@@ -145,6 +158,7 @@ async def apply_bulk_operation(
                         else None
                     ),
                     assigned_by=reviewer,
+                    expires_at=expires_at,
                 )
             )
             applied += 1
@@ -213,6 +227,16 @@ async def apply_bulk_operation(
                 )
                 .values(status="SUPERSEDED", updated_at=now)
             )
+            # P3-09: capture structured evidence per subject so the reviewed-
+            # bulk (P0-02) certify path writes the same evidence shape as the
+            # direct-write single/bulk endpoints and the playbook auto-apply.
+            evidence_blob = await compute_certification_evidence(
+                session,
+                table_id,
+                organization_id=operation.organization_id,
+                now=now,
+                certifier_notes=parameters["rationale"],
+            )
             session.add(
                 AssetCertification(
                     organization_id=operation.organization_id,
@@ -221,6 +245,7 @@ async def apply_bulk_operation(
                     rationale=parameters["rationale"],
                     certified_by=reviewer,
                     expires_at=expires_at,
+                    evidence=evidence_blob,
                 )
             )
             applied += 1

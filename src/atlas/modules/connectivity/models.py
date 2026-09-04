@@ -39,12 +39,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
     Integer,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -77,6 +79,16 @@ class DataSource(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(30), default="REGISTERED", nullable=False)
     max_concurrency: Mapped[int] = mapped_column(Integer, default=4, nullable=False)
     capabilities: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    # P1-05: when `AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE=require_review`,
+    # connector-pushed lineage (OpenLineage, dbt manifests) from a datasource
+    # flagged trusted_for_lineage lands ACTIVE without an approval step --
+    # every other datasource's connector-pushed edges land PROPOSED like
+    # any other parsed edge. Default False keeps existing rows untrusted;
+    # the default `auto_active` mode ignores the flag entirely, so nothing
+    # about the pre-review-mode behavior changes on the flag being unset.
+    trusted_for_lineage: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
 
 
 class ConnectorCertificationRun(Base, TimestampMixin):

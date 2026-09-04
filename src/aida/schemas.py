@@ -1701,8 +1701,39 @@ class OwnershipAssignmentRead(ApiModel):
     source_rule_id: UUID | None
     status: str
     assigned_by: str
+    # P2-07: re-affirmation cadence surface. `expires_at` is nullable so
+    # legacy pre-P2-07 rows read back as "no expiry", not as a validation
+    # error. The four fields below are all writer-populated -- reaffirmed_*
+    # by the `/reaffirm` endpoint, expiry_warning_emitted_at by the sweep.
+    expires_at: datetime | None = None
+    expiry_warning_emitted_at: datetime | None = None
+    reaffirmed_at: datetime | None = None
+    reaffirmed_by: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class OwnershipAssignmentBulkReaffirmRequest(ApiModel):
+    """P2-07: body for `POST /v1/ownership-assignments/bulk-reaffirm`.
+
+    Bounded at 100 ids per call to match the same limit
+    `bulk_decide_relationship_candidates` and other bulk endpoints use --
+    keeps the SAVEPOINT loop's worst-case wall time predictable.
+    """
+
+    assignment_ids: list[UUID] = Field(min_length=1, max_length=100)
+
+
+class OwnershipAssignmentBulkReaffirmItemResult(ApiModel):
+    assignment_id: UUID
+    outcome: str  # "REAFFIRMED" | "NOT_FOUND" | "FORBIDDEN" | "ERROR"
+    detail: str | None = None
+
+
+class OwnershipAssignmentBulkReaffirmResult(ApiModel):
+    reaffirmed: int
+    skipped: int
+    items: list[OwnershipAssignmentBulkReaffirmItemResult]
 
 
 class BulkStewardshipOperationCreate(ApiModel):
@@ -2927,6 +2958,11 @@ class CatalogRowRead(ApiModel):
     owner: str | None
     certification: str  # CERTIFIED | EXPIRED | NONE | REVOKED
     certification_expires_at: datetime | None
+    # P3-09: small counts snapshot from the current cert's structured
+    # evidence (description version, active owner count, open-incidents-at-
+    # certify, glossary-term count). Null when the current cert is legacy
+    # (evidence IS NULL) or when there is no current cert.
+    certification_evidence_summary: CertificationEvidenceSummary | None = None
     quality: str  # PASSING | INCIDENT_OPEN | STALE | UNKNOWN
     glossary_terms: list[str]
     row_count_estimate: int | None
@@ -3650,6 +3686,44 @@ class CertificationRevokeRequest(ApiModel):
     column_id: UUID | None = None
 
 
+class CertificationEvidence(ApiModel):
+    """P3-09: structured, machine-consumable snapshot of what a certifier
+    was implicitly attesting to at certify time -- populated on every new
+    write alongside the free-text ``rationale`` field, empty (``None``) on
+    every pre-P3-09 row (the migration adds the column nullable and never
+    backfills historical rows in-place). Shape composed by
+    ``aida.certification_evidence.compute_certification_evidence``; a
+    future ``revoke-on-evidence-change`` job keys off these fields.
+    """
+
+    schema_version: str = "1"
+    captured_at: datetime | None = None
+    description_version_id: UUID | None = None
+    ownership_assignment_ids: list[UUID] = Field(default_factory=list)
+    quality_snapshot: dict[str, Any] = Field(default_factory=dict)
+    glossary_term_ids: list[UUID] = Field(default_factory=list)
+    supporting_dq_check_ids: list[UUID] = Field(default_factory=list)
+    certifier_notes: str | None = None
+    # True on rows populated by `backfill_certification_evidence_v1`
+    # (best-effort snapshot from *now's* state, not as-of-certify).
+    backfilled: bool = False
+    backfilled_at: datetime | None = None
+
+
+class CertificationEvidenceSummary(ApiModel):
+    """P3-09: the small, catalog-UI-facing projection of
+    ``CertificationEvidence`` -- fold of counts the hover tooltip renders on
+    the certification cell of the catalog grid. Null on ``CatalogRowRead``
+    when the current cert has no structured evidence (legacy row).
+    """
+
+    description_version_id: UUID | None = None
+    active_owner_count: int = 0
+    open_incident_count_at_certify: int = 0
+    glossary_term_count: int = 0
+    backfilled: bool = False
+
+
 class AssetCertificationRead(ApiModel):
     id: UUID
     organization_id: UUID
@@ -3666,6 +3740,10 @@ class AssetCertificationRead(ApiModel):
     revoked_at: datetime | None = None
     revoked_by: str | None = None
     revocation_reason: str | None = None
+    # P3-09: structured evidence captured at certify time. Null on every
+    # pre-P3-09 row (the column is nullable and no historical row is
+    # mutated by the schema migration).
+    evidence: CertificationEvidence | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -3750,3 +3828,102 @@ class StudioContextProductMaterializationRead(ApiModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# P1-05 / ADR-0026: parsed lineage-edge review schemas.
+#
+# The five non-governed parser-produced lineage edge tables all share the
+# same review lifecycle (PROPOSED → ACTIVE | REJECTED | SUPERSEDED) but keep
+# their own storage. These DTOs are the common wire vocabulary the review
+# endpoint uses -- decide/bulk-decide/queue all speak in ParsedLineageEdge*
+# regardless of which underlying table the edge lives in.
+# ---------------------------------------------------------------------------
+
+
+PARSED_LINEAGE_EDGE_TYPES = (
+    "VIEW",
+    "PROCEDURE",
+    "DBT",
+    "OPENLINEAGE_TABLE",
+    "OPENLINEAGE_COLUMN",
+)
+PARSED_LINEAGE_BULK_DECISION_MAX_ITEMS = 100
+
+
+class ParsedLineageEdgeReviewQueueItemRead(ApiModel):
+    """One PROPOSED parsed-lineage edge as it appears in the review queue.
+
+    Deliberately narrow: enough for the reviewer to judge the edge and
+    dereference the source SQL, without loading the raw SQL text into
+    the queue payload itself (source_sql_reference names the tool/id
+    the reviewer's UI dereferences on demand)."""
+
+    edge_id: UUID
+    edge_type: Literal[
+        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
+    ]
+    organization_id: UUID
+    created_at: datetime
+    created_by: str | None
+    confidence: str | float | None
+    source_label: str
+    target_label: str
+    transformation_type: str | None
+    source_sql_reference: dict[str, str]
+
+
+class ParsedLineageEdgeReviewQueueRead(ApiModel):
+    items: list[ParsedLineageEdgeReviewQueueItemRead]
+    limit: int
+    offset: int
+    total: int
+
+
+class ParsedLineageEdgeDecisionRequest(ApiModel):
+    """Decision on one PROPOSED parsed-lineage edge."""
+
+    edge_type: Literal[
+        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
+    ]
+    decision: Literal["APPROVED", "REJECTED"]
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ParsedLineageEdgeDecisionRead(ApiModel):
+    edge_id: UUID
+    edge_type: str
+    review_status: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    review_reason: str | None
+
+
+class ParsedLineageEdgeBulkDecisionItem(ApiModel):
+    edge_id: UUID
+    edge_type: Literal[
+        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
+    ]
+
+
+class ParsedLineageEdgeBulkDecisionRequest(ApiModel):
+    items: list[ParsedLineageEdgeBulkDecisionItem] = Field(
+        min_length=1, max_length=PARSED_LINEAGE_BULK_DECISION_MAX_ITEMS
+    )
+    decision: Literal["APPROVED", "REJECTED"]
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class ParsedLineageEdgeBulkDecisionItemRead(ApiModel):
+    edge_id: UUID
+    edge_type: str
+    status: Literal["SUCCEEDED", "FAILED"]
+    reason: str | None = None
+
+
+class ParsedLineageEdgeBulkDecisionResultRead(ApiModel):
+    decision: Literal["APPROVED", "REJECTED"]
+    requested_count: int
+    succeeded_count: int
+    failed_count: int
+    results: list[ParsedLineageEdgeBulkDecisionItemRead]

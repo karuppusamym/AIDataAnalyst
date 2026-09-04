@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from typing import Any
 from uuid import UUID
@@ -70,6 +70,9 @@ from aida.schemas import (
     GlossaryTermDeprecationRequest,
     GovernanceReviewRead,
     LeaverReassignmentRequest,
+    OwnershipAssignmentBulkReaffirmItemResult,
+    OwnershipAssignmentBulkReaffirmRequest,
+    OwnershipAssignmentBulkReaffirmResult,
     OwnershipAssignmentRead,
     OwnershipRuleCreate,
     OwnershipRuleRead,
@@ -766,6 +769,225 @@ async def list_ownership_assignments(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# -- P2-07: OwnershipAssignment re-affirmation -----------------------------
+#
+# `POST /v1/ownership-assignments/{id}/reaffirm` is the single-item entry;
+# `POST /v1/ownership-assignments/bulk-reaffirm` is the maker-checker-friendly
+# per-item SAVEPOINT bulk shape used by every other bulk write in this
+# module (`bulk_decide_relationship_candidates`, `bulk_reject_link_proposals`).
+# A caller may reaffirm only their own ownership; PlatformAdmin/MetadataAdmin
+# can reaffirm on behalf of any principal.
+
+
+# `_OWNERSHIP_ADMIN_ROLES`: roles that may reaffirm an assignment they do NOT
+# themselves own. Kept narrow -- broadening this would defeat the "the owner
+# must actively re-attest" property the reaffirm endpoint exists to enforce.
+_OWNERSHIP_ADMIN_ROLES = frozenset({"PlatformAdmin", "MetadataAdmin"})
+
+
+async def _reaffirm_one(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    assignment: OwnershipAssignment,
+    now: datetime,
+    reaffirm_days: int,
+) -> None:
+    """Core: stamps `reaffirmed_at`/`reaffirmed_by`, extends `expires_at`, and
+    writes one audit + outbox row. Shared by the single-item endpoint and
+    each SAVEPOINT of the bulk endpoint.
+
+    Callers are responsible for checking caller-owns-or-is-admin BEFORE this;
+    the row-status ACTIVE gate is checked here to keep the single- and
+    bulk-item paths behaviorally identical.
+    """
+    if assignment.status != "ACTIVE":
+        raise HTTPException(
+            status_code=409,
+            detail="only ACTIVE ownership assignments can be reaffirmed",
+        )
+    assignment.reaffirmed_at = now
+    assignment.reaffirmed_by = context.principal_id
+    assignment.expires_at = now + timedelta(days=reaffirm_days)
+    # A reaffirmation clears the warning stamp so the row can warn again in
+    # its next cycle (the warning was for the previous expiry horizon).
+    assignment.expiry_warning_emitted_at = None
+    details = {
+        "subject_type": assignment.subject_type,
+        "subject_id": assignment.subject_id,
+        "owner_type": assignment.owner_type,
+        "owner_principal": assignment.owner_principal,
+        "reaffirm_days": reaffirm_days,
+        "new_expires_at": assignment.expires_at.isoformat(),
+    }
+    record_audit(
+        session,
+        _audit_context(context, assignment.organization_id),
+        action="OWNERSHIP_ASSIGNMENT_REAFFIRMED",
+        resource_type="ownership_assignment",
+        resource_id=str(assignment.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details=details,
+    )
+    record_outbox(
+        session,
+        organization_id=assignment.organization_id,
+        aggregate_type="ownership_assignment",
+        aggregate_id=str(assignment.id),
+        event_type="ownership.assignment.reaffirmed.v1",
+        payload={"assignment_id": str(assignment.id), **details},
+    )
+
+
+def _caller_may_reaffirm(context: SecurityContext, assignment: OwnershipAssignment) -> bool:
+    """Reaffirm is either self-service (caller is the owner) or admin-driven.
+
+    A GROUP-owned assignment is reaffirmable by any admin or by a caller
+    whose principal_id equals the group id (in that deployment a group is
+    itself a principal; see security.SecurityContext principal model).
+    """
+    if any(role in _OWNERSHIP_ADMIN_ROLES for role in context.roles):
+        return True
+    return context.principal_id == assignment.owner_principal
+
+
+@router.post(
+    "/ownership-assignments/{assignment_id}/reaffirm",
+    response_model=OwnershipAssignmentRead,
+)
+async def reaffirm_ownership_assignment(
+    assignment_id: UUID,
+    settings: Settings = Depends(get_settings),
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> OwnershipAssignment:
+    """P2-07: the owner (or admin) reaffirms an ACTIVE assignment. Extends
+    `expires_at` by `settings.ownership_reaffirm_days`, records audit +
+    outbox.
+    """
+    assignment = await session.get(OwnershipAssignment, assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code=404, detail="ownership assignment not found")
+    enforce_organization(context, assignment.organization_id)
+    if not _caller_may_reaffirm(context, assignment):
+        raise HTTPException(
+            status_code=403,
+            detail="only the owner or an admin may reaffirm this ownership assignment",
+        )
+    now = datetime.now(UTC)
+    await _reaffirm_one(
+        session,
+        context=context,
+        assignment=assignment,
+        now=now,
+        reaffirm_days=settings.ownership_reaffirm_days,
+    )
+    await session.commit()
+    await session.refresh(assignment)
+    return assignment
+
+
+@router.post(
+    "/ownership-assignments/bulk-reaffirm",
+    response_model=OwnershipAssignmentBulkReaffirmResult,
+)
+async def bulk_reaffirm_ownership_assignments(
+    body: OwnershipAssignmentBulkReaffirmRequest,
+    settings: Settings = Depends(get_settings),
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> OwnershipAssignmentBulkReaffirmResult:
+    """P2-07: the owner (or admin) reaffirms up to 100 ACTIVE assignments in
+    one call. Per-item SAVEPOINT -- one item failing (missing, wrong org,
+    not-owner, already-LAPSED) doesn't roll the rest back. Same
+    partial-success shape as `bulk_decide_relationship_candidates` and
+    `bulk_reject_link_proposals`.
+    """
+    now = datetime.now(UTC)
+    items: list[OwnershipAssignmentBulkReaffirmItemResult] = []
+    reaffirmed = 0
+    skipped = 0
+    for assignment_id in body.assignment_ids:
+        savepoint = await session.begin_nested()
+        try:
+            assignment = await session.get(OwnershipAssignment, assignment_id)
+            if assignment is None:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="NOT_FOUND",
+                        detail="ownership assignment not found",
+                    )
+                )
+                skipped += 1
+                continue
+            if context.organization_id != assignment.organization_id:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="FORBIDDEN",
+                        detail="assignment belongs to a different organization",
+                    )
+                )
+                skipped += 1
+                continue
+            if not _caller_may_reaffirm(context, assignment):
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="FORBIDDEN",
+                        detail="only the owner or an admin may reaffirm",
+                    )
+                )
+                skipped += 1
+                continue
+            try:
+                await _reaffirm_one(
+                    session,
+                    context=context,
+                    assignment=assignment,
+                    now=now,
+                    reaffirm_days=settings.ownership_reaffirm_days,
+                )
+            except HTTPException as exc:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="ERROR",
+                        detail=str(exc.detail),
+                    )
+                )
+                skipped += 1
+                continue
+            await savepoint.commit()
+            items.append(
+                OwnershipAssignmentBulkReaffirmItemResult(
+                    assignment_id=assignment_id,
+                    outcome="REAFFIRMED",
+                )
+            )
+            reaffirmed += 1
+        except Exception as exc:  # noqa: BLE001 -- SAVEPOINT catches all
+            await savepoint.rollback()
+            items.append(
+                OwnershipAssignmentBulkReaffirmItemResult(
+                    assignment_id=assignment_id,
+                    outcome="ERROR",
+                    detail=type(exc).__name__,
+                )
+            )
+            skipped += 1
+    await session.commit()
+    return OwnershipAssignmentBulkReaffirmResult(
+        reaffirmed=reaffirmed, skipped=skipped, items=items
     )
 
 

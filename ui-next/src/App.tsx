@@ -11,6 +11,7 @@ import "./App.css";
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
 const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
 const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then((module) => ({ default: module.ReviewQueueScreen })));
+const ParsedLineageReviewScreen = lazy(() => import("./screens/ParsedLineageReviewScreen").then((module) => ({ default: module.ParsedLineageReviewScreen })));
 const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));
 const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
 const StudioChangeSetsScreen = lazy(() => import("./screens/StudioChangeSetsScreen").then((module) => ({ default: module.StudioChangeSetsScreen })));
@@ -60,6 +61,7 @@ const NAV: NavItem[] = [
   { id: "transformations", label: "Transformations", group: "Understand", icon: "▤", keywords: "dbt models sql transforms manifest" },
   { id: "agents", label: "AI governance", group: "Govern", icon: "⌬", keywords: "model routes agents evaluations runtime" },
   { id: "governance", label: "Review queue", group: "Govern", icon: "✓", keywords: "approve reject proposals" },
+  { id: "parsed-lineage-review", label: "Parsed lineage review", group: "Govern", icon: "↯", keywords: "lineage parsed view procedure dbt openlineage proposed approve reject p1-05" },
   { id: "description-drafts", label: "Description drafts", group: "Govern", icon: "✎", keywords: "asset description draft generate submit steward" },
   { id: "studio", label: "Studio", group: "Govern", icon: "△", keywords: "change sets author" },
   { id: "quality", label: "Data quality", group: "Govern", icon: "◎", keywords: "incidents score checks" },
@@ -88,6 +90,7 @@ function Screen({ view }: { view: string }) {
   switch (view) {
     case "catalog": return <CatalogScreen />;
     case "governance": return <ReviewQueueScreen />;
+    case "parsed-lineage-review": return <ParsedLineageReviewScreen />;
     case "description-drafts": return <DescriptionDraftsScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;

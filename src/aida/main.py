@@ -59,6 +59,7 @@ from aida.observability import (
 from aida.observability_api import router as observability_router
 from aida.openlineage_api import router as openlineage_router
 from aida.operational_api import router as operational_router
+from aida.parsed_lineage_review_api import router as parsed_lineage_review_router
 from aida.persona_api import router as persona_router
 from aida.playbooks_api import router as playbooks_router
 from aida.policy_native_sync_api import router as policy_native_sync_router
@@ -318,6 +319,7 @@ app.include_router(ingestion_router)
 app.include_router(glossary_router)
 app.include_router(stewardship_router)
 app.include_router(unified_lineage_router)
+app.include_router(parsed_lineage_review_router)
 app.include_router(lineage_evidence_export_router)
 app.include_router(context_product_router)
 app.include_router(context_compiler_router)

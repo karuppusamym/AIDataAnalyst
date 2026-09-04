@@ -150,3 +150,175 @@ describe("classifyDescriptionDraftError", () => {
     expect(classifyDescriptionDraftError(new ApiError(418, "teapot")).kind).toBe("UNKNOWN");
   });
 });
+
+/* ---------------------------------------------------------------------------
+   P1-03: glossary api wrappers from `_api_append.ts`. Same pattern as
+   above -- mock global fetch, assert URL/method/headers/body/error
+   classification the wrappers promise.
+--------------------------------------------------------------------------- */
+
+describe("listGlossaryTerms", () => {
+  it("GETs the org-scoped list route and forwards status/limit query params", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ items: [], limit: 50, offset: 0, total: 0 }));
+    const { listGlossaryTerms } = await import("./_api_append");
+
+    await listGlossaryTerms(ORG, { status: "APPROVED", limit: 50 });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`/v1/organizations/${ORG}/glossary-terms?status=APPROVED&limit=50`);
+    expect(init?.method).toBe("GET");
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["Accept"]).toBe("application/json");
+  });
+
+  it("derives next_cursor from offset + limit < total, and omits it on the last page", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], limit: 10, offset: 0, total: 25 }));
+    const { listGlossaryTerms } = await import("./_api_append");
+    const first = await listGlossaryTerms(ORG, { limit: 10 });
+    expect(first.next_cursor).toBe("10");
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ items: [], limit: 10, offset: 20, total: 25 }));
+    const last = await listGlossaryTerms(ORG, { limit: 10, cursor: "20" });
+    expect(last.next_cursor).toBeUndefined();
+  });
+
+  it("classifies a 403 as an ApiError with the server detail", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ detail: "policy_denied" }, { status: 403 }));
+    const { listGlossaryTerms, ApiError } = await import("./_api_append").then(async (m) => ({
+      listGlossaryTerms: m.listGlossaryTerms,
+      ApiError: (await import("./api")).ApiError,
+    }));
+
+    await expect(listGlossaryTerms(ORG)).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("createGlossaryTerm", () => {
+  it("POSTs to the org-scoped create route with the term payload including business_node_id mapped to category_id", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ id: "ver_new", term_id: "term_new", status: "DRAFT" }, { status: 201 }),
+    );
+    const { createGlossaryTerm } = await import("./_api_append");
+
+    await createGlossaryTerm(ORG, {
+      term_key: "mrr",
+      display_name: "Monthly Recurring Revenue",
+      definition: "Recurring revenue normalized to a month.",
+      business_node_id: "node_finance",
+      synonyms: ["MRR"],
+    });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`/v1/organizations/${ORG}/glossary-terms`);
+    expect(init?.method).toBe("POST");
+    const body = JSON.parse(init?.body as string);
+    expect(body.term_key).toBe("mrr");
+    expect(body.display_name).toBe("Monthly Recurring Revenue");
+    expect(body.category_id).toBe("node_finance");
+    expect(body.synonyms).toEqual(["MRR"]);
+    // business_node_id itself must not leak onto the wire -- server does not know it.
+    expect(body.business_node_id).toBeUndefined();
+  });
+});
+
+describe("submitGlossaryTermVersion", () => {
+  it("POSTs to /v1/glossary-term-versions/{id}/submit with an empty body", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ id: "gr_1", status: "PENDING" }, { status: 202 }));
+    const { submitGlossaryTermVersion } = await import("./_api_append");
+
+    await submitGlossaryTermVersion("ver_1");
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/v1/glossary-term-versions/ver_1/submit");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({});
+  });
+});
+
+describe("linkTermToTable", () => {
+  it("POSTs to /v1/metadata/tables/{table_id}/glossary-links with {term_id} and an X-Link-Reason header", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({ id: "link_1", term_id: "term_1", table_id: "t_1" }, { status: 201 }),
+    );
+    const { linkTermToTable } = await import("./_api_append");
+
+    await linkTermToTable(ORG, "t_1", "term_1", { reason: "matches finance policy" });
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/v1/metadata/tables/t_1/glossary-links");
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({ term_id: "term_1" });
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["X-Link-Reason"]).toBe("matches finance policy");
+  });
+});
+
+describe("unlinkTermFromTable", () => {
+  it("DELETEs /v1/asset-term-links/{link_id} and resolves on 204", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }));
+    const { unlinkTermFromTable } = await import("./_api_append");
+
+    await expect(unlinkTermFromTable(ORG, "t_1", "link_1")).resolves.toBeUndefined();
+
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/v1/asset-term-links/link_1");
+    expect(init?.method).toBe("DELETE");
+  });
+});
+
+describe("listAssetTermLinks", () => {
+  it("returns an empty page when no tableId is provided (no server route for org-wide)", async () => {
+    const { listAssetTermLinks } = await import("./_api_append");
+    const page = await listAssetTermLinks(ORG, {});
+    expect(page.items).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("GETs /v1/metadata/tables/{id}/glossary-links when a tableId is given, filtering by termId client-side", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        items: [
+          { id: "l1", term_id: "term_a", table_id: "t_1", link_type: "MANUAL" },
+          { id: "l2", term_id: "term_b", table_id: "t_1", link_type: "INFERRED" },
+        ],
+        limit: 100,
+        offset: 0,
+        total: 2,
+      }),
+    );
+    const { listAssetTermLinks } = await import("./_api_append");
+
+    const page = await listAssetTermLinks(ORG, { tableId: "t_1", termId: "term_b" });
+
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/v1/metadata/tables/t_1/glossary-links?limit=100");
+    expect(page.items.map((l) => l.id)).toEqual(["l2"]);
+  });
+});
+
+describe("classifyGlossaryError", () => {
+  it("maps 409 with 'only approved' to TERM_NOT_APPROVED_FOR_LINK", async () => {
+    const { ApiError } = await import("./api");
+    const { classifyGlossaryError } = await import("./_api_append");
+    const err = new ApiError(409, "only approved glossary terms can be linked");
+    expect(classifyGlossaryError(err).kind).toBe("TERM_NOT_APPROVED_FOR_LINK");
+  });
+
+  it("maps 409 with 'already exists' to TERM_KEY_TAKEN", async () => {
+    const { ApiError } = await import("./api");
+    const { classifyGlossaryError } = await import("./_api_append");
+    expect(classifyGlossaryError(new ApiError(409, "glossary term key already exists")).kind).toBe(
+      "TERM_KEY_TAKEN",
+    );
+  });
+
+  it("maps 404/401/403/5xx/other to their own kinds", async () => {
+    const { ApiError } = await import("./api");
+    const { classifyGlossaryError } = await import("./_api_append");
+    expect(classifyGlossaryError(new ApiError(404, "x")).kind).toBe("TERM_NOT_FOUND");
+    expect(classifyGlossaryError(new ApiError(401, "x")).kind).toBe("UNAUTHORIZED");
+    expect(classifyGlossaryError(new ApiError(403, "x")).kind).toBe("UNAUTHORIZED");
+    expect(classifyGlossaryError(new ApiError(500, "x")).kind).toBe("SERVER_ERROR");
+    expect(classifyGlossaryError(new ApiError(418, "x")).kind).toBe("UNKNOWN");
+  });
+});

@@ -69,10 +69,33 @@ export interface CatalogRowRead {
   owner: string | null;
   certification: CertificationStatus;
   certification_expires_at: string | null;
+  /** P3-09: small counts snapshot from the current certification's
+   *  structured `evidence` blob -- what the certifier was implicitly
+   *  attesting to (description version, active owner count,
+   *  open-incidents-at-certify, glossary-term count). Null when the current
+   *  cert is legacy (server has `evidence IS NULL`), when the cert is
+   *  EXPIRED/REVOKED, or when there is no current cert. The catalog grid's
+   *  certification cell reads this to render the "Based on: ..." hover
+   *  tooltip; keep it nullable, no client should assume its presence. */
+  certification_evidence_summary: CertificationEvidenceSummary | null;
   quality: QualityState;
   glossary_terms: string[];
   row_count_estimate: number | null;
   updated_at: string;
+}
+
+/** P3-09: matches `aida.schemas.CertificationEvidenceSummary`. Kept on
+ *  `CatalogRowRead` (not on a separate detail endpoint) so the catalog
+ *  grid can render the tooltip from one row payload without a follow-up
+ *  fetch. Values are null/zero when the certifier's evidence is absent
+ *  or empty; `backfilled=true` marks a row populated retrospectively by
+ *  the `backfill_certification_evidence.py` CLI, not at certify time. */
+export interface CertificationEvidenceSummary {
+  description_version_id: string | null;
+  active_owner_count: number;
+  open_incident_count_at_certify: number;
+  glossary_term_count: number;
+  backfilled: boolean;
 }
 
 /** Front-end persona set (module 21 §5). No server enum backs this: in

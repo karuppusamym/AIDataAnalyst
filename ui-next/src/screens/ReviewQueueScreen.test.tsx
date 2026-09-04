@@ -99,7 +99,7 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
 
     render(<ReviewQueueScreen />);
 
-    await waitFor(() => expect(screen.getByText("term:mrr")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
     expect(fetchReviewQueue).toHaveBeenCalledWith(
       expect.objectContaining({ status: "PENDING" }),
       expect.anything(),
@@ -144,7 +144,7 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
     });
     const ReviewQueueScreen = await loadScreen();
     render(<ReviewQueueScreen />);
-    await waitFor(() => expect(screen.getByText("term:mrr")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
 
     screen.getByRole("button", { name: "Approve" }).click();
 
@@ -163,7 +163,7 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
     vi.spyOn(window, "prompt").mockReturnValue(null);
     const ReviewQueueScreen = await loadScreen();
     render(<ReviewQueueScreen />);
-    await waitFor(() => expect(screen.getByText("term:mrr")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
 
     screen.getByRole("button", { name: "Reject" }).click();
 
@@ -175,9 +175,9 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
     fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
     const ReviewQueueScreen = await loadScreen();
     render(<ReviewQueueScreen />);
-    await waitFor(() => expect(screen.getByText("term:mrr")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
 
-    screen.getByRole("button", { name: "term:mrr" }).click();
+    screen.getByRole("button", { name: /term:mrr/ }).click();
 
     const panel = await screen.findByLabelText("Proposal detail");
     expect(within(panel).getByText("Two domains disagree")).toBeInTheDocument();
@@ -221,5 +221,96 @@ describe("ReviewQueueScreen's PropagationLog gate (AT-D4, default off)", () => {
       expect(screen.getByText("Why orders_raw is currently blocked")).toBeInTheDocument(),
     );
     expect(screen.getByText(/Quality propagation/)).toBeInTheDocument();
+  });
+});
+
+
+/* ---------------------------------------------------------------------------
+   P1-03: glossary-specific row renderers. GLOSSARY_LINK_PROPOSAL rows now
+   show the term display_name in the header and the confidence in the
+   subtitle; GLOSSARY_TERM_VERSION rows show the term name and the diff
+   below is unchanged (it already surfaces the definition delta from
+   `diff.entries`).
+--------------------------------------------------------------------------- */
+
+const LINK_PROPOSAL: ReviewQueueRead["proposals"][number] = {
+  review_id: "rq_link_1",
+  organization_id: "org1",
+  object_type: "GLOSSARY_LINK_PROPOSAL",
+  object_id: "prop_9f",
+  requested_action: "APPROVE",
+  status: "PENDING",
+  requested_by: "glossary_link_agent",
+  decided_by: null,
+  decision_reason: null,
+  decided_at: null,
+  created_at: "2026-09-01T00:00:00Z",
+  confidence: 0.88,
+  evidence: [
+    { category: "GLOSSARY_LINK_PROPOSAL", claim: "term_display_name: Monthly Recurring Revenue", source: "glossary_link_proposal:prop_9f.evidence" },
+    { category: "GLOSSARY_LINK_PROPOSAL", claim: "table_name: finance.mrr_daily", source: "glossary_link_proposal:prop_9f.evidence" },
+    { category: "GLOSSARY_LINK_PROPOSAL", claim: "summary: name matches term synonym", source: "glossary_link_proposal:prop_9f.evidence" },
+  ],
+  diff: {
+    review_id: "rq_link_1",
+    object_type: "GLOSSARY_LINK_PROPOSAL",
+    object_id: "prop_9f",
+    diffable: false,
+    message: "Link proposals have no field-level diff.",
+  },
+};
+
+const TERM_VERSION: ReviewQueueRead["proposals"][number] = {
+  review_id: "rq_ver_1",
+  organization_id: "org1",
+  object_type: "GLOSSARY_TERM_VERSION",
+  object_id: "term:revenue",
+  requested_action: "UPDATE",
+  status: "PENDING",
+  requested_by: "priya@tenant.example",
+  decided_by: null,
+  decision_reason: null,
+  decided_at: null,
+  created_at: "2026-09-01T00:00:00Z",
+  confidence: null,
+  evidence: [
+    { category: "GLOSSARY_TERM_VERSION", claim: "display_name: Revenue", source: "glossary_term_version:v2" },
+    { category: "GLOSSARY_TERM_VERSION", claim: "reason: reconcile with finance policy", source: "glossary_term_version:v2" },
+  ],
+  diff: {
+    review_id: "rq_ver_1",
+    object_type: "GLOSSARY_TERM_VERSION",
+    object_id: "term:revenue",
+    diffable: true,
+    entries: [
+      { field: "definition", change: "modified", before: "any inflow", after: "net inflow attributable to sales" },
+    ],
+  },
+};
+
+describe("ReviewQueueScreen glossary row renderers (P1-03)", () => {
+  it("GLOSSARY_LINK_PROPOSAL row shows the term display_name in the title and confidence in the subtitle", async () => {
+    fetchReviewQueue.mockResolvedValue(queueOf([LINK_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+
+    // Title carries the term name, not the raw proposal uuid.
+    await waitFor(() =>
+      expect(screen.getByText(/Monthly Recurring Revenue/)).toBeInTheDocument(),
+    );
+    // Subtitle carries the target asset and the confidence percentage.
+    expect(screen.getByText(/finance\.mrr_daily/)).toBeInTheDocument();
+    expect(screen.getByText(/confidence 88%/)).toBeInTheDocument();
+  });
+
+  it("GLOSSARY_TERM_VERSION row shows the term name in the title and the definition diff below", async () => {
+    fetchReviewQueue.mockResolvedValue(queueOf([TERM_VERSION]));
+    const ReviewQueueScreen = await loadScreen();
+    render(<ReviewQueueScreen />);
+
+    await waitFor(() => expect(screen.getByText(/Revenue/)).toBeInTheDocument());
+    // The diff row is emitted by the existing DiffEntries component.
+    expect(screen.getByText(/definition/)).toBeInTheDocument();
+    expect(screen.getByText(/net inflow attributable to sales/)).toBeInTheDocument();
   });
 });

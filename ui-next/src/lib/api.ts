@@ -3085,3 +3085,163 @@ export async function revokeAssetCertification(
     signal,
   );
 }
+
+// -------------------------------------------------------------------------
+// P1-05 / ADR-0026: parsed-lineage-edge review queue.
+//
+// The five non-governed parser-produced lineage edge tables all share the
+// same review lifecycle. `listParsedLineageReviewQueue` composes across all
+// five; `decideParsedLineageEdge` / `bulkDecideParsedLineageEdges` mirror
+// the shape and semantics of `decideRelationshipCandidate` /
+// `bulkDecideRelationshipCandidates` above.
+// -------------------------------------------------------------------------
+
+/** `GET /v1/lineage/parsed-edges/review-queue` -- one paginated view across
+ *  the five non-governed parser-produced lineage edge tables, filtered to
+ *  review_status="PROPOSED". */
+export interface ParsedLineageReviewQueueQuery {
+  edgeType?: import("./types").ParsedLineageEdgeType | null;
+  minConfidence?: number | null;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listParsedLineageReviewQueue(
+  query: ParsedLineageReviewQueueQuery,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeReviewQueueRead> {
+  const params = new URLSearchParams();
+  if (query.edgeType) params.set("edge_type", query.edgeType);
+  if (query.minConfidence != null)
+    params.set("min_confidence", String(query.minConfidence));
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<import("./types").ParsedLineageEdgeReviewQueueRead>(
+    `/v1/lineage/parsed-edges/review-queue?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/lineage/parsed-edges/{edge_id}/decision` -- maker-checker
+ *  approve/reject of one PROPOSED parsed lineage edge. A reason is
+ *  required by the schema; callers should collect one before posting. */
+export async function decideParsedLineageEdge(
+  edgeId: string,
+  body: import("./types").ParsedLineageEdgeDecisionRequest,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeDecisionRead> {
+  return postJson<import("./types").ParsedLineageEdgeDecisionRead>(
+    `/v1/lineage/parsed-edges/${edgeId}/decision`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/lineage/parsed-edges/bulk-decide` -- up to 100 edges per call.
+ *  A per-item failure marks that item FAILED in the response and the rest
+ *  still commit (partial-success, per-item SAVEPOINT semantics). */
+export async function bulkDecideParsedLineageEdges(
+  body: import("./types").ParsedLineageEdgeBulkDecisionRequest,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeBulkDecisionResultRead> {
+  return postJson<import("./types").ParsedLineageEdgeBulkDecisionResultRead>(
+    `/v1/lineage/parsed-edges/bulk-decide`,
+    body,
+    signal,
+  );
+}
+
+
+// -------------------------------------------------------------------------
+// P2-07: OwnershipAssignment re-affirmation (`reaffirm`, `bulk-reaffirm`) +
+// the "expiring soon" banner listing that the OwnershipExpiryBanner screen
+// reads. The types are declared inline (rather than in `./types`) because
+// they are a small P2-07-specific surface; if a second screen consumes them
+// they should move to `./types` on the next codegen pass.
+// -------------------------------------------------------------------------
+
+/** Server row shape. Mirrors `aida.schemas.OwnershipAssignmentRead`. */
+export interface OwnershipAssignmentRead {
+  id: string;
+  organization_id: string;
+  subject_type: string;
+  subject_id: string;
+  owner_type: string;
+  owner_principal: string;
+  assignment_kind: string;
+  source_rule_id: string | null;
+  status: string;
+  assigned_by: string;
+  expires_at: string | null;
+  expiry_warning_emitted_at: string | null;
+  reaffirmed_at: string | null;
+  reaffirmed_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OwnershipAssignmentBulkReaffirmItemResult {
+  assignment_id: string;
+  outcome: "REAFFIRMED" | "NOT_FOUND" | "FORBIDDEN" | "ERROR";
+  detail: string | null;
+}
+
+export interface OwnershipAssignmentBulkReaffirmResult {
+  reaffirmed: number;
+  skipped: number;
+  items: OwnershipAssignmentBulkReaffirmItemResult[];
+}
+
+/** `POST /v1/ownership-assignments/{id}/reaffirm` -- the owner (or admin)
+ *  reaffirms one ACTIVE assignment. Extends `expires_at` by
+ *  `settings.ownership_reaffirm_days` (default 180). */
+export async function reaffirmOwnershipAssignment(
+  assignmentId: string,
+  signal?: AbortSignal,
+): Promise<OwnershipAssignmentRead> {
+  return postJson<OwnershipAssignmentRead>(
+    `/v1/ownership-assignments/${assignmentId}/reaffirm`,
+    {},
+    signal,
+  );
+}
+
+/** `POST /v1/ownership-assignments/bulk-reaffirm` -- up to 100 ids per call
+ *  with per-item SAVEPOINT semantics (one failure does not block the rest). */
+export async function bulkReaffirmOwnershipAssignments(
+  assignmentIds: string[],
+  signal?: AbortSignal,
+): Promise<OwnershipAssignmentBulkReaffirmResult> {
+  return postJson<OwnershipAssignmentBulkReaffirmResult>(
+    `/v1/ownership-assignments/bulk-reaffirm`,
+    { assignment_ids: assignmentIds },
+    signal,
+  );
+}
+
+export interface OwnershipAssignmentListQuery {
+  subject_type?: string | null;
+  subject_id?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/ownership-assignments` --
+ *  ACTIVE-only paginated listing. Used by the P2-07 "expiring soon" banner
+ *  which client-side filters to rows whose `expires_at` lies inside
+ *  `warn_days` and whose `owner_principal` matches the current principal. */
+export async function fetchOwnershipAssignments(
+  organizationId: string,
+  query: OwnershipAssignmentListQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<OwnershipAssignmentRead>> {
+  const params = new URLSearchParams();
+  if (query.subject_type) params.set("subject_type", query.subject_type);
+  if (query.subject_id) params.set("subject_id", query.subject_id);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<OwnershipAssignmentRead>>(
+    `/v1/organizations/${organizationId}/ownership-assignments?${params}`,
+    signal,
+  );
+}

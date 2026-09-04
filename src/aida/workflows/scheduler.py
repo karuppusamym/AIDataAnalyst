@@ -28,6 +28,7 @@ from aida.models import (
 )
 from aida.playbooks import run_due_playbooks_pass
 from aida.certification_expiry_warning import run_certification_expiry_warning_pass
+from aida.ownership_expiry_warning import run_ownership_expiry_pass
 from aida.reaper_service import run_reaper_scheduler_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
@@ -630,6 +631,11 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # so calling it every iteration is cheap (a no-op between windows -- the
     # exact same shape the reaper above uses).
     await run_certification_expiry_warning_pass(settings, now=now)
+    # P2-07: daily "your ownership expires in N days" sweep + expire-lapsed
+    # sweep. Rate-limited inside `run_ownership_expiry_pass` by
+    # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
+    # the same in-process cadence tracker the cert pass above uses.
+    await run_ownership_expiry_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit
@@ -20,6 +21,9 @@ from aida.models import (
     MetadataTable,
     ProcedureLineageEdge,
     ViewLineageEdge,
+)
+from aida.parsed_lineage_review_service import (
+    resolve_review_status_for_new_edge,
 )
 from aida.schemas import (
     LineageEdgeRead,
@@ -129,6 +133,8 @@ async def _persist_edges(
     model: type[ViewLineageEdge] | type[ProcedureLineageEdge],
     datasource: DataSource,
     result: ParseResult,
+    *,
+    context: SecurityContext | None = None,
 ) -> int:
     """Replace this parse's edges for the target table(s) it actually
     produced, then insert the fresh set with `source_table_id`/
@@ -165,15 +171,73 @@ async def _persist_edges(
     }
     table_ids = await _resolve_table_ids(session, datasource.id, table_names)
 
-    await session.execute(
-        delete(model).where(
-            model.datasource_id == datasource.id,
-            model.target_table.in_(target_tables),
-        )
+    settings = get_settings()
+    review_mode = settings.lineage_parsed_edges_review_mode
+    principal_id = context.principal_id if context is not None else None
+
+    # P1-05: in require_review mode a re-parse must NOT clear an
+    # ACTIVE edge that a human previously approved -- the re-parse is
+    # untrusted, the approval is not. Only prior PROPOSED rows for the
+    # same target table(s) are cleared. In auto_active mode (default,
+    # backward-compatible with the pre-P1-05 delete-then-insert) we
+    # continue to clear both ACTIVE and PROPOSED rows so a re-parse can
+    # legitimately update an unreviewed edge in place.
+    delete_stmt = delete(model).where(
+        model.datasource_id == datasource.id,
+        model.target_table.in_(target_tables),
     )
+    if review_mode == "require_review":
+        delete_stmt = delete_stmt.where(model.review_status == "PROPOSED")
+    await session.execute(delete_stmt)
+
+    # In require_review mode, fold the existing ACTIVE rows this re-parse
+    # would collide with (same natural key) into a set so we can skip
+    # them -- inserting a duplicate would raise on the natural-key
+    # unique constraint. Leaving the human-approved row untouched is the
+    # explicit idempotency guarantee the ADR calls for.
+    existing_active_keys: set[tuple[str, str, str, str, str]] = set()
+    if review_mode == "require_review":
+        existing_rows = (
+            await session.scalars(
+                select(model).where(
+                    model.datasource_id == datasource.id,
+                    model.target_table.in_(target_tables),
+                    model.review_status == "ACTIVE",
+                )
+            )
+        ).all()
+        for row in existing_rows:
+            existing_active_keys.add(
+                (
+                    row.source_table,
+                    row.source_column,
+                    row.target_table,
+                    row.target_column,
+                    row.transformation_type,
+                )
+            )
+
+    inserted = 0
     for edge in result.edges:
+        key = (
+            edge.source_table,
+            edge.source_column,
+            edge.target_table,
+            edge.target_column,
+            edge.transformation_type,
+        )
+        if key in existing_active_keys:
+            # An earlier human-approved edge already covers this exact
+            # source/target/column/transform triple -- leave it alone.
+            continue
         source_name = _persistable_source_table(edge)
         target_name = _persistable_target_table(edge)
+        review_status = resolve_review_status_for_new_edge(
+            review_mode=review_mode,
+            confidence=edge.confidence,
+            threshold=settings.lineage_high_confidence_auto_active_threshold,
+            source_trusted=None,  # SQL parses are never connector-pushed
+        )
         session.add(
             model(
                 organization_id=datasource.organization_id,
@@ -188,9 +252,12 @@ async def _persist_edges(
                 confidence=edge.confidence,
                 dialect=edge.dialect,
                 sql_hash=result.sql_hash,
+                review_status=review_status,
+                created_by=principal_id,
             )
         )
-    return len(result.edges)
+        inserted += 1
+    return inserted
 
 
 @router.post(
@@ -211,7 +278,9 @@ async def parse_view_lineage_endpoint(
     datasource = await _load_datasource(session, context, datasource_id)
     result = parse_view_lineage(body.sql, body.dialect)
 
-    persisted = await _persist_edges(session, ViewLineageEdge, datasource, result)
+    persisted = await _persist_edges(
+        session, ViewLineageEdge, datasource, result, context=context
+    )
     record_audit(
         session,
         context,
@@ -267,7 +336,9 @@ async def parse_procedure_lineage_endpoint(
     datasource = await _load_datasource(session, context, datasource_id)
     result = parse_procedure_lineage(body.sql, body.dialect)
 
-    persisted = await _persist_edges(session, ProcedureLineageEdge, datasource, result)
+    persisted = await _persist_edges(
+        session, ProcedureLineageEdge, datasource, result, context=context
+    )
     record_audit(
         session,
         context,

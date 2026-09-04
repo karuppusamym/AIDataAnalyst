@@ -4585,3 +4585,79 @@ export interface WorkspaceRead {
   created_at: string;
   updated_at: string;
 }
+
+// -------------------------------------------------------------------------
+// P1-05 / ADR-0026: parsed-lineage-edge review DTOs.
+// -------------------------------------------------------------------------
+
+export type ParsedLineageEdgeType =
+  | "VIEW"
+  | "PROCEDURE"
+  | "DBT"
+  | "OPENLINEAGE_TABLE"
+  | "OPENLINEAGE_COLUMN";
+
+export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";
+
+export interface ParsedLineageEdgeReviewQueueItemRead {
+  edge_id: string;
+  edge_type: ParsedLineageEdgeType;
+  organization_id: string;
+  created_at: string;
+  created_by: string | null;
+  // Backend allows string enum (FULL/PARTIAL/LOW) or float; unify to
+  // whichever the source table stores. OpenLineage carries no confidence.
+  confidence: string | number | null;
+  source_label: string;
+  target_label: string;
+  transformation_type: string | null;
+  source_sql_reference: Record<string, string>;
+}
+
+export interface ParsedLineageEdgeReviewQueueRead {
+  items: ParsedLineageEdgeReviewQueueItemRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+export interface ParsedLineageEdgeDecisionRequest {
+  edge_type: ParsedLineageEdgeType;
+  decision: ParsedLineageEdgeDecision;
+  reason: string;
+}
+
+export interface ParsedLineageEdgeDecisionRead {
+  edge_id: string;
+  edge_type: string;
+  review_status: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_reason: string | null;
+}
+
+export interface ParsedLineageEdgeBulkDecisionItem {
+  edge_id: string;
+  edge_type: ParsedLineageEdgeType;
+}
+
+export interface ParsedLineageEdgeBulkDecisionRequest {
+  items: ParsedLineageEdgeBulkDecisionItem[];
+  decision: ParsedLineageEdgeDecision;
+  reason: string;
+}
+
+export interface ParsedLineageEdgeBulkDecisionItemRead {
+  edge_id: string;
+  edge_type: string;
+  status: "SUCCEEDED" | "FAILED";
+  reason: string | null;
+}
+
+export interface ParsedLineageEdgeBulkDecisionResultRead {
+  decision: ParsedLineageEdgeDecision;
+  requested_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  results: ParsedLineageEdgeBulkDecisionItemRead[];
+}
