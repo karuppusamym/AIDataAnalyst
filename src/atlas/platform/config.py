@@ -108,6 +108,45 @@ class Settings(BaseSettings):
     metadata_batch_max_chunks: int = Field(default=1_000, ge=1, le=10_000)
     metadata_batch_max_tables: int = Field(default=1_000_000, ge=1_000, le=10_000_000)
     metadata_batch_max_columns: int = Field(default=5_000_000, ge=10_000, le=50_000_000)
+    # ING-4 / P0-01: on ingest of a table that has never been described,
+    # emit `catalog.table.newly_created.v1` so a downstream handler can
+    # auto-enqueue an asset-description draft (and, once an AnalysisRun
+    # completes for the datasource, a semantic-inference proposal)
+    # instead of the table sitting empty until a steward manually POSTs
+    # each drafter endpoint. Kill switch: an operator can set
+    # `AIDA_AUTO_ENQUEUE_ON_INGEST=false` to suppress the emission
+    # entirely -- the ingest path itself keeps working exactly as
+    # before. Consumed by `persist_discovery_snapshot` in
+    # `src/aida/workflows/activities.py` and by
+    # `handle_newly_created_table` in `src/aida/newly_created_table_drafter.py`.
+    auto_enqueue_on_ingest: bool = True
+    # GV-2 / P0-02: catalog-router bulk-ownership and bulk-certify endpoints
+    # (`atlas.modules.catalog.router.bulk_assign_ownership`,
+    # `bulk_certify_tables`) used to write straight to ACTIVE under only
+    # RBAC, letting a `DataSteward` bypass the maker-checker contract that
+    # `aida.stewardship_api._create_bulk_operation` enforces for the same
+    # subjects on the governed path. The catalog router now consults these
+    # two knobs before deciding whether a given call may direct-write:
+    #
+    #   * `bulk_governance_threshold` -- an item count above which the
+    #     operation MUST go through `BulkStewardshipOperation` +
+    #     `GovernanceReview`, no matter the caller's role. Default 10,
+    #     sized so a small manual clean-up still lands immediately but a
+    #     wholesale reassignment can never be a one-person action.
+    #   * `bulk_governance_roles_requiring_review` -- roles that always
+    #     route through review regardless of count. Default
+    #     `["DataSteward"]` (the role the audit flagged as bypass-capable).
+    #     Higher-privileged admins are deliberately absent so they can
+    #     still direct-write within the count threshold, matching the
+    #     "single deliberate action by an authorized user" comment on
+    #     the single-item endpoints. The RBAC allowed-writers list
+    #     (`CATALOG_BULK_ACTION_WRITE_ROLES`) is unchanged; this filter
+    #     only decides which of the already-authorized callers may skip
+    #     review.
+    bulk_governance_threshold: int = Field(default=10, ge=0, le=10_000)
+    bulk_governance_roles_requiring_review: list[str] = Field(
+        default_factory=lambda: ["DataSteward"]
+    )
     redis_url: str = "redis://localhost:6379/0"
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
@@ -214,6 +253,18 @@ class Settings(BaseSettings):
     # Default every 6 hours; bounded 15 minutes to 7 days so an operator can
     # tighten or loosen it without a code change.
     graph_reconciliation_interval_minutes: int = Field(default=360, ge=15, le=10_080)
+    # P2-06: generic stale-row reaper. Daily by default (86_400s); bounded 15
+    # minutes to 7 days so an operator can tighten or loosen it without a code
+    # change, but never turn it into a per-tick scan. `reaper_enabled=False`
+    # is the ops kill switch (turns the pass into a no-op without stopping the
+    # rest of the scheduler). `reaper_retention_overrides` is a per-rule days
+    # override, comma-separated (`rule_name:days,other_rule:days`) --
+    # `aida.reaper_service.parse_retention_overrides` drops a malformed entry
+    # with a warning rather than raising, so a typo here never takes the
+    # scheduler offline.
+    reaper_enabled: bool = True
+    reaper_sweep_interval_seconds: int = Field(default=86_400, ge=900, le=604_800)
+    reaper_retention_overrides: str | None = None
     knowledge_graph_max_nodes: int = Field(default=250, ge=25, le=2_000)
     knowledge_graph_max_edges: int = Field(default=1_000, ge=50, le=10_000)
     knowledge_graph_max_depth: int = Field(default=4, ge=1, le=8)
@@ -293,6 +344,25 @@ class Settings(BaseSettings):
     # case that reasoning was written for).
     quality_certification_expiry_enabled: bool = False
     quality_certification_sustained_threshold: int = Field(default=3, ge=1, le=50)
+    # P2-08: manual revoke endpoint + daily "your cert expires in N days" warning
+    # job + partial-unique-index backstop on the ACTIVE tuple.
+    #
+    # `certification_expiry_warn_days` is the horizon the warning job looks
+    # ahead by (`now < expires_at < now + warn_days`), and the same value is
+    # also (doubled) the idempotency cooldown -- a cert whose warning was
+    # already emitted inside `warn_days * 2` does not warn again -- so N=7
+    # gives a one-warning-per-cycle "expires next week" ping without spamming
+    # the owner. `certification_expiry_warn_interval_seconds` is the scheduler
+    # cadence for the pass itself (daily by default, matching the reaper);
+    # `certification_revoke_enforce_maker_checker` is the maker-checker guard
+    # on the new revoke endpoint (a principal cannot revoke a certification
+    # they themselves granted), off-switchable for single-steward
+    # deployments where maker-checker would deadlock every revoke.
+    certification_expiry_warn_days: int = Field(default=7, ge=1, le=90)
+    certification_expiry_warn_interval_seconds: int = Field(
+        default=86_400, ge=900, le=604_800
+    )
+    certification_revoke_enforce_maker_checker: bool = True
     # --- Vector index (ADR-0019) -------------------------------------------
     #
     # `pgvector` is not assumed. A regulated PostgreSQL estate frequently forbids

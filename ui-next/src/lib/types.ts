@@ -484,12 +484,59 @@ export interface AssetCertificationRead {
   certified_by: string;
   expires_at: string;
   is_active: boolean;
+  /** P2-08: revoke fields; populated only when `status === "REVOKED"`. */
+  revoked_at?: string | null;
+  revoked_by?: string | null;
+  revocation_reason?: string | null;
   created_at: string;
   updated_at: string;
 }
 
+/** P2-08: request body for
+ *  `POST /v1/tables/{table_id}/certification/revoke`.
+ *  `column_id` absent revokes the table-level cert; present revokes that
+ *  column's ACTIVE cert. `reason` is server-required (>=10 chars). */
+export interface CertificationRevokeRequest {
+  reason: string;
+  column_id?: string | null;
+}
+
 export interface AssetDescriptionDraftGenerate {
   table_ids: string[];
+}
+
+/** Server-side lifecycle union for a description draft. The server does not
+ *  export this as a schema (`status: str` on `AssetDescriptionDraftRead`), so
+ *  it is transcribed from `AssetDescriptionDraft.status` in models.py and the
+ *  branches in `asset_description_api.py::submit_asset_description_draft` +
+ *  the sample-review decision path. The API only surfaces these four values;
+ *  fresh drafts are DRAFT, submit moves them to PENDING_APPROVAL, and the
+ *  governance-review decision resolves them to APPROVED or REJECTED. */
+export type AssetDescriptionDraftStatus =
+  | "DRAFT"
+  | "PENDING_APPROVAL"
+  | "APPROVED"
+  | "REJECTED";
+
+/** Response envelope for the batch-generate endpoint. Server returns
+ *  `Page` (schemas.py) with `items: AssetDescriptionDraftRead[]`; wrap it
+ *  here so callers do not have to narrow `unknown[]`. `total` reflects only
+ *  the drafts actually created — the server skips tables that already have
+ *  an open draft or a REJECTED duplicate. */
+export interface AssetDescriptionDraftGenerateResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** Response envelope for the list endpoint. The server's `Page` shape has no
+ *  cursor; pagination is `limit`/`offset`. */
+export interface AssetDescriptionDraftListResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
 }
 
 export interface AssetDescriptionDraftRead {
@@ -3533,6 +3580,7 @@ export interface RelationshipCandidateReviewItemRead {
   candidate: RelationshipCandidateRead;
   diff: RelationshipCandidateDiffEntryRead[];
   impact: RelationshipCandidateImpactRead;
+  can_review?: boolean;
 }
 
 export interface RelationshipCandidateReviewQueueRead {

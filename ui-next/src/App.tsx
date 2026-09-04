@@ -9,6 +9,7 @@ import type { Persona } from "./lib/ui-types";
 import "./App.css";
 
 const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
+const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
 const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then((module) => ({ default: module.ReviewQueueScreen })));
 const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));
 const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
@@ -59,6 +60,7 @@ const NAV: NavItem[] = [
   { id: "transformations", label: "Transformations", group: "Understand", icon: "▤", keywords: "dbt models sql transforms manifest" },
   { id: "agents", label: "AI governance", group: "Govern", icon: "⌬", keywords: "model routes agents evaluations runtime" },
   { id: "governance", label: "Review queue", group: "Govern", icon: "✓", keywords: "approve reject proposals" },
+  { id: "description-drafts", label: "Description drafts", group: "Govern", icon: "✎", keywords: "asset description draft generate submit steward" },
   { id: "studio", label: "Studio", group: "Govern", icon: "△", keywords: "change sets author" },
   { id: "quality", label: "Data quality", group: "Govern", icon: "◎", keywords: "incidents score checks" },
   { id: "ai", label: "AI registry", group: "Govern", icon: "◆", keywords: "agents models tools" },
@@ -86,6 +88,7 @@ function Screen({ view }: { view: string }) {
   switch (view) {
     case "catalog": return <CatalogScreen />;
     case "governance": return <ReviewQueueScreen />;
+    case "description-drafts": return <DescriptionDraftsScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
     case "studio": return <StudioChangeSetsScreen />;

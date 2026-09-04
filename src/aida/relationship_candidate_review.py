@@ -349,6 +349,7 @@ class RelationshipCandidateReviewItemRead(ApiModel):
     candidate: RelationshipCandidateRead
     diff: list[RelationshipCandidateDiffEntryRead]
     impact: RelationshipCandidateImpactRead
+    can_review: bool = True
 
 
 class RelationshipCandidateReviewQueueRead(ApiModel):
@@ -371,6 +372,7 @@ async def compose_relationship_candidate_review_queue(
     node_limit: int = DEFAULT_IMPACT_NODE_LIMIT,
     scan_limit: int = REVIEW_QUEUE_SCAN_LIMIT,
     settings: Settings | None = None,
+    reviewer_principal_id: str | None = None,
 ) -> RelationshipCandidateReviewQueueRead:
     """N4: the impact-ordered, diff-based relationship-candidate review
     queue for one datasource.
@@ -496,6 +498,10 @@ async def compose_relationship_candidate_review_queue(
                     depth=impact.depth,
                     node_limit=impact.node_limit,
                     truncated=impact.truncated,
+                ),
+                can_review=(
+                    reviewer_principal_id is None
+                    or candidate.created_by != reviewer_principal_id
                 ),
             )
         )

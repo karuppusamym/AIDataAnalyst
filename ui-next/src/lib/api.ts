@@ -5,6 +5,9 @@ import type {
   AgentRunRead,
   AiDecisionRead,
   AnalysisRunRead,
+  AssetDescriptionDraftGenerateResponse,
+  AssetDescriptionDraftListResponse,
+  AssetDescriptionDraftRead,
   AssetEvidenceRead,
   BusinessMapRead,
   ConsumerFooterRead,
@@ -22,6 +25,7 @@ import type {
   MetadataIngestionBatchRead,
   OrganizationRead,
   OutboxEventRead,
+  Page,
   ProjectRead,
   ReviewQueueRead,
   SemanticMetricVersionRead,
@@ -2885,4 +2889,199 @@ export async function fetchContractSlaStatus(
   const params = new URLSearchParams();
   params.set("period_days", String(periodDays));
   return get<SlaStatusResponse>(`/v1/data-contracts/${contractId}/sla-status?${params}`, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   P1-04: Asset description drafts.
+
+   Backend routes live in `src/aida/asset_description_api.py`:
+     * POST /v1/organizations/{org}/asset-description-drafts/generate
+     * GET  /v1/organizations/{org}/asset-description-drafts
+     * POST /v1/asset-description-drafts/{draft_id}/submit
+
+   Before this file added them the UI had zero references to any of the three
+   -- drafts could only be created and moved to PENDING_APPROVAL from `curl`,
+   which is why the ReviewQueueScreen renders ASSET_DESCRIPTION_DRAFT items
+   but nothing in the app submits them. The server-side batch cap is
+   `_GENERATE_BATCH_LIMIT = 100`; the client mirrors it as a fast-fail so
+   selecting 101+ rows in the Catalog does not round-trip only to be trimmed
+   silently on the server (the server slices `table_ids[:100]` rather than
+   422-ing). The submit endpoint's minimum-evidence gate
+   (`asset_description_service.ensure_reviewable`) returns HTTP 422 with
+   detail "draft carries too little evidence for independent review" when the
+   deterministic `overall_score < MINIMUM_EVIDENCE_FOR_REVIEW = 0.4`; that is
+   a distinct-enough failure mode that `classifyDescriptionDraftError` below
+   surfaces it as a dedicated `DRAFT_BELOW_EVIDENCE_THRESHOLD` kind so the
+   DescriptionDraftsScreen can render specific copy rather than a raw 422.
+--------------------------------------------------------------------------- */
+
+const ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT = 100;
+
+export interface AssetDescriptionDraftListQuery {
+  status?: string;
+  tableId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export type DescriptionDraftErrorKind =
+  | "DRAFT_BELOW_EVIDENCE_THRESHOLD"
+  | "DRAFT_NOT_FOUND"
+  | "DRAFT_NOT_SUBMITTABLE"
+  | "UNAUTHORIZED"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
+export interface DescriptionDraftError {
+  kind: DescriptionDraftErrorKind;
+  status: number;
+  detail: string;
+}
+
+const DRAFT_BELOW_EVIDENCE_DETAIL =
+  "draft carries too little evidence for independent review";
+
+/** Maps an `ApiError` from any of the three description-draft endpoints to a
+ *  discriminated kind the UI can branch copy on. Only `submit` can raise the
+ *  evidence-gate 422; the other endpoints reach it via the generic branches
+ *  below. */
+export function classifyDescriptionDraftError(error: ApiError): DescriptionDraftError {
+  const { status, detail } = error;
+  if (status === 422 && detail === DRAFT_BELOW_EVIDENCE_DETAIL) {
+    return { kind: "DRAFT_BELOW_EVIDENCE_THRESHOLD", status, detail };
+  }
+  if (status === 404) return { kind: "DRAFT_NOT_FOUND", status, detail };
+  if (status === 409) return { kind: "DRAFT_NOT_SUBMITTABLE", status, detail };
+  if (status === 401 || status === 403) return { kind: "UNAUTHORIZED", status, detail };
+  if (status >= 500) return { kind: "SERVER_ERROR", status, detail };
+  return { kind: "UNKNOWN", status, detail };
+}
+
+/** `POST /v1/organizations/{org}/asset-description-drafts/generate` (see
+ *  `generate_asset_description_drafts` in asset_description_api.py). Server
+ *  silently truncates a >100 table_ids batch; enforce the same limit here
+ *  and reject up-front with a synthetic 400 ApiError so the UI does not have
+ *  to guess why a subset came back. */
+export async function generateAssetDescriptionDrafts(
+  organizationId: string,
+  tableIds: string[],
+  signal?: AbortSignal,
+): Promise<AssetDescriptionDraftGenerateResponse> {
+  if (tableIds.length === 0) {
+    throw new ApiError(400, "at least one table_id is required");
+  }
+  if (tableIds.length > ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT) {
+    throw new ApiError(
+      400,
+      `at most ${ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT} tables can be drafted in one batch`,
+    );
+  }
+  const page = await postJson<Page>(
+    `/v1/organizations/${organizationId}/asset-description-drafts/generate`,
+    { table_ids: tableIds },
+    signal,
+  );
+  return {
+    drafts: (page.items as AssetDescriptionDraftRead[]) ?? [],
+    limit: page.limit,
+    offset: page.offset,
+    total: page.total,
+  };
+}
+
+/** `GET /v1/organizations/{org}/asset-description-drafts` (see
+ *  `list_asset_description_drafts`). The server orders by
+ *  `overall_score DESC, created_at DESC` -- that is the reviewer-priority
+ *  order the DescriptionDraftsScreen defaults to, so no `order_by` param is
+ *  exposed here. `tableId` is a client-side convenience filter: the server
+ *  has no `table_id` query param on this route, so pass-through is a no-op
+ *  and callers filter locally. `cursor` here is the string form of the
+ *  next `offset` — the server's `Page` shape is offset-based and has no
+ *  opaque cursor of its own; the response's `next_cursor` is derived from
+ *  `offset + limit < total`. */
+export async function listAssetDescriptionDrafts(
+  organizationId: string,
+  filters: AssetDescriptionDraftListQuery = {},
+  signal?: AbortSignal,
+): Promise<AssetDescriptionDraftListResponse & { next_cursor?: string }> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (typeof filters.limit === "number") params.set("limit", String(filters.limit));
+  if (filters.cursor) params.set("offset", filters.cursor);
+  const qs = params.toString();
+  const path = qs
+    ? `/v1/organizations/${organizationId}/asset-description-drafts?${qs}`
+    : `/v1/organizations/${organizationId}/asset-description-drafts`;
+  const page = await get<Page>(path, signal);
+  const drafts = (page.items as AssetDescriptionDraftRead[]) ?? [];
+  const nextOffset = page.offset + page.limit;
+  const hasMore = typeof page.total === "number" && nextOffset < page.total;
+  return {
+    drafts,
+    limit: page.limit,
+    offset: page.offset,
+    total: page.total,
+    ...(hasMore ? { next_cursor: String(nextOffset) } : {}),
+  };
+}
+
+/** `POST /v1/asset-description-drafts/{draft_id}/submit` (see
+ *  `submit_asset_description_draft`). Server responds 202 Accepted with the
+ *  freshly-created `GovernanceReview`; the DescriptionDraftsScreen only
+ *  needs to know the draft flipped to PENDING_APPROVAL, so this refetches
+ *  the draft rather than returning the review. If refetch fails, an
+ *  optimistically-updated `AssetDescriptionDraftRead` is synthesised from
+ *  the review response so the row still flips. */
+export async function submitAssetDescriptionDraft(
+  draftId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  return postJson<GovernanceReviewRead>(
+    `/v1/asset-description-drafts/${draftId}/submit`,
+    {},
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   P2-08: manual revoke of an ACTIVE asset certification.
+
+   Wired to `POST /v1/tables/{table_id}/certification/revoke` -- the ONLY
+   place `AssetCertification.status = "REVOKED"` is produced (before P2-08 the
+   REVOKED value existed in the state machine but no code ever wrote it, so a
+   revoked-by-policy certification could only be worked around by letting it
+   expire).
+
+   Auth: same roles as the certify endpoint (PlatformAdmin, MetadataAdmin,
+   DataAdmin, DataSteward). Maker-checker is enforced server-side by default
+   (a principal cannot revoke a certification they themselves granted); the
+   flag `certification_revoke_enforce_maker_checker` toggles that for
+   single-steward deployments. Server responses this call must handle at the
+   UI layer:
+     - 200 AssetCertificationRead .. success (`status === "REVOKED"`)
+     - 404 no active certification to revoke, or table not found
+     - 409 detail === "same_principal_cannot_revoke_own_certification"
+
+   UI follow-up (not in this pass): CatalogTable.tsx should expose a
+   "Revoke" button in the certification cell that opens a small dialog for
+   the reason (>=10 chars) and column_id (optional), with an explicit
+   confirmation copy ("This will affect downstream policy decisions."). The
+   api.ts function is landed now so the follow-up UI slice is a
+   copy-and-paste against an already-typed call. --------------------------- */
+
+import type {
+  AssetCertificationRead as _AssetCertificationRead_p208,
+  CertificationRevokeRequest as _CertificationRevokeRequest_p208,
+} from "./types";
+
+export async function revokeAssetCertification(
+  tableId: string,
+  body: _CertificationRevokeRequest_p208,
+  signal?: AbortSignal,
+): Promise<_AssetCertificationRead_p208> {
+  return postJson<_AssetCertificationRead_p208>(
+    `/v1/tables/${tableId}/certification/revoke`,
+    body,
+    signal,
+  );
 }

@@ -415,11 +415,16 @@ class ProviderNeutralModelGateway:
             raise KillSwitchEngaged(
                 f"kill switch engaged ({scope_desc}): {blocking.reason or 'no reason given'}"
             )
-        if not self.settings.model_generation_enabled or not self.settings.model_route:
+        allowed_routes = {
+            key
+            for key in (self.settings.model_route, *self.settings.model_route_fallback_keys)
+            if key
+        }
+        if not self.settings.model_generation_enabled or not allowed_routes:
             raise ModelRouteNotApproved("no policy-approved model route is configured")
-        if route is None or route.route_key != self.settings.model_route:
+        if route is None or route.route_key not in allowed_routes:
             raise ModelRouteNotApproved(
-                "selected model route is not approved for this organization"
+                "selected model route is not approved for this deployment"
             )
         provider = self.providers.get(route.provider_type)
         if provider is None:

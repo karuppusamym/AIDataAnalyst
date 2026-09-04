@@ -2110,8 +2110,32 @@ class AssetCertification(Base, TimestampMixin):
     """
 
     __tablename__ = "asset_certification"
+    # P2-08: partial unique index on the ACTIVE tuple is the last-mile atomicity
+    # guarantee against two concurrent certify calls both landing an ACTIVE
+    # row for the same (table, asset_type, column, organization) tuple. The
+    # existing app-side "select prior ACTIVE, flip to SUPERSEDED, insert new"
+    # is a read-modify-write with no lock between the read and the insert;
+    # under a two-connection race both requests can read no-prior-active, both
+    # can insert, and only a DB-level uniqueness constraint refuses the second
+    # insert. `column_id` participates via COALESCE to the zero-UUID sentinel
+    # since PostgreSQL treats NULL as distinct in a unique index (so two
+    # concurrent table-level certifies with `column_id IS NULL` would otherwise
+    # both slip past). Declared here for ORM/DDL parity; the alembic migration
+    # ships the identical partial index server-side.
     __table_args__ = (
         Index("ix_asset_certification_org_status", "organization_id", "status"),
+        Index(
+            "ix_asset_certification_active_tuple",
+            "table_id",
+            "asset_type",
+            text(
+                "COALESCE(column_id, '00000000-0000-0000-0000-000000000000')"
+            ),
+            "organization_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
         CheckConstraint(
             "asset_type IN ('TABLE', 'COLUMN')", name="ck_asset_certification_asset_type"
         ),
@@ -2137,6 +2161,23 @@ class AssetCertification(Base, TimestampMixin):
     rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
     certified_by: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # P2-08: manual revoke via POST /v1/tables/{id}/certification/revoke. These
+    # three columns are nullable because every pre-P2-08 row was written by the
+    # certify or supersede path and never revoked; a REVOKED row (produced only
+    # by the new endpoint) sets all three atomically. `rationale` / `certified_by`
+    # / `expires_at` stay exactly what the table was certified as, so
+    # certification history is never mutated -- the same evidence-preservation
+    # rule DQ-3's EXPIRED path already follows.
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+    revocation_reason: Mapped[str | None] = mapped_column(String(2000))
+    # P2-08: daily warning job (`warn_upcoming_certification_expiries`) stamps
+    # this whenever it emits the "expires in N days" notification for a row, so
+    # the same cert never warns twice within one warning cycle. Nullable because
+    # every row starts un-warned; the row is not backfilled by the migration.
+    expiry_warning_emitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class GlossaryConflict(Base, TimestampMixin):

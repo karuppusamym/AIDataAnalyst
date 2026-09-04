@@ -100,6 +100,7 @@ function CandidateCard({
   onDecide: (decision: "APPROVE" | "REJECT") => void;
 }) {
   const { candidate, impact } = item;
+  const canReview = item.can_review !== false;
   const label = edgeLabel(item);
   const signals = asConfidenceSignals(diffField(item, "confidence_signals"));
 
@@ -160,10 +161,15 @@ function CandidateCard({
       ) : null}
 
       <div className="rcard__act">
-        <Button variant="primary" disabled={deciding} onClick={() => onDecide("APPROVE")}>
+        {!canReview ? (
+          <span className="prop__done" role="status">
+            Your proposal cannot be approved by its maker.
+          </span>
+        ) : null}
+        <Button variant="primary" disabled={deciding || !canReview} onClick={() => onDecide("APPROVE")}>
           Approve
         </Button>
-        <Button disabled={deciding} onClick={() => onDecide("REJECT")}>
+        <Button disabled={deciding || !canReview} onClick={() => onDecide("REJECT")}>
           Reject
         </Button>
       </div>
@@ -182,6 +188,7 @@ export function RelationshipsScreen() {
   const [data, setData] = useState<RelationshipCandidateReviewQueueRead | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
   const [bulkDeciding, setBulkDeciding] = useState(false);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
@@ -211,6 +218,7 @@ export function RelationshipsScreen() {
     const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
+    setDecisionError(null);
     try {
       const queue = await fetchRelationshipCandidateReviewQueue(ds, { limit: 200 }, ac.signal);
       if (seq !== reqSeq.current) return;
@@ -291,11 +299,12 @@ export function RelationshipsScreen() {
         if (!reason) return; // the endpoint itself requires a non-empty reason on REJECT
       }
       setDeciding(candidateId);
+      setDecisionError(null);
       try {
         await decideRelationshipCandidate(candidateId, { decision, reason });
         await load();
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        setDecisionError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setDeciding(null);
       }
@@ -313,12 +322,19 @@ export function RelationshipsScreen() {
         if (!reason) return;
       }
       setBulkDeciding(true);
+      setDecisionError(null);
       try {
-        await bulkDecideRelationshipCandidates({ candidate_ids: ids, decision, reason });
+        const result = await bulkDecideRelationshipCandidates({ candidate_ids: ids, decision, reason });
         setChecked(new Set());
         await load();
+        if (result.failed_count > 0) {
+          setDecisionError(
+            `${result.succeeded_count} decision${result.succeeded_count === 1 ? "" : "s"} recorded; ` +
+              `${result.failed_count} could not be recorded. ${result.results.find((r) => r.status === "FAILED")?.reason ?? "Review the audit ledger for details."}`,
+          );
+        }
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        setDecisionError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setBulkDeciding(false);
       }
@@ -402,6 +418,9 @@ export function RelationshipsScreen() {
       ) : null}
 
       <div className="rel__main">
+        {decisionError ? (
+          <div className="evp__error" role="alert">Decision was not fully recorded: {decisionError}</div>
+        ) : null}
         {!ds ? (
           <Empty
             title="Pick a datasource"

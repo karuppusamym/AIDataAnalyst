@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,7 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     AssetCertification,
     AssetTag,
+    BulkStewardshipOperation,
     CatalogBulkActionRun,
     DataSource,
     MetadataColumn,
@@ -53,6 +54,8 @@ from aida.models import (
 from aida.pagination import InvalidCursor, apply_keyset, decode_cursor, encode_cursor
 from aida.schemas import (
     AssetCertificationRead,
+    BulkStewardshipOperationCreate,
+    BulkStewardshipOperationRead,
     CatalogBulkActionRunRead,
     CatalogBulkCertifyRequest,
     CatalogBulkClassifyRequest,
@@ -61,6 +64,7 @@ from aida.schemas import (
     CatalogBulkTagRequest,
     CatalogRowRead,
     CertificationDecisionRequest,
+    CertificationRevokeRequest,
     CursorPage,
     Page,
 )
@@ -122,6 +126,9 @@ def _asset_certification_read(
         certified_by=certification.certified_by,
         expires_at=certification.expires_at,
         is_active=is_active,
+        revoked_at=certification.revoked_at,
+        revoked_by=certification.revoked_by,
+        revocation_reason=certification.revocation_reason,
         created_at=certification.created_at,
         updated_at=certification.updated_at,
     )
@@ -324,7 +331,20 @@ async def certify_table_asset(
         expires_at=body.expires_at,
     )
     session.add(certification)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        # P2-08: partial unique index `ix_asset_certification_active_tuple`
+        # is the atomicity backstop the app-side supersede loop cannot give.
+        # A second concurrent certify call for the same tuple that got past
+        # the SUPERSEDE loop (because it read no prior ACTIVE row before this
+        # request had committed its own insert) is refused here rather than
+        # allowed to leave two ACTIVE rows behind.
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="certification_already_active_on_this_tuple",
+        ) from exc
     record_audit(
         session,
         replace(context, organization_id=table.organization_id),
@@ -359,6 +379,123 @@ async def certify_table_asset(
     return _asset_certification_read(
         certification, is_active=asset_certification_is_active(certification, at=now)
     )
+
+
+@router.post(
+    "/tables/{table_id}/certification/revoke",
+    response_model=AssetCertificationRead,
+)
+async def revoke_table_certification(
+    table_id: UUID,
+    body: CertificationRevokeRequest,
+    context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AssetCertificationRead:
+    """P2-08: manual revocation of an ACTIVE certification.
+
+    Flips the currently ACTIVE certification row for the ``(table, asset_type,
+    column?)`` tuple to ``status = "REVOKED"``, stamping
+    ``revoked_at`` / ``revoked_by`` / ``revocation_reason`` atomically. This is
+    the ONLY writer of the ``REVOKED`` status; before P2-08 the value existed
+    in the state machine (readers in
+    ``catalog/service.py::_certification_state`` and
+    ``asset_usage_decision.py`` already gated on it) but no code ever produced
+    it, so a revoked-by-policy certification could only be worked around by
+    letting it expire.
+
+    Maker-checker: by default, the principal who granted the certification
+    cannot revoke it -- the same two-person rule module 08 applies to reviewed
+    stewardship operations, applied here at the certification itself.
+    Off-switchable via ``certification_revoke_enforce_maker_checker`` for
+    single-steward deployments where the rule would deadlock every revoke.
+
+    Emits a ``catalog.asset.certification_revoked.v1`` outbox event so
+    downstream projections (retrieval demotion, policy-decision cache,
+    ``asset_usage_decision``'s ``REVOKED -> BLOCKED``) invalidate promptly.
+    """
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    asset_type = "TABLE"
+    column_id: UUID | None = None
+    if body.column_id is not None:
+        column = await session.get(MetadataColumn, body.column_id)
+        if (
+            column is None
+            or column.organization_id != table.organization_id
+            or column.table_id != table.id
+        ):
+            raise HTTPException(status_code=404, detail="column not found on this table")
+        asset_type = "COLUMN"
+        column_id = column.id
+    active = (
+        await session.scalars(
+            select(AssetCertification)
+            .where(
+                AssetCertification.table_id == table.id,
+                AssetCertification.asset_type == asset_type,
+                AssetCertification.column_id == column_id,
+                AssetCertification.status == "ACTIVE",
+            )
+            .order_by(AssetCertification.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    if active is None:
+        raise HTTPException(
+            status_code=404, detail="no active certification to revoke"
+        )
+    if (
+        settings.certification_revoke_enforce_maker_checker
+        and active.certified_by == context.principal_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="same_principal_cannot_revoke_own_certification",
+        )
+    now = datetime.now(UTC)
+    active.status = "REVOKED"
+    active.revoked_at = now
+    active.revoked_by = context.principal_id
+    active.revocation_reason = body.reason
+    await session.flush()
+    record_audit(
+        session,
+        replace(context, organization_id=table.organization_id),
+        action="CERTIFICATION_REVOKED",
+        resource_type="asset_certification",
+        resource_id=str(active.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "table_id": str(table.id),
+            "column_id": str(column_id) if column_id else None,
+            "asset_type": asset_type,
+            "revoked_by": context.principal_id,
+            "certified_by": active.certified_by,
+            "reason": body.reason,
+        },
+    )
+    record_outbox(
+        session,
+        organization_id=table.organization_id,
+        aggregate_type="asset_certification",
+        aggregate_id=str(active.id),
+        event_type="catalog.asset.certification_revoked.v1",
+        payload={
+            "certification_id": str(active.id),
+            "table_id": str(table.id),
+            "column_id": str(column_id) if column_id else None,
+            "asset_type": asset_type,
+            "revoked_by": context.principal_id,
+            "revoked_at": now.isoformat(),
+            "reason": body.reason,
+        },
+    )
+    await session.commit()
+    return _asset_certification_read(active, is_active=False)
 
 
 @router.get("/tables/{table_id}/certification", response_model=AssetCertificationRead)
@@ -707,16 +844,173 @@ async def bulk_classify_columns(
     return run
 
 
+# ---------------------------------------------------------------------------
+# GV-2 / P0-02: bulk-action governance router.
+#
+# The 2026-08-30 audit flagged the two "bulk" endpoints below
+# (`bulk_assign_ownership`, `bulk_certify_tables`) as a maker-checker
+# bypass: they wrote straight to ACTIVE under only RBAC, while every
+# same-shape operation reached through `aida.stewardship_api._create_bulk_operation`
+# routed through `BulkStewardshipOperation` + `GovernanceReview` with
+# maker != checker enforced. A `DataSteward` could therefore act as both
+# maker and applier by picking the catalog endpoint instead of the
+# governed one. `_should_route_bulk_through_governance` closes that gap
+# without changing the RBAC allowed-writers list at all: two settings
+# knobs (see `atlas.platform.config.Settings.bulk_governance_threshold`
+# and `.bulk_governance_roles_requiring_review`) decide, per call,
+# whether the request may direct-write or MUST go through review.
+#
+# `_route_bulk_through_governance` is the one bridge into the governed
+# path, and it deliberately calls into `stewardship_api._create_bulk_operation`
+# rather than duplicating the review-object creation, so any future change
+# to how a `BulkStewardshipOperation` is minted lands here for free.
+# ---------------------------------------------------------------------------
+
+
+def _should_route_bulk_through_governance(
+    context: SecurityContext,
+    count: int,
+    settings: Settings,
+) -> tuple[bool, str | None]:
+    """Return (route_through_review, reason). ``reason`` is a short string
+    naming why the request must be reviewed, suitable for the direct-write
+    audit event's ``details`` and for the returned 202 body's ``reason``
+    field. ``None`` on the direct-write path.
+    """
+    require_review = frozenset(settings.bulk_governance_roles_requiring_review)
+    if not context.roles.isdisjoint(require_review):
+        # Any of the caller's roles is in the review-required list -- e.g. the
+        # default `DataSteward`, which is authorized to *request* a bulk
+        # action but not to unilaterally apply one.
+        return True, "role_requires_review"
+    if count > settings.bulk_governance_threshold:
+        return True, "count_above_threshold"
+    return False, None
+
+
+async def _route_bulk_through_governance(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    context: SecurityContext,
+    operation_type: str,
+    subject_ids: list[UUID],
+    owner_type: str | None = None,
+    owner_principal: str | None = None,
+    rationale: str | None = None,
+    expires_at: datetime | None = None,
+    reason: str,
+) -> Response:
+    """Delegate a catalog-router bulk action into the governed path.
+
+    Reuses `aida.stewardship_api._create_bulk_operation` -- the SAME helper
+    the governed endpoint uses -- so the router now shares one code path
+    for creating a `BulkStewardshipOperation` + its paired
+    `GovernanceReview`; the maker != checker enforcement lives entirely on
+    that side and does not need re-implementing here. Returns HTTP 202 with
+    the operation, matching the governed endpoint's response shape.
+    """
+    # Import inside the function to keep `atlas.modules.catalog.router` from
+    # importing `aida.stewardship_api` at module load (avoids any circular
+    # import surprise; also lets the reachability gate treat the two as
+    # separately-reachable routers rather than one composite module).
+    from aida.stewardship_api import _create_bulk_operation
+
+    body = BulkStewardshipOperationCreate(
+        operation_type=operation_type,  # type: ignore[arg-type]
+        subject_type="TABLE",
+        subject_ids=subject_ids,
+        owner_type=owner_type,  # type: ignore[arg-type]
+        owner_principal=owner_principal,
+        rationale=rationale,
+        expires_at=expires_at,
+    )
+    operation = await _create_bulk_operation(
+        session,
+        organization_id=organization_id,
+        body=body,
+        context=context,
+    )
+    # Additional audit signal naming *why* the router chose to route this
+    # particular request through review, so an operator inspecting one
+    # `BulkStewardshipOperation` row can see whether the trigger was the
+    # count threshold, a role in the review-required list, or both.
+    record_audit(
+        session,
+        context,
+        action="catalog.bulk_action.review_routed.v1",
+        resource_type="bulk_stewardship_operation",
+        resource_id=str(operation.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "operation_type": operation_type,
+            "subject_count": len(subject_ids),
+            "reason": reason,
+            "roles": sorted(context.roles),
+        },
+    )
+    await session.commit()
+    review_url = (
+        f"/v1/organizations/{organization_id}/governance-reviews/"
+        f"{operation.governance_review_id}"
+    )
+    # Response body keeps `BulkStewardshipOperationRead`\'s existing shape --
+    # so the openapi.json addition matches an existing declared model -- and
+    # exposes `review_url`/`route_reason` via headers rather than
+    # extending the schema; the client already has `governance_review_id`
+    # on the body and can reconstruct the URL if it prefers.
+    return Response(
+        content=BulkStewardshipOperationRead.model_validate(operation).model_dump_json(),
+        media_type="application/json",
+        status_code=status.HTTP_202_ACCEPTED,
+        headers={
+            "Location": review_url,
+            "X-Bulk-Route-Reason": reason,
+        },
+    )
+
+
+def _resolve_settings(settings: Settings | None) -> Settings:
+    """FastAPI wires `settings` in via `Depends(get_settings)`; the router
+    handlers are also called directly by the CT-1 test suite, which passes
+    only `context=` and `session=`. In that path `settings` arrives as the
+    `Depends` sentinel, not a `Settings` instance -- fall back to
+    `get_settings()` (LRU-cached) so a directly-called handler still gets
+    real settings without every test having to construct and thread one
+    through.
+    """
+    return settings if isinstance(settings, Settings) else get_settings()
+
+
+
 @router.post(
     "/organizations/{organization_id}/tables/bulk-own",
     response_model=CatalogBulkActionRunRead,
+    # GV-2: the review-routed path returns 202 with a
+    # `BulkStewardshipOperationRead` body; declare it in `responses` so the
+    # generated OpenAPI keeps typed shapes for both 200 (direct-write, the
+    # existing shape -- backward-compatible) and 202 (review-routed).
+    responses={
+        status.HTTP_202_ACCEPTED: {
+            "model": BulkStewardshipOperationRead,
+            "description": (
+                "Request exceeded the bulk-governance threshold or the "
+                "caller\'s role requires review; a "
+                "`BulkStewardshipOperation` has been created and awaits "
+                "an independent approver (maker != checker)."
+            ),
+        }
+    },
 )
 async def bulk_assign_ownership(
     organization_id: UUID,
     body: CatalogBulkOwnRequest,
     context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
     session: AsyncSession = Depends(get_session),
-) -> CatalogBulkActionRun:
+    settings: Settings = Depends(get_settings),
+) -> CatalogBulkActionRun | Response:
+    settings = _resolve_settings(settings)
     enforce_organization(context, organization_id)
     subject_ids, selection_mode, truncated = await _resolve_bulk_table_subjects(
         session,
@@ -724,6 +1018,25 @@ async def bulk_assign_ownership(
         table_ids=body.table_ids,
         selection_filter=body.filter,
     )
+    # GV-2 / P0-02: decide whether this call may direct-write to ACTIVE or
+    # must route through `BulkStewardshipOperation` + `GovernanceReview`
+    # (maker != checker). See `_should_route_bulk_through_governance` for
+    # the two knobs (`AIDA_BULK_GOVERNANCE_THRESHOLD`,
+    # `AIDA_BULK_GOVERNANCE_ROLES_REQUIRING_REVIEW`) that decide.
+    should_route, reason = _should_route_bulk_through_governance(
+        context, len(subject_ids), settings
+    )
+    if should_route:
+        return await _route_bulk_through_governance(
+            session,
+            organization_id=organization_id,
+            context=context,
+            operation_type="ASSIGN_OWNERSHIP",
+            subject_ids=subject_ids,
+            owner_type=body.owner_type,
+            owner_principal=body.owner_principal,
+            reason=reason or "policy",
+        )
     tables = await _fetch_bulk_tables(
         session, organization_id=organization_id, table_ids=subject_ids
     )
@@ -778,6 +1091,29 @@ async def bulk_assign_ownership(
         },
         plan=plan,
     )
+    # GV-2 / P0-02: audit signal on every direct-write path, naming
+    # operator, count, resolved subject ids and the reason the request was
+    # allowed to skip review -- so a compliance query can surface every
+    # bypass at grep-time instead of reconstructing it after the fact from
+    # `OwnershipAssignment` rows alone.
+    record_audit(
+        session,
+        context,
+        action="catalog.bulk_action.direct_write.v1",
+        resource_type="catalog_bulk_action_run",
+        resource_id=str(run.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "operation_type": "ASSIGN_OWNERSHIP",
+            "subject_count": len(subject_ids),
+            "subject_ids": [str(value) for value in subject_ids],
+            "owner_type": body.owner_type,
+            "owner_principal": body.owner_principal,
+            "reason": "within_threshold_and_role_not_in_review_list",
+            "roles": sorted(context.roles),
+        },
+    )
     await session.commit()
     return run
 
@@ -785,13 +1121,26 @@ async def bulk_assign_ownership(
 @router.post(
     "/organizations/{organization_id}/tables/bulk-certify",
     response_model=CatalogBulkActionRunRead,
+    responses={
+        status.HTTP_202_ACCEPTED: {
+            "model": BulkStewardshipOperationRead,
+            "description": (
+                "Request exceeded the bulk-governance threshold or the "
+                "caller\'s role requires review; a "
+                "`BulkStewardshipOperation` has been created and awaits "
+                "an independent approver (maker != checker)."
+            ),
+        }
+    },
 )
 async def bulk_certify_tables(
     organization_id: UUID,
     body: CatalogBulkCertifyRequest,
     context: SecurityContext = Depends(require_roles(*CATALOG_BULK_ACTION_WRITE_ROLES)),
     session: AsyncSession = Depends(get_session),
-) -> CatalogBulkActionRun:
+    settings: Settings = Depends(get_settings),
+) -> CatalogBulkActionRun | Response:
+    settings = _resolve_settings(settings)
     enforce_organization(context, organization_id)
     if body.expires_at <= datetime.now(UTC):
         raise HTTPException(status_code=422, detail="certification expiry must be in the future")
@@ -801,6 +1150,25 @@ async def bulk_certify_tables(
         table_ids=body.table_ids,
         selection_filter=body.filter,
     )
+    # GV-2 / P0-02: same governance gate as `bulk_assign_ownership`. A
+    # `DataSteward` who could formerly bulk-certify an entire quarter\'s
+    # tables in one direct write now routes through the SAME
+    # `BulkStewardshipOperation` + `GovernanceReview` flow the governed
+    # `_create_bulk_operation` endpoint uses.
+    should_route, reason = _should_route_bulk_through_governance(
+        context, len(subject_ids), settings
+    )
+    if should_route:
+        return await _route_bulk_through_governance(
+            session,
+            organization_id=organization_id,
+            context=context,
+            operation_type="CERTIFY_ASSET",
+            subject_ids=subject_ids,
+            rationale=body.rationale,
+            expires_at=body.expires_at,
+            reason=reason or "policy",
+        )
     tables = await _fetch_bulk_tables(
         session, organization_id=organization_id, table_ids=subject_ids
     )
@@ -857,6 +1225,24 @@ async def bulk_certify_tables(
             "selection_truncated": truncated,
         },
         plan=plan,
+    )
+    record_audit(
+        session,
+        context,
+        action="catalog.bulk_action.direct_write.v1",
+        resource_type="catalog_bulk_action_run",
+        resource_id=str(run.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "operation_type": "CERTIFY_ASSET",
+            "subject_count": len(subject_ids),
+            "subject_ids": [str(value) for value in subject_ids],
+            "rationale": body.rationale,
+            "expires_at": body.expires_at.isoformat(),
+            "reason": "within_threshold_and_role_not_in_review_list",
+            "roles": sorted(context.roles),
+        },
     )
     await session.commit()
     return run

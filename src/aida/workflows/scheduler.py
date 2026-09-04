@@ -27,6 +27,8 @@ from aida.models import (
     UnownedAssetEscalation,
 )
 from aida.playbooks import run_due_playbooks_pass
+from aida.certification_expiry_warning import run_certification_expiry_warning_pass
+from aida.reaper_service import run_reaper_scheduler_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.security import SecurityContext
 from aida.stewardship_api import (
@@ -615,6 +617,19 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.
     await purge_expired_value_profile_artifacts(settings, now=now)
+    # P2-06: generic reaper. Sweeps stale rows across artifact types (rejected
+    # enrichment proposals past retention, orphan asset-term links whose glossary
+    # term was deprecated, stale pending drafts, ...). Guarded by
+    # `settings.reaper_enabled` and rate-limited to
+    # `settings.reaper_sweep_interval_seconds` inside `run_reaper_scheduler_pass`,
+    # so calling it every iteration here is cheap (a no-op between windows).
+    await run_reaper_scheduler_pass(settings, now=now)
+    # P2-08: daily "your certification expires in N days" sweep, rate-limited
+    # inside `run_certification_expiry_warning_pass` by
+    # `settings.certification_expiry_warn_interval_seconds` (default 86_400),
+    # so calling it every iteration is cheap (a no-op between windows -- the
+    # exact same shape the reaper above uses).
+    await run_certification_expiry_warning_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

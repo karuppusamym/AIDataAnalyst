@@ -108,6 +108,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `catalog.asset.certification_expired.v1` | DQ-3: a table's certification expired because it crossed `quality_certification_sustained_threshold` unresolved quality incidents (off by default -- `quality_certification_expiry_enabled`) | table_id, certification_id |
 | `rename_candidate.decided.v1` | CT-4: steward approved/rejected a proposed rename | candidate_id, status |
 | `cross_source_resolution_candidate.decided.v1` | CT-6: steward approved/rejected a proposed cross-source match | candidate_id, status |
+| `catalog.table.newly_created.v1` | ING-4 / P0-01: `persist_discovery_snapshot` observed a table this call actually created (as opposed to reactivated/updated); consumed by `aida.newly_created_table_drafter.run_newly_created_table_drafter_consumer` to auto-enqueue an asset-description draft and unblock a semantic-inference proposal without a steward manually POSTing each drafter endpoint | organization_id, datasource_id, table_id, analysis_run_id |
+| `asset_description.draft.auto_enqueued.v1` | ING-4 / P0-01: `handle_newly_created_table` created an `AssetDescriptionDraft` for a table that had none. Downstream analytics / notification consumers pick this up as "a draft is now waiting for the steward" | asset_description_draft_id, table_id, datasource_id, overall_score |
+| `business_semantics.inference.auto_enqueue_deferred.v1` | ING-4 / P0-01: `handle_newly_created_table` deferred kicking off semantic inference because no `AnalysisRun` has reached `COMPLETED` yet for the datasource (mirrors the HTTP 409 gate in `create_semantic_inference_run`). Advisory; a later profiling-completion pass picks the table back up | table_id, datasource_id, reason |
 
 ### Profiling — topic `atlas.catalog.v1`
 

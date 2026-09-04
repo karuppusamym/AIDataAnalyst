@@ -3635,6 +3635,21 @@ class CertificationDecisionRequest(ApiModel):
         return self
 
 
+class CertificationRevokeRequest(ApiModel):
+    """P2-08: request body for
+    ``POST /v1/tables/{table_id}/certification/revoke``.
+
+    ``column_id`` mirrors ``CertificationDecisionRequest``: absent when
+    revoking the table-level cert, present when revoking a specific column's.
+    ``reason`` is required and durable -- it is stored as
+    ``AssetCertification.revocation_reason`` and echoed in the outbox event
+    that downstream policy decisions consume.
+    """
+
+    reason: str = Field(min_length=10, max_length=2000)
+    column_id: UUID | None = None
+
+
 class AssetCertificationRead(ApiModel):
     id: UUID
     organization_id: UUID
@@ -3646,6 +3661,11 @@ class AssetCertificationRead(ApiModel):
     certified_by: str
     expires_at: datetime
     is_active: bool
+    # P2-08: revoke details, populated only on rows the manual revoke endpoint
+    # wrote (`status == "REVOKED"`); nullable everywhere else.
+    revoked_at: datetime | None = None
+    revoked_by: str | None = None
+    revocation_reason: str | None = None
     created_at: datetime
     updated_at: datetime
 

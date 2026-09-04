@@ -222,6 +222,40 @@ def _context(datasource: DataSource) -> SecurityContext:
     )
 
 
+def _platform_admin_context(datasource: DataSource) -> SecurityContext:
+    """GV-2 / P0-02: `DataSteward` is now in the default
+    `bulk_governance_roles_requiring_review` list -- a request under that
+    role is (correctly) routed through `BulkStewardshipOperation` +
+    `GovernanceReview` regardless of count. The CT-1 tests below prove the
+    direct-write batch mechanics (cap-at-500, SAVEPOINT isolation) that
+    still need to run on the direct path, and are executed under
+    `PlatformAdmin` -- a role deliberately absent from the review-required
+    list so admins can direct-write within the count threshold.
+    """
+    return SecurityContext(
+        principal_id="admin@example.com",
+        principal_type="USER",
+        organization_id=datasource.organization_id,
+        roles=frozenset({"PlatformAdmin"}),
+    )
+
+
+def _high_threshold_settings() -> "Settings":
+    """Settings override for the two CT-1 tests that exercise 40-item and
+    500-item direct-write batches. Default threshold is 10 (P0-02), so a
+    truncation-cap test needs a threshold well above the cap; the empty
+    review-required-roles list is defensive so this fixture also stays
+    stable if a caller here ever ran under `DataSteward` again.
+    """
+    from atlas.platform.config import Settings
+
+    return Settings(
+        environment="test",
+        bulk_governance_threshold=10_000,
+        bulk_governance_roles_requiring_review=[],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Partial success at real scale: a full 500-item explicit-selection batch --
 # CATALOG_BULK_ACTION_MAX_ITEMS, the request's own ceiling, not 2-3 rows --
@@ -340,8 +374,9 @@ async def test_bulk_own_by_filter_caps_at_500_and_reports_truncation(
             owner_type="GROUP",
             owner_principal="retail-data-stewards",
         ),
-        context=_context(datasource),
+        context=_platform_admin_context(datasource),
         session=session,
+        settings=_high_threshold_settings(),
     )
 
     assert result.selection_mode == "FILTER"
@@ -370,8 +405,9 @@ async def test_bulk_own_by_filter_matching_fewer_than_the_cap_is_not_truncated(
             owner_type="INDIVIDUAL",
             owner_principal="jane.steward",
         ),
-        context=_context(datasource),
+        context=_platform_admin_context(datasource),
         session=session,
+        settings=_high_threshold_settings(),
     )
     assert result.parameters["selection_truncated"] is False
     assert result.requested_count == 40
@@ -434,7 +470,7 @@ async def test_bulk_certify_isolates_a_failure_within_one_items_dispatch(
                 rationale="Certified against the approved quarterly data contract.",
                 expires_at=now + timedelta(days=90),
             ),
-            context=_context(datasource),
+            context=_platform_admin_context(datasource),
             session=session,
         )
     finally:
