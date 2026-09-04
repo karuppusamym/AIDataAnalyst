@@ -66,6 +66,7 @@ from aida.procedure_lineage_api import router as procedure_lineage_router
 from aida.procedure_tool_api import router as procedure_tool_router
 from aida.product_marketplace_api import router as product_marketplace_router
 from aida.quality_api import router as quality_router
+from aida.retrieval_ops_api import router as retrieval_ops_router
 from aida.review_queue_api import router as review_queue_router
 from aida.runtime_contracts_api import router as runtime_contracts_router
 from aida.schemas import HealthResponse
@@ -307,6 +308,7 @@ app.include_router(operational_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(agent_contract_router)
+app.include_router(retrieval_ops_router)
 app.include_router(ai_registry_router)
 app.include_router(agent_roster_router)
 app.include_router(dbt_router)

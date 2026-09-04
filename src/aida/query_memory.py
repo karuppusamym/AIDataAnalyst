@@ -208,6 +208,88 @@ def select_best_match(
     return best
 
 
+def select_top_matches(
+    candidates: Sequence[MemoryCandidateFacts],
+    *,
+    target_table_ids: frozenset[str],
+    current_semantic_version: str | None,
+    table_updated_at: dict[str, datetime],
+    min_similarity: float,
+    limit: int,
+) -> list[MemoryMatch]:
+    """AG-11: the top `limit` eligible, non-stale matches, best first.
+
+    `select_best_match` answers "adapt this one"; this answers "here are the
+    shapes that worked on this estate". They apply the identical eligibility
+    and staleness rules -- a candidate this returns is one `select_best_match`
+    would have been willing to return -- so few-shot exemplars can never be
+    drawn from memory the adaptation path would have refused as stale.
+
+    Ordered by similarity, then by `agent_run_id` so the list is
+    deterministic for one input and a prompt built from it replays.
+    """
+    if limit <= 0:
+        return []
+    eligible: list[MemoryMatch] = []
+    for candidate in candidates:
+        if candidate.status != ELIGIBLE_STATUS:
+            continue
+        stale = check_candidate_staleness(
+            candidate_semantic_version=candidate.semantic_version,
+            current_semantic_version=current_semantic_version,
+            referenced_table_ids=candidate.referenced_table_ids,
+            table_updated_at=table_updated_at,
+            run_completed_at=candidate.run_completed_at,
+        )
+        if stale.is_stale:
+            continue
+        similarity = jaccard_similarity(target_table_ids, candidate.referenced_table_ids)
+        if similarity < min_similarity:
+            continue
+        eligible.append(
+            MemoryMatch(
+                memory_evidence_id=candidate.memory_evidence_id,
+                agent_run_id=candidate.agent_run_id,
+                query_execution_id=candidate.query_execution_id,
+                normalized_sql=candidate.normalized_sql,
+                similarity=similarity,
+                semantic_version=candidate.semantic_version,
+                referenced_table_ids=tuple(sorted(candidate.referenced_table_ids)),
+            )
+        )
+    eligible.sort(key=lambda match: (-match.similarity, match.agent_run_id))
+    return eligible[:limit]
+
+
+async def find_query_memory_matches(
+    session: AsyncSession,
+    *,
+    datasource: DataSource,
+    current_semantic_version: str | None,
+    retrieved_table_ids: frozenset[str],
+    min_similarity: float,
+    scan_limit: int,
+    limit: int,
+) -> list[MemoryMatch]:
+    """AG-11: the top `limit` matches, for few-shot exemplars.
+
+    A thin, explicitly-typed wrapper over the same assembly the single-match
+    finder uses, so the two cannot drift in what they consider eligible.
+    """
+    if limit <= 0:
+        return []
+    matches = await find_query_memory_match(
+        session,
+        datasource=datasource,
+        current_semantic_version=current_semantic_version,
+        retrieved_table_ids=retrieved_table_ids,
+        min_similarity=min_similarity,
+        scan_limit=scan_limit,
+        top_k=limit,
+    )
+    return list(matches) if matches else []
+
+
 async def find_query_memory_match(
     session: AsyncSession,
     *,
@@ -216,7 +298,8 @@ async def find_query_memory_match(
     retrieved_table_ids: frozenset[str],
     min_similarity: float,
     scan_limit: int,
-) -> MemoryMatch | None:
+    top_k: int | None = None,
+) -> Any:
     """The one place this module touches a session. Reads real,
     already-persisted `QueryMemoryEvidence` / `AgentRun` / `QueryExecution` /
     `MetadataTable` rows, translates them into `MemoryCandidateFacts`, and hands
@@ -283,6 +366,15 @@ async def find_query_memory_match(
             )
         )
 
+    if top_k is not None:
+        return select_top_matches(
+            candidates,
+            target_table_ids=frozenset(retrieved_table_ids),
+            current_semantic_version=current_semantic_version,
+            table_updated_at=table_updated_at,
+            min_similarity=min_similarity,
+            limit=top_k,
+        )
     return select_best_match(
         candidates,
         target_table_ids=frozenset(retrieved_table_ids),

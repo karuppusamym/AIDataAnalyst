@@ -319,6 +319,19 @@ class Settings(BaseSettings):
     #: Confidence at or above which the agent recommends APPROVE for a
     #: tier-eligible item that carries a confidence at all.
     reviewer_agent_approve_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
+
+    # --- RT-1: persisted vector index ------------------------------------
+    #: How old the persisted index may be before retrieval falls back to
+    #: embedding candidates live. A catalog change newer than the index also
+    #: forces the fallback, which is the staleness that actually returns
+    #: wrong results; age alone is the cheaper backstop.
+    vector_index_max_age_minutes: int = Field(default=1440, ge=1)
+
+    # --- AG-11: exemplar few-shot ----------------------------------------
+    #: How many prior confirmed queries are supplied to generation as
+    #: labelled examples. 0 disables the stage entirely and restores the
+    #: single-template behaviour query memory had before AG-11.
+    exemplar_fewshot_k: int = Field(default=3, ge=0, le=10)
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and
