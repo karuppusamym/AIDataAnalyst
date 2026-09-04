@@ -44,7 +44,7 @@ import pytest
 from sqlalchemy import event, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from aida.api import (
+from atlas.modules.catalog.router import (
     bulk_assign_ownership,
     bulk_certify_tables,
     bulk_classify_columns,
