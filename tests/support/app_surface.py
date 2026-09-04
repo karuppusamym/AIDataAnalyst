@@ -33,7 +33,15 @@ from typing import Any
 
 from fastapi.routing import APIRoute
 
-SRC_ROOT = Path(__file__).resolve().parents[2] / "src" / "aida"
+SRC_DIR = Path(__file__).resolve().parents[2] / "src"
+SRC_ROOT = SRC_DIR / "aida"
+#: Every package the call-graph walker reads. `atlas` joined `aida` when ST-07
+#: moved route handlers into `src/atlas/modules/*/router.py`: the walker was
+#: hardcoded to `src/aida`, could not read the moved handlers' source, and so
+#: reported 33 genuinely-audited endpoints as unaudited -- an INV-7 gate that
+#: had silently stopped covering a third of the application's mutations.
+WALKED_PACKAGES: tuple[str, ...] = ("aida", "atlas")
+SRC_ROOTS: tuple[tuple[str, Path], ...] = tuple((pkg, SRC_DIR / pkg) for pkg in WALKED_PACKAGES)
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -129,33 +137,36 @@ class _ModuleIndex:
 @lru_cache(maxsize=1)
 def _source_index() -> dict[str, _ModuleIndex]:
     index: dict[str, _ModuleIndex] = {}
-    for path in sorted(SRC_ROOT.rglob("*.py")):
-        parts = path.relative_to(SRC_ROOT).with_suffix("").parts
-        module = "aida." + ".".join(parts)
-        module = module.removesuffix(".__init__")
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-        methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-        imported_from: dict[str, str] = {}
-        imported_modules: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                functions.setdefault(node.name, node)
-            elif isinstance(node, ast.ClassDef):
-                for member in node.body:
-                    if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef):
-                        methods.setdefault(f"{node.name}.{member.name}", member)
-            elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("aida"):
-                imported_modules.add(node.module or "")
-                for alias in node.names:
-                    imported_from[alias.asname or alias.name] = node.module or ""
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name.startswith("aida"):
-                        imported_modules.add(alias.name)
-        index[module] = _ModuleIndex(
-            functions, methods, imported_from, frozenset(imported_modules)
-        )
+    for package, root in SRC_ROOTS:
+        for path in sorted(root.rglob("*.py")):
+            parts = path.relative_to(root).with_suffix("").parts
+            module = package + "." + ".".join(parts)
+            module = module.removesuffix(".__init__")
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            functions: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+            methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+            imported_from: dict[str, str] = {}
+            imported_modules: set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                    functions.setdefault(node.name, node)
+                elif isinstance(node, ast.ClassDef):
+                    for member in node.body:
+                        if isinstance(member, ast.FunctionDef | ast.AsyncFunctionDef):
+                            methods.setdefault(f"{node.name}.{member.name}", member)
+                elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith(
+                    WALKED_PACKAGES
+                ):
+                    imported_modules.add(node.module or "")
+                    for alias in node.names:
+                        imported_from[alias.asname or alias.name] = node.module or ""
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith(WALKED_PACKAGES):
+                            imported_modules.add(alias.name)
+            index[module] = _ModuleIndex(
+                functions, methods, imported_from, frozenset(imported_modules)
+            )
     return index
 
 
@@ -346,9 +357,7 @@ def _writes_via_session(node: ast.AST) -> bool:
 # `tests/test_inv4_authorization_wiring.py` asserts that it still does. If either
 # function ever writes something other than a shadow record, that test fails and this
 # list is wrong.
-NON_GOVERNED_WRITERS: frozenset[str] = frozenset(
-    {"record_divergence", "record_divergence_durably"}
-)
+NON_GOVERNED_WRITERS: frozenset[str] = frozenset({"record_divergence", "record_divergence_durably"})
 
 
 def reaches_session_write(

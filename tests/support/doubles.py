@@ -123,6 +123,14 @@ class ScriptedResult:
     def all(self) -> list[Any]:
         return list(self._rows)
 
+    def scalars(self) -> "ScriptedResult":
+        """`session.execute(...).scalars().all()`, which the AU-11 certification
+        lookup uses. SQLAlchemy's `Result.scalars()` returns a new result over
+        the first column; these rows are already single entities, so returning
+        self is the faithful shape.
+        """
+        return self
+
     def __iter__(self) -> Any:
         return iter(self._rows)
 
@@ -326,11 +334,25 @@ class CatalogSession(RecordingSession):
         # (value_shape, column_name) pairs, matching `_tokenized_output_names`'
         # SELECT list.
         self._tokenized_columns = tokenized_columns or []
-        # AU-11: no referenced tables resolve, no certification/quality/freshness
-        # evidence exists, by default -- the same "honest empty default" as
-        # bindings/tokenized_columns above, not an invented CERTIFIED/HEALTHY/
-        # FRESH state a test never asked for.
-        self._referenced_table_ids = referenced_table_ids or []
+        # AU-11: no certification/quality/freshness evidence exists by default --
+        # the same "honest empty default" as bindings/tokenized_columns above,
+        # not an invented CERTIFIED/HEALTHY/FRESH state a test never asked for.
+        #
+        # `referenced_table_ids` is the exception, and defaults to one synthetic
+        # id per declared table (2026-09-04). An empty default stopped being the
+        # honest one when AU-11 made "the guard named tables and none resolved"
+        # a hard denial: a double that is told the catalog contains
+        # `analytics.customers` and then answers "no table resolves" is stating
+        # two contradictory things about the same catalog, and the gateway --
+        # correctly -- fails closed on the second, so tests about masking,
+        # lineage and value-freedom died on an authorization error before
+        # reaching the behaviour they exist to check. Pass the argument
+        # explicitly (`[]` included) to model the genuinely-unresolvable case.
+        self._referenced_table_ids = (
+            referenced_table_ids
+            if referenced_table_ids is not None
+            else [uuid4() for _ in tables]
+        )
         self._classifications = classifications or []
         self._certifications = certifications or []
         self._quality_incident_severities = quality_incident_severities or []
