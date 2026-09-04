@@ -289,7 +289,7 @@ async def test_a_message_carries_no_source_value(session: AsyncSession, wire) ->
             "severity": "HIGH",
             # A caller mistakenly passing a value must not reach the wire.
             "sample_row": SENTINEL,
-            "sql": f"SELECT * FROM customers WHERE name = '{SENTINEL}'",
+            "sql": f"SELECT * FROM customers WHERE name = '{SENTINEL}'",  # noqa: S608
         },
         settings=_settings(),
     )
