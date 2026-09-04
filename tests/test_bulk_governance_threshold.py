@@ -429,6 +429,7 @@ async def test_playbook_auto_apply_own_emits_per_subject_audit(session: AsyncSes
     playbook = MetadataPlaybook(
         id=uuid4(),
         organization_id=datasource.organization_id,
+        datasource_id=datasource.id,
         name="RetailOwner",
         action="OWN",
         action_parameters={

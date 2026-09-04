@@ -256,7 +256,7 @@ async def test_certify_table_asset_populates_evidence(db: AsyncSession) -> None:
     ctx = SecurityContext(
         principal_id="steward-a",
         principal_type="USER",
-        organization_id=None,
+        organization_id=org.id,
         roles=frozenset({"DataSteward"}),
     )
     body = CertificationDecisionRequest(
@@ -387,7 +387,7 @@ async def test_playbook_certify_populates_evidence(db: AsyncSession) -> None:
     ctx = SecurityContext(
         principal_id="playbook",
         principal_type="SERVICE",
-        organization_id=None,
+        organization_id=org.id,
         roles=frozenset({"PlatformAdmin"}),
     )
     await _apply_one_item(
@@ -490,6 +490,9 @@ async def test_backfill_certification_evidence(db: AsyncSession) -> None:
 
     n = await backfill_certification_evidence_v1(db)
     assert n == 1
+    # The backfill only *stages* the writes -- its docstring makes the caller
+    # responsible for committing, so a dry-run CLI can count without writing.
+    await db.flush()
     await db.refresh(legacy)
     assert legacy.evidence is not None
     assert legacy.evidence["backfilled"] is True

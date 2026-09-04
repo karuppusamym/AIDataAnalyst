@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from aida.events import record_audit, record_outbox
 from aida.models import OwnershipAssignment, UnownedAssetEscalation
 from aida.security import SecurityContext
+from aida.timeutil import as_utc
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,11 +111,14 @@ async def warn_upcoming_ownership_expiries(
     rows = (await session.scalars(stmt)).all()
     emitted: list[OwnershipExpiryWarning] = []
     for assignment in rows:
-        expires_at = assignment.expires_at
-        assert expires_at is not None  # narrowed by the filter above
-        days_until = max(
-            0, int((expires_at - effective_now).total_seconds() // 86_400)
-        )
+        raw_expires_at = assignment.expires_at
+        assert raw_expires_at is not None  # narrowed by the filter above
+        # Normalise before arithmetic: PostgreSQL `timestamptz` reads back
+        # aware, SQLite reads back naive, and subtracting one from an aware
+        # `effective_now` raises on the second. Same reason and same helper as
+        # `business_graph._as_utc`.
+        expires_at = as_utc(raw_expires_at)
+        days_until = max(0, int((expires_at - effective_now).total_seconds() // 86_400))
         assignment.expiry_warning_emitted_at = effective_now
         context = _system_context(assignment.organization_id)
         details = {

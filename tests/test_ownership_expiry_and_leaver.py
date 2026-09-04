@@ -22,6 +22,7 @@ from sqlalchemy.pool import StaticPool
 import aida.models  # noqa: F401 -- registers every table on Base.metadata
 from aida import ownership_expiry_warning as expiry_module
 from aida.db import Base
+from aida.timeutil import as_utc
 from aida.identity_events import (
     emit_principal_deleted,
     emit_principal_merged,
@@ -201,7 +202,8 @@ async def test_assign_ownership_sets_expires_at_180_days(db, monkeypatch):
         await db.scalars(select(OwnershipAssignment).where(OwnershipAssignment.subject_id == str(table.id)))
     ).one()
     assert row.expires_at is not None
-    delta_days = (row.expires_at - now).total_seconds() / 86_400
+    # SQLite reads `timestamptz` back naive; normalise before subtracting.
+    delta_days = (as_utc(row.expires_at) - now).total_seconds() / 86_400
     assert 179.9 < delta_days < 180.1
 
 

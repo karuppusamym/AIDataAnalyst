@@ -460,7 +460,11 @@ async def test_stale_pending_description_drafts_flip_and_young_stay(session) -> 
     now = datetime.now(UTC)
     stale = await _seed_description_draft(
         session, org=org, table=table, status="DRAFT",
-        updated_at=now - timedelta(days=60),
+        # Clearly past the 60-day window, not sitting exactly on it: the rule
+        # reaps rows *older than* the retention (`updated_at < cutoff`), so a
+        # row seeded at exactly `now - 60d` is correctly left alone and the
+        # test was asserting the boundary rather than the behaviour.
+        updated_at=now - timedelta(days=61),
     )
     young = await _seed_description_draft(
         session, org=org, table=table, status="DRAFT",

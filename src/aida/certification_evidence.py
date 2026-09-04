@@ -32,7 +32,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import JSON, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
@@ -233,7 +233,18 @@ async def backfill_certification_evidence_v1(
         await session.scalars(
             select(AssetCertification).where(
                 AssetCertification.status == "ACTIVE",
-                AssetCertification.evidence.is_(None),
+                # `evidence` is a JSON column, and SQLAlchemy's JSON type
+                # serialises Python `None` to JSON `null` (the four bytes
+                # 'null') rather than SQL NULL. `.is_(None)` therefore matched
+                # nothing and this backfill silently populated zero rows on
+                # every run, in production as well as in tests. Match both
+                # forms: JSON null is what every existing legacy row holds,
+                # SQL NULL is what a row written through a raw INSERT or a
+                # future `none_as_null=True` column would hold.
+                or_(
+                    AssetCertification.evidence.is_(None),
+                    AssetCertification.evidence == JSON.NULL,
+                ),
                 # Column-level certifications carry no independent evidence
                 # composition path today; skip them so this run does not
                 # tag them with a table-level snapshot.
