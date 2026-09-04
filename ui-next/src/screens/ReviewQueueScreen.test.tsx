@@ -283,7 +283,7 @@ const TERM_VERSION: ReviewQueueRead["proposals"][number] = {
     object_id: "term:revenue",
     diffable: true,
     entries: [
-      { field: "definition", change: "modified", before: "any inflow", after: "net inflow attributable to sales" },
+      { field: "definition", change: "changed", before: "any inflow", after: "net inflow attributable to sales" },
     ],
   },
 };

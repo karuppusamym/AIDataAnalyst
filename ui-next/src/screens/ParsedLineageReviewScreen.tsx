@@ -182,12 +182,12 @@ export function ParsedLineageReviewScreen() {
         </div>
       ) : null}
 
-      {error ? <ErrorState title="Could not load queue" message={error} /> : null}
+      {error ? <ErrorState title="Could not load queue" detail={error} onRetry={() => void load()} /> : null}
 
       {!loading && items.length === 0 && !error ? (
         <Empty
           title="No proposed lineage edges"
-          message="Nothing waiting for review right now."
+          hint="Nothing waiting for review right now."
         />
       ) : null}
 

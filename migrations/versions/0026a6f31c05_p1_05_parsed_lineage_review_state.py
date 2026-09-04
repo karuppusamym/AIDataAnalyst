@@ -1,7 +1,7 @@
 """p1-05 parsed lineage-edge review state + merge parallel heads
 
 Revision ID: 0026a6f31c05
-Revises: f0c8a2e91b74, c5243ed13a18, dcb1fe4dfe6a, b3f7a1c94d62, a67d5816d225
+Revises: f0c8a2e91b74, c5243ed13a18
 Create Date: 2026-09-04 12:00:00.000000
 
 P1-05 / ADR-0026: add the review lifecycle columns (review_status,
@@ -13,10 +13,9 @@ openlineage_column_edge). Also adds Datasource.trusted_for_lineage so
 `require_review` mode can trust connector-pushed lineage from a datasource
 the operator has explicitly vouched for.
 
-Also merges the five pre-existing parallel heads (P2-08 certification,
-Group I procedure lineage, tool certification corpus, catalog bulk
-actions, BI lineage) so the P1-05 revision is a single new head on top
-of everything Wave-2 shipped.
+The other Wave-2 branches named in the original draft are already ancestors
+of these two current heads through the existing tracker merge migration, so
+they must not be repeated here as additional Alembic parents.
 
 The `review_status` default (`server_default="ACTIVE"`) is what makes
 this migration safe to apply live: every existing row keeps its
@@ -35,9 +34,6 @@ revision: str = "0026a6f31c05"
 down_revision: str | Sequence[str] | None = (
     "f0c8a2e91b74",
     "c5243ed13a18",
-    "dcb1fe4dfe6a",
-    "b3f7a1c94d62",
-    "a67d5816d225",
 )
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

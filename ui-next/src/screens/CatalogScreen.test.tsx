@@ -93,6 +93,7 @@ const ROW: CatalogRowRead = {
   certification: "NONE",
   certification_expires_at: null,
   quality: "PASSING",
+  certification_evidence_summary: null,
   glossary_terms: [],
   row_count_estimate: 1000,
   updated_at: "2026-09-02T00:00:00Z",
