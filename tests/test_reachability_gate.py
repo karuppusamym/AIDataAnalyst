@@ -152,6 +152,55 @@ def _touched_dotted_names(
     return names
 
 
+def _atlas_bridge_deps() -> dict[str, set[str]]:
+    """Map each `atlas.modules.*.router` module to the aida.* modules it
+    imports.
+
+    2026-09-03 strangle bridge. When an aida module imports an
+    `atlas.modules.<name>.router` (as `main.py` does when mounting a
+    strangled router, and as the aida-side shims do to re-export the
+    router object), the router in turn imports back from aida
+    (`aida.security`, `aida.models`, `aida.events`, ...). Without this
+    bridge, the pure-aida reachability walk would false-positive every
+    aida module used only by a router that moved. This helper lets the
+    graph builder treat those aida deps as if the aida importer had
+    imported them directly.
+
+    Deliberately limited to `router.py` files under `atlas/modules/`:
+    that's the only shape the strangle produces today. Extending it to
+    `service.py` / `repository.py` / etc. would over-approximate
+    reachability -- those modules are only reached from their own
+    router or api file, and if that's a shim, the router file's own
+    aida deps are what matters.
+    """
+    bridges: dict[str, set[str]] = {}
+    atlas_root = SRC_ROOT / "atlas" / "modules"
+    if not atlas_root.exists():
+        return bridges
+    for router_path in atlas_root.rglob("router.py"):
+        rel = router_path.relative_to(SRC_ROOT)
+        mod = ".".join(rel.with_suffix("").parts)
+        deps: set[str] = set()
+        try:
+            tree = ast.parse(router_path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                base = node.module or ""
+                if base == PACKAGE or base.startswith(f"{PACKAGE}."):
+                    deps.add(base)
+                    for alias in node.names:
+                        if alias.name != "*":
+                            deps.add(f"{base}.{alias.name}")
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == PACKAGE or alias.name.startswith(f"{PACKAGE}."):
+                        deps.add(alias.name)
+        bridges[mod] = deps
+    return bridges
+
+
 def build_import_graph() -> tuple[dict[str, set[str]], set[str]]:
     """Full static import graph of src/aida: module -> set of aida modules
     it causes to load, restricted to modules that actually exist on disk.
@@ -159,6 +208,7 @@ def build_import_graph() -> tuple[dict[str, set[str]], set[str]]:
     modules = _discover_modules()
     all_modules = set(modules)
     graph: dict[str, set[str]] = {name: set() for name in all_modules}
+    atlas_bridges = _atlas_bridge_deps()
 
     for name, (path, is_pkg) in modules.items():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -166,15 +216,27 @@ def build_import_graph() -> tuple[dict[str, set[str]], set[str]]:
             if not isinstance(node, ast.Import | ast.ImportFrom):
                 continue
             for dotted in _touched_dotted_names(name, is_pkg, node):
-                if dotted != PACKAGE and not dotted.startswith(f"{PACKAGE}."):
+                # Aida-prefixed name: normal case, add every real prefix.
+                if dotted == PACKAGE or dotted.startswith(f"{PACKAGE}."):
+                    parts = dotted.split(".")
+                    for i in range(1, len(parts) + 1):
+                        prefix = ".".join(parts[: i])
+                        if prefix in all_modules:
+                            graph[name].add(prefix)
                     continue
-                parts = dotted.split(".")
-                # A statement that touches a.b.c causes Python to load a,
-                # a.b and a.b.c -- add every prefix that is a real module.
-                for i in range(1, len(parts) + 1):
-                    prefix = ".".join(parts[: i])
-                    if prefix in all_modules:
-                        graph[name].add(prefix)
+                # Strangle bridge: an atlas.modules.*.router import brings
+                # in whatever aida modules that router itself imports (the
+                # router still depends on aida.security / aida.models /
+                # aida.events / etc. -- only the endpoint handlers moved).
+                for bridge_mod, bridge_deps in atlas_bridges.items():
+                    if dotted == bridge_mod or dotted.startswith(f"{bridge_mod}."):
+                        for aida_dep in bridge_deps:
+                            dparts = aida_dep.split(".")
+                            for i in range(1, len(dparts) + 1):
+                                prefix = ".".join(dparts[: i])
+                                if prefix in all_modules:
+                                    graph[name].add(prefix)
+                        break
 
     return graph, all_modules
 

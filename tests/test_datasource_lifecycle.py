@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 
-from aida.api import test_datasource as call_test_datasource
+from atlas.modules.connectivity.router import test_datasource as call_test_datasource
 from aida.config import Settings
 from aida.connectors.base import ConnectorCapabilities
 from aida.connectors.registry import connector_registry

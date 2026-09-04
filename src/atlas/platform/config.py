@@ -403,6 +403,44 @@ class Settings(BaseSettings):
     agent_query_memory_scan_limit: int = Field(default=200, ge=1, le=5_000)
     model_generation_enabled: bool = False
     model_route: str | None = Field(default=None, min_length=3, max_length=255)
+    # 2026-09-03: comma-separated list of additional model_route_keys to try in
+    # PREFERENCE ORDER when the primary `model_route` fails with a transient
+    # provider error (HTTP 429, 502, 503, 504) after its own in-route retries
+    # (`model_provider_max_attempts`) are exhausted. Each entry must itself be
+    # an APPROVED `ModelRouteConfiguration` for the organization -- unapproved
+    # entries are silently skipped rather than failing the whole call, so
+    # revoking a route via governance is a no-op for callers that had it as a
+    # fallback. Non-retryable errors (401/403 authentication, 400 malformed
+    # request) do NOT trigger fallback: they indicate a broken route, not a
+    # busy provider, so switching would just move the failure. Empty/None
+    # means no fallback (behavior identical to before this setting existed).
+    # Governance-compatible: fallback only ever picks between routes that are
+    # ALREADY APPROVED, never a route it discovers itself.
+    model_route_fallbacks: str | None = Field(default=None, max_length=1024)
+
+    @property
+    def model_route_fallback_keys(self) -> list[str]:
+        """Ordered, deduplicated list of fallback route_keys.
+
+        The primary `model_route` is NOT included -- callers iterate primary
+        first, then this list. Empty/None settings collapse to []; whitespace
+        is trimmed; empty entries between commas are dropped. The primary is
+        also filtered out so a misconfiguration where the same key appears
+        in both settings doesn't cost a doubled retry on outage.
+        """
+        if not self.model_route_fallbacks:
+            return []
+        seen: set[str] = set()
+        keys: list[str] = []
+        for raw in self.model_route_fallbacks.split(","):
+            key = raw.strip()
+            if not key or key in seen:
+                continue
+            if self.model_route and key == self.model_route:
+                continue
+            seen.add(key)
+            keys.append(key)
+        return keys
     model_timeout_seconds: int = Field(default=30, ge=1, le=300)
     model_max_input_tokens: int = Field(default=8_000, ge=100, le=1_000_000)
     model_max_output_tokens: int = Field(default=2_000, ge=100, le=100_000)

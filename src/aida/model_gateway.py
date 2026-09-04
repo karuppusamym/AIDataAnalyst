@@ -31,7 +31,18 @@ class SqlGenerationOutput(BaseModel):
 
 
 class ModelGatewayError(RuntimeError):
-    pass
+    """Model provider call could not be completed.
+
+    ``provider_status_code`` carries the underlying HTTP status when the
+    failure was a provider response (as opposed to a local timeout/network
+    error); the API layer branches on it so a 429 (throttled) can surface as
+    HTTP 429 to the client instead of a generic 503, and the UI can render
+    "provider throttled, try again" instead of "no model route configured".
+    """
+
+    def __init__(self, message: str, *, provider_status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.provider_status_code = provider_status_code
 
 
 class ModelRouteNotApproved(ModelGatewayError):
@@ -103,11 +114,18 @@ async def post_with_retry(
         retryable = response.status_code in {408, 409, 429, 500, 502, 503, 504}
         if not retryable or attempt + 1 == attempts:
             raise ModelGatewayError(
-                f"model provider request failed with HTTP {response.status_code}"
+                f"model provider request failed with HTTP {response.status_code}",
+                provider_status_code=response.status_code,
             )
         retry_after = response.headers.get("retry-after")
         try:
-            delay = min(float(retry_after), 2.0) if retry_after else min(0.25 * (2**attempt), 2.0)
+            # 2026-09-03: retry_after ceiling raised 2s -> 30s so a provider that
+            # signals a real back-off window (OpenAI/Gemini quota-reset headers
+            # commonly return 20-60s) is honored instead of being re-hit at 2s
+            # intervals and guaranteed to 429 again. The exp-backoff branch
+            # (no retry_after header) keeps its original 2s cap since it is
+            # only picking a delay in the absence of provider guidance.
+            delay = min(float(retry_after), 30.0) if retry_after else min(0.25 * (2**attempt), 2.0)
         except ValueError:
             delay = min(0.25 * (2**attempt), 2.0)
         await asyncio.sleep(delay)

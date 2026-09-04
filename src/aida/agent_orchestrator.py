@@ -26,6 +26,7 @@ from aida.config import Settings
 from aida.events import record_audit, record_outbox
 from aida.model_gateway import (
     ApprovedModelRoute,
+    ModelCallEvidence,
     ModelGatewayError,
     ProviderNeutralModelGateway,
     SqlGenerationOutput,
@@ -65,7 +66,17 @@ from aida.trust_scoring import AssetContext, compute_trust_score
 
 
 class ModelRouteUnavailable(RuntimeError):
-    pass
+    """The model route couldn't produce a completion for this request.
+
+    ``provider_status_code`` is set when the underlying failure was a
+    provider HTTP response (e.g. 429 throttled); the API layer branches
+    on it so 429 → HTTP 429, everything else → HTTP 503. Callers that only
+    care about "the model didn't answer" ignore it.
+    """
+
+    def __init__(self, message: str, *, provider_status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.provider_status_code = provider_status_code
 
 
 class AgentClarificationRequired(RuntimeError):
@@ -246,6 +257,140 @@ class GovernedAgentOrchestrator:
         self.planner = GovernedPlanner(settings)
         self.prompt_risk_classifier = DeterministicPromptRiskClassifier()
         self.model_gateway = ProviderNeutralModelGateway(settings)
+
+    async def _approved_model_routes(
+        self, session: AsyncSession, organization_id: UUID
+    ) -> list[ApprovedModelRoute]:
+        """Return the ordered list of approved routes to try: the primary
+        `settings.model_route` first, then each entry in
+        `settings.model_route_fallback_keys`.
+
+        Unapproved / disabled / uncapable entries are silently skipped rather
+        than raising -- revoking a route via governance is a no-op for callers
+        that had it in their fallback list, so the change lands without a
+        redeploy. Deduplicates while preserving order so the same key in both
+        settings costs one lookup, not two. Bounded by
+        1 + len(settings.model_route_fallback_keys), typically 1-3.
+        """
+        keys: list[str] = []
+        if self.settings.model_route:
+            keys.append(self.settings.model_route)
+        for key in self.settings.model_route_fallback_keys:
+            if key not in keys:
+                keys.append(key)
+        if not keys:
+            return []
+        routes: list[ApprovedModelRoute] = []
+        for key in keys:
+            route = await session.scalar(
+                select(ModelRouteConfiguration)
+                .where(
+                    ModelRouteConfiguration.organization_id == organization_id,
+                    ModelRouteConfiguration.route_key == key,
+                    ModelRouteConfiguration.status == "APPROVED",
+                )
+                .order_by(ModelRouteConfiguration.version.desc())
+                .limit(1)
+            )
+            if (
+                route is None
+                or "SQL_GENERATION" not in route.capabilities
+                or not route.credential_reference
+            ):
+                continue
+            routes.append(
+                ApprovedModelRoute(
+                    route_key=route.route_key,
+                    provider_type=route.provider_type,
+                    model_id=route.model_id,
+                    endpoint_alias=route.endpoint_alias,
+                    credential_reference=route.credential_reference,
+                    max_input_tokens=route.max_input_tokens,
+                    max_output_tokens=route.max_output_tokens,
+                    timeout_seconds=route.timeout_seconds,
+                )
+            )
+        return routes
+
+    async def _generate_with_fallback(
+        self,
+        *,
+        session: AsyncSession,
+        organization_id: UUID,
+        approved_routes: list[ApprovedModelRoute],
+        system_instruction: str,
+        payload: dict[str, Any],
+    ) -> tuple[SqlGenerationOutput, ModelCallEvidence, list[dict[str, Any]]]:
+        """Try `approved_routes` in preference order; return the first
+        route's `(output, evidence)` along with the full per-route attempt
+        chain. Falls back only on transient provider errors (HTTP 429/502/
+        503/504); non-transient errors (401/403/400) short-circuit -- they
+        indicate the route itself is broken, not a busy provider, so
+        switching would just move the failure.
+
+        `attempts` records every route tried (route_key, provider_type,
+        attempt_ordinal, outcome, provider_status_code on failure) so the
+        caller can attach it to `plan_evidence.model_call_attempts`
+        whenever more than one attempt fired.
+
+        Raises `ModelGatewayError` if all approved routes are exhausted or a
+        non-retryable failure fires; the caller translates that into a
+        rejection + refusal record.
+        """
+        _RETRYABLE_PROVIDER_STATUSES = {429, 502, 503, 504}
+        attempts: list[dict[str, Any]] = []
+        if not approved_routes:
+            raise ModelGatewayError(
+                "no approved model route is configured", provider_status_code=None
+            )
+        for attempt_ordinal, approved_route in enumerate(approved_routes, start=1):
+            try:
+                output, model_evidence = await self.model_gateway.structured_completion(
+                    session=session,
+                    organization_id=organization_id,
+                    route=approved_route,
+                    system_instruction=system_instruction,
+                    payload=payload,
+                    output_schema=SqlGenerationOutput,
+                )
+            except ModelGatewayError as exc:
+                attempts.append(
+                    {
+                        "route_key": approved_route.route_key,
+                        "provider_type": approved_route.provider_type,
+                        "attempt_ordinal": attempt_ordinal,
+                        "outcome": "FAILED",
+                        "provider_status_code": exc.provider_status_code,
+                        "error_class": type(exc).__name__,
+                    }
+                )
+                is_retryable = exc.provider_status_code in _RETRYABLE_PROVIDER_STATUSES
+                is_last_attempt = attempt_ordinal == len(approved_routes)
+                if not is_retryable or is_last_attempt:
+                    # Attach the attempt chain onto the exception so the
+                    # caller can record it on the agent_run's plan_evidence
+                    # even on refusal. Using an attribute (not a subclass)
+                    # keeps `ModelGatewayError`'s existing shape unchanged
+                    # for every other caller of `structured_completion`.
+                    exc.model_call_attempts = attempts  # type: ignore[attr-defined]
+                    raise
+                continue
+            attempts.append(
+                {
+                    "route_key": approved_route.route_key,
+                    "provider_type": approved_route.provider_type,
+                    "attempt_ordinal": attempt_ordinal,
+                    "outcome": "SUCCEEDED",
+                }
+            )
+            return output, model_evidence, attempts
+        # Loop exited without success or raise (shouldn't happen given the
+        # empty-routes guard above and the raise-on-last-attempt path, but
+        # defensive).
+        raise ModelGatewayError(
+            "model route iteration exhausted without producing a result",
+            provider_status_code=None,
+        )
 
     async def _approved_model_route(
         self, session: AsyncSession, organization_id: UUID
@@ -734,7 +879,7 @@ class GovernedAgentOrchestrator:
                     scan_limit=self.settings.agent_query_memory_scan_limit,
                 )
             try:
-                approved_route = await self._approved_model_route(
+                approved_routes = await self._approved_model_routes(
                     session, datasource.organization_id
                 )
                 model_context = await self._model_context(
@@ -763,13 +908,19 @@ class GovernedAgentOrchestrator:
                         "otherwise generate fresh SQL from the metadata context alone."
                     )
                     payload["query_memory_template"] = memory_match.normalized_sql
-                output, model_evidence = await self.model_gateway.structured_completion(
-                    session=session,
-                    organization_id=datasource.organization_id,
-                    route=approved_route,
-                    system_instruction=system_instruction,
-                    payload=payload,
-                    output_schema=SqlGenerationOutput,
+                # 2026-09-03: iterate approved routes; `_generate_with_fallback`
+                # handles retryable-error semantics + per-attempt evidence.
+                # Governance-preserving: iteration walks routes that are
+                # already APPROVED via `_approved_model_routes`, never a route
+                # the runtime discovers itself. See ADR-0024.
+                output, model_evidence, model_call_attempts = (
+                    await self._generate_with_fallback(
+                        session=session,
+                        organization_id=datasource.organization_id,
+                        approved_routes=approved_routes,
+                        system_instruction=system_instruction,
+                        payload=payload,
+                    )
                 )
                 generated_sql = output.sql
                 generation_source = (
@@ -785,10 +936,29 @@ class GovernedAgentOrchestrator:
                     "output_fingerprint": model_evidence.output_fingerprint,
                     "schema_name": model_evidence.schema_name,
                 }
+                # Record the attempt chain only when it materially explains
+                # the outcome -- either more than one attempt fired, or a
+                # fallback was configured (so the audit shows "the fallback
+                # was set but the primary answered first"). Skipping the
+                # noise case keeps normal successful runs' `plan_evidence`
+                # the same shape as before this change.
+                if len(model_call_attempts) > 1 or (
+                    model_call_attempts and self.settings.model_route_fallback_keys
+                ):
+                    plan_evidence["model_call_attempts"] = model_call_attempts
                 if memory_match is not None:
                     plan_evidence["query_memory_match"] = memory_match.evidence()
                 agent_run.plan_evidence = plan_evidence
             except ModelGatewayError as exc:
+                # If the fallback loop attached per-route attempts to the
+                # exception (see `_generate_with_fallback`), record them on
+                # plan_evidence before persisting rejection so the audit trail
+                # explains "primary 429, fallback also 429" rather than a bare
+                # "model route not configured".
+                exc_attempts = getattr(exc, "model_call_attempts", None)
+                if exc_attempts:
+                    plan_evidence["model_call_attempts"] = exc_attempts
+                    agent_run.plan_evidence = plan_evidence
                 await self._persist_rejection(
                     session,
                     agent_run,
@@ -798,7 +968,9 @@ class GovernedAgentOrchestrator:
                     correlation_id,
                     "MODEL_ROUTE_NOT_CONFIGURED",
                 )
-                raise ModelRouteUnavailable(str(exc)) from exc
+                raise ModelRouteUnavailable(
+                    str(exc), provider_status_code=getattr(exc, "provider_status_code", None)
+                ) from exc
 
         agent_run.generation_source = generation_source
         state = state.transition(RuntimeStage.GENERATED, generated_sql=generated_sql)

@@ -74,6 +74,7 @@ const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, st
   DATASOURCE_DISABLED: "This datasource is disabled",
   POLICY_REJECTED: "The generated query was rejected by policy",
   MODEL_UNAVAILABLE: "No model route is available right now",
+  MODEL_THROTTLED: "The model provider is throttling us — try again in a moment",
   CLARIFICATION_NEEDED: "This question needs more information",
   SERVER_ERROR: "The analysis failed on the server",
   UNKNOWN: "The question could not be answered",

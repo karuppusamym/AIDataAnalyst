@@ -709,6 +709,7 @@ export type AgentAskErrorKind =
   | "DATASOURCE_DISABLED"
   | "POLICY_REJECTED"
   | "MODEL_UNAVAILABLE"
+  | "MODEL_THROTTLED"
   | "CLARIFICATION_NEEDED"
   | "SERVER_ERROR"
   | "UNKNOWN";
@@ -769,6 +770,7 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
   }
   if (status === 409) return { kind: "CLARIFICATION_NEEDED", status, detail, alternatives: [] };
   if (status === 422) return { kind: "POLICY_REJECTED", status, detail, alternatives: [] };
+  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, alternatives: [] };
   if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, alternatives: [] };
   if (status === 502) return { kind: "SERVER_ERROR", status, detail, alternatives: [] };
   return { kind: "UNKNOWN", status, detail, alternatives: [] };
