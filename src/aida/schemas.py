@@ -2962,7 +2962,7 @@ class CatalogRowRead(ApiModel):
     # evidence (description version, active owner count, open-incidents-at-
     # certify, glossary-term count). Null when the current cert is legacy
     # (evidence IS NULL) or when there is no current cert.
-    certification_evidence_summary: CertificationEvidenceSummary | None = None
+    certification_evidence_summary: "CertificationEvidenceSummary | None" = None
     quality: str  # PASSING | INCIDENT_OPEN | STALE | UNKNOWN
     glossary_terms: list[str]
     row_count_estimate: int | None

@@ -64,6 +64,7 @@ Docs/
 | [05 Differentiation and whitespace](00-product/05-differentiation-and-whitespace.md) | Five defensible differentiators, ten whitespace opportunities, and the strategic clock |
 | [06 Product surface catalog](00-product/06-product-surface-catalog.md) | Every workbench, workspace, inspector, and console |
 | [07 Packaging and editions](00-product/07-packaging-and-editions.md) | Deployment models, editions, metering, limits |
+| [08 Market deep dive and target architecture v2 (2026-09)](00-product/08-market-deep-dive-and-target-architecture-2026-09.md) | September 2026 vendor moves, revised differentiator ledger, architecture v2, role-to-agent mapping, UI and flexibility plan, ML lanes, codebase plan |
 
 **Per-vendor deep dives** all live in [`review-2026-08/research/`](review-2026-08/research/) as of the 2026-08-30 consolidation — the older, shallower set under `competitors/` was retired to `_superseded/`. These complement the segment-level analysis above with primary-source module breakdowns, UI-surface detail, pricing and per-vendor weakness assessments:
 
