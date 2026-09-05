@@ -1884,7 +1884,9 @@ async def _apply_governance_review_decision(
         if request is None or request.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if request.status != "PENDING":
-            raise HTTPException(status_code=409, detail="agent contract request is no longer pending")
+            raise HTTPException(
+                status_code=409, detail="agent contract request is no longer pending"
+            )
         contract_eval_gate_verdict: str | None = None
         if decision == "APPROVE":
             # AG-10 extension: see `agent_contract_request_api`'s module
@@ -1893,7 +1895,10 @@ async def _apply_governance_review_decision(
             # state" rule, computed live so a stale pass can never carry a
             # request through.
             request_ai_version = await session.get(AiAssetVersion, request.ai_asset_version_id)
-            if request_ai_version is None or request_ai_version.organization_id != review.organization_id:
+            if (
+                request_ai_version is None
+                or request_ai_version.organization_id != review.organization_id
+            ):
                 raise HTTPException(status_code=409, detail="review target is unavailable")
             gate_result = await compute_agent_eval_gate(
                 session,
