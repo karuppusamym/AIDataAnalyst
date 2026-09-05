@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DataSourceRead, ConnectorHealthScoreRead } from "../lib/types";
-import { ApiError, downloadDatasourceContextSnapshot, fetchDatasourceHealth, fetchOrgDatasources } from "../lib/api";
+import {
+  ApiError,
+  downloadDatasourceContextSnapshot,
+  downloadProjectContextSnapshot,
+  fetchDatasourceHealth,
+  fetchOrgDatasources,
+} from "../lib/api";
+import { useScopeSelection } from "../lib/scope";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
@@ -269,6 +276,7 @@ function HealthPane({
 
 export function SourcesScreen() {
   const ORG = useOrgId();
+  const scope = useScopeSelection();
   const [params, setParams] = useUrlState();
   const q = params.get("q") ?? "";
   const statusFilter = params.get("status") ?? "ALL";
@@ -279,6 +287,8 @@ export function SourcesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [draftQ, setDraftQ] = useState(q);
+  const [projectGenerating, setProjectGenerating] = useState<"markdown" | "json" | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
 
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
@@ -339,6 +349,41 @@ export function SourcesScreen() {
 
   const activeCount = sources.filter((s) => s.status === "ACTIVE").length;
 
+  // Project rollup: the current scope's project, and the datasources within
+  // it that this screen already loaded (org-wide) — filtered client-side,
+  // no second fetch. `scope` is `null` for exactly one tick before
+  // `ScopeProvider` resolves; every derived value below degrades to "no
+  // project selected" rather than throwing.
+  const currentProject = useMemo(
+    () => scope?.projects.find((p) => p.id === scope.projectId) ?? null,
+    [scope],
+  );
+  const projectDatasources = useMemo(
+    () => (currentProject ? sources.filter((s) => s.project_id === currentProject.id) : []),
+    [sources, currentProject],
+  );
+
+  const generateProjectSnapshot = useCallback(
+    async (format: "markdown" | "json") => {
+      if (!currentProject || projectDatasources.length === 0) return;
+      setProjectGenerating(format);
+      setProjectNotice(null);
+      try {
+        const snapshot = await downloadProjectContextSnapshot(currentProject, projectDatasources, format);
+        setProjectNotice(
+          snapshot.warnings.length > 0
+            ? `Downloaded — ${snapshot.warnings.length} of ${snapshot.datasource_count} datasource(s) could not be included.`
+            : `Downloaded: ${snapshot.datasource_count} datasource(s), ${snapshot.documented_count} documented / ${snapshot.undocumented_count} undocumented tables.`,
+        );
+      } catch (e) {
+        setProjectNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setProjectGenerating(null);
+      }
+    },
+    [currentProject, projectDatasources],
+  );
+
   return (
     <div className="srcscreen">
       <header className="srcscreen__head">
@@ -354,6 +399,29 @@ export function SourcesScreen() {
           <span><b className="tnum">{activeCount}</b> active</span>
         </div>
       </header>
+
+      {currentProject && (
+        <div className="srcscreen__project" role="group" aria-label="Project context">
+          <span className="srcscreen__projectlabel">
+            Project <b>{currentProject.name}</b> — {projectDatasources.length} datasource(s) in scope
+          </span>
+          <Button
+            disabled={projectGenerating !== null || projectDatasources.length === 0}
+            onClick={() => void generateProjectSnapshot("markdown")}
+            title="Generate one combined Markdown context document across every datasource in this project"
+          >
+            {projectGenerating === "markdown" ? "Generating…" : "Generate project context (.md)"}
+          </Button>
+          <Button
+            disabled={projectGenerating !== null || projectDatasources.length === 0}
+            onClick={() => void generateProjectSnapshot("json")}
+            title="Same rollup as JSON"
+          >
+            {projectGenerating === "json" ? "Generating…" : "Generate project context (.json)"}
+          </Button>
+          {projectNotice && <span className="srcscreen__projectnotice">{projectNotice}</span>}
+        </div>
+      )}
 
       <div className="srcscreen__filters">
         <Field label="Search">

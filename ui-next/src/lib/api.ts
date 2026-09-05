@@ -1621,6 +1621,114 @@ export async function downloadDatasourceContextSnapshot(
 }
 
 /* ---------------------------------------------------------------------------
+   Project context snapshot — the same idea rolled up across every datasource
+   in one project, for the operator question "what do we know about this
+   project as a whole" rather than one datasource at a time. Built entirely
+   from `buildDatasourceContextSnapshot` above, run once per datasource in
+   the project — no new fetch shape, no new backend route.
+--------------------------------------------------------------------------- */
+
+export interface ProjectContextSnapshot {
+  generated_at: string;
+  project: { id: string; name: string; slug: string };
+  datasource_count: number;
+  documented_count: number;
+  undocumented_count: number;
+  open_incident_count: number;
+  datasources: DatasourceContextSnapshot[];
+  warnings: string[];
+}
+
+/** Runs `buildDatasourceContextSnapshot` for every datasource in `datasources`
+ *  and rolls the totals up. A project with 20+ datasources runs 20+ fetches
+ *  in parallel per datasource (five each) — fine for the modest per-project
+ *  fleet sizes this is meant for, not something to fan out at organization
+ *  scale without a limit. */
+export async function buildProjectContextSnapshot(
+  project: ProjectRead,
+  datasources: DataSourceRead[],
+  signal?: AbortSignal,
+): Promise<ProjectContextSnapshot> {
+  const warnings: string[] = [];
+  const results = await Promise.all(
+    datasources.map((ds) =>
+      buildDatasourceContextSnapshot(ds, signal).catch((e: unknown) => {
+        if ((e as Error)?.name === "AbortError") throw e;
+        warnings.push(`${ds.name}: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+        return null;
+      }),
+    ),
+  );
+  const perDatasource = results.filter((r): r is DatasourceContextSnapshot => r !== null);
+
+  return {
+    generated_at: new Date().toISOString(),
+    project: { id: project.id, name: project.name, slug: project.slug },
+    datasource_count: datasources.length,
+    documented_count: perDatasource.reduce((sum, r) => sum + r.documented_count, 0),
+    undocumented_count: perDatasource.reduce((sum, r) => sum + r.undocumented_count, 0),
+    open_incident_count: perDatasource.reduce((sum, r) => sum + r.open_incidents.length, 0),
+    datasources: perDatasource,
+    warnings,
+  };
+}
+
+/** Renders a project rollup as one Markdown document: a project-level
+ *  summary followed by each datasource's own section, reusing
+ *  `renderContextSnapshotMarkdown`'s per-datasource body so the two documents
+ *  never describe the same datasource differently. */
+export function renderProjectContextSnapshotMarkdown(snapshot: ProjectContextSnapshot): string {
+  const lines: string[] = [];
+  lines.push(`# ${snapshot.project.name}`);
+  lines.push("");
+  lines.push(`_Generated ${snapshot.generated_at}_`);
+  lines.push("");
+  lines.push(
+    `${snapshot.datasource_count} datasource(s) · ${snapshot.documented_count} documented tables · ` +
+      `${snapshot.undocumented_count} undocumented tables · ${snapshot.open_incident_count} open incidents.`,
+  );
+  lines.push("");
+  if (snapshot.warnings.length > 0) {
+    lines.push("> **Some datasources could not be included:**");
+    for (const w of snapshot.warnings) lines.push(`> - ${w}`);
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push("");
+  for (const ds of snapshot.datasources) {
+    lines.push(renderContextSnapshotMarkdown(ds));
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** Builds the project rollup and triggers a same-origin blob download,
+ *  mirroring `downloadDatasourceContextSnapshot`. */
+export async function downloadProjectContextSnapshot(
+  project: ProjectRead,
+  datasources: DataSourceRead[],
+  format: "markdown" | "json",
+  signal?: AbortSignal,
+): Promise<ProjectContextSnapshot> {
+  const snapshot = await buildProjectContextSnapshot(project, datasources, signal);
+  const slug = project.slug || project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const isMarkdown = format === "markdown";
+  const content = isMarkdown ? renderProjectContextSnapshotMarkdown(snapshot) : JSON.stringify(snapshot, null, 2);
+  const blob = new Blob([content], { type: isMarkdown ? "text/markdown" : "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `context-project-${slug}.${isMarkdown ? "md" : "json"}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return snapshot;
+}
+
+/* ---------------------------------------------------------------------------
    UX-16: Relationships — the review queue for N4's impact-ordered,
    diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
    plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
