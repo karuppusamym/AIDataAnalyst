@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from aida.config import Settings, get_settings
 from aida.data_quality import QualityProfile, evaluate_quality, normalized_policy
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.models import (
     AnalysisRun,
     ColumnProfile,
@@ -27,6 +28,7 @@ from aida.notification_routing import (
     format_itsm_payload,
     route_notification,
 )
+from aida.quality_coupling import IncidentSummary, expire_sustained_incident_certifications
 from aida.security import SecurityContext
 
 # DQ-6: bounded per-table lookback for the day-of-week seasonal baseline query, only
@@ -254,6 +256,24 @@ async def route_and_notify_incident(
                 "channels": sorted({record.channel for record in created}),
             },
         )
+    # NT-1: alongside DQ-1's rule-matched channels, push the incident to the
+    # organization's Slack/Teams governance channel. Distinct from the rule
+    # engine above: that routes to the owners a rule names, this is the
+    # broadcast an operator watches.
+    await notify_safely(
+        session,
+        organization_id,
+        "QUALITY_INCIDENT_OPENED"
+        if incident.status in ("OPEN", "REOPENED")
+        else "QUALITY_INCIDENT_RESOLVED",
+        {
+            "object_type": "TABLE",
+            "object_id": str(incident.table_id) if incident.table_id else None,
+            "severity": incident.severity,
+            "occurred_at": datetime.now(UTC).isoformat(),
+        },
+        settings=settings,
+    )
     return created
 
 
@@ -293,6 +313,7 @@ async def evaluate_analysis_run(
         "no_baseline": 0,
         "incidents_opened": 0,
         "incidents_resolved": 0,
+        "certifications_expired": 0,
     }
     if not profiles:
         return counts
@@ -494,6 +515,40 @@ async def evaluate_analysis_run(
                 notification_rules=list(notification_rules),
                 settings=settings,
             )
+
+    # DQ-3 (module 11 sec 9's fifth coupling row, off by default -- see the
+    # setting's own comment in config.py): `incident_by_control` holds every
+    # incident touched by this run at its final, post-loop status (resolved
+    # incidents flipped to RESOLVED above, reopened ones flipped back to
+    # OPEN), so it -- not the pre-loop `active_by_table` snapshot -- is the
+    # correct source for "does this table currently have a sustained run of
+    # unresolved incidents". A brand-new incident's `status` column has a
+    # server/client default ("OPEN") that SQLAlchemy only applies at flush
+    # time, not at construction -- reading `.status` off an unflushed new
+    # `DataQualityIncident` here would see `None`, not "OPEN". The DQ-1 block
+    # above only flushes when it has notification rules to route through, so
+    # this cannot rely on that having already happened.
+    if settings.quality_certification_expiry_enabled:
+        await session.flush()
+        current_incidents = [
+            IncidentSummary(
+                incident_id=str(incident.id),
+                asset_id=str(incident.table_id),
+                severity=incident.severity,
+                status=incident.status,
+                anomaly_type=incident.anomaly_type,
+            )
+            for incident in incident_by_control.values()
+        ]
+        expired_certifications = await expire_sustained_incident_certifications(
+            session,
+            organization_id=organization_id,
+            table_ids=table_ids,
+            incidents=current_incidents,
+            context=context,
+            sustained_threshold=settings.quality_certification_sustained_threshold,
+        )
+        counts["certifications_expired"] = len(expired_certifications)
 
     record_audit(
         session,

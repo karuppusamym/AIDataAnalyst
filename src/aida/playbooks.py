@@ -46,6 +46,7 @@ from aida.catalog_bulk_actions import (
     match_columns_by_pattern,
     match_tables_by_filter,
 )
+from aida.certification_evidence import compute_certification_evidence
 from aida.context import get_correlation_id
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
@@ -189,6 +190,7 @@ async def _apply_one_item(
     subject_id: UUID,
     *,
     applied_by: str,
+    context: SecurityContext,
     tables: dict[UUID, MetadataTable],
     existing_tags: dict[UUID, AssetTag],
     existing_assignments: dict[UUID, OwnershipAssignment],
@@ -232,9 +234,42 @@ async def _apply_one_item(
         if is_new:
             session.add(assignment)
         await session.flush([assignment])
+        # GV-2 / P0-02: per-subject audit for playbook auto-apply. The
+        # existing `_auto_apply` record_audit fires once per run with a
+        # count; this fires once per subject so a compliance query can
+        # answer "which playbook, if any, set this table\'s owner?"
+        # without correlating a run id back to its list of results.
+        record_audit(
+            session,
+            context,
+            action="PLAYBOOK_AUTO_APPLY",
+            resource_type="TABLE",
+            resource_id=str(subject_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "playbook_id": str(playbook.id),
+                "playbook_kind": "OWN",
+                "rule_id": str(playbook.id),
+                "owner_type": params["owner_type"],
+                "owner_principal": params["owner_principal"],
+                "assignment_is_new": is_new,
+            },
+        )
     else:
         assert playbook.action == "CERTIFY"
         expires_at = now + timedelta(days=int(params["expires_after_days"]))
+        # P3-09: capture the structured evidence blob so a playbook-auto-
+        # applied cert writes the same evidence shape as the interactive /
+        # bulk / reviewed-bulk paths do; the four paths cannot drift on
+        # what "evidence" means.
+        evidence_blob = await compute_certification_evidence(
+            session,
+            subject_id,
+            organization_id=playbook.organization_id,
+            now=now,
+            certifier_notes=params["rationale"],
+        )
         new_certification, superseded = apply_certify_item(
             subject_id,
             tables=tables,
@@ -243,9 +278,27 @@ async def _apply_one_item(
             rationale=params["rationale"],
             expires_at=expires_at,
             certified_by=applied_by,
+            evidence=evidence_blob,
         )
         session.add(new_certification)
         await session.flush([new_certification, *superseded])
+        record_audit(
+            session,
+            context,
+            action="PLAYBOOK_AUTO_APPLY",
+            resource_type="TABLE",
+            resource_id=str(subject_id),
+            outcome="SUCCESS",
+            correlation_id=get_correlation_id(),
+            details={
+                "playbook_id": str(playbook.id),
+                "playbook_kind": "CERTIFY",
+                "rule_id": str(playbook.id),
+                "rationale": params["rationale"],
+                "expires_at": expires_at.isoformat(),
+                "superseded_count": len(superseded),
+            },
+        )
 
 
 async def _auto_apply(
@@ -322,6 +375,7 @@ async def _auto_apply(
                     playbook,
                     subject_id,
                     applied_by=context.principal_id,
+                    context=context,
                     tables=tables,
                     existing_tags=existing_tags,
                     existing_assignments=existing_assignments,

@@ -1,12 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DescriptionEditor } from "../components/DescriptionEditor";
 import type { CatalogRowRead } from "../lib/ui-types";
-import { ApiError, fetchCatalogRows } from "../lib/api";
+import {
+  ApiError,
+  classifyDescriptionDraftError,
+  fetchCatalogRows,
+  generateAssetDescriptionDrafts,
+} from "../lib/api";
 import { CatalogTable } from "../components/CatalogTable";
 import { EvidencePane } from "../components/EvidencePane";
 import { Button, ErrorState, Field, Pill } from "../components/primitives";
 import "./CatalogScreen.css";
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
 
 /** Filters live in the URL so a filtered catalog view is shareable — the same
@@ -20,7 +26,8 @@ function useUrlState() {
         if (v === null || v === "") next.delete(k);
         else next.set(k, v);
       }
-      history.replaceState(null, "", `${location.pathname}?${next}`);
+      const query = next.toString();
+      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
       return next;
     });
   }, []);
@@ -28,6 +35,7 @@ function useUrlState() {
 }
 
 export function CatalogScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
 
   const q = params.get("q") ?? "";
@@ -43,6 +51,12 @@ export function CatalogScreen() {
   const [error, setError] = useState<string | null>(null);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [draftQ, setDraftQ] = useState(q);
+
+  // P1-04: batch/single draft generation state. Kept co-located rather than
+  // hoisted into `useUrlState` because it is transient by design — the
+  // "success" banner should not survive a filter change or a hash navigation.
+  const [draftBusy, setDraftBusy] = useState(false);
+  const [draftMsg, setDraftMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   // One in-flight request at a time. Aborting the previous one is what stops a
   // slow first page from overwriting the results of a newer, narrower filter.
@@ -134,6 +148,43 @@ export function CatalogScreen() {
   const undocumented = rows.filter((r) => !r.description).length;
   const uncertified = rows.filter((r) => r.certification !== "CERTIFIED").length;
 
+  const generateDrafts = useCallback(
+    async (tableIds: string[]) => {
+      if (tableIds.length === 0) return;
+      setDraftBusy(true);
+      setDraftMsg(null);
+      try {
+        const page = await generateAssetDescriptionDrafts(ORG, tableIds);
+        const created = page.drafts.length;
+        const skipped = tableIds.length - created;
+        const suffix = skipped > 0
+          ? ` (${skipped} skipped — a draft is already open, or a rejected duplicate exists)`
+          : "";
+        setDraftMsg({
+          kind: "ok",
+          text: `${created} draft${created === 1 ? "" : "s"} generated${suffix}. View them in Description drafts.`,
+        });
+        setChecked(new Set());
+      } catch (e) {
+        const detail =
+          e instanceof ApiError
+            ? classifyDescriptionDraftError(e).detail
+            : (e as Error).message;
+        setDraftMsg({ kind: "err", text: `Could not generate drafts: ${detail}` });
+      } finally {
+        setDraftBusy(false);
+      }
+    },
+    [ORG],
+  );
+
+  const openDrafts = useCallback(() => {
+    if (location.hash !== "#/description-drafts") {
+      history.pushState(null, "", "#/description-drafts");
+    }
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  }, []);
+
   return (
     <div className="cat">
       <header className="cat__head">
@@ -187,12 +238,54 @@ export function CatalogScreen() {
         {checked.size > 0 ? (
           <div className="cat__bulk" role="status">
             <Pill tone="accent">{nf.format(checked.size)} selected</Pill>
-            <Button variant="primary">Describe…</Button>
-            <Button>Certify…</Button>
+            <Button
+              variant="primary"
+              onClick={() => void generateDrafts(Array.from(checked))}
+              disabled={draftBusy || checked.size > 100}
+              title={
+                checked.size > 100
+                  ? "Select at most 100 rows to generate drafts in one batch."
+                  : "Generate a metadata-drafted description for each selected asset."
+              }
+            >
+              {draftBusy ? "Generating…" : "Generate description drafts"}
+            </Button>
+            <Button
+              disabled
+              title="Bulk certify is not available yet — certification is managed per asset in stewardship."
+            >
+              Certify…
+            </Button>
             <Button onClick={() => setChecked(new Set())}>Clear</Button>
           </div>
         ) : null}
+        {selected ? (
+          <div className="cat__rowaction" role="status">
+            <DescriptionEditor key={selected.id} tableId={selected.id} currentText={selected.description ?? ""} />
+            <Button
+              onClick={() => void generateDrafts([selected.id])}
+              disabled={draftBusy}
+              title="Generate a metadata-drafted description for this asset. Submit it for review from the Description drafts screen."
+            >
+              {draftBusy ? "Generating…" : "Generate description draft"}
+            </Button>
+          </div>
+        ) : null}
       </div>
+
+      {draftMsg ? (
+        <div
+          className={`cat__banner cat__banner--${draftMsg.kind}`}
+          role={draftMsg.kind === "err" ? "alert" : "status"}
+          aria-live="polite"
+        >
+          <span>{draftMsg.text}</span>
+          {draftMsg.kind === "ok" ? (
+            <Button onClick={openDrafts}>Open description drafts</Button>
+          ) : null}
+          <Button onClick={() => setDraftMsg(null)}>Dismiss</Button>
+        </div>
+      ) : null}
 
       <div className="cat__main">
         {error ? (

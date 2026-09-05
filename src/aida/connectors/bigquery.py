@@ -14,6 +14,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
 
 from aida.connectors.base import (
@@ -24,6 +25,7 @@ from aida.connectors.base import (
     DiscoveredRoutineParameter,
     DiscoveredViewDefinition,
     QueryEstimate,
+    QueryLogEntry,
     QueryResult,
     TableProfileSnapshot,
 )
@@ -854,3 +856,63 @@ class BigQueryConnector(SqlExecutor):
             )
 
         return await asyncio.to_thread(_profile)
+
+    async def get_query_history(
+        self,
+        *,
+        since: datetime,
+        limit: int = 5_000,
+        timeout_seconds: int = 30,
+    ) -> tuple[QueryLogEntry, ...]:
+        """CN-9. Read this project's own query log from the region-qualified
+        `INFORMATION_SCHEMA.JOBS_BY_PROJECT` view.
+
+        Reads only `job_id`, `query`, and `creation_time` -- never a result
+        row -- and scopes to completed, successful query jobs only (`state =
+        'DONE'`, `job_type = 'QUERY'`, `error_result IS NULL`), the same
+        "never parse a failed statement" posture as the Snowflake
+        implementation. Bounded on both axes: `since` via `creation_time`,
+        `limit` via `LIMIT`, enforced in the query itself.
+
+        `JOBS_BY_PROJECT` requires `bigquery.jobs.listAll` (project-level) or
+        the more restrictive `bigquery.jobs.list` (caller's-own-jobs-only,
+        which would silently narrow this to jobs the connector's own service
+        account ran, not the project's real usage) -- CN-9's certification
+        must confirm which grant the connected service account actually
+        holds, not assume the broader one.
+        """
+
+        def _get_query_history() -> tuple[QueryLogEntry, ...]:
+            client = self._get_client()
+            region = _region_dataset(self._config.location)
+            query = f"""
+                SELECT job_id, query, creation_time
+                FROM `{self._config.project_id}`.`{region}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+                WHERE creation_time >= @since
+                  AND job_type = 'QUERY'
+                  AND state = 'DONE'
+                  AND error_result IS NULL
+                ORDER BY creation_time DESC
+                LIMIT @row_limit
+            """  # noqa: S608 -- identifiers are config-sourced, not user input
+            from google.cloud import bigquery as bq
+
+            job_config = bq.QueryJobConfig(
+                query_parameters=[
+                    bq.ScalarQueryParameter("since", "TIMESTAMP", since),
+                    bq.ScalarQueryParameter("row_limit", "INT64", limit),
+                ]
+            )
+            job = client.query(query, job_config=job_config, timeout=timeout_seconds)
+            rows = [dict(row.items()) for row in job.result(timeout=timeout_seconds)]
+            return tuple(
+                QueryLogEntry(
+                    query_id=str(row["job_id"]),
+                    sql_text=str(row["query"]),
+                    executed_at=row.get("creation_time"),
+                )
+                for row in rows
+                if row.get("job_id") is not None and row.get("query") is not None
+            )
+
+        return await asyncio.to_thread(_get_query_history)

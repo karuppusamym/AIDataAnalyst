@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   RelationshipCandidateCalibrationRead,
+  RelationshipCandidateRead,
   RelationshipCandidateReviewItemRead,
   RelationshipCandidateReviewQueueRead,
 } from "../lib/types";
@@ -9,6 +10,7 @@ import {
   bulkDecideRelationshipCandidates,
   decideRelationshipCandidate,
   fetchRelationshipCandidateCalibration,
+  fetchRelationshipCandidates,
   fetchRelationshipCandidateReviewQueue,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
@@ -41,7 +43,7 @@ import "./RelationshipsScreen.css";
    independently and never allowed to block or error out the main queue.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
 interface ConfidenceSignal {
@@ -98,6 +100,7 @@ function CandidateCard({
   onDecide: (decision: "APPROVE" | "REJECT") => void;
 }) {
   const { candidate, impact } = item;
+  const canReview = item.can_review !== false;
   const label = edgeLabel(item);
   const signals = asConfidenceSignals(diffField(item, "confidence_signals"));
 
@@ -158,10 +161,15 @@ function CandidateCard({
       ) : null}
 
       <div className="rcard__act">
-        <Button variant="primary" disabled={deciding} onClick={() => onDecide("APPROVE")}>
+        {!canReview ? (
+          <span className="prop__done" role="status">
+            Your proposal cannot be approved by its maker.
+          </span>
+        ) : null}
+        <Button variant="primary" disabled={deciding || !canReview} onClick={() => onDecide("APPROVE")}>
           Approve
         </Button>
-        <Button disabled={deciding} onClick={() => onDecide("REJECT")}>
+        <Button disabled={deciding || !canReview} onClick={() => onDecide("REJECT")}>
           Reject
         </Button>
       </div>
@@ -170,19 +178,26 @@ function CandidateCard({
 }
 
 export function RelationshipsScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const ds = params.get("ds");
   const focusedId = params.get("candidate");
 
-  const { datasources, error: datasourcesError } = useDatasourcePicker(ORG);
+  const { datasources, error: datasourcesError, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const ds = params.get("ds") ?? preferredDatasourceId;
 
   const [data, setData] = useState<RelationshipCandidateReviewQueueRead | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [decisionError, setDecisionError] = useState<string | null>(null);
   const [deciding, setDeciding] = useState<string | null>(null);
   const [bulkDeciding, setBulkDeciding] = useState(false);
   const [checked, setChecked] = useState<ReadonlySet<string>>(new Set());
   const [calibration, setCalibration] = useState<RelationshipCandidateCalibrationRead | null>(null);
+  // Decision history (APPROVED/REJECTED) — the PENDING-only queue drops it.
+  // Lazy-loaded the first time the section is expanded.
+  const [decided, setDecided] = useState<RelationshipCandidateRead[] | null>(null);
+  const [decidedLoading, setDecidedLoading] = useState(false);
+  const [decidedError, setDecidedError] = useState<string | null>(null);
 
   // One in-flight review-queue request at a time — same reason CatalogScreen
   // aborts the previous one: a slow first fetch must not overwrite the
@@ -203,6 +218,7 @@ export function RelationshipsScreen() {
     const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
+    setDecisionError(null);
     try {
       const queue = await fetchRelationshipCandidateReviewQueue(ds, { limit: 200 }, ac.signal);
       if (seq !== reqSeq.current) return;
@@ -223,6 +239,27 @@ export function RelationshipsScreen() {
 
   useEffect(() => {
     setChecked(new Set());
+    // Drop cached decision history so expanding the section refetches for the
+    // newly selected datasource rather than showing the previous one's.
+    setDecided(null);
+    setDecidedError(null);
+  }, [ds]);
+
+  const loadDecided = useCallback(async () => {
+    if (!ds) return;
+    setDecidedLoading(true);
+    setDecidedError(null);
+    try {
+      const [approved, rejected] = await Promise.all([
+        fetchRelationshipCandidates(ds, { status: "APPROVED" }),
+        fetchRelationshipCandidates(ds, { status: "REJECTED" }),
+      ]);
+      setDecided([...approved.items, ...rejected.items]);
+    } catch (e) {
+      setDecidedError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setDecidedLoading(false);
+    }
   }, [ds]);
 
   // RL-7: optional secondary info, fetched independently — a failure here
@@ -262,11 +299,12 @@ export function RelationshipsScreen() {
         if (!reason) return; // the endpoint itself requires a non-empty reason on REJECT
       }
       setDeciding(candidateId);
+      setDecisionError(null);
       try {
         await decideRelationshipCandidate(candidateId, { decision, reason });
         await load();
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        setDecisionError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setDeciding(null);
       }
@@ -284,12 +322,19 @@ export function RelationshipsScreen() {
         if (!reason) return;
       }
       setBulkDeciding(true);
+      setDecisionError(null);
       try {
-        await bulkDecideRelationshipCandidates({ candidate_ids: ids, decision, reason });
+        const result = await bulkDecideRelationshipCandidates({ candidate_ids: ids, decision, reason });
         setChecked(new Set());
         await load();
+        if (result.failed_count > 0) {
+          setDecisionError(
+            `${result.succeeded_count} decision${result.succeeded_count === 1 ? "" : "s"} recorded; ` +
+              `${result.failed_count} could not be recorded. ${result.results.find((r) => r.status === "FAILED")?.reason ?? "Review the audit ledger for details."}`,
+          );
+        }
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        setDecisionError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setBulkDeciding(false);
       }
@@ -373,6 +418,9 @@ export function RelationshipsScreen() {
       ) : null}
 
       <div className="rel__main">
+        {decisionError ? (
+          <div className="evp__error" role="alert">Decision was not fully recorded: {decisionError}</div>
+        ) : null}
         {!ds ? (
           <Empty
             title="Pick a datasource"
@@ -424,6 +472,65 @@ export function RelationshipsScreen() {
           </>
         )}
       </div>
+
+      {ds ? (
+        <details
+          className="rel__decided"
+          onToggle={(e) => {
+            if (
+              (e.target as HTMLDetailsElement).open &&
+              decided === null &&
+              !decidedLoading
+            ) {
+              void loadDecided();
+            }
+          }}
+        >
+          <summary>Decision history</summary>
+          <div className="rel__decidedinner">
+            {decidedError ? (
+              <ErrorState
+                title="Decision history could not be loaded"
+                detail={decidedError}
+                onRetry={() => void loadDecided()}
+              />
+            ) : decidedLoading || decided === null ? (
+              <p className="rel__load" role="status">
+                Loading decided candidates…
+              </p>
+            ) : decided.length === 0 ? (
+              <Empty
+                title="No decisions yet"
+                hint="Approved and rejected relationships for this datasource will appear here."
+              />
+            ) : (
+              <ol className="evl">
+                {decided.map((c) => (
+                  <li
+                    key={c.id}
+                    className={`evi ${c.status === "APPROVED" ? "evi--ok" : "evi--bad"}`}
+                  >
+                    <div className="evi__label">
+                      <Pill tone={c.status === "APPROVED" ? "ok" : "bad"}>
+                        {c.status.toLowerCase()}
+                      </Pill>
+                      {" "}
+                      {c.detection_rule} · {pct(c.confidence)}
+                    </div>
+                    {c.review_reason ? (
+                      <div className="evi__value">{c.review_reason}</div>
+                    ) : null}
+                    <div className="evi__source">
+                      {c.reviewed_by ?? "unknown"}
+                      {c.reviewed_at ? ` · ${new Date(c.reviewed_at).toLocaleString()}` : ""}
+                    </div>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+        </details>
+      ) : null}
 
       {focused ? (
         <aside className="evp rel__evidence" aria-label="Candidate detail">

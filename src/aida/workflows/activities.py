@@ -735,6 +735,12 @@ async def persist_discovery_snapshot(
     tracker = ChangeTracker()
     table_map: dict[tuple[str, str, str], MetadataTable] = {}
     snapshot_scope = scope or SnapshotScope()
+    # ING-4 / P0-01: track table ids that go from absent-in-scope to
+    # present-in-scope during THIS call, so the auto-enqueue emitter below
+    # only fires once per genuinely-new table even when a chunked caller
+    # (`batch_ingestion._process_chunk`, or the loop in `discover_datasource`)
+    # threads the same accumulator across many calls.
+    _pre_call_created_table_ids: set[UUID] = set(snapshot_scope.created_table_ids)
     for discovered_catalog in catalogs:
         catalog = await _get_or_create_catalog(session, datasource, discovered_catalog, tracker)
         snapshot_scope.catalog_ids.add(catalog.id)
@@ -877,12 +883,93 @@ async def persist_discovery_snapshot(
             connector_registry.definition(datasource.connector_type).capabilities
         )
     datasource.capabilities = connector_capabilities
+    # ING-4 / P0-01: emit `catalog.table.newly_created.v1` for every table
+    # this call *actually* created (see `_pre_call_created_table_ids` at the
+    # top of this function for why a diff, not the raw accumulator). Gated
+    # on the `auto_enqueue_on_ingest` setting so an operator can turn the
+    # follow-on drafters off without touching the ingest path itself.
+    await _emit_newly_created_table_events(
+        session,
+        run=run,
+        datasource=datasource,
+        newly_created_table_ids=snapshot_scope.created_table_ids
+        - _pre_call_created_table_ids,
+    )
     return {
         **counts,
         "created_objects": tracker.created,
         "changed_objects": tracker.changed,
         "deprecated_objects": tracker.deprecated,
     }
+
+
+# ING-4 / P0-01: constants and helper for auto-enqueue-on-ingest.
+# The event type is the single string documented in
+# Docs/30-contracts/04-event-catalog.md (Ingestion section) and consumed by
+# `handle_newly_created_table` in `src/aida/newly_created_table_drafter.py`.
+NEWLY_CREATED_TABLE_EVENT_TYPE = "catalog.table.newly_created.v1"
+
+
+async def _emit_newly_created_table_events(
+    session: AsyncSession,
+    *,
+    run: AnalysisRun,
+    datasource: DataSource,
+    newly_created_table_ids: set[UUID],
+) -> None:
+    """Emit one `catalog.table.newly_created.v1` outbox event per newly
+    created table, so the drafter projector can auto-enqueue an asset
+    description (and, once an AnalysisRun completes for the datasource,
+    a semantic-inference proposal) without a steward manually POSTing each
+    drafter endpoint (P0-01, audit finding).
+
+    No-op when `auto_enqueue_on_ingest` is False, or when no tables were
+    newly created in this call. Also writes a batch-level audit row so the
+    fact that the follow-on drafters were auto-enqueued is attributable.
+
+    Called from the very end of `persist_discovery_snapshot` on every path
+    that persists new tables (chunked pull discovery, single-shot pull
+    discovery, push-based batch ingestion).
+    """
+    settings = get_settings()
+    if not settings.auto_enqueue_on_ingest:
+        return
+    if not newly_created_table_ids:
+        return
+    worker_context = SecurityContext(
+        principal_id=_METADATA_WORKER_PRINCIPAL,
+        principal_type="WORKER",
+        organization_id=run.organization_id,
+        roles=frozenset({"MetadataWorker"}),
+    )
+    for table_id in sorted(newly_created_table_ids, key=str):
+        record_outbox(
+            session,
+            organization_id=run.organization_id,
+            aggregate_type="metadata_table",
+            aggregate_id=str(table_id),
+            event_type=NEWLY_CREATED_TABLE_EVENT_TYPE,
+            payload={
+                "organization_id": str(run.organization_id),
+                "datasource_id": str(datasource.id),
+                "table_id": str(table_id),
+                "analysis_run_id": str(run.id),
+            },
+        )
+    record_audit(
+        session,
+        worker_context,
+        action="AUTO_ENQUEUE_DRAFTS_ON_INGEST",
+        resource_type="TABLE",
+        resource_id=str(datasource.id),
+        outcome="SUCCESS",
+        correlation_id=str(run.id),
+        details={
+            "datasource_id": str(datasource.id),
+            "analysis_run_id": str(run.id),
+            "newly_created_table_count": len(newly_created_table_ids),
+        },
+    )
 
 
 async def _mark_run_cancelled(run_uuid: UUID) -> None:

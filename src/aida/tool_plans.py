@@ -9,6 +9,7 @@ evidence recording.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -133,8 +134,7 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
             ValidationIssue(
                 step_sequence=0,
                 issue=(
-                    f"plan has {len(plan.steps)} steps, "
-                    f"exceeds budget of {plan.budget.max_steps}"
+                    f"plan has {len(plan.steps)} steps, exceeds budget of {plan.budget.max_steps}"
                 ),
                 severity="ERROR",
             )
@@ -161,14 +161,15 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
             ValidationIssue(
                 step_sequence=0,
                 issue=(
-                    f"total timeout {total_time}s "
-                    f"exceeds budget of {plan.budget.max_time_seconds}s"
+                    f"total timeout {total_time}s exceeds budget of {plan.budget.max_time_seconds}s"
                 ),
                 severity="WARNING",
             )
         )
 
     sequences = {s.sequence for s in plan.steps}
+    if len(sequences) != len(plan.steps):
+        issues.append(ValidationIssue(0, "step sequences must be unique", "ERROR"))
 
     for step in plan.steps:
         # Check dependencies reference valid sequences
@@ -242,9 +243,7 @@ async def execute_plan(
 ) -> PlanResult:
     """Execute a validated plan in dependency order with budget enforcement.
 
-    `step_executor` is an optional callable(step, context) -> StepResult.
-    If not provided, steps are recorded as COMPLETED with empty evidence
-    (useful for dry-run or when the actual tool runtime is separate).
+    An executor is mandatory. Missing runtime wiring must never report success.
     """
     started_at = datetime.now(UTC)
     step_results: list[StepResult] = []
@@ -254,6 +253,22 @@ async def execute_plan(
     budget_time = 0.0
     budget_tokens = 0
     budget_cost = 0.0
+
+    validation = validate_plan(plan)
+    if not validation.valid or step_executor is None:
+        reason = (
+            "tool executor is unavailable"
+            if step_executor is None
+            else "; ".join(issue.issue for issue in validation.issues if issue.severity == "ERROR")
+        )
+        return PlanResult(
+            plan.id or uuid4(),
+            "FAILED",
+            [StepResult(s.sequence, "FAILED", error_message=reason) for s in plan.steps],
+            BudgetConsumed(0, 0, 0, 0),
+            started_at,
+            datetime.now(UTC),
+        )
 
     ordered_steps = _topological_order(plan.steps)
 
@@ -267,9 +282,7 @@ async def execute_plan(
                     sequence=step.sequence,
                     status="SKIPPED",
                     evidence={
-                        "reason": (
-                            "dependency_not_met" if not deps_met else "earlier_failure"
-                        )
+                        "reason": ("dependency_not_met" if not deps_met else "earlier_failure")
                     },
                 )
             )
@@ -288,7 +301,7 @@ async def execute_plan(
             continue
 
         elapsed = (datetime.now(UTC) - started_at).total_seconds()
-        if elapsed > plan.budget.max_time_seconds:
+        if elapsed >= plan.budget.max_time_seconds:
             step_results.append(
                 StepResult(
                     sequence=step.sequence,
@@ -301,29 +314,27 @@ async def execute_plan(
 
         # Execute step
         step_start = datetime.now(UTC)
-        if step_executor is not None:
-            result = await step_executor(step, {"organization_id": str(organization_id)})
-        else:
-            # Dry run: mark as completed
-            result = StepResult(
-                sequence=step.sequence,
-                status="COMPLETED",
-                evidence={"dry_run": True},
-                started_at=step_start,
-                completed_at=datetime.now(UTC),
-            )
+        try:
+            async with asyncio.timeout(
+                min(step.timeout_seconds, max(0.001, plan.budget.max_time_seconds - elapsed))
+            ):
+                result = await step_executor(step, {"organization_id": str(organization_id)})
+        except TimeoutError:
+            result = StepResult(step.sequence, "FAILED", error_message="step timeout exceeded")
+        except Exception:
+            # Do not persist exception text: provider errors may include source values.
+            result = StepResult(step.sequence, "FAILED", error_message="tool execution failed")
 
         result.started_at = result.started_at or step_start
         result.completed_at = result.completed_at or datetime.now(UTC)
 
         step_results.append(result)
 
+        budget_time += (result.completed_at - result.started_at).total_seconds()
         if result.status == "COMPLETED":
             completed_sequences.add(step.sequence)
             budget_cost += step.expected_cost
-            if result.completed_at and result.started_at:
-                budget_time += (result.completed_at - result.started_at).total_seconds()
-        elif result.status == "FAILED":
+        elif result.status != "COMPLETED":
             failed = True
 
     completed_at = datetime.now(UTC)

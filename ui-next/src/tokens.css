@@ -16,20 +16,20 @@
 
   /* Neutrals carry a slight blue bias so they sit with the accent rather than
      reading as unconsidered greys. */
-  --paper: #fafbfd;
+  --paper: #f6f7fb;
   --surface: #ffffff;
-  --sunk: #f0f3f8;
+  --sunk: #f2f3f8;
   --raised: #ffffff;
-  --line: #dbe1ec;
-  --line-soft: #e9edf4;
+  --line: #dde1ea;
+  --line-soft: #eaecf2;
 
   --ink: #0f1420;
   --ink-2: #3d465c;
   --ink-3: #6b7590;
 
-  --accent: #0e6e7e;
-  --accent-hover: #0b5966;
-  --accent-soft: #e3f1f3;
+  --accent: #5b50d6;
+  --accent-hover: #493fbd;
+  --accent-soft: #eeecff;
   --accent-ink: #ffffff;
 
   /* Semantic state. Never reuse these for chrome. */
@@ -42,10 +42,10 @@
   --info: #3a5bbf;
   --info-soft: #e8ecfa;
 
-  --focus: #0e6e7e;
+  --focus: #5b50d6;
 
-  --radius: 6px;
-  --radius-sm: 4px;
+  --radius: 9px;
+  --radius-sm: 6px;
   --shadow-1: 0 1px 2px rgba(15, 20, 32, 0.06);
   --shadow-2: 0 1px 2px rgba(15, 20, 32, 0.05), 0 10px 28px -14px rgba(15, 20, 32, 0.22);
 
@@ -67,10 +67,10 @@
     --ink: #e8ecf4;
     --ink-2: #aeb8cc;
     --ink-3: #7c879f;
-    --accent: #4fbacb;
-    --accent-hover: #6fcedd;
-    --accent-soft: #10303a;
-    --accent-ink: #06222a;
+    --accent: #a69cff;
+    --accent-hover: #beb7ff;
+    --accent-soft: #2c2753;
+    --accent-ink: #17132c;
     --ok: #4fbe86;
     --ok-soft: #102c1f;
     --warn: #d9a44b;
@@ -79,7 +79,7 @@
     --bad-soft: #2e1815;
     --info: #8fa6e8;
     --info-soft: #171d33;
-    --focus: #4fbacb;
+    --focus: #a69cff;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -14px rgba(0, 0, 0, 0.75);
   }
@@ -96,10 +96,10 @@
   --ink: #e8ecf4;
   --ink-2: #aeb8cc;
   --ink-3: #7c879f;
-  --accent: #4fbacb;
-  --accent-hover: #6fcedd;
-  --accent-soft: #10303a;
-  --accent-ink: #06222a;
+  --accent: #a69cff;
+  --accent-hover: #beb7ff;
+  --accent-soft: #2c2753;
+  --accent-ink: #17132c;
   --ok: #4fbe86;
   --ok-soft: #102c1f;
   --warn: #d9a44b;
@@ -108,7 +108,7 @@
   --bad-soft: #2e1815;
   --info: #8fa6e8;
   --info-soft: #171d33;
-  --focus: #4fbacb;
+  --focus: #a69cff;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 28px -14px rgba(0, 0, 0, 0.75);
 }

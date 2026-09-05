@@ -23,13 +23,16 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.events import record_audit, record_outbox
 from aida.models import (
+    AssetCertification,
     DataQualityIncident,
     DataSource,
     MetadataCatalog,
     MetadataSchema,
     MetadataTable,
 )
+from aida.security import SecurityContext
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,3 +294,84 @@ def should_expire_certification(
         if i.asset_id == asset_id and i.status in ("OPEN", "ACKNOWLEDGED")
     ]
     return len(active) >= sustained_threshold
+
+
+async def expire_sustained_incident_certifications(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    table_ids: Sequence[UUID],
+    incidents: list[IncidentSummary],
+    context: SecurityContext,
+    sustained_threshold: int = 3,
+) -> list[AssetCertification]:
+    """DQ-3 (module 11 §9's fifth coupling row): a table whose own
+    `should_expire_certification` fires loses its certification.
+
+    Expired, not deleted or backdated: only `status` moves to `"EXPIRED"`,
+    the identical single-field-write shape every other certification
+    transition in this codebase already uses for `"SUPERSEDED"`
+    (`api.py::certify_table_asset`, `catalog_bulk_actions.apply_certify_item`,
+    `stewardship_service`'s reviewed `CERTIFY_ASSET` branch) --
+    `rationale`/`certified_by`/`expires_at` stay exactly what the table was
+    certified as, so certification history is never mutated by anything but
+    a new certification (`AssetCertification`'s own docstring). No new read
+    path is needed either: `catalog_read_model._certification_state`'s
+    existing fall-through already reports any non-`ACTIVE`, non-`REVOKED`
+    status as `"EXPIRED"`.
+
+    Scoped to `asset_type == "TABLE"` certifications only -- `DataQualityIncident`
+    has no `column_id`, so there is no real per-column incident signal to
+    expire a `COLUMN` certification on without inventing one.
+    """
+    if not table_ids:
+        return []
+    expiring_table_ids = [
+        table_id
+        for table_id in table_ids
+        if should_expire_certification(
+            str(table_id), incidents, sustained_threshold=sustained_threshold
+        )
+    ]
+    if not expiring_table_ids:
+        return []
+    active_certifications = (
+        await session.scalars(
+            select(AssetCertification).where(
+                AssetCertification.organization_id == organization_id,
+                AssetCertification.table_id.in_(expiring_table_ids),
+                AssetCertification.asset_type == "TABLE",
+                AssetCertification.status == "ACTIVE",
+            )
+        )
+    ).all()
+    expired: list[AssetCertification] = []
+    for certification in active_certifications:
+        certification.status = "EXPIRED"
+        record_audit(
+            session,
+            context,
+            action="catalog.asset.certification_expired",
+            resource_type="asset_certification",
+            resource_id=str(certification.id),
+            outcome="SUCCESS",
+            correlation_id=str(certification.table_id),
+            details={
+                "table_id": str(certification.table_id),
+                "reason": "SUSTAINED_QUALITY_INCIDENTS",
+                "sustained_threshold": sustained_threshold,
+            },
+        )
+        record_outbox(
+            session,
+            organization_id=organization_id,
+            aggregate_type="asset_certification",
+            aggregate_id=str(certification.id),
+            event_type="catalog.asset.certification_expired.v1",
+            payload={
+                "table_id": str(certification.table_id),
+                "certification_id": str(certification.id),
+            },
+        )
+        expired.append(certification)
+    return expired

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ConnectorHealthScoreRead, DataSourceRead } from "../lib/types";
+import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
-import { ApiError } from "../lib/api";
+import { ApiError, type DatasourceContextSnapshot, type ProjectContextSnapshot } from "../lib/api";
+import type { ScopeSelection } from "../lib/scope";
 
 /* ---------------------------------------------------------------------------
    Sources — nav id `sources`, against the real
@@ -20,6 +21,12 @@ const fetchOrgDatasources = vi.fn<
 const fetchDatasourceHealth = vi.fn<
   (datasourceId: string, signal?: AbortSignal) => Promise<ConnectorHealthScoreRead>
 >();
+const downloadDatasourceContextSnapshot = vi.fn<
+  (datasource: DataSourceRead, format: "markdown" | "json") => Promise<DatasourceContextSnapshot>
+>();
+const downloadProjectContextSnapshot = vi.fn<
+  (project: ProjectRead, datasources: DataSourceRead[], format: "markdown" | "json") => Promise<ProjectContextSnapshot>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -29,8 +36,40 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchOrgDatasources(organizationId, signal),
     fetchDatasourceHealth: (datasourceId: string, signal?: AbortSignal) =>
       fetchDatasourceHealth(datasourceId, signal),
+    downloadDatasourceContextSnapshot: (datasource: DataSourceRead, format: "markdown" | "json") =>
+      downloadDatasourceContextSnapshot(datasource, format),
+    downloadProjectContextSnapshot: (
+      project: ProjectRead,
+      datasources: DataSourceRead[],
+      format: "markdown" | "json",
+    ) => downloadProjectContextSnapshot(project, datasources, format),
   };
 });
+
+let scopeSelection: ScopeSelection | null = null;
+vi.mock("../lib/scope", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/scope")>();
+  return {
+    ...actual,
+    useScopeSelection: () => scopeSelection,
+  };
+});
+
+const PROJECT_ONE: ProjectRead = {
+  id: "proj1", organization_id: "org1", line_of_business_id: "lob1",
+  data_domain_id: "dom1", name: "Core Finance", slug: "core-finance",
+  status: "ACTIVE", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+};
+
+function scopeWithProject(projectId: string): ScopeSelection {
+  return {
+    workspaceId: "ws1", projectId, datasourceId: "",
+    workspaces: [], projects: [PROJECT_ONE], datasources: [], bindings: [],
+    visibleProjects: [PROJECT_ONE], visibleDatasources: [],
+    setWorkspaceId: () => {}, setProjectId: () => {}, setDatasourceId: () => {},
+    refresh: () => {}, loading: false, error: null,
+  };
+}
 
 const SNOWFLAKE: DataSourceRead = {
   id: "ds_snowflake_prod", organization_id: "org1", line_of_business_id: "lob1",
@@ -71,6 +110,9 @@ async function loadScreen() {
 beforeEach(() => {
   fetchOrgDatasources.mockReset();
   fetchDatasourceHealth.mockReset();
+  downloadDatasourceContextSnapshot.mockReset();
+  downloadProjectContextSnapshot.mockReset();
+  scopeSelection = null;
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -169,5 +211,135 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     await waitFor(() => expect(screen.queryByText("snowflake_prod")).not.toBeInTheDocument());
     expect(screen.getByText("oracle_core")).toBeInTheDocument();
     expect(fetchOrgDatasources).toHaveBeenCalledTimes(1); // filtering never re-fetches the fleet
+  });
+
+  it("generates and downloads a Markdown context snapshot for the selected source", async () => {
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    downloadDatasourceContextSnapshot.mockResolvedValue({
+      generated_at: "2026-09-05T00:00:00Z",
+      datasource: {
+        id: "ds_snowflake_prod", name: "snowflake_prod", connector_type: "SNOWFLAKE",
+        dialect: "snowflake", environment: "PRODUCTION", network_zone: "default",
+        status: "ACTIVE", project_id: "proj1", organization_id: "org1",
+      },
+      health: { score: 91, status: "HEALTHY", computed_at: "2026-09-02T00:00:00Z" },
+      quality: null,
+      open_incidents: [],
+      documented_tables: [],
+      undocumented_tables: [],
+      documented_count: 4,
+      undocumented_count: 2,
+      truncated: false,
+      warnings: [],
+    });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    await screen.findByLabelText("Health for snowflake_prod");
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate context (.md)" }));
+
+    await waitFor(() =>
+      expect(downloadDatasourceContextSnapshot).toHaveBeenCalledWith(SNOWFLAKE, "markdown"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/4 documented \/ 2 undocumented tables/)).toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces a warning count instead of hiding a partially-failed snapshot", async () => {
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    downloadDatasourceContextSnapshot.mockResolvedValue({
+      generated_at: "2026-09-05T00:00:00Z",
+      datasource: {
+        id: "ds_snowflake_prod", name: "snowflake_prod", connector_type: "SNOWFLAKE",
+        dialect: "snowflake", environment: "PRODUCTION", network_zone: "default",
+        status: "ACTIVE", project_id: "proj1", organization_id: "org1",
+      },
+      health: { score: 91, status: "HEALTHY", computed_at: "2026-09-02T00:00:00Z" },
+      quality: null,
+      open_incidents: [],
+      documented_tables: [],
+      undocumented_tables: [],
+      documented_count: 0,
+      undocumented_count: 0,
+      truncated: false,
+      warnings: ["Quality summary could not be loaded: 403 policy_denied"],
+    });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    await screen.findByLabelText("Health for snowflake_prod");
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate context (.json)" }));
+
+    await waitFor(() =>
+      expect(downloadDatasourceContextSnapshot).toHaveBeenCalledWith(SNOWFLAKE, "json"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/1 section\(s\) unavailable/)).toBeInTheDocument(),
+    );
+  });
+
+  it("offers no project rollup when the scope has no project selected", async () => {
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    expect(screen.queryByRole("group", { name: "Project context" })).not.toBeInTheDocument();
+  });
+
+  it("rolls up every datasource in the scoped project into one download", async () => {
+    scopeSelection = scopeWithProject("proj1");
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    downloadProjectContextSnapshot.mockResolvedValue({
+      generated_at: "2026-09-05T00:00:00Z",
+      project: { id: "proj1", name: "Core Finance", slug: "core-finance" },
+      datasource_count: 2,
+      documented_count: 9,
+      undocumented_count: 3,
+      open_incident_count: 1,
+      datasources: [],
+      warnings: [],
+    });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    const group = screen.getByRole("group", { name: "Project context" });
+    expect(group).toHaveTextContent("Core Finance");
+    expect(group).toHaveTextContent("2 datasource(s) in scope");
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate project context (.md)" }));
+
+    await waitFor(() =>
+      expect(downloadProjectContextSnapshot).toHaveBeenCalledWith(
+        PROJECT_ONE,
+        [SNOWFLAKE, ORACLE],
+        "markdown",
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/2 datasource\(s\), 9 documented \/ 3 undocumented/)).toBeInTheDocument(),
+    );
+  });
+
+  it("shows zero in scope, with the generate buttons disabled, for a project with no matching datasources", async () => {
+    const emptyProject: ProjectRead = { ...PROJECT_ONE, id: "proj-empty", name: "Empty Project" };
+    scopeSelection = { ...scopeWithProject("proj-empty"), projects: [emptyProject], visibleProjects: [emptyProject] };
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE, ORACLE], limit: 500, offset: 0, total: 2 });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+
+    const group = screen.getByRole("group", { name: "Project context" });
+    expect(group).toHaveTextContent("0 datasource(s) in scope");
+    expect(screen.getByRole("button", { name: "Generate project context (.md)" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Generate project context (.json)" })).toBeDisabled();
   });
 });

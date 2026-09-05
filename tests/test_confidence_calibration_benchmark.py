@@ -308,14 +308,14 @@ def test_main_writes_a_well_formed_markdown_and_json_report(tmp_path) -> None:
     assert report_md.exists()
     assert report_json.exists()
 
-    payload = json.loads(report_json.read_text())
+    payload = json.loads(report_json.read_text(encoding="utf-8"))
     assert payload["case_count"] == len(load_corpus(DEFAULT_CORPUS))
     assert "expected_calibration_error" in payload
     assert "brier_score" in payload
     assert len(payload["buckets"]) == 10
     assert len(payload["cases"]) == payload["case_count"]
 
-    text = report_md.read_text()
+    text = report_md.read_text(encoding="utf-8")
     assert "# Confidence calibration results (SM-3)" in text
     assert "Expected Calibration Error" in text
     assert "Brier score" in text
@@ -370,8 +370,8 @@ def test_main_is_deterministic_across_runs_apart_from_the_timestamp(tmp_path) ->
         ]
     )
 
-    payload_1 = json.loads(report_json_1.read_text())
-    payload_2 = json.loads(report_json_2.read_text())
+    payload_1 = json.loads(report_json_1.read_text(encoding="utf-8"))
+    payload_2 = json.loads(report_json_2.read_text(encoding="utf-8"))
     payload_1.pop("generated_at")
     payload_2.pop("generated_at")
     assert payload_1 == payload_2

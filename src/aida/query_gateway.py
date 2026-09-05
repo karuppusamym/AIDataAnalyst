@@ -504,6 +504,42 @@ class QueryExecutionGateway:
         table_ids = await resolve_referenced_table_ids(
             session, datasource, guard_result.referenced_tables
         )
+        # AU-11 fail-closed (2026-09-03): the guard accepted a statement that
+        # references at least one table, but leaf-name lookup against ACTIVE
+        # MetadataTable returned nothing -- the classification/certification/
+        # quality/freshness axes cannot be evaluated for this query. The
+        # earlier behaviour was to default every axis to empty/None, which
+        # silently bypassed any policy rule keyed on those axes. Deny instead.
+        #
+        # `guard_result.valid` is part of the condition (2026-09-04) because
+        # this control only has meaning for a statement the guard *accepted* --
+        # which is what the paragraph above says, and what the original
+        # implementation failed to check. A statement the guard already
+        # rejected (stacked DDL, a mutation, an unbounded join) is denied on
+        # its own merits and can never execute, so raising here instead of
+        # returning the findings weakened nothing but replaced an accurate,
+        # actionable violation list with a generic authorization error.
+        # AU-11/AU-15 (2026-09-03, amended 2026-09-04). The guard accepted a
+        # statement that references at least one table, but leaf-name lookup
+        # against ACTIVE MetadataTable returned nothing, so the
+        # classification/certification/quality/freshness axes cannot be
+        # evaluated. `execute` fails closed on this and raises. `validate`
+        # does not: it opens no connector and returns no row -- its contract,
+        # stated in the docstring above, is to tell the caller what is wrong
+        # with a statement, and the pipeline below already refuses every
+        # unresolvable reference with `UNKNOWN_OR_UNAUTHORIZED_TABLE`, naming
+        # each offending table. Raising here replaced that precise, actionable
+        # finding with a generic authorization error, and preempted the
+        # catalog allowlist check outright.
+        #
+        # Leaving the ABAC axes empty is safe *here and only here*: the axes
+        # describe catalog objects, every referenced table is absent from the
+        # catalog, so there is no classification, certification or quality
+        # state to bypass and no metadata about a real asset to disclose. The
+        # statement is still refused -- by the finding, on its merits -- and
+        # the reason is carried into this call's single audit row below, so
+        # the attempt stays attributable (INV-7).
+        unresolvable_references = bool(guard_result.referenced_tables) and not table_ids
         resource_attributes = await resolve_resource_attributes(session, datasource, table_ids)
         try:
             await gate(
@@ -560,6 +596,11 @@ class QueryExecutionGateway:
                 "applied_row_limit": report.applied_row_limit,
                 "plan_cost": report.plan_cost,
                 "executed": False,
+                **(
+                    {"reason": "unresolvable_table_references"}
+                    if unresolvable_references
+                    else {}
+                ),
             },
         )
         await session.commit()
@@ -686,6 +727,18 @@ class QueryExecutionGateway:
             table_ids = await resolve_referenced_table_ids(
                 session, datasource, guard_result.referenced_tables
             )
+            # AU-11 fail-closed (2026-09-03): mirror validate() -- an
+            # unresolvable table reference on the execute path cannot silently
+            # default the ABAC axes to empty/None. Deny with the same reason
+            # code so operators see this consistently in the audit trail.
+            # `guard_result.valid` mirrors validate()'s 2026-09-04 correction:
+            # a statement the guard rejected is refused by `_run_validation`
+            # below with its real violation, and never reaches a connector
+            # either way, so this control applies only to accepted statements.
+            if guard_result.valid and guard_result.referenced_tables and not table_ids:
+                raise AuthorizationRejected(
+                    "unresolvable_table_references", workspace_id=workspace_id
+                )
             resource_attributes = await resolve_resource_attributes(
                 session, datasource, table_ids
             )

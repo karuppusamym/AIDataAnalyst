@@ -1,0 +1,178 @@
+/* Description drafts screen (P1-04). Kept structurally in line with the
+   Catalog/Quality screens: `.drafts` == top-level, `.drafts__head` == title
+   block, `.drafts__filters` == filter row, `.drafts__main` == results area.
+   Row layout is grid-based so the score/status/action columns line up
+   without table markup (this list is a flat, non-virtualized column view --
+   real virtualization can come in a follow-up once the row count justifies
+   it). */
+
+.drafts {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+}
+
+.drafts__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.drafts__h1 {
+  font-size: 22px;
+  margin: 0 0 4px;
+}
+
+.drafts__lede {
+  color: var(--ink-3);
+  margin: 0;
+  max-width: 720px;
+}
+
+.drafts__filters {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.drafts__main {
+  min-height: 200px;
+}
+
+.drafts__skeleton {
+  padding: 32px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.drafts__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 0;
+}
+
+.drafts__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.drafts__legend,
+.draftrow__head {
+  display: grid;
+  grid-template-columns: minmax(240px, 2fr) 80px 140px 100px 180px;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+}
+
+.drafts__legend {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.draftrow {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.draftrow--exp {
+  box-shadow: var(--shadow-1);
+}
+
+.draftrow__head {
+  cursor: default;
+}
+
+.draftrow__name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.draftrow__toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+
+.draftrow__tablename {
+  font-weight: 600;
+}
+
+.draftrow__caret {
+  display: inline-block;
+  width: 12px;
+  color: var(--ink-3);
+}
+
+.draftrow__snippet {
+  color: var(--ink-3);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.draftrow__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.draftrow__body {
+  border-top: 1px solid var(--line-soft);
+  padding: 12px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--sunk);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.draftrow__scores {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.draftrow__scores b {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+
+.draftrow__full {
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ink);
+}
+
+.draftrow__err {
+  padding: 8px 12px;
+  background: var(--bad-soft);
+  border: 1px solid var(--bad);
+  border-radius: var(--radius-sm);
+  color: var(--bad);
+  font-size: 13px;
+}

@@ -31,6 +31,7 @@ it (see `mcp_server.py::_view_definition_transformation_detail`).
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID
 
@@ -38,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.catalog_read_model import _latest_observation_at, _open_incident_table_ids, _quality_state
 from aida.config import Settings, get_settings
 from aida.db import get_session
 from aida.domain_service import check_cross_boundary_grant
@@ -72,6 +74,7 @@ from aida.schemas import (
     DomainLineageGraphRead,
     UnifiedLineageEdgeRead,
     UnifiedLineageGraphRead,
+    UnifiedLineageImpactNodeRead,
     UnifiedLineageImpactRead,
     UnifiedLineageNodeRead,
 )
@@ -141,6 +144,7 @@ async def _build_unified_graph(
     node_limit: int,
     edge_limit: int,
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"],
+    include_pending_edges: bool = False,
 ) -> _UnifiedGraph:
     truncation_reasons: list[str] = []
     nodes: dict[str, _NodeInfo] = {}
@@ -317,18 +321,22 @@ async def _build_unified_graph(
             )
 
     if table_ids:
-        view_rows = (
-            await session.scalars(
-                select(ViewLineageEdge)
-                .where(
-                    ViewLineageEdge.datasource_id == datasource.id,
-                    ViewLineageEdge.source_table_id.in_(table_ids),
-                    ViewLineageEdge.target_table_id.in_(table_ids),
-                )
-                .order_by(ViewLineageEdge.id)
-                .limit(edge_limit)
+        view_stmt = (
+            select(ViewLineageEdge)
+            .where(
+                ViewLineageEdge.datasource_id == datasource.id,
+                ViewLineageEdge.source_table_id.in_(table_ids),
+                ViewLineageEdge.target_table_id.in_(table_ids),
             )
-        ).all()
+            .order_by(ViewLineageEdge.id)
+            .limit(edge_limit)
+        )
+        # P1-05: PROPOSED edges (parser-produced, unreviewed) belong in
+        # the review queue, not the shared unified-lineage graph. An
+        # explicit `include_pending_edges=True` caller opts in.
+        if not include_pending_edges:
+            view_stmt = view_stmt.where(ViewLineageEdge.review_status == "ACTIVE")
+        view_rows = (await session.scalars(view_stmt)).all()
         if len(view_rows) >= edge_limit:
             truncation_reasons.append("EDGE_LIMIT")
 
@@ -360,18 +368,22 @@ async def _build_unified_graph(
             view_rows, "VIEW_DEFINITION", view_definitions_by_table_id
         )
 
-        procedure_rows = (
-            await session.scalars(
-                select(ProcedureLineageEdge)
-                .where(
-                    ProcedureLineageEdge.datasource_id == datasource.id,
-                    ProcedureLineageEdge.source_table_id.in_(table_ids),
-                    ProcedureLineageEdge.target_table_id.in_(table_ids),
-                )
-                .order_by(ProcedureLineageEdge.id)
-                .limit(edge_limit)
+        procedure_stmt = (
+            select(ProcedureLineageEdge)
+            .where(
+                ProcedureLineageEdge.datasource_id == datasource.id,
+                ProcedureLineageEdge.source_table_id.in_(table_ids),
+                ProcedureLineageEdge.target_table_id.in_(table_ids),
             )
-        ).all()
+            .order_by(ProcedureLineageEdge.id)
+            .limit(edge_limit)
+        )
+        # P1-05: see the same guard on view_rows above.
+        if not include_pending_edges:
+            procedure_stmt = procedure_stmt.where(
+                ProcedureLineageEdge.review_status == "ACTIVE"
+            )
+        procedure_rows = (await session.scalars(procedure_stmt)).all()
         if len(procedure_rows) >= edge_limit:
             truncation_reasons.append("EDGE_LIMIT")
         register_definition_edges(procedure_rows, "PROCEDURE_DEFINITION")
@@ -479,21 +491,23 @@ async def _build_unified_graph(
             )
             if register_node(info):
                 resource_node_id[resource.id] = node_id
-        edges = (
-            await session.scalars(
-                select(DbtLineageEdge)
-                .where(
-                    DbtLineageEdge.artifact_import_id == latest_import.id,
-                    # Column-level (LN-5) edges are consumed via the dedicated
-                    # dbt lineage read surface, not folded into this
-                    # table/resource-level graph -- without this filter, one
-                    # column edge per column pair would render as a redundant
-                    # parallel link between the same two dbt-resource nodes.
-                    DbtLineageEdge.edge_type == "DEPENDS_ON",
-                )
-                .limit(edge_limit + 1)
+        dbt_stmt = (
+            select(DbtLineageEdge)
+            .where(
+                DbtLineageEdge.artifact_import_id == latest_import.id,
+                # Column-level (LN-5) edges are consumed via the dedicated
+                # dbt lineage read surface, not folded into this
+                # table/resource-level graph -- without this filter, one
+                # column edge per column pair would render as a redundant
+                # parallel link between the same two dbt-resource nodes.
+                DbtLineageEdge.edge_type == "DEPENDS_ON",
             )
-        ).all()
+            .limit(edge_limit + 1)
+        )
+        # P1-05: see the same guard on view_rows above.
+        if not include_pending_edges:
+            dbt_stmt = dbt_stmt.where(DbtLineageEdge.review_status == "ACTIVE")
+        edges = (await session.scalars(dbt_stmt)).all()
         if len(edges) > edge_limit:
             truncation_reasons.append("EDGE_LIMIT")
         for edge in edges:
@@ -517,18 +531,20 @@ async def _build_unified_graph(
         truncation_reasons.append("EDGE_LIMIT")
 
     # --- OpenLineage table edges ---
-    ol_rows = (
-        await session.scalars(
-            select(OpenLineageTableEdge)
-            .join(
-                OpenLineageRunEvent,
-                OpenLineageRunEvent.id == OpenLineageTableEdge.run_event_id,
-            )
-            .where(OpenLineageRunEvent.datasource_id == datasource.id)
-            .order_by(OpenLineageTableEdge.created_at.desc())
-            .limit(edge_limit)
+    ol_stmt = (
+        select(OpenLineageTableEdge)
+        .join(
+            OpenLineageRunEvent,
+            OpenLineageRunEvent.id == OpenLineageTableEdge.run_event_id,
         )
-    ).all()
+        .where(OpenLineageRunEvent.datasource_id == datasource.id)
+        .order_by(OpenLineageTableEdge.created_at.desc())
+        .limit(edge_limit)
+    )
+    # P1-05: see the same guard on view_rows above.
+    if not include_pending_edges:
+        ol_stmt = ol_stmt.where(OpenLineageTableEdge.review_status == "ACTIVE")
+    ol_rows = (await session.scalars(ol_stmt)).all()
     ol_edge_total = 0
     for ol_edge in ol_rows:
         input_node_id = (
@@ -616,6 +632,7 @@ async def build_unified_lineage_graph_payload(
     edge_limit: int = 1_500,
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
     settings: Settings | None = None,
+    include_pending_edges: bool = False,
 ) -> UnifiedLineageGraphRead:
     """Build the merged FK + suggested + dbt + OpenLineage + view/procedure graph for one
     datasource.
@@ -626,9 +643,13 @@ async def build_unified_lineage_graph_payload(
     authorizing `datasource` -- this function does no access control itself.
     """
 
+    # P1-05: include the review-filter in the cache key so a caller that
+    # opts in to PROPOSED edges never gets a filtered-graph cache hit
+    # (and vice versa).
     cache_key = (
         f"aida:lineage:graph:{datasource.organization_id}:{datasource.id}:"
-        f"{node_limit}:{edge_limit}:{suggestion_status}"
+        f"{node_limit}:{edge_limit}:{suggestion_status}:"
+        f"pending={int(include_pending_edges)}"
     )
     if settings is not None and settings.lineage_cache_enabled:
         cached = await get_lineage_cache(settings.redis_url).get(cache_key)
@@ -641,6 +662,7 @@ async def build_unified_lineage_graph_payload(
         node_limit=node_limit,
         edge_limit=edge_limit,
         suggestion_status=suggestion_status,
+        include_pending_edges=include_pending_edges,
     )
 
     inbound = Counter(link.target_id for link in graph.links)
@@ -708,6 +730,7 @@ async def build_domain_unified_lineage_graph_payload(
     edge_limit: int = 1_500,
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = "APPROVED",
     settings: Settings | None = None,
+    include_pending_edges: bool = False,
 ) -> DomainLineageGraphRead:
     """Federate the per-datasource unified lineage graph (above) across every
     datasource in one data_domain (ADR-0017 SS3, SS6).
@@ -752,6 +775,7 @@ async def build_domain_unified_lineage_graph_payload(
             edge_limit=edge_limit - len(merged_edges),
             suggestion_status=suggestion_status,
             settings=settings,
+            include_pending_edges=include_pending_edges,
         )
         contributing_datasource_ids.append(datasource.id)
         prefix = f"{datasource.id}:"
@@ -1027,6 +1051,65 @@ async def build_domain_unified_lineage_graph_payload(
     )
 
 
+async def _enrich_impact_quality(
+    session: AsyncSession, result: UnifiedLineageImpactRead
+) -> UnifiedLineageImpactRead:
+    """DQ-3 (module 11 §9, "Impact surfacing"): attach each TABLE node's
+    quality state so an open incident is visible on the affected asset's
+    impact surface, not just its Catalog row.
+
+    Backend-agnostic on purpose -- called on the result of *either* graph-
+    store backend (postgres or an accelerated one), never inside a specific
+    adapter, because a TABLE node's `node_id` is always the bare
+    `str(table.id)` regardless of which backend produced it (see
+    `_build_unified_graph`'s table-node registration and the neo4j
+    adapter's `platform_id` projection, which mirrors it). Reuses
+    `catalog_read_model`'s exact PASSING/STALE/UNKNOWN/INCIDENT_OPEN states
+    and batched lookups -- the same ones the Catalog screen already shows --
+    rather than a second quality-state vocabulary or a per-node query.
+    """
+    table_ids: list[UUID] = []
+    seen: set[UUID] = set()
+    for node in (*result.upstream, *result.downstream):
+        if node.node_kind != "TABLE":
+            continue
+        try:
+            table_id = UUID(node.node_id)
+        except ValueError:
+            continue
+        if table_id not in seen:
+            seen.add(table_id)
+            table_ids.append(table_id)
+    if not table_ids:
+        return result
+
+    open_incident_ids = await _open_incident_table_ids(session, table_ids)
+    latest_observation_at = await _latest_observation_at(session, table_ids)
+    now = datetime.now(UTC)
+
+    def enrich(node: UnifiedLineageImpactNodeRead) -> UnifiedLineageImpactNodeRead:
+        if node.node_kind != "TABLE":
+            return node
+        try:
+            table_id = UUID(node.node_id)
+        except ValueError:
+            return node
+        state = _quality_state(
+            table_id,
+            open_incident_ids=open_incident_ids,
+            latest_observation_at=latest_observation_at,
+            now=now,
+        )
+        return node.model_copy(update={"quality_state": state})
+
+    return result.model_copy(
+        update={
+            "upstream": [enrich(node) for node in result.upstream],
+            "downstream": [enrich(node) for node in result.downstream],
+        }
+    )
+
+
 async def build_unified_lineage_impact_payload(
     session: AsyncSession,
     datasource: DataSource,
@@ -1080,6 +1163,7 @@ async def build_unified_lineage_impact_payload(
             except GraphStoreUnavailable:
                 projected = None
             if projected is not None:
+                projected = await _enrich_impact_quality(session, projected)
                 if settings.lineage_cache_enabled:
                     await get_lineage_cache(settings.redis_url).set(
                         cache_key,
@@ -1105,6 +1189,7 @@ async def build_unified_lineage_impact_payload(
         raise LineageNodeNotFoundError(
             f"lineage node '{node_id}' not found in this datasource's graph"
         )
+    result = await _enrich_impact_quality(session, result)
     if settings is not None and settings.lineage_cache_enabled:
         await get_lineage_cache(settings.redis_url).set(
             cache_key,
@@ -1124,6 +1209,14 @@ async def get_unified_lineage_graph(
     edge_limit: int = Query(default=1_500, ge=5, le=10_000),
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = Query(
         default="APPROVED"
+    ),
+    include_pending_edges: bool = Query(
+        default=False,
+        description=(
+            "P1-05: opt in to include PROPOSED parsed-lineage edges "
+            "(view/procedure/dbt/OpenLineage). Default false keeps them "
+            "in the review queue only, per ADR-0026."
+        ),
     ),
     context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
     session: AsyncSession = Depends(get_session),
@@ -1146,6 +1239,7 @@ async def get_unified_lineage_graph(
         edge_limit=edge_limit,
         suggestion_status=suggestion_status,
         settings=settings,
+        include_pending_edges=include_pending_edges,
     )
 
 
@@ -1196,6 +1290,14 @@ async def get_domain_unified_lineage_graph(
     suggestion_status: Literal["ALL", "PENDING", "APPROVED", "REJECTED"] = Query(
         default="APPROVED"
     ),
+    include_pending_edges: bool = Query(
+        default=False,
+        description=(
+            "P1-05: opt in to include PROPOSED parsed-lineage edges "
+            "(view/procedure/dbt/OpenLineage). Default false keeps them "
+            "in the review queue only, per ADR-0026."
+        ),
+    ),
     context: SecurityContext = Depends(require_roles(*UNIFIED_LINEAGE_READER_ROLES)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -1216,4 +1318,5 @@ async def get_domain_unified_lineage_graph(
         edge_limit=edge_limit,
         suggestion_status=suggestion_status,
         settings=settings,
+        include_pending_edges=include_pending_edges,
     )

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from typing import Any
 from uuid import UUID
@@ -23,6 +23,7 @@ from aida.db import get_session
 from aida.documentation_worklist import (
     DocumentationWorklistEntry,
     TableQuerySignal,
+    WorklistRanking,
     rank_documentation_worklist,
 )
 from aida.events import record_audit, record_outbox
@@ -70,6 +71,9 @@ from aida.schemas import (
     GlossaryTermDeprecationRequest,
     GovernanceReviewRead,
     LeaverReassignmentRequest,
+    OwnershipAssignmentBulkReaffirmItemResult,
+    OwnershipAssignmentBulkReaffirmRequest,
+    OwnershipAssignmentBulkReaffirmResult,
     OwnershipAssignmentRead,
     OwnershipRuleCreate,
     OwnershipRuleRead,
@@ -81,6 +85,7 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
+from aida.stewardship_worklist import enrich_tables
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -766,6 +771,225 @@ async def list_ownership_assignments(
         limit=limit,
         offset=offset,
         total=total or 0,
+    )
+
+
+# -- P2-07: OwnershipAssignment re-affirmation -----------------------------
+#
+# `POST /v1/ownership-assignments/{id}/reaffirm` is the single-item entry;
+# `POST /v1/ownership-assignments/bulk-reaffirm` is the maker-checker-friendly
+# per-item SAVEPOINT bulk shape used by every other bulk write in this
+# module (`bulk_decide_relationship_candidates`, `bulk_reject_link_proposals`).
+# A caller may reaffirm only their own ownership; PlatformAdmin/MetadataAdmin
+# can reaffirm on behalf of any principal.
+
+
+# `_OWNERSHIP_ADMIN_ROLES`: roles that may reaffirm an assignment they do NOT
+# themselves own. Kept narrow -- broadening this would defeat the "the owner
+# must actively re-attest" property the reaffirm endpoint exists to enforce.
+_OWNERSHIP_ADMIN_ROLES = frozenset({"PlatformAdmin", "MetadataAdmin"})
+
+
+async def _reaffirm_one(
+    session: AsyncSession,
+    *,
+    context: SecurityContext,
+    assignment: OwnershipAssignment,
+    now: datetime,
+    reaffirm_days: int,
+) -> None:
+    """Core: stamps `reaffirmed_at`/`reaffirmed_by`, extends `expires_at`, and
+    writes one audit + outbox row. Shared by the single-item endpoint and
+    each SAVEPOINT of the bulk endpoint.
+
+    Callers are responsible for checking caller-owns-or-is-admin BEFORE this;
+    the row-status ACTIVE gate is checked here to keep the single- and
+    bulk-item paths behaviorally identical.
+    """
+    if assignment.status != "ACTIVE":
+        raise HTTPException(
+            status_code=409,
+            detail="only ACTIVE ownership assignments can be reaffirmed",
+        )
+    assignment.reaffirmed_at = now
+    assignment.reaffirmed_by = context.principal_id
+    assignment.expires_at = now + timedelta(days=reaffirm_days)
+    # A reaffirmation clears the warning stamp so the row can warn again in
+    # its next cycle (the warning was for the previous expiry horizon).
+    assignment.expiry_warning_emitted_at = None
+    details = {
+        "subject_type": assignment.subject_type,
+        "subject_id": assignment.subject_id,
+        "owner_type": assignment.owner_type,
+        "owner_principal": assignment.owner_principal,
+        "reaffirm_days": reaffirm_days,
+        "new_expires_at": assignment.expires_at.isoformat(),
+    }
+    record_audit(
+        session,
+        _audit_context(context, assignment.organization_id),
+        action="OWNERSHIP_ASSIGNMENT_REAFFIRMED",
+        resource_type="ownership_assignment",
+        resource_id=str(assignment.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details=details,
+    )
+    record_outbox(
+        session,
+        organization_id=assignment.organization_id,
+        aggregate_type="ownership_assignment",
+        aggregate_id=str(assignment.id),
+        event_type="ownership.assignment.reaffirmed.v1",
+        payload={"assignment_id": str(assignment.id), **details},
+    )
+
+
+def _caller_may_reaffirm(context: SecurityContext, assignment: OwnershipAssignment) -> bool:
+    """Reaffirm is either self-service (caller is the owner) or admin-driven.
+
+    A GROUP-owned assignment is reaffirmable by any admin or by a caller
+    whose principal_id equals the group id (in that deployment a group is
+    itself a principal; see security.SecurityContext principal model).
+    """
+    if any(role in _OWNERSHIP_ADMIN_ROLES for role in context.roles):
+        return True
+    return context.principal_id == assignment.owner_principal
+
+
+@router.post(
+    "/ownership-assignments/{assignment_id}/reaffirm",
+    response_model=OwnershipAssignmentRead,
+)
+async def reaffirm_ownership_assignment(
+    assignment_id: UUID,
+    settings: Settings = Depends(get_settings),
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> OwnershipAssignment:
+    """P2-07: the owner (or admin) reaffirms an ACTIVE assignment. Extends
+    `expires_at` by `settings.ownership_reaffirm_days`, records audit +
+    outbox.
+    """
+    assignment = await session.get(OwnershipAssignment, assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code=404, detail="ownership assignment not found")
+    enforce_organization(context, assignment.organization_id)
+    if not _caller_may_reaffirm(context, assignment):
+        raise HTTPException(
+            status_code=403,
+            detail="only the owner or an admin may reaffirm this ownership assignment",
+        )
+    now = datetime.now(UTC)
+    await _reaffirm_one(
+        session,
+        context=context,
+        assignment=assignment,
+        now=now,
+        reaffirm_days=settings.ownership_reaffirm_days,
+    )
+    await session.commit()
+    await session.refresh(assignment)
+    return assignment
+
+
+@router.post(
+    "/ownership-assignments/bulk-reaffirm",
+    response_model=OwnershipAssignmentBulkReaffirmResult,
+)
+async def bulk_reaffirm_ownership_assignments(
+    body: OwnershipAssignmentBulkReaffirmRequest,
+    settings: Settings = Depends(get_settings),
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> OwnershipAssignmentBulkReaffirmResult:
+    """P2-07: the owner (or admin) reaffirms up to 100 ACTIVE assignments in
+    one call. Per-item SAVEPOINT -- one item failing (missing, wrong org,
+    not-owner, already-LAPSED) doesn't roll the rest back. Same
+    partial-success shape as `bulk_decide_relationship_candidates` and
+    `bulk_reject_link_proposals`.
+    """
+    now = datetime.now(UTC)
+    items: list[OwnershipAssignmentBulkReaffirmItemResult] = []
+    reaffirmed = 0
+    skipped = 0
+    for assignment_id in body.assignment_ids:
+        savepoint = await session.begin_nested()
+        try:
+            assignment = await session.get(OwnershipAssignment, assignment_id)
+            if assignment is None:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="NOT_FOUND",
+                        detail="ownership assignment not found",
+                    )
+                )
+                skipped += 1
+                continue
+            if context.organization_id != assignment.organization_id:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="FORBIDDEN",
+                        detail="assignment belongs to a different organization",
+                    )
+                )
+                skipped += 1
+                continue
+            if not _caller_may_reaffirm(context, assignment):
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="FORBIDDEN",
+                        detail="only the owner or an admin may reaffirm",
+                    )
+                )
+                skipped += 1
+                continue
+            try:
+                await _reaffirm_one(
+                    session,
+                    context=context,
+                    assignment=assignment,
+                    now=now,
+                    reaffirm_days=settings.ownership_reaffirm_days,
+                )
+            except HTTPException as exc:
+                await savepoint.rollback()
+                items.append(
+                    OwnershipAssignmentBulkReaffirmItemResult(
+                        assignment_id=assignment_id,
+                        outcome="ERROR",
+                        detail=str(exc.detail),
+                    )
+                )
+                skipped += 1
+                continue
+            await savepoint.commit()
+            items.append(
+                OwnershipAssignmentBulkReaffirmItemResult(
+                    assignment_id=assignment_id,
+                    outcome="REAFFIRMED",
+                )
+            )
+            reaffirmed += 1
+        except Exception as exc:  # noqa: BLE001 -- SAVEPOINT catches all
+            await savepoint.rollback()
+            items.append(
+                OwnershipAssignmentBulkReaffirmItemResult(
+                    assignment_id=assignment_id,
+                    outcome="ERROR",
+                    detail=type(exc).__name__,
+                )
+            )
+            skipped += 1
+    await session.commit()
+    return OwnershipAssignmentBulkReaffirmResult(
+        reaffirmed=reaffirmed, skipped=skipped, items=items
     )
 
 
@@ -1874,6 +2098,15 @@ class DocumentationWorklistEntryRead(ApiModel):
     last_queried_at: datetime | None
     last_consumed_at: datetime | None
     description_is_proposed: bool
+    # SW-1 factors. Every term of the score is on the row for the same reason
+    # `query_volume` always was: a steward asking "why is this first" has to
+    # be answerable from the response, not from reading the ranker.
+    score: float
+    usage: float
+    impact: float
+    deficit: float
+    downstream_count: int
+    missing: list[str]
 
 
 # Mirrors GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT` bound: caps both (a) how
@@ -2077,6 +2310,20 @@ async def _documentation_worklist_signals(
     documentation_state = await _documentation_state(
         session, [table for table, _, _ in candidate_rows]
     )
+    # SW-1 adoption: downstream impact and the five-field deficit, from the
+    # same `enrich_tables` `compute_worklist` uses -- so "documented" has one
+    # definition on this platform rather than one per surface. AT-5's own
+    # UX-12 precedence chain still decides the description field; SW-1 is
+    # handed that answer rather than computing a weaker one of its own.
+    enrichment = await enrich_tables(
+        session,
+        organization_id,
+        [table.id for table, _, _ in candidate_rows],
+        descriptions={
+            table.id: documentation_state.get(table.id, (False, False))[0]
+            for table, _, _ in candidate_rows
+        },
+    )
 
     signals: list[TableQuerySignal] = []
     for table, schema, datasource in candidate_rows:
@@ -2085,6 +2332,7 @@ async def _documentation_worklist_signals(
         is_documented, description_is_proposed = documentation_state.get(
             table.id, (False, False)
         )
+        deficit = enrichment.get(table.id)
         signals.append(
             TableQuerySignal(
                 table_id=table.id,
@@ -2097,6 +2345,8 @@ async def _documentation_worklist_signals(
                 last_consumed_at=last_consumed_at,
                 is_documented=is_documented,
                 description_is_proposed=description_is_proposed,
+                downstream_count=deficit.downstream_count if deficit else 0,
+                missing=deficit.missing if deficit else (),
             )
         )
     return signals
@@ -2117,6 +2367,16 @@ async def list_documentation_worklist(
             "MCP consumption read), sorted after every real-volume row. Off by "
             "default: this worklist ranks by real usage, and a zero-volume table "
             "has none to rank it by (see `documentation_worklist.py`)."
+        ),
+    ),
+    ranking: WorklistRanking = Query(
+        default="priority",
+        description=(
+            "`priority` (default) is SW-1's usage x impact x deficit: among "
+            "comparably used tables it puts the hub missing four of five "
+            "documentation fields ahead of the leaf missing one. Usage is still "
+            "a term, so a table nobody queries still cannot reach the top. "
+            "`query_volume` restores the pre-adoption order exactly."
         ),
     ),
     context: SecurityContext = Depends(require_roles(*READ_ROLES)),
@@ -2153,6 +2413,7 @@ async def list_documentation_worklist(
         limit=limit,
         offset=offset,
         include_zero_volume=include_zero_volume,
+        ranking=ranking,
     )
     return Page(
         items=[DocumentationWorklistEntryRead.model_validate(entry) for entry in entries],

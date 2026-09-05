@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
@@ -24,6 +25,9 @@ from aida.openlineage import (
     OpenLineageError,
     ParsedOpenLineageDataset,
     parse_openlineage_run_event,
+)
+from aida.parsed_lineage_review_service import (
+    resolve_review_status_for_new_edge,
 )
 from aida.schemas import (
     OpenLineageColumnEdgeRead,
@@ -285,6 +289,24 @@ async def ingest_openlineage_run_event(
             )
         )
 
+    # P1-05: apply the shared review-mode rule. OpenLineage edges carry
+    # no per-edge confidence, so the high-confidence auto-active short
+    # circuit is inert here -- they go PROPOSED under `require_review`
+    # unless the source datasource is `trusted_for_lineage`. Every
+    # existing row and every row written under the default
+    # `auto_active` mode still lands ACTIVE with an untouched contract.
+    settings = get_settings()
+    review_mode = settings.lineage_parsed_edges_review_mode
+    high_conf = settings.lineage_high_confidence_auto_active_threshold
+    source_trusted = bool(getattr(datasource, "trusted_for_lineage", False))
+    edge_review_status = resolve_review_status_for_new_edge(
+        review_mode=review_mode,
+        confidence=None,
+        threshold=high_conf,
+        source_trusted=source_trusted,
+    )
+    principal_id = context.principal_id
+
     for table_edge in parsed.table_edges:
         session.add(
             OpenLineageTableEdge(
@@ -306,6 +328,8 @@ async def ingest_openlineage_run_event(
                         _normalized_identifier(table_edge.output_dataset_name),
                     )
                 ),
+                review_status=edge_review_status,
+                created_by=principal_id,
             )
         )
 
@@ -334,6 +358,8 @@ async def ingest_openlineage_run_event(
                 output_column_name=col_edge.output_column_name,
                 transformation_type=col_edge.transformation_type,
                 transformation_subtype=col_edge.transformation_subtype,
+                review_status=edge_review_status,
+                created_by=principal_id,
             )
         )
 

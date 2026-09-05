@@ -34,9 +34,11 @@ const DATASOURCE: DataSourceRead = {
 };
 
 const CANDIDATE: CatalogRowRead = {
-  id: "t_orders_raw", name: "orders_raw", schema_name: "core", datasource_name: "snowflake_prod",
+  id: "t_orders_raw", name: "orders_raw", schema_name: "core",
+  datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
   object_type: "TABLE", status: "ACTIVE", description: null, description_is_proposed: false,
   owner: null, certification: "NONE", certification_expires_at: null, quality: "INCIDENT_OPEN",
+  certification_evidence_summary: null,
   glossary_terms: [], row_count_estimate: 1000, updated_at: "2026-09-01T00:00:00Z",
 };
 

@@ -9,6 +9,7 @@ from aida.context import get_correlation_id
 from aida.custom_quality_rules import evaluate_rule_pack
 from aida.data_quality import DEFAULT_POLICY
 from aida.db import get_session
+from aida.dq_triage_agent import suggest_triage
 from aida.events import record_audit, record_outbox
 from aida.external_quality_signals import ingest_external_signal
 from aida.freshness import WatermarkConfig, evaluate_freshness
@@ -28,6 +29,7 @@ from aida.models import (
 )
 from aida.quality_service import evaluate_analysis_run
 from aida.schemas import (
+    ApiModel,
     DataQualityIncidentRead,
     DataQualityIncidentTransition,
     DataQualityObservationRead,
@@ -342,6 +344,57 @@ async def transition_quality_incident(
             },
             "table_name": row[1],
         }
+    )
+
+
+class DataQualityIncidentTriageRead(ApiModel):
+    incident_id: UUID
+    anomaly_type: str
+    likely_causes: list[str]
+    recommended_next_steps: list[str]
+    #: The evidence field name(s) each cause/step was derived from, so a
+    #: steward can check this against the incident's own `evidence` blob
+    #: rather than trust an unattributed sentence.
+    basis: list[str]
+
+
+@router.get(
+    "/quality-incidents/{incident_id}/triage",
+    response_model=DataQualityIncidentTriageRead,
+)
+async def get_quality_incident_triage(
+    incident_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles(
+            "PlatformAdmin", "DataAdmin", "DataSteward", "Operations", "Viewer", "Analyst"
+        )
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> DataQualityIncidentTriageRead:
+    """A deterministic root-cause hint for one incident (`dq_triage_agent`).
+
+    Read-only and computed fresh on every call -- nothing about an incident
+    is mutated or persisted by this endpoint (INV-7's read-route gate holds
+    trivially here since there is no write at all). See
+    `dq_triage_agent`'s own module docstring for why this stays computed
+    rather than stored.
+    """
+    incident = await session.get(DataQualityIncident, incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail="quality incident not found")
+    enforce_organization(context, incident.organization_id)
+    suggestion = suggest_triage(
+        anomaly_type=incident.anomaly_type,
+        source=incident.source,
+        evidence=dict(incident.evidence or {}),
+        occurrence_count=incident.occurrence_count,
+    )
+    return DataQualityIncidentTriageRead(
+        incident_id=incident.id,
+        anomaly_type=suggestion.anomaly_type,
+        likely_causes=list(suggestion.likely_causes),
+        recommended_next_steps=list(suggestion.recommended_next_steps),
+        basis=list(suggestion.basis),
     )
 
 

@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { DataQualityIncidentRead, DataQualitySummaryRead, DataSourceRead } from "../lib/types";
+import type {
+  DataQualityIncidentRead,
+  DataQualityIncidentTriageRead,
+  DataQualitySummaryRead,
+  DataSourceRead,
+} from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 
 /* ---------------------------------------------------------------------------
@@ -22,6 +27,9 @@ const fetchQualityIncidents = vi.fn<
 const transitionQualityIncident = vi.fn<
   (incidentId: string, body: unknown, signal?: AbortSignal) => Promise<DataQualityIncidentRead>
 >();
+const fetchQualityIncidentTriage = vi.fn<
+  (incidentId: string, signal?: AbortSignal) => Promise<DataQualityIncidentTriageRead>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -35,6 +43,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchQualityIncidents(datasourceId, query, signal),
     transitionQualityIncident: (incidentId: string, body: unknown, signal?: AbortSignal) =>
       transitionQualityIncident(incidentId, body, signal),
+    fetchQualityIncidentTriage: (incidentId: string, signal?: AbortSignal) =>
+      fetchQualityIncidentTriage(incidentId, signal),
   };
 });
 
@@ -84,6 +94,7 @@ beforeEach(() => {
   fetchQualitySummary.mockReset();
   fetchQualityIncidents.mockReset();
   transitionQualityIncident.mockReset();
+  fetchQualityIncidentTriage.mockReset();
   fetchOrgDatasources.mockResolvedValue({ items: [DATASOURCE], limit: 500, offset: 0, total: 1 });
   fetchQualitySummary.mockResolvedValue(SUMMARY);
   fetchQualityIncidents.mockResolvedValue(incidentsPage([INCIDENT]));
@@ -206,6 +217,39 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
     expect(transitionQualityIncident).not.toHaveBeenCalled();
   });
 
+  it("shows the runtime-coupling note for an open CRITICAL incident, and omits it once resolved (DQ-3)", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+    await waitFor(() => expect(screen.getByText("raw_sales")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "raw_sales" }));
+    const panel = await screen.findByLabelText("Incident detail for raw_sales");
+    expect(within(panel).getByText("Runtime coupling (DQ-3)")).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/blocks governed tools that depend on this table/),
+    ).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Close incident detail" }));
+
+    fetchQualityIncidents.mockResolvedValue(
+      incidentsPage([
+        {
+          ...INCIDENT,
+          status: "RESOLVED",
+          resolved_by: "me@tenant.example",
+          resolved_at: "2026-09-02T06:00:00Z",
+          resolution_reason: "False positive from a backfill.",
+        },
+      ]),
+    );
+    fireEvent.change(screen.getByLabelText("Status"), { target: { value: "RESOLVED" } });
+    await waitFor(() => expect(fetchQualityIncidents).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(screen.getByRole("button", { name: "raw_sales" }));
+    const resolvedPanel = await screen.findByLabelText("Incident detail for raw_sales");
+    expect(within(resolvedPanel).queryByText("Runtime coupling (DQ-3)")).not.toBeInTheDocument();
+  });
+
   it("opens a permalinkable detail panel for a selected incident", async () => {
     history.replaceState(null, "", "/?ds=ds_1");
     const QualityScreen = await loadScreen();
@@ -220,5 +264,45 @@ describe("QualityScreen against the real quality_api.py endpoints", () => {
 
     fireEvent.click(within(panel).getByRole("button", { name: "Close incident detail" }));
     expect(new URLSearchParams(location.search).get("incident")).toBeNull();
+  });
+
+  it("suggests a root cause on demand, and hides it again on a second click", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    fetchQualityIncidentTriage.mockResolvedValue({
+      incident_id: "inc_1",
+      anomaly_type: "NULL_RATE_SHIFT",
+      likely_causes: ["At least one column's null rate shifted versus its baseline."],
+      recommended_next_steps: ["Check whether the source added a new optional field."],
+      basis: ["max_null_rate_change_percent"],
+    });
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+    await waitFor(() => expect(screen.getByText("raw_sales")).toBeInTheDocument());
+
+    expect(fetchQualityIncidentTriage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Suggest root cause" }));
+
+    await waitFor(() => expect(fetchQualityIncidentTriage).toHaveBeenCalledWith("inc_1", expect.anything()));
+    expect(
+      await screen.findByText("At least one column's null rate shifted versus its baseline."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/max_null_rate_change_percent/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide suggested cause" }));
+    expect(
+      screen.queryByText("At least one column's null rate shifted versus its baseline."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a triage fetch failure without breaking the row", async () => {
+    history.replaceState(null, "", "/?ds=ds_1");
+    fetchQualityIncidentTriage.mockRejectedValue(new Error("triage unavailable"));
+    const QualityScreen = await loadScreen();
+    render(<QualityScreen />);
+    await waitFor(() => expect(screen.getByText("raw_sales")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Suggest root cause" }));
+
+    await waitFor(() => expect(screen.getByText(/triage unavailable/)).toBeInTheDocument());
   });
 });

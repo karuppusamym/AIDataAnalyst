@@ -45,6 +45,28 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ./scripts/verify-local.ps1
    ```
 
+5. Load a sample estate (optional, recommended for a first look). A fresh
+   install has no metadata, so the catalog, knowledge graph and unified lineage
+   render empty. Populate a value-free retail-and-risk estate — structure and
+   keys only, never row values — through the governed API:
+
+   ```powershell
+   docker compose --profile seed run --rm seed
+   ```
+
+   Or run it directly against a locally running API:
+
+   ```powershell
+   python scripts/seed_sample_estate.py            # defaults to http://localhost:8000
+   ```
+
+   The seed is idempotent and safe to re-run. It creates a demonstration
+   organization, registers a canonical-push datasource, ingests the estate,
+   discovers relationship candidates from the declared foreign keys, and
+   approves them so **Knowledge graph** and **Unified lineage** render a
+   populated, connected estate. Point it only at a development or demonstration
+   environment.
+
 Development authentication is deliberately explicit. API examples must include identity headers documented in the generated OpenAPI specification. Production requires configured OIDC issuer/audience/JWKS verification and a registered non-environment credential provider; it refuses development authentication and `env` secret resolution.
 
 Model generation is also fail closed. For local development, create and independently approve an organization model-route version whose provider is `OPENAI` or `GOOGLE_GEMINI`, whose route key matches `AIDA_MODEL_ROUTE`, and whose credential reference is `env://OPENAI_API_KEY` or `env://GEMINI_API_KEY`. Enable `AIDA_MODEL_GENERATION_ENABLED` only after the credential is valid and the route's residency, retention, capabilities, budgets, and model ID are approved. Route approval alone never activates model traffic.

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { MeRead } from "./lib/types";
 
 /* ---------------------------------------------------------------------------
@@ -25,9 +25,25 @@ async function loadApp() {
 beforeEach(() => {
   fetchMe.mockReset();
   vi.resetModules();
+  history.replaceState(null, "", "/");
 });
 
 describe("App shell persona gating", () => {
+  it("keeps the sidebar compact and reveals each workbench on demand", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    expect(nav.getByRole("button", { name: "Analyst" })).toHaveAttribute("aria-expanded", "true");
+    expect(nav.queryByRole("button", { name: /Operations/ })).not.toBeInTheDocument();
+    fireEvent.click(nav.getByRole("button", { name: "Operator" }));
+    expect(nav.queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
+    fireEvent.click(nav.getByRole("button", { name: /Operations/ }));
+    expect(location.hash).toBe("#/operations");
+    expect(nav.getByRole("button", { name: "Operator" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("removes the persona switcher once /v1/me reports the OIDC identity provider", async () => {
     fetchMe.mockResolvedValue({
       principal_id: "bank-user-123",
@@ -72,5 +88,63 @@ describe("App shell persona gating", () => {
     render(<App />);
 
     expect(screen.queryByTestId("persona-nav")).not.toBeInTheDocument();
+  });
+
+  it("offers keyboard-friendly quick navigation across the full product", async () => {
+    fetchMe.mockResolvedValue({
+      principal_id: "dev-fixture-user",
+      principal_type: "USER",
+      organization_id: null,
+      roles: ["Analyst"],
+      persona: null,
+      identity_provider: "DEVELOPMENT",
+    });
+    const App = await loadApp();
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Jump to/ }));
+    const input = screen.getByRole("textbox", { name: "Search pages" });
+    fireEvent.change(input, { target: { value: "context compile" } });
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Quick navigation" })).getByRole("button", { name: /Context products/ }));
+
+    expect(location.hash).toBe("#/context");
+    expect(screen.queryByRole("dialog", { name: "Quick navigation" })).not.toBeInTheDocument();
+  });
+
+  it("provides an ordered in-page menu for the active product section", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    // UX-20: sections are persona workbenches, so Catalog sits in the
+    // Analyst workbench alongside the rest of an analyst's jobs.
+    const section = screen.getByRole("navigation", { name: "Analyst pages" });
+    expect(within(section).getAllByRole("button").map((button) => button.textContent)).toEqual([
+      "Ask Atlas",
+      "Catalog",
+      "Semantic layer",
+      "Tool registry",
+      "Tool plans",
+      "Lineage",
+      "Unified lineage",
+    ]);
+    expect(within(section).getByRole("button", { name: "Catalog" })).toHaveAttribute("aria-current", "page");
+
+    fireEvent.click(within(section).getByRole("button", { name: "Semantic layer" }));
+    expect(location.hash).toBe("#/semantics");
+  });
+
+  it("restores the correct page on browser history navigation", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    history.replaceState(null, "", "/#/operations");
+    fireEvent(window, new PopStateEvent("popstate"));
+
+    await waitFor(() => expect(screen.getByRole("navigation", { name: "Operator pages" })).toBeInTheDocument());
+    expect(screen.getByText("Operations", { selector: ".topbar__trail strong" })).toBeInTheDocument();
   });
 });

@@ -1657,7 +1657,12 @@ async def get_relationship_candidate_review_queue(
         raise HTTPException(status_code=404, detail="datasource not found")
     enforce_organization(context, datasource.organization_id)
     return await compose_relationship_candidate_review_queue(
-        session, datasource, limit=limit, offset=offset, settings=settings
+        session,
+        datasource,
+        limit=limit,
+        offset=offset,
+        settings=settings,
+        reviewer_principal_id=context.principal_id,
     )
 
 

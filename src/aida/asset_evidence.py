@@ -191,8 +191,8 @@ async def compose_asset_evidence(
         )
 
     certification = (await _latest_certifications(session, table_ids)).get(table.id)
-    certification_state, certification_expires_at = _certification_state(
-        certification, now=moment
+    certification_state, certification_expires_at, _cert_evidence_summary = (
+        _certification_state(certification, now=moment)
     )
     if certification_state != "NONE":
         expiry = (

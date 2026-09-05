@@ -32,7 +32,7 @@
  *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
  *  OpenAPI document (see the file banner above). */
 export type { CursorPage } from "./types";
-import type { DataProductVersionRead } from "./types";
+import type { AssetDescriptionDraftRead, DataProductVersionRead } from "./types";
 
 export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
 export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
@@ -58,6 +58,9 @@ export interface CatalogRowRead {
   id: string;
   name: string;
   schema_name: string;
+  /** The owning datasource. Every screen a catalog row links out to is
+   *  datasource-scoped, so a cross-link needs the id, not just the name. */
+  datasource_id: string;
   datasource_name: string;
   object_type: string;
   status: string;
@@ -69,10 +72,33 @@ export interface CatalogRowRead {
   owner: string | null;
   certification: CertificationStatus;
   certification_expires_at: string | null;
+  /** P3-09: small counts snapshot from the current certification's
+   *  structured `evidence` blob -- what the certifier was implicitly
+   *  attesting to (description version, active owner count,
+   *  open-incidents-at-certify, glossary-term count). Null when the current
+   *  cert is legacy (server has `evidence IS NULL`), when the cert is
+   *  EXPIRED/REVOKED, or when there is no current cert. The catalog grid's
+   *  certification cell reads this to render the "Based on: ..." hover
+   *  tooltip; keep it nullable, no client should assume its presence. */
+  certification_evidence_summary: CertificationEvidenceSummary | null;
   quality: QualityState;
   glossary_terms: string[];
   row_count_estimate: number | null;
   updated_at: string;
+}
+
+/** P3-09: matches `aida.schemas.CertificationEvidenceSummary`. Kept on
+ *  `CatalogRowRead` (not on a separate detail endpoint) so the catalog
+ *  grid can render the tooltip from one row payload without a follow-up
+ *  fetch. Values are null/zero when the certifier's evidence is absent
+ *  or empty; `backfilled=true` marks a row populated retrospectively by
+ *  the `backfill_certification_evidence.py` CLI, not at certify time. */
+export interface CertificationEvidenceSummary {
+  description_version_id: string | null;
+  active_owner_count: number;
+  open_incident_count_at_certify: number;
+  glossary_term_count: number;
+  backfilled: boolean;
 }
 
 /** Front-end persona set (module 21 §5). No server enum backs this: in
@@ -160,3 +186,88 @@ export interface MarketplaceProductRead extends DataProductVersionRead {
   domain_affinity: boolean;
   role_affinity: boolean;
 }
+
+/** `ViolationRead` -- `runtime_contracts_api.py:41` (Phase E runtime data
+ *  contract enforcement). That file defines its response models inline
+ *  rather than in `schemas.py`, so -- like `CatalogRowRead`/`MetadataTableRead`
+ *  above -- it has no counterpart in `types.ts`'s generated OpenAPI mirror;
+ *  hand-written here for the same reason. One row per detected contract
+ *  violation, returned by `GET /v1/data-contracts/{contract_id}/violations`. */
+export interface ViolationRead {
+  id: string;
+  organization_id: string;
+  contract_id: string;
+  violation_type: string;
+  severity: string;
+  evidence: Record<string, unknown>;
+  detected_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/* ---------------------------------------------------------------------------
+   Client-side shapes that were living in the generated `types.ts`.
+
+   `types.ts` says AUTO-GENERATED -- DO NOT EDIT, and the `ui-types-diff` CI
+   job re-runs `scripts/generate_ui_types.py` to prove it. Five names below
+   had been hand-added to that file anyway, which made the job fail on every
+   commit: the generator does not produce them, so regenerating deleted them
+   and broke the build. They are moved here, the file this repository already
+   designates for types the live OpenAPI document cannot supply.
+
+   None of them is a server schema. Two narrow a server `str` to the literal
+   union that column actually stores (the same convenience `CatalogRowRead`'s
+   `certification` field takes above); two are client envelopes over the
+   server's `Page`; one is an alias of a union the generator already emits
+   inline, named so call sites can refer to it.
+--------------------------------------------------------------------------- */
+
+/** `AssetDescriptionDraft.status` -- the server types this as `str`. Fresh
+ *  drafts are DRAFT, submit moves them to PENDING_APPROVAL, and the
+ *  governance-review decision resolves them to APPROVED or REJECTED. */
+export type AssetDescriptionDraftStatus =
+  | "DRAFT"
+  | "PENDING_APPROVAL"
+  | "APPROVED"
+  | "REJECTED";
+
+/** Response envelope for the batch-generate endpoint. The server returns
+ *  `Page` with `items: AssetDescriptionDraftRead[]`; wrapped here so callers
+ *  do not have to narrow `unknown[]`. `total` reflects only the drafts
+ *  actually created -- the server skips tables that already have an open
+ *  draft or a REJECTED duplicate. */
+export interface AssetDescriptionDraftGenerateResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** Response envelope for the list endpoint. The server's `Page` shape has no
+ *  cursor; pagination is `limit`/`offset`. */
+export interface AssetDescriptionDraftListResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** The five parser-produced lineage edge tables `GET
+ *  /v1/lineage/parsed-edges/review-queue` spans. The generator emits this
+ *  union inline on every field that carries it
+ *  (`ParsedLineageEdgeReviewQueueItemRead.edge_type`,
+ *  `ParsedLineageEdgeDecisionRequest.edge_type`) but never names it, so a
+ *  call site that wants to hold one in a variable needs this alias. Keep the
+ *  members identical to what the generated file emits inline. */
+export type ParsedLineageEdgeType =
+  | "VIEW"
+  | "PROCEDURE"
+  | "DBT"
+  | "OPENLINEAGE_TABLE"
+  | "OPENLINEAGE_COLUMN";
+
+/** Same reasoning as `ParsedLineageEdgeType`, for
+ *  `ParsedLineageEdgeDecisionRequest.decision`. */
+export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";

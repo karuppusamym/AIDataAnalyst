@@ -20,11 +20,11 @@ POWER_BI_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "power_bi_metadata_
 
 
 def tableau_metadata_fixture() -> dict[str, object]:
-    return json.loads(FIXTURE_PATH.read_text())
+    return json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
 def power_bi_metadata_fixture() -> dict[str, object]:
-    return json.loads(POWER_BI_FIXTURE_PATH.read_text())
+    return json.loads(POWER_BI_FIXTURE_PATH.read_text(encoding="utf-8"))
 
 
 def test_tableau_parser_builds_report_metric_column_edges() -> None:

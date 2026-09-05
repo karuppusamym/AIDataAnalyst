@@ -15,7 +15,7 @@ import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives
 import type { Tone } from "../components/primitives";
 import "./OperationsScreen.css";
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const nf = new Intl.NumberFormat("en-US");
 
 /* ---------------------------------------------------------------------------
@@ -160,6 +160,7 @@ function OutboxRow({
 }
 
 export function OperationsScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const runStatus = params.get("run_status") ?? "ALL";
   const dsFilter = params.get("ds") ?? "";

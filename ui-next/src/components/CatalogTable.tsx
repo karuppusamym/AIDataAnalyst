@@ -19,12 +19,99 @@ import "./CatalogTable.css";
    "row 3 of 40" while the user is 200,000 rows down.
 --------------------------------------------------------------------------- */
 
+const certEvidenceTitle = (row: CatalogRowRead): string | undefined => {
+  // P3-09: only surface the tooltip when a CERTIFIED row carries a
+  // populated `certification_evidence_summary`. Legacy rows and non-
+  // CERTIFIED states return undefined so the browser renders no title.
+  if (row.certification !== "CERTIFIED") return undefined;
+  const s = row.certification_evidence_summary;
+  if (!s) return undefined;
+  const parts: string[] = [];
+  if (s.description_version_id) parts.push("description v" + s.description_version_id.slice(0, 8));
+  parts.push(s.active_owner_count + " owner" + (s.active_owner_count === 1 ? "" : "s"));
+  parts.push(s.open_incident_count_at_certify + " open incident" + (s.open_incident_count_at_certify === 1 ? "" : "s") + " at certify");
+  parts.push(s.glossary_term_count + " glossary term" + (s.glossary_term_count === 1 ? "" : "s"));
+  const base = "Based on: " + parts.join(", ");
+  return s.backfilled ? base + " (backfilled)" : base;
+};
+
 const certTone = (c: CatalogRowRead["certification"]): Tone =>
   c === "CERTIFIED" ? "ok" : c === "NONE" ? "mute" : "bad";
 const qualityTone = (q: CatalogRowRead["quality"]): Tone =>
   q === "PASSING" ? "ok" : q === "UNKNOWN" ? "mute" : q === "STALE" ? "warn" : "bad";
 
 const nf = new Intl.NumberFormat("en-US");
+
+// Same relative-time convention QualityScreen already uses (relTime) --
+// copied rather than shared, matching this codebase's existing pattern of
+// small per-file formatters (nf itself is already redefined per-screen).
+const relTime = (iso: string): string => {
+  const ms = Date.now() - new Date(iso).getTime();
+  const min = Math.round(ms / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.round(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.round(hr / 24)}d ago`;
+};
+
+/** P1-03: pale glossary-term chips shown under the description snippet on a
+ *  catalog row. Server exposes `row.glossary_terms: string[]` via
+ *  `_glossary_terms_by_table`; up to 3 chips are shown inline and a "+N more"
+ *  chip absorbs the tail so the row stays one line tall (Module 21 §6: fixed
+ *  row height, never re-measured). Click on a chip navigates to the
+ *  Business Meaning screen scoped to that term; click on "+N more" opens the
+ *  same screen scoped to this asset instead. */
+const MAX_INLINE_CHIPS = 3;
+function GlossaryChipRow({ terms, tableId }: { terms: readonly string[]; tableId: string }) {
+  const visible = terms.slice(0, MAX_INLINE_CHIPS);
+  const overflow = terms.length - visible.length;
+  const openTerm = (term: string) => (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const q = encodeURIComponent(term);
+    window.location.href = `/business-meaning?view=glossary&term=${q}`;
+  };
+  const openAllForTable = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    window.location.href = `/business-meaning?view=glossary&asset=${encodeURIComponent(tableId)}`;
+  };
+  return (
+    <span
+      className="cglossary"
+      role="list"
+      aria-label={`${terms.length} glossary term${terms.length === 1 ? "" : "s"}`}
+    >
+      {visible.map((t) => (
+        <button
+          key={t}
+          type="button"
+          role="listitem"
+          className="cglossary__chip"
+          // `listitem` is not a name-from-content role, so without an explicit
+          // label the accessible name falls through to `title` and a screen
+          // reader announces the instruction instead of the term.
+          aria-label={t}
+          title={`Open glossary term: ${t}`}
+          onClick={openTerm(t)}
+        >
+          {t}
+        </button>
+      ))}
+      {overflow > 0 ? (
+        <button
+          type="button"
+          role="listitem"
+          className="cglossary__chip cglossary__chip--more"
+          aria-label={`+${overflow} more`}
+          title={`${overflow} more glossary term${overflow === 1 ? "" : "s"}`}
+          onClick={openAllForTable}
+        >
+          +{overflow} more
+        </button>
+      ) : null}
+    </span>
+  );
+}
 
 export interface CatalogTableProps {
   rows: CatalogRowRead[];
@@ -97,6 +184,7 @@ export function CatalogTable({
         <div className="cc cc--state">Certification</div>
         <div className="cc cc--state">Quality</div>
         <div className="cc cc--rows">Rows</div>
+        <div className="cc cc--updated">Updated</div>
       </div>
 
       <div
@@ -157,13 +245,26 @@ export function CatalogTable({
                   ) : (
                     <span className="cnone">Undocumented</span>
                   )}
+                  {row.glossary_terms && row.glossary_terms.length > 0 ? (
+                    <GlossaryChipRow terms={row.glossary_terms} tableId={row.id} />
+                  ) : null}
                 </div>
 
                 <div className="cc cc--owner" role="gridcell">
                   {row.owner ?? <span className="cnone">Unowned</span>}
                 </div>
 
-                <div className="cc cc--state" role="gridcell">
+                <div
+                  className="cc cc--state"
+                  role="gridcell"
+                  /* P3-09: hover tooltip summarising the certification's
+                     structured evidence (see `CertificationEvidenceSummary`
+                     on the row). Falls back cleanly when the current cert
+                     is legacy (evidence null) or the row is EXPIRED /
+                     REVOKED / NONE -- `title` stays undefined so the
+                     browser renders no tooltip rather than an empty one. */
+                  title={certEvidenceTitle(row)}
+                >
                   <Pill tone={certTone(row.certification)}>
                     {row.certification.toLowerCase()}
                   </Pill>
@@ -181,6 +282,10 @@ export function CatalogTable({
                   ) : (
                     nf.format(row.row_count_estimate)
                   )}
+                </div>
+
+                <div className="cc cc--updated tnum" role="gridcell" title={new Date(row.updated_at).toLocaleString()}>
+                  {relTime(row.updated_at)}
                 </div>
               </div>
             );

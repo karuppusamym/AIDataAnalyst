@@ -12,6 +12,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.agent_contract_request_api import definition_from_json
+from aida.agent_contracts import AgentContractValidationError, validate_contract_definition
 from aida.agent_eval_gate import (
     DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
     compute_agent_eval_gate,
@@ -27,14 +29,22 @@ from aida.config import Settings, get_settings
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.description_withdrawal import (
+    apply_description_withdrawal,
+    reject_description_withdrawal,
+)
 from aida.document_ingestion import apply_document_claim, reject_document_claim
 from aida.events import record_audit, record_outbox
+from aida.governance_notifications import notify_safely
 from aida.metric_formula_signature import find_formula_collisions
 from aida.metric_suggestion_service import (
     apply_metric_suggestion_proposal,
     reject_metric_suggestion_proposal,
 )
+from aida.model_import import apply_model_import_batch, reject_model_import_batch
 from aida.models import (
+    AgentContract,
+    AgentContractRequest,
     AiAsset,
     AiAssetVersion,
     AssetDescriptionDraft,
@@ -47,6 +57,7 @@ from aida.models import (
     DataProductAccessRequest,
     DataProductVersion,
     DataSource,
+    DescriptionWithdrawal,
     DocumentClaim,
     GlossaryConflict,
     GlossaryLinkProposal,
@@ -57,6 +68,7 @@ from aida.models import (
     MetadataColumn,
     MetadataEnrichmentProposal,
     MetadataTable,
+    ModelImportBatch,
     ModelRouteConfiguration,
     Project,
     SemanticMetric,
@@ -483,6 +495,83 @@ async def create_metric_version(
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={"metric_slug": metric.slug, "version": version.version},
+    )
+    await session.commit()
+    return _metric_read(version, metric)
+
+
+class MetricDraftEdit(ApiModel):
+    definition: SemanticMetricCreate
+    expected_fingerprint: str
+
+
+@router.put("/semantic-metric-versions/{version_id}", response_model=SemanticMetricVersionRead)
+async def edit_metric_draft(
+    version_id: UUID,
+    body: MetricDraftEdit,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> SemanticMetricVersionRead:
+    version = await session.get(SemanticMetricVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Metric version not found")
+    enforce_organization(context, version.organization_id)
+    model = await session.scalar(
+        select(SemanticModelVersion)
+        .where(
+            SemanticModelVersion.id == version.semantic_model_version_id,
+        )
+        .with_for_update()
+    )
+    if model is None or model.status != "DRAFT" or version.fingerprint != body.expected_fingerprint:
+        raise HTTPException(status_code=409, detail="Metric changed or model is no longer a draft")
+    definition = body.definition
+    metric = await session.get(SemanticMetric, version.metric_id)
+    table = await session.get(MetadataTable, definition.source_table_id)
+    source = await session.get(DataSource, table.datasource_id) if table else None
+    if metric is None or definition.slug != metric.slug:
+        raise HTTPException(status_code=422, detail="A metric revision must preserve its slug")
+    if (
+        table is None
+        or table.status != "ACTIVE"
+        or source is None
+        or source.project_id != model.project_id
+    ):
+        raise HTTPException(status_code=422, detail="Choose an active table in the model project")
+    ids = set(definition.allowed_dimension_column_ids)
+    ids.update(i for i in (definition.measure_column_id, definition.default_time_column_id) if i)
+    columns = list(await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(ids))))
+    if len(columns) != len(ids) or any(
+        c.table_id != table.id or c.status != "ACTIVE" for c in columns
+    ):
+        raise HTTPException(
+            status_code=422, detail="Metric columns must belong to the active source table"
+        )
+    before = version.fingerprint
+    for key in (
+        "name",
+        "description",
+        "aggregation",
+        "grain",
+        "source_table_id",
+        "measure_column_id",
+        "default_time_column_id",
+    ):
+        setattr(version, key, getattr(definition, key))
+    version.allowed_dimension_column_ids = [str(i) for i in definition.allowed_dimension_column_ids]
+    version.fingerprint = _metric_fingerprint(definition)
+    version.created_by = context.principal_id
+    record_audit(
+        session,
+        context,
+        action="semantic_metric.draft.edit",
+        resource_type="semantic_metric_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"before_fingerprint": before, "after_fingerprint": version.fingerprint},
     )
     await session.commit()
     return _metric_read(version, metric)
@@ -1217,9 +1306,7 @@ async def _semantic_model_version_snapshot(
                     if metric_version.default_time_column_id
                     else None
                 ),
-                "allowed_dimension_column_ids": sorted(
-                    metric_version.allowed_dimension_column_ids
-                ),
+                "allowed_dimension_column_ids": sorted(metric_version.allowed_dimension_column_ids),
             }
             for metric_version, metric in rows
         },
@@ -1792,6 +1879,92 @@ async def _apply_governance_review_decision(
             "review_id": str(review.id),
             "eval_gate_verdict": eval_gate_verdict,
         }
+    elif review.object_type == "AGENT_CONTRACT_REQUEST":
+        request = await session.get(AgentContractRequest, UUID(review.object_id))
+        if request is None or request.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if request.status != "PENDING":
+            raise HTTPException(status_code=409, detail="agent contract request is no longer pending")
+        contract_eval_gate_verdict: str | None = None
+        if decision == "APPROVE":
+            # AG-10 extension: see `agent_contract_request_api`'s module
+            # docstring. Mirrors the AI_ASSET_VERSION branch above verbatim --
+            # same gate, same "raise rather than land in a half-decided
+            # state" rule, computed live so a stale pass can never carry a
+            # request through.
+            request_ai_version = await session.get(AiAssetVersion, request.ai_asset_version_id)
+            if request_ai_version is None or request_ai_version.organization_id != review.organization_id:
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            gate_result = await compute_agent_eval_gate(
+                session,
+                organization_id=review.organization_id,
+                extra_verdicts=stored_steward_verdicts(request_ai_version),
+                threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+            )
+            contract_eval_gate_verdict = gate_result.verdict
+            if gate_result.verdict != "PASS":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "agent evaluation gate did not pass "
+                        f"({gate_result.verdict}): {gate_result.reason}"
+                    ),
+                )
+            record_agent_eval_gate_evidence(
+                session,
+                request_ai_version,
+                gate_result,
+                context=replace(context, organization_id=review.organization_id),
+                stage="PUBLISH",
+            )
+            try:
+                definition = definition_from_json(request.definition)
+                validate_contract_definition(
+                    definition,
+                    actor_principal_id=context.principal_id,
+                    human_principal_ids=frozenset({request.requested_by}),
+                )
+            except AgentContractValidationError as exc:
+                raise HTTPException(status_code=422, detail=exc.code) from exc
+            contract = await session.scalar(
+                select(AgentContract).where(
+                    AgentContract.organization_id == review.organization_id,
+                    AgentContract.ai_asset_version_id == request.ai_asset_version_id,
+                )
+            )
+            if contract is None:
+                contract = AgentContract(
+                    organization_id=review.organization_id,
+                    ai_asset_version_id=request.ai_asset_version_id,
+                    created_by=request.requested_by,
+                    kill_engaged=False,
+                )
+                session.add(contract)
+            contract.agent_principal_id = definition.agent_principal_id.strip()
+            contract.capability_envelope = definition.capability_envelope.as_json()
+            contract.autonomy_tier = definition.autonomy_tier
+            contract.supervisor_persona = definition.supervisor_persona
+            contract.kill_scope = definition.kill_scope
+            contract.sampling_rate = definition.sampling_rate
+            contract.daily_token_cap = definition.daily_token_cap
+            contract.per_run_token_cap = definition.per_run_token_cap
+            contract.wall_clock_seconds_cap = definition.wall_clock_seconds_cap
+            contract.eval_gate_threshold = definition.eval_gate_threshold
+            request.status = "ACTIVATED"
+            request.activated_at = now
+            request.eval_gate_verdict = contract_eval_gate_verdict
+            event_type = "agent_contract_request.activated.v1"
+        else:
+            request.status = "REJECTED"
+            event_type = "agent_contract_request.rejected.v1"
+        aggregate_type = "agent_contract_request"
+        aggregate_id = str(request.id)
+        payload = {
+            "agent_contract_request_id": str(request.id),
+            "ai_asset_version_id": str(request.ai_asset_version_id),
+            "review_id": str(review.id),
+            "eval_gate_verdict": contract_eval_gate_verdict,
+        }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":
         proposal = await session.get(MetadataEnrichmentProposal, UUID(review.object_id))
         if proposal is None or proposal.organization_id != review.organization_id:
@@ -2010,6 +2183,13 @@ async def _apply_governance_review_decision(
         if draft is None or draft.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if decision == "APPROVE":
+            if (
+                context.principal_id in (draft.evidence or {}).get("editors", [])
+                or (draft.evidence or {}).get("edited_by") == context.principal_id
+            ):
+                raise HTTPException(
+                    status_code=409, detail="A description editor cannot approve their own edits"
+                )
             # GL-9: this is the only call site that publishes a drafted
             # description onto the asset, and it only runs after the
             # maker-checker guard above (status PENDING, independent
@@ -2043,9 +2223,18 @@ async def _apply_governance_review_decision(
         if claim is None or claim.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if decision == "APPROVE":
-            event_type = await apply_document_claim(claim, reviewer=context.principal_id, now=now)
+            # Publishes into the description store for the claim's subject --
+            # `ColumnDocumentationVersion` for a COLUMN claim,
+            # `AssetDocumentationVersion` for a TABLE one. Reached only after
+            # this endpoint's shared maker-checker guard above, which is the
+            # sole reason a direct-write authoring endpoint for column
+            # descriptions deliberately does not exist.
+            event_type, claim_version_id = await apply_document_claim(
+                session, claim, reviewer=context.principal_id, now=now
+            )
         else:
             event_type = await reject_document_claim(claim, reviewer=context.principal_id, now=now)
+            claim_version_id = None
         aggregate_type = "document_claim"
         aggregate_id = str(claim.id)
         payload = {
@@ -2053,6 +2242,69 @@ async def _apply_governance_review_decision(
             "document_section_id": str(claim.document_section_id),
             "subject_type": claim.subject_type,
             "subject_id": claim.subject_id,
+            "published_version_id": str(claim_version_id) if claim_version_id else None,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DESCRIPTION_WITHDRAWAL":
+        withdrawal = await session.get(DescriptionWithdrawal, UUID(review.object_id))
+        if withdrawal is None or withdrawal.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # WITHDRAW moves the version to WITHDRAWN, keeping its text so a
+            # run grounded on it stays replayable. REINSTATE republishes that
+            # text as a *new* version rather than flipping the old row back,
+            # so the chain goes on recording that it was retired. Either way
+            # the flag is False when the asset moved on in between: the
+            # reviewer decided about text that is no longer current.
+            event_type, retired = await apply_description_withdrawal(
+                session, withdrawal, reviewer=context.principal_id, now=now
+            )
+        else:
+            event_type = await reject_description_withdrawal(
+                withdrawal, reviewer=context.principal_id, now=now
+            )
+            retired = False
+        aggregate_type = "description_withdrawal"
+        aggregate_id = str(withdrawal.id)
+        payload = {
+            "withdrawal_id": str(withdrawal.id),
+            "request_type": withdrawal.request_type,
+            "subject_type": withdrawal.subject_type,
+            "subject_id": withdrawal.subject_id,
+            "version_id": str(withdrawal.version_id),
+            # False when the asset moved on between the request and this
+            # decision, in which case nothing was touched.
+            "applied": retired,
+            "retired": retired,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "MODEL_IMPORT_BATCH":
+        batch = await session.get(ModelImportBatch, UUID(review.object_id))
+        if batch is None or batch.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # Publishes through the same `publish_*` helpers a single-asset
+            # approval uses -- a bulk edit gets no shortcut past them. A change
+            # superseded since the workbook was exported is skipped rather than
+            # applied, so `applied` can be lower than the batch proposed.
+            event_type, applied = await apply_model_import_batch(
+                session, batch, reviewer=context.principal_id, now=now
+            )
+        else:
+            event_type = await reject_model_import_batch(
+                session, batch, reviewer=context.principal_id, now=now
+            )
+            applied = 0
+        aggregate_type = "model_import_batch"
+        aggregate_id = str(batch.id)
+        payload = {
+            "batch_id": str(batch.id),
+            "datasource_id": str(batch.datasource_id),
+            "filename": batch.filename,
+            "content_sha256": batch.content_sha256,
+            "change_count": batch.change_count,
+            "applied_count": applied,
+            "skipped_count": batch.skipped_count,
             "review_id": str(review.id),
         }
     elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":
@@ -2186,6 +2438,21 @@ async def decide_governance_review(
         raise HTTPException(
             status_code=409, detail="governance decision conflicted with concurrent state"
         ) from exc
+    # NT-1: after the commit, so a chat outage can never roll back a
+    # governance decision. Value-free: object type, id, decider, tier.
+    await notify_safely(
+        session,
+        review.organization_id,
+        "REVIEW_DECIDED",
+        {
+            "object_type": review.object_type,
+            "object_id": review.object_id,
+            "principal_id": context.principal_id,
+            "risk_tier": getattr(review, "risk_tier", None),
+            "occurred_at": now.isoformat(),
+        },
+        settings=get_settings(),
+    )
     return review
 
 
@@ -2348,15 +2615,18 @@ async def bulk_decide_governance_reviews(
             continue
         try:
             async with session.begin_nested():
-                event_type, aggregate_type, aggregate_id, payload = (
-                    await _apply_governance_review_decision(
-                        session,
-                        review,
-                        decision=body.decision,
-                        reason=item_reason,
-                        context=context,
-                        now=now,
-                    )
+                (
+                    event_type,
+                    aggregate_type,
+                    aggregate_id,
+                    payload,
+                ) = await _apply_governance_review_decision(
+                    session,
+                    review,
+                    decision=body.decision,
+                    reason=item_reason,
+                    context=context,
+                    now=now,
                 )
                 record_outbox(
                     session,

@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -685,3 +686,59 @@ def test_a_schema_known_only_through_its_own_comment_still_surfaces() -> None:
 def test_get_ddl_object_names_are_escaped_as_string_literals() -> None:
     assert _quote_literal("DB.SCHEMA.VIEW") == "'DB.SCHEMA.VIEW'"
     assert _quote_literal("o'brien") == "'o''brien'"
+
+
+# --- CN-9: get_query_history() reads ACCOUNT_USAGE.QUERY_HISTORY, value-free at
+# the connector boundary (the SQL text itself is not scrubbed here -- see
+# `QueryLogEntry`'s docstring for why that is INV-6-safe: nothing here persists it).
+
+
+@pytest.mark.asyncio
+async def test_snowflake_get_query_history_maps_rows() -> None:
+    connector = SnowflakeConnector("snowflake://user:pass@acc/ANALYTICS/PUBLIC")
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.description = [("query_id",), ("query_text",), ("start_time",)]
+    executed_at = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
+    mock_cursor.fetchall.return_value = [
+        ("01a-real-query-id", "SELECT a.id FROM a JOIN b ON a.id = b.a_id", executed_at),
+    ]
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(connector, "_get_connection", return_value=mock_conn):
+        entries = await connector.get_query_history(
+            since=datetime(2026, 8, 1, tzinfo=UTC), limit=100
+        )
+
+    assert len(entries) == 1
+    assert entries[0].query_id == "01a-real-query-id"
+    assert entries[0].sql_text == "SELECT a.id FROM a JOIN b ON a.id = b.a_id"
+    assert entries[0].executed_at == executed_at
+
+    # Bounded on both axes: `since` and `limit` are real bind parameters, not
+    # merely accepted and ignored.
+    executed_sql, params = mock_cursor.execute.call_args[0]
+    assert params["since"] == datetime(2026, 8, 1, tzinfo=UTC)
+    assert params["limit"] == 100
+    assert "account_usage.query_history" in executed_sql.lower()
+    assert "LIMIT" in executed_sql
+
+
+@pytest.mark.asyncio
+async def test_snowflake_get_query_history_drops_incomplete_rows() -> None:
+    connector = SnowflakeConnector("snowflake://user:pass@acc/ANALYTICS/PUBLIC")
+
+    mock_conn = MagicMock()
+    mock_cursor = MagicMock()
+    mock_cursor.description = [("query_id",), ("query_text",), ("start_time",)]
+    mock_cursor.fetchall.return_value = [
+        (None, "SELECT 1", None),
+        ("real-id", None, None),
+    ]
+    mock_conn.cursor.return_value = mock_cursor
+
+    with patch.object(connector, "_get_connection", return_value=mock_conn):
+        entries = await connector.get_query_history(since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    assert entries == ()

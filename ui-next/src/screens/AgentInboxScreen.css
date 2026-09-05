@@ -1,0 +1,99 @@
+/* Agent inbox (UX-21). Read first thing in the morning: density and
+   scannability beat decoration — built entirely on the platform's shared
+   design tokens (tokens.css) so it themes correctly in dark mode instead of
+   hard-coded fallback colours. */
+
+.aiinbox { display: flex; flex-direction: column; gap: 16px; max-width: 1180px; margin: 0 auto; padding-bottom: 32px; }
+
+.aiinbox__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.aiinbox__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.aiinbox__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 56ch; }
+
+.aiinbox__killbanner {
+  margin: 0; display: flex; align-items: center; gap: 9px;
+  padding: 10px 14px; border: 1px solid var(--bad); border-left-width: 3px;
+  border-radius: var(--radius); background: var(--bad-soft); color: var(--bad);
+  font-weight: 600; font-size: 13px;
+}
+.aiinbox__notice {
+  margin: 0; padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--sunk); color: var(--ink-2); font-size: 12.5px;
+}
+
+.aiinbox__kpis {
+  list-style: none; margin: 0; padding: 0;
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px;
+}
+.aiinbox__kpi {
+  display: flex; align-items: center; gap: 12px; min-width: 0;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  padding: 13px 15px; box-shadow: var(--shadow-1);
+}
+.aiinbox__kpiicon {
+  width: 35px; height: 35px; border-radius: 9px; display: grid; place-items: center;
+  font-size: 15px; flex: none;
+}
+.aiinbox__kpi--info .aiinbox__kpiicon { color: var(--info); background: var(--info-soft); }
+.aiinbox__kpi--ok .aiinbox__kpiicon { color: var(--ok); background: var(--ok-soft); }
+.aiinbox__kpi--warn .aiinbox__kpiicon { color: var(--warn); background: var(--warn-soft); }
+.aiinbox__kpi--accent .aiinbox__kpiicon { color: var(--accent); background: var(--accent-soft); }
+.aiinbox__kpivalue { display: block; font-size: 21px; font-weight: 700; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.aiinbox__kpilabel { display: block; font-size: 11px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; }
+
+.aiinbox__panel {
+  border: 1px solid var(--line); border-radius: 11px; background: var(--surface);
+  box-shadow: var(--shadow-1); overflow: hidden;
+}
+.aiinbox__panelhead {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 13px 16px; border-bottom: 1px solid var(--line-soft);
+}
+.aiinbox__panelhead h2 { margin: 0; font-size: 13.5px; font-weight: 600; letter-spacing: -0.005em; }
+.aiinbox__count {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 999px;
+  min-width: 1.5em; text-align: center; padding: 1px 7px;
+}
+.aiinbox__panelbody { padding: 10px; }
+.aiinbox__loading { margin: 0; padding: 18px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.aiinbox__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+
+.aiinbox__pending { border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
+.aiinbox__pendingbtn {
+  width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+  padding: 11px 13px; display: flex; flex-direction: column; gap: 7px; font: inherit;
+}
+.aiinbox__pendingbtn:hover { background: var(--sunk); }
+.aiinbox__pendingbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.aiinbox__pendinghead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.aiinbox__pendinghead strong { font-size: 13.5px; }
+
+.aiinbox__row {
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 11px 13px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.aiinbox__rowhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.aiinbox__rowhead strong { font-size: 13.5px; }
+
+.aiinbox__meta {
+  display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-3); font-size: 11.5px; align-items: center;
+}
+.aiinbox__recommendation { display: flex; align-items: center; gap: 8px; }
+.aiinbox__negative { color: var(--bad); font-weight: 600; }
+.aiinbox__muted { color: var(--ink-3); }
+
+.aiinbox__budget { display: inline-flex; align-items: center; gap: 6px; }
+.aiinbox__budgetbar {
+  display: inline-block; width: 5.5rem; height: 5px; border-radius: 999px;
+  background: var(--sunk); border: 1px solid var(--line-soft); overflow: hidden;
+}
+.aiinbox__budgetfill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover)); }
+
+@media (max-width: 780px) {
+  .aiinbox__kpis { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 460px) {
+  .aiinbox__kpis { grid-template-columns: 1fr; }
+  .aiinbox__head { flex-direction: column; align-items: flex-start; }
+}

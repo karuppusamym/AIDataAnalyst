@@ -1,0 +1,22 @@
+/* CrossLinks — see CrossLinks.tsx. */
+
+.xlinks { display: flex; flex-direction: column; gap: 5px; }
+
+.xlinks__label {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+
+.xlinks__row { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.xlinks__link {
+  font: inherit; font-size: 12px; line-height: 1.5;
+  padding: 4px 9px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--ink-2);
+  transition: background .12s, border-color .12s, color .12s;
+  white-space: nowrap;
+}
+.xlinks__link:hover {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}

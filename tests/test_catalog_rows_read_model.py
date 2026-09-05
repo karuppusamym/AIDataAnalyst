@@ -1,6 +1,6 @@
 """UX-12 -- `GET /v1/organizations/{organization_id}/catalog/rows`.
 
-Runs the real endpoint body (`aida.api.list_catalog_rows`) and the real
+Runs the real endpoint body (`atlas.modules.catalog.router.list_catalog_rows`) and the real
 composition (`aida.catalog_read_model.compose_catalog_rows`) against an
 in-memory SQLite database, following `test_catalog_pagination.py`'s own
 rationale for doing so: PostgreSQL is not reachable in this sandbox, but
@@ -30,7 +30,6 @@ from fastapi import HTTPException
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from aida.api import list_catalog_rows
 from aida.authorization_gate import AuthorizationDenied, GateOutcome
 from aida.config import Settings
 from aida.db import Base
@@ -56,6 +55,7 @@ from aida.models import (
     Project,
     TableProfile,
 )
+from atlas.modules.catalog.router import list_catalog_rows
 from tests.support.doubles import security_context
 
 pytestmark = pytest.mark.asyncio
@@ -711,7 +711,7 @@ async def test_rows_from_a_datasource_the_gate_denies_are_filtered_out(
             raise AuthorizationDenied("policy_denied")
         return GateOutcome(workspace_id=None, reason_code="ok", decided=True)
 
-    monkeypatch.setattr("aida.api.gate", fake_gate)
+    monkeypatch.setattr("atlas.modules.catalog.router.gate", fake_gate)
 
     page = await list_catalog_rows(
         org.id,

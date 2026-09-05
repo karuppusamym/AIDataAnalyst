@@ -11324,3 +11324,563 @@ before this session started; `ui-next/src/lib/types.ts` was not touched.
 - No backend endpoint had to be stubbed or mocked for any of UX-15/UX-20/UX-8 -- every call in this
   session's diff hits a route that already existed, unchanged, on `feature/snowflake-dbt-lineage-mcp` at
   this branch's base commit (`fa501c0`).
+
+## 2026-09-03 — CN-9 connector methods, plus a full-suite verification pass (not a delivery, an audit)
+
+### CN-9: `Connector.get_query_history()` for Snowflake and BigQuery
+
+Added the base-class method (`connectors/base.py`: `QueryLogEntry`, `ConnectorQueryHistoryUnsupported`,
+`Connector.get_query_history` -- non-abstract, fails closed, same shape as `profile_column_values`) and
+implemented it for `SnowflakeConnector` (`ACCOUNT_USAGE.QUERY_HISTORY`) and `BigQueryConnector`
+(region-qualified `JOBS_BY_PROJECT`), both bounded by `since`/`limit` bind parameters, both reading only
+a query's own text and timing, never a result row. `QueryLogEntry` is defined in `connectors/base.py`
+rather than imported from `query_history_miner.py` on purpose -- module 02 (connectivity) is a lower
+layer than modules 05/07/12 where the miner lives, and a connector must not depend upward on the module
+that consumes what it produces. Six new tests (`tests/test_connectors.py`,
+`tests/test_connectors_snowflake.py`, `tests/test_connectors_bigquery.py`): fail-closed default,
+row-mapping, bind-parameter bounding, incomplete-row dropping.
+
+**Honest gaps:** Databricks (`system.query.history`) not implemented. `query_history` capability flags
+stay `False` on every connector regardless (module 02 §11: flags are certification-derived, never
+hand-declared) -- no live account was available to certify against, so that is correctly still closed.
+The INV-6 gap-proof test this row's own tracker entry (CN-9) calls for -- a sentinel scan proving
+`sql_text` never reaches persisted state once a caller wires this into
+`mine_and_land_query_history_candidates` -- is not written, because that caller/wiring does not exist
+yet either (AT-12's own honest gap #3).
+
+### A full-suite verification pass, prompted by a fair question about depth
+
+The session this entry closes had drifted into scoping and "designing" work (N20/CN-9) before checking
+whether a working test/type-check environment even existed here. It didn't: every `.venv*` in this
+worktree pointed at a now-gone session's Python interpreter, and rebuilding one on this session's own
+scratch disk failed with `No space left on device` (a session-VM constraint, not a project one -- the
+project's own mount had hundreds of GB free). Redirecting `UV_PYTHON_INSTALL_DIR`/`UV_PROJECT_ENVIRONMENT`
+to `/tmp` (which had room) let `uv sync --frozen --extra dev` complete for real.
+
+With a working environment, this entry runs what the tracker has been claiming, rather than trusting
+the citations:
+
+- **`tests/test_doc_claims.py`** (TS-12's mechanical citation gate over all of `Docs/`): clean, first
+  try, no stale citations found anywhere in the tree.
+- **Full test suite**, run in six chunks (no background-process capability in this session, so this was
+  sequential, not backgrounded): **7,112 of 7,112 collected tests executed, 0 errors, 13 skipped, 1
+  apparent failure** (`tests/test_config.py::test_environment_must_be_explicit_outside_tests`) that
+  traced directly to this session's own `AIDA_ENVIRONMENT=development` export leaking into a test that
+  specifically checks behaviour when that variable is *unset* -- rerun in isolation without the export,
+  it passes. Net: **7,112/7,112 real passes**, matching (and for the first time in this session, actually
+  proving rather than repeating) the tracker's repeated "tests passing" claims.
+- **`mypy src`**: clean, 293 source files, 0 issues.
+- **`lint-imports`**: 8 contracts analyzed, 8 kept, 0 broken.
+- **Two claims spot-checked at the algebra/code level, not just by trusting a green test:**
+  `_lane3_confidence` (AT-12) cannot exceed `QUERY_HISTORY_CONFIDENCE_CAP = 0.70` for any occurrence
+  count -- `progress` is clamped to `1.0` before scaling, and the return value is additionally
+  `min()`-capped again on the way out. `test_model_output_types_are_inert` and
+  `test_no_connector_execution_outside_gateway` (INV-2/INV-3) are real structural checks -- type
+  hierarchy, method-signature, and static call-site assertions -- not tautologies dressed as tests.
+
+**What this does not establish.** This is one session's snapshot verification, not a standing gate --
+it used a throwaway `/tmp` environment, not a committed CI configuration, and it checked what currently
+exists against what `Docs/` currently claims, not whether either one is the *right* thing to have built.
+A citation resolving and a test passing prove the artifact exists and its narrow assertion holds; they
+do not prove the feature is well-designed, complete, or that its test actually exercises the risk it
+claims to cover. This entry also did not audit the UI packages (`ui/`, `ui-next/`), infra, or migration
+history -- scope was `src/`, `tests/`, and `Docs/` citations only. Worth turning into a real CI job
+(module 02's own `CN-3` neighbours this territory) rather than repeating by hand next time.
+
+---
+
+## 2026-09-05 — Column-level descriptions: the store that was missing, and the model workbook export
+
+### What was actually broken
+
+Two separate gaps hid behind one symptom ("I don't see the column-level description"):
+
+1. **The source-side description existed and was never rendered.**
+   `MetadataColumn.source_description` has been populated by ingestion and returned by
+   `GET /v1/tables/{table_id}/columns` (`MetadataColumnRead`) all along. The only caller
+   in `ui-next` was `SemanticAuthor.tsx`, which destructured `{id, name}` for metric-builder
+   dropdowns and dropped the rest. The data reached the browser and was thrown away.
+2. **The authored column description had nowhere to live at all.** Table-level had two stores
+   (`MetadataBusinessAnnotationVersion.business_description`, `AssetDocumentationVersion.readme`);
+   column-level had none. This was known and documented rather than accidental —
+   `DocumentClaim`'s docstring and tracker row N8 both recorded that an APPROVED column
+   `DESCRIBES` claim's terminal state was the claim row, because no surface consumed it.
+   A steward could approve a column description and no reader anywhere could resolve it.
+
+### What was built
+
+- **`ColumnDocumentation` / `ColumnDocumentationVersion`** (migration `b4e1c7a90d33`) — the
+  column-level counterpart to `AssetDocumentation`/`AssetDocumentationVersion`, same
+  parent-identity / append-only-version split. `aida.column_documentation` is the single write
+  path; the prior `APPROVED` row moves to `SUPERSEDED` in the same transaction, never edited for
+  content, so a run grounded on a description stays replayable against exactly that text.
+  `source_claim_id` traces a published version back through the claim to the uploaded source text.
+- **Approval now publishes.** `document_ingestion.apply_document_claim` takes a session and writes:
+  COLUMN claims into `ColumnDocumentationVersion`, TABLE claims into `AssetDocumentationVersion`
+  through `asset_description_service.publish_asset_documentation_version` — extracted from
+  `apply_asset_description_draft` so the two approval routes cannot grow divergent
+  append-and-supersede implementations. `created_by` carries the uploader, not the reviewer, so
+  maker and checker stay distinguishable on the published version.
+- **Deliberately no direct-write endpoint.** Authored column content reaches an APPROVED version
+  only through `decide_governance_review`'s maker-checker guard. A POST here would be a way around
+  the one gate that makes the content trustworthy.
+- **`GET /v1/tables/{table_id}/column-documentation`** (`column_documentation_api.py`) — columns
+  with both descriptions as *separate fields*. Kept off `list_columns` on purpose: that is one of
+  the five CT-2 keyset endpoints, and joining a window function onto the hot catalog list path for
+  a pane that reads one table at a time is the wrong trade.
+- **`ColumnPanel`** in the catalog evidence pane — the first place in either UI a column
+  description has ever been rendered. Source comment and authored description render as separately
+  labelled claims; absence renders as absence rather than falling back to the source comment under
+  a "business description" heading, which would assert a review that never happened.
+- **`GET /v1/datasources/{datasource_id}/model/export.xlsx`** — README, Tables, Columns and
+  Relationships sheets, with stable ids on every row so a re-import can match after a rename.
+  Written by `aida.xlsx`, a ~250-line stdlib OOXML writer: `pyproject.toml` pins no spreadsheet
+  library and this follows `asset_evidence_api`'s stated constraint of not adding a dependency
+  when a dependency-free format is honest. `defusedxml` is already pinned for the parsing half.
+
+### Verification
+
+- `tests/test_column_documentation.py` (11), `tests/test_xlsx.py` (18), `tests/test_model_export.py`
+  (15); `ui-next` `ColumnPanel.test.tsx` (7). Full suites green: backend, 312 `ui-next` tests,
+  `mypy` clean, `ruff` clean, `lint-imports` 8/8 kept, one Alembic head (`b4e1c7a90d33`).
+- OpenAPI baseline regenerated; `scripts/openapi_diff.py` reports two added paths and no breaking
+  changes.
+- The workbook was rendered from seeded data and its package structure asserted part-by-part
+  (every relationship resolves to a present part, every part parses as XML) rather than only
+  "returned bytes" — a malformed workbook otherwise fails first at the point a steward opens it.
+
+### Known limitations
+
+- **The round trip is half built.** Download and edit work; re-import does not exist yet. The
+  workbook's README sheet names the editable columns and warns against editing id columns, which is
+  groundwork for that pass, not a substitute for it.
+- **Cross-source relationships are omitted from the export.** Rendering a cross-domain edge needs
+  `domain_service.check_cross_boundary_grant` per read (ADR-0017 SS4/SS8) and this export does not
+  perform it. The README sheet says so, so absence is not read as "there are none".
+- **Composition is in memory, not streamed.** `EXPORT_MAX_ROWS_PER_SHEET = 50_000` per sheet;
+  truncation is reported in the README sheet and in `X-Export-Truncated`, never silently.
+- **The export hash is not stable across downloads.** The README sheet records when the snapshot
+  was taken, so `X-Artifact-SHA256` varies per download by design. What `aida.xlsx`'s determinism
+  buys is that the hash varies with *content* alone — no zip timestamps or part ordering leak in.
+- **Table descriptions published from a claim bypass GL-9's scoring.** A TABLE `DocumentClaim` and
+  an `AssetDescriptionDraft` now both publish into `AssetDocumentationVersion`, but only the latter
+  carries evidence scores. Both still pass through the same review; the claim route simply has no
+  score to sort a reviewer's queue by.
+
+---
+
+## 2026-09-05 — Workbook re-import: the round trip closes
+
+The previous entry shipped the export and named the missing half: "Download and
+edit work; re-import does not exist yet." This is that half.
+
+### The shape
+
+    POST /v1/datasources/{id}/model/import   parse + diff, writes a DRAFT batch
+    GET  /v1/model-imports/{id}/changes      what it would change, row by row
+    POST /v1/model-imports/{id}/submit       enters the shared review queue
+                                             -> APPROVE publishes
+
+Upload is deliberately not submit. A steward who uploads the wrong file sees a
+nonsense diff and abandons it, rather than having already put hundreds of
+spurious changes in front of a reviewer.
+
+**One review per batch, not per change.** `DocumentClaim` takes a review per
+claim because deciding one means reading its own source paragraph. A workbook's
+changes share one provenance, and 400 queue entries for one edit would make the
+queue useless — which is why this path exists alongside the claim path rather
+than reusing it. Approval publishes through the same `publish_column_description`
+/ `publish_asset_documentation_version` / `write_annotation_version` helpers a
+single-asset approval uses; there is no bulk write that bypasses them.
+
+### The two things most likely to go wrong, and what stops them
+
+**Lost updates.** Every editable field exports beside a read-only `*_version`
+column (`description_version`, `readme_version`, and `annotation_version`, added
+to the Tables sheet in this pass). That records the version the editor was
+looking at. At apply time it is compared against the current version; a change
+whose expectation no longer holds is `SKIPPED_STALE` and the other person's
+work stands. Without it, a workbook exported Monday and uploaded Friday would
+silently discard everything published in between —
+`tests/test_model_import.py::test_an_edit_superseded_since_export_is_skipped_not_applied`.
+
+**A reader that only understands its own writer's output.** Excel rewrites a
+workbook wholesale on save: strings move into `xl/sharedStrings.xml`, empty
+cells vanish entirely, sheet parts stop matching sheet order, and formatted
+strings split into runs. `aida.xlsx_reader` handles all four, and
+`tests/test_xlsx_reader.py` builds Excel-shaped packages deliberately —
+a reader tested only against `aida.xlsx`'s inline-string output would have
+passed every test and failed on the first real upload.
+
+### Deliberate refusals
+
+- **A blank cell is not a deletion.** Blanking a cell by accident is the easiest
+  mistake in a spreadsheet, and an empty cell is indistinguishable from one
+  nobody filled in. Blank means "no edit".
+- **A spreadsheet cannot create a business annotation.** Editing
+  `business_name` / `business_description` / `grain_statement` re-publishes an
+  existing one; creating one needs a domain and entity classification that no
+  cell can supply. Rows attempting it are REJECTED *with the reason*, not
+  ignored.
+- **Rows that could not be matched are reported, never dropped.** An edited id,
+  a column from another datasource, a missing `column_id` header — each becomes
+  a REJECTED change row carrying its own sheet name and row number, and the
+  preview UI sorts those to the top. An import that hid what it could not
+  understand would look cleaner than it was.
+- **Several annotation fields edited on one table publish one new version**, not
+  three: the version chain should record what the steward did, not how many
+  cells they touched. Fields the workbook does not expose (`table_role`,
+  `synonyms`, `tags`, `confidence`) are carried forward verbatim.
+
+### Verification
+
+- `tests/test_model_import.py` (21) — every test starts from a real
+  `compose_model_workbook` export and edits the file, rather than hand-building
+  an upload, so an export/import disagreement about a header or version column
+  cannot pass. `tests/test_xlsx_reader.py` (15). `ui-next`
+  `WorkbookImport.test.tsx` (7). Full suites green; `mypy` clean on 323 files,
+  `ruff` clean, `lint-imports` 8/8, one Alembic head (`c7f2a4b81e50`).
+- OpenAPI baseline regenerated: five added paths, no path removed, and no
+  existing path's definition changed (verified by set comparison, not just by
+  the diff tool's own report).
+- `test_the_readme_promises_exactly_the_fields_the_import_reads_back` asserts
+  `model_export.EDITABLE_COLUMNS` (what the README sheet tells a steward) equals
+  `model_import.COLUMN_FIELDS`/`TABLE_FIELDS` (what the code actually reads), so
+  the file's own instructions cannot drift from its behaviour.
+
+### Known limitations
+
+- **No `python-multipart`**, so the workbook is sent as the raw request body
+  with the filename as a query parameter rather than as a form upload. This
+  follows the repo's standing no-new-dependency constraint and lets a browser
+  stream the `File` through without base64, but it is a slightly unusual API
+  shape that a client has to be told about.
+- **`MAX_CHANGES_PER_BATCH = 5_000`.** Past that a single decision stops being
+  a review, so the upload is refused with a message telling the uploader to
+  split it — not truncated into something that looks complete.
+- **Relationships are exported but not importable.** Approving or rejecting a
+  relationship candidate is a decision with its own evidence and its own review
+  path; making it a spreadsheet cell would be the wrong affordance.
+- **No partial approval.** A reviewer approves or rejects the whole batch. Per-
+  change decisions would reintroduce exactly the per-row review load this design
+  exists to avoid, but it does mean one bad row means rejecting the file and
+  re-uploading a corrected one.
+- **Deleting a description still has no path anywhere** — not through the
+  workbook (by design, above), and not through the UI either. It remains a gap.
+
+---
+
+## 2026-09-05 — Cross-source reaches the UI: domain-scoped lineage, grants, and identity resolution
+
+The previous entries closed the workbook round trip and noted a separate gap
+found while answering a question about it: the platform's cross-source
+capabilities have been on the server the whole time and `ui-next` reached none
+of them. Every lineage and relationship screen was scoped to one datasource, so
+the two questions a single source cannot answer — *does this column point into
+another system?* and *are these two tables the same object?* — had no surface at
+all. `UnifiedLineageScreen` documented the omission; `DomainLineageGraphRead`
+had sat in `types.ts` unused since it was generated.
+
+### What was already there, and what was not
+
+Server-side, addressed by **data domain** rather than datasource:
+`/v1/data-domains/{id}/unified-lineage/graph`,
+`.../relationship-candidates/discover-cross-source`,
+`.../cross-source-object-resolution-candidates/discover`,
+`/v1/datasources/{id}/cross-source-object-resolution-candidates`,
+`/v1/cross-source-object-resolution-candidates/{id}/decision`, and the grant
+pair in `atlas.modules.identity_tenancy.router`. No backend change was needed
+in this pass; every line of it is UI.
+
+### What shipped
+
+- **Domain scope on Unified lineage.** A `Scope` select switches between one
+  datasource and every datasource in one domain — the only view in which a
+  relationship spanning two systems renders as an edge at all. Both scopes live
+  in the URL (`?scope=domain&dom=…`), so a domain graph is as shareable as a
+  single-source one.
+- **Withheld domains are named, never dropped.** ADR-0017 SS4 / INV-5 make
+  cross-domain visibility deny-by-default and never inherited, and the server
+  reports `withheld_cross_boundary_domain_ids` for domains with candidates
+  reaching in that no ACTIVE grant covers. Those render as a banner naming each
+  one, with the grant request pre-filled for the specific domain that was
+  withheld — an incomplete graph cannot pass for a complete one.
+- **`CrossBoundaryGrants`.** Lists grants in both directions and states the
+  direction *in words* ("Retail may see into Finance"), because two domain names
+  alone leave a steward guessing which side they are on. It can request and it
+  deliberately cannot approve: a grant goes ACTIVE only when a different
+  principal decides its `CROSS_BOUNDARY_GRANT` review on the Review queue.
+- **`CrossSourceScreen`** (nav `cross-source`, Steward group) — domain-scoped
+  discovery for both relationship candidates and object-resolution candidates,
+  plus the review queue for the latter with approve/reject. A cross-boundary
+  scan refused with 403 is turned into the grant request rather than a dead end.
+- **Impact still resolves per datasource.** The impact endpoint is
+  datasource-scoped; a domain-graph node id carries its owning datasource as a
+  `{datasource_id}:` prefix (added by the merge step so two sources' same-named
+  synthetic nodes cannot false-merge), so selecting a node splits that prefix
+  back off and asks the right datasource — rather than disabling impact in the
+  one view where cross-source questions actually arise.
+
+### A bug the unit tests did not catch, and the browser did
+
+The graph body was gated on `!ds`, so domain scope — which has no `ds` — rendered
+"Pick a datasource" *underneath a header already reporting the domain graph's
+node and edge counts*. Both of the domain tests written first asserted on things
+that render outside that guard (the counts, the withheld banner), so both passed
+against a screen that showed an empty state. Found by loading the page and
+querying the DOM. Fixed, and a new case in `UnifiedLineageScreen.test.tsx`
+("renders the graph body in domain scope, not an empty 'pick a datasource'
+state") now asserts on the tabs *inside* that guard so it cannot regress.
+
+### Verification
+
+- `ui-next`: 340 tests (up from 319) across 53 files — `CrossSourceScreen.test.tsx`
+  (9), `CrossBoundaryGrants.test.tsx` (7), and 5 added to
+  `UnifiedLineageScreen.test.tsx`. `tsc --noEmit` clean, production build clean.
+- Browser-verified against fixtures: domain graph renders 4 nodes / 3 edges with
+  the cross-datasource edge present, the withheld banner names Retail, the grants
+  panel shows direction and pending state, and the cross-source screen lists two
+  candidates with evidence and decision controls. No console errors from this code.
+
+### Known limitations
+
+- **Discovery reports a count, not a run.** Both discover actions are synchronous
+  `202`-style calls that return the candidates they proposed; there is no progress
+  view for a long scan over many datasource pairs, and the server's own
+  `max_datasource_pairs` cap is not exposed as a control yet.
+- **Object-resolution candidates are fetched per datasource and merged client-side**
+  because no domain-scoped list endpoint exists. Bounded by the domain's source
+  count, and a source the caller cannot read contributes nothing rather than
+  failing the view — but it is N requests, not one.
+- **Relationship candidates discovered cross-source are still reviewed on the
+  existing per-datasource Relationships screen.** Only object-resolution
+  candidates get a queue here; unifying the two review surfaces is separate work.
+- **No approve control for grants**, by design — the Review queue owns that
+  decision. A steward requesting a grant has to go there to see it decided.
+- **The domain picker walks organization → lines of business → domains**, since
+  there is no org-wide domain endpoint. Bounded, but it is a fan-out.
+
+---
+
+## 2026-09-05 — Three open gaps closed: retiring a description, trimming a batch, reviewing cross-source relationships
+
+Each of these was named as a known limitation in one of the three entries above.
+None needed a new idea; all three needed the work actually doing.
+
+### 1. A description can now be retired
+
+The gap flagged twice: **publishing** a description was governed from the first
+commit, **un-publishing** one was not possible at all. The workbook path
+deliberately refuses to read a blank cell as a deletion (an empty cell is
+indistinguishable from one nobody filled in), and `publish_column_description`
+only ever adds — so the only remedy was to publish a correction, which does not
+work when the right answer is that the platform should say nothing.
+
+`DescriptionWithdrawal` (migration `d9a3f61c2b07`) + `aida.description_withdrawal`,
+routed through `GovernanceReview` as `DESCRIPTION_WITHDRAWAL`. Three properties
+carry the design:
+
+- **It is not a delete.** The version row keeps its text and moves to
+  `WITHDRAWN`, so an `AgentRun` grounded on it stays replayable against exactly
+  the words it saw. The current-version resolvers filter `status == "APPROVED"`,
+  so the asset simply reads as undescribed again.
+- **`WITHDRAWN` is deliberately distinct from `SUPERSEDED`.** One means "a newer
+  approved version replaced this", the other "this was retracted". An audit has
+  to be able to tell them apart.
+- **It re-checks the version it names.** The request records the exact
+  `version_id` it was raised against; if someone publishes in the window before
+  approval, nothing is retired — the reviewer read one description and would
+  otherwise be removing another. Same lost-update reasoning as the workbook
+  import's `expected_version`.
+
+The read side matters as much: `ColumnDocumentationRead.withdrawn_description`
+lets a reader distinguish *"we looked and decided to say nothing"* from
+*"nobody has looked"*. Reverting a withdrawn column to looking untouched would
+lose a real editorial decision.
+
+There is deliberately **no approve endpoint** — approving is
+`POST /v1/governance/reviews/{id}/decision` like every other governed object.
+
+### 2. One wrong row no longer forces rejecting a whole workbook
+
+Previously a reviewer approved or rejected a batch whole, so a typo in a 400-row
+workbook meant rejecting the file and re-uploading. `set_change_exclusion` +
+`POST /v1/model-imports/{id}/changes/exclusion` add the release valve, and it
+sits on the **uploader's** side of the review boundary: only a `DRAFT` batch can
+be trimmed, so what a reviewer is asked to decide is fixed the moment it is
+submitted. Excluding is not deciding — an `EXCLUDED` row is never applied and
+never counted as skipped; it was withdrawn before anyone was asked to look at it.
+`REJECTED` diff findings cannot be toggled into changes.
+
+The UI keeps excluded rows visible and dimmed rather than hiding them: hiding
+one would make the decision invisible the moment it was made.
+
+### 3. Cross-source relationships are reviewed where they are discovered
+
+Discovery already lived on `CrossSourceScreen`; the results were reviewed on the
+per-datasource Relationships screen — the one scope that *cannot* express "this
+column points into another system", so the rows a steward most needed were the
+ones its filter hid. Both queues now live on the cross-source screen, sharing a
+domain, a status filter and a pending count. Same-source candidates deliberately
+stay on Relationships; duplicating them would make this a second,
+differently-filtered copy of that screen. Relationships render **directionally**
+(`→`), unlike the symmetric `≡` of a same-object pair — a foreign-key-like
+relationship points one way, and rendering it symmetrically would misstate which
+side is the reference.
+
+### 4. Three shared gates caught real integration gaps in the above
+
+Worth recording, because all three were things the feature work itself would
+never have surfaced:
+
+- **`test_event_catalog_gate`** — new `record_outbox` event types must appear in
+  `Docs/30-contracts/04-event-catalog.md`. Six rows added
+  (`model_import.submitted/applied/rejected`, `description.withdrawal.
+  requested/approved/rejected/superseded`).
+- **`test_reviewer_agent::test_every_object_type_the_codebase_creates_is_classified`**
+  — a review object type absent from the ADR-0027 tier table silently defaults
+  to T3. `MODEL_IMPORT_BATCH` takes `BULK_STEWARDSHIP_OPERATION`'s shape (T1
+  below the governance threshold, T2 above, now shared through
+  `_COUNT_ESCALATED` rather than a second threshold that could drift).
+  `DESCRIPTION_WITHDRAWAL` is **T2, deliberately above the tier of publishing**
+  (`ASSET_DOCUMENTATION_VERSION`, T0): a withdrawal undoes a decision a human
+  already made and removes grounding a run may have cited. Publishing bad
+  language is visible and correctable; silently un-publishing good language is
+  neither, so it sits above `DEFAULT_MAX_AGENT_TIER` and a human always decides.
+- **`test_migration_orm_drift`** — reported three indexes that
+  `alembic upgrade head` builds but `Base.metadata` never declared, on
+  `governance_review` and `ownership_assignment`. **Pre-existing, from
+  migrations `a1b2c3d4e5f6` and `b7e3f19d5c24`, unrelated to this work** —
+  fixed anyway, by declaring them on the models, since the ORM should tell the
+  truth about the database it maps.
+
+### Verification
+
+**A correction to the two entries above this one.** Both reported the backend
+suite as green citing "exit code 0". That signal was worthless: the command was
+`pytest … | tail -6`, and a shell pipeline's exit code is the *last* command's
+(`tail`, always 0), never pytest's. The captured output was also truncated to
+its final few hundred bytes, so the `grep -c FAILED` run over it found nothing
+because the failures had scrolled out, not because there were none. Re-run
+properly here (no pipeline, full output to a file), the suite was **exit 1 with
+5 failures** — two of which were the gaps in §4 above. Anyone reading those two
+entries should treat their "suite green" line as unverified.
+
+- Backend, verified: `tests/test_description_withdrawal.py` (15) and 6 added to
+  `tests/test_model_import.py` (27 total). All five previously-failing gates
+  now pass. `mypy` clean on 327 files, `lint-imports` 8/8, one Alembic head.
+- `ui-next`: **358 tests** across 54 files, up from 343 — 5 added to
+  `ColumnPanel.test.tsx`, 5 to `WorkbookImport.test.tsx`, 5 to
+  `CrossSourceScreen.test.tsx`. `tsc --noEmit` clean, production build clean.
+- Browser-verified against fixtures: the column pane renders all four states
+  (described + Withdraw, source-comment-only with no Withdraw offered, retired,
+  and undescribed), and the cross-source screen renders both queues with the
+  directional/symmetric distinction and a combined pending count. No console
+  errors.
+
+### Known limitations
+
+- **The withdraw reason is collected with `window.prompt`.** Functional and
+  honest, but not the right affordance for a governed action; it wants a proper
+  dialog with the text being retired shown alongside.
+- **A withdrawn description cannot be reinstated** except by publishing it again
+  as a new version, which is a different provenance. There is no "undo the
+  withdrawal".
+- **Table-level withdrawal has no UI** — the API and service handle `TABLE`
+  subjects, and `test_a_table_readme_can_be_withdrawn_too` covers it, but only
+  columns have a button.
+- **Workbook exclusion is not browser-verified**, because uploading requires a
+  live API and the fixture path refuses by design. Covered by 5 component tests
+  against mocked calls.
+- **The full `ui-next` suite showed 4 timeout flakes under load in one run**
+  (`App.test.tsx`, `LineageRefusalScreen.test.tsx` — neither touched by this
+  work) and passed clean on re-run. The 5s default timeout is tight for those
+  two files; worth raising rather than re-running.
+- **Never assert a suite passed from a piped exit code.** The correction above
+  cost two entries' worth of false confidence. Redirect to a file and read
+  pytest's own summary line.
+
+---
+
+## 2026-09-05 — The description lifecycle closes: a real dialog, reinstatement, and table-level control
+
+The three limitations the previous entry left open, all of them about the same
+feature being half-finished.
+
+### 1. The withdraw dialog
+
+`window.prompt` was functional and honest but the wrong affordance for a
+governed action, in three ways `DescriptionActionDialog` fixes:
+
+- **It shows the text being acted on.** A prompt asks "why?" about a description
+  the steward has to remember. Deciding to retire a paragraph without re-reading
+  it is exactly how the wrong one gets retired.
+- **It says what will and will not happen.** Nothing is published or
+  un-published; a review is filed and someone else decides. A prompt could not
+  say that, so the platform's most important property at that moment was
+  invisible.
+- **Cancel is unambiguous.** `prompt` conflates "cancel" with "empty reason",
+  and the difference matters when the reason is what the reviewer decides on.
+
+Inline rather than a full-screen modal: the pane is already a focused surface,
+and an overlay for a two-field form would be heavier than the decision warrants.
+
+### 2. Reinstatement
+
+Retiring a description was possible; taking that back was not, and the only
+remedy — republish the text — has no direct path by design.
+
+`request_type` (`WITHDRAW` | `REINSTATE`, migration `e4b8d2f71a95`)
+discriminates the two directions on the existing table rather than adding a
+second one: both are the same decision shape (this asset, this exact version,
+this reason, decided by someone else) and every existing column serves both.
+
+**Reinstatement republishes as a new version; it never flips the WITHDRAWN row
+back to APPROVED.** Flipping it back would rewrite history — the version chain
+would stop recording that the description was ever retired, and an audit of why
+an agent cited text that "was always approved" would be misled. It is a fresh
+publish whose provenance happens to be an older version's words. Two guards:
+refused when the asset already has a live description (that is a *correction*,
+which is authored rather than undone), and skipped at approval if someone
+described the asset while the request was pending.
+
+### 3. Table-level control
+
+The API handled `TABLE` subjects from the start; only columns had a button. The
+blocker was that the evidence pane's items are **prose claims** — good for
+reading, useless for driving a control that needs to know structurally whether a
+description exists and which version it is. `GET /v1/tables/{id}/description`
+supplies that, and the table's documentation now renders above its columns in
+the same pane: the same kind of claim about the same asset, so splitting them
+would have meant looking in two places to answer one question.
+
+### Verification
+
+- Backend: `tests/test_description_withdrawal.py` now 26 (up from 15) — 8 for
+  reinstatement, 3 for the table read. `mypy` clean on 327 files,
+  `lint-imports` 8/8, one Alembic head (`e4b8d2f71a95`).
+- The new migration chains after `69702d37d798` rather than after the migration
+  that created the table: that one had already been branched from by a parallel
+  workstream, and two heads is the first thing `test_migration_orm_drift`
+  reports, before it can compare anything.
+- `ui-next`: **376 tests** across 55 files, up from 358 — `ColumnPanel.test.tsx`
+  went 12 → 19. `tsc` and production build clean.
+- Browser-verified against fixtures: the table description row renders with its
+  own Withdraw; the dialog shows the exact text plus "Nothing is un-published
+  now…"; the reinstate dialog shows the retired text plus "the withdrawn one
+  stays withdrawn". No console errors.
+- Event catalog rows added for `description.reinstatement.approved/rejected/
+  superseded.v1`.
+
+### Known limitations
+
+- **Reinstatement always brings back the most recently withdrawn version.**
+  Choosing an older one from the chain would be an edit dressed as an undo, so
+  it is deliberately not offered — but a steward who withdrew twice cannot
+  reach the earlier text this way.
+- **The dialog is inline, not a focus trap.** Escape closes it and it is
+  labelled `role="dialog"` with `aria-modal="false"`, which is honest about what
+  it is, but keyboard focus can still leave it.
+- **No bulk withdraw.** Retiring the descriptions on forty columns is forty
+  requests and forty reviews. The workbook path deliberately cannot express a
+  deletion, so there is no bulk route at all.

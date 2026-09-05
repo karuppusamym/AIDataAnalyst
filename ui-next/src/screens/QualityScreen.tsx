@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DataQualityIncidentRead, DataQualitySummaryRead } from "../lib/types";
+import type { DataQualityIncidentRead, DataQualityIncidentTriageRead, DataQualitySummaryRead } from "../lib/types";
 import {
   ApiError,
+  fetchQualityIncidentTriage,
   fetchQualityIncidents,
   fetchQualitySummary,
   transitionQualityIncident,
@@ -9,6 +10,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -43,7 +45,7 @@ import "./QualityScreen.css";
    MVP here, matching this screen's own transition endpoint shape.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const STATUS_OPTIONS = ["OPEN", "ACKNOWLEDGED", "RESOLVED"] as const;
 const SEVERITY_OPTIONS = ["CRITICAL", "WARNING"] as const;
@@ -71,6 +73,59 @@ function humanize(s: string): string {
   return s.toLowerCase().replace(/_/g, " ");
 }
 
+function TriagePanel({ incidentId }: { incidentId: string }) {
+  const [triage, setTriage] = useState<DataQualityIncidentTriageRead | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetchQualityIncidentTriage(incidentId, ac.signal)
+      .then((result) => {
+        setTriage(result);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if ((err as Error)?.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : String(err));
+        setLoading(false);
+      });
+    return () => ac.abort();
+  }, [incidentId]);
+
+  if (loading) return <p className="qinc__triageload" role="status">Suggesting a root cause…</p>;
+  if (error) return <p className="qinc__triageerror" role="alert">{error}</p>;
+  if (!triage) return null;
+
+  return (
+    <div className="qinc__triage" aria-label="Suggested root cause">
+      <div className="qinc__triagesection">
+        <span className="qinc__triagelabel">Likely cause</span>
+        <ul>
+          {triage.likely_causes.map((cause) => (
+            <li key={cause}>{cause}</li>
+          ))}
+        </ul>
+      </div>
+      <div className="qinc__triagesection">
+        <span className="qinc__triagelabel">Suggested next step</span>
+        <ul>
+          {triage.recommended_next_steps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ul>
+      </div>
+      {triage.basis.length > 0 && (
+        <p className="qinc__triagebasis">
+          Based on: {triage.basis.join(", ")} — check these fields in the incident's own evidence.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function IncidentRow({
   incident,
   focused,
@@ -84,6 +139,7 @@ function IncidentRow({
   onTransition: (status: "ACKNOWLEDGED" | "RESOLVED") => void;
   transitioning: boolean;
 }) {
+  const [triageOpen, setTriageOpen] = useState(false);
   return (
     <article
       className={`qinc${focused ? " qinc--focused" : ""}`}
@@ -100,6 +156,16 @@ function IncidentRow({
         </button>
       </header>
       <p className="qinc__summary">{incident.summary}</p>
+      {/* An incident is about a table. Before this, reading one and then
+          looking at that table meant re-finding it by name in the Catalog. */}
+      <CrossLinks
+        label="Open the affected asset in"
+        links={[
+          { screen: "catalog", label: "Catalog", params: { asset: incident.table_id }, title: `Evidence for ${incident.table_name}` },
+          { screen: "lineage", label: "Lineage", params: { ds: incident.datasource_id, node: incident.table_id }, title: "What feeds this table, and what it feeds" },
+          { screen: "meaning", label: "Business meaning", params: { ds: incident.datasource_id, asset: incident.table_id } },
+        ]}
+      />
       <div className="qinc__meta">
         <span>{nf.format(incident.occurrence_count)} occurrence{incident.occurrence_count === 1 ? "" : "s"}</span>
         <span>last observed {relTime(incident.last_observed_at)}</span>
@@ -122,19 +188,24 @@ function IncidentRow({
             </Button>
           </>
         )}
+        <Button onClick={() => setTriageOpen((open) => !open)} title="A deterministic root-cause hint, computed on demand — never stored">
+          {triageOpen ? "Hide suggested cause" : "Suggest root cause"}
+        </Button>
       </div>
+      {triageOpen && <TriagePanel incidentId={incident.id} />}
     </article>
   );
 }
 
 export function QualityScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
   const statusFilter = params.get("status") ?? "ALL";
   const severityFilter = params.get("severity") ?? "ALL";
   const selectedId = params.get("incident");
 
-  const { datasources, error: dsPickerError } = useDatasourcePicker(ORG);
+  const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
 
   const [summary, setSummary] = useState<DataQualitySummaryRead | null>(null);
   const [incidents, setIncidents] = useState<DataQualityIncidentRead[]>([]);
@@ -406,6 +477,19 @@ export function QualityScreen() {
                       </li>
                     ) : null}
                   </ol>
+                  {selected.status !== "RESOLVED" ? (
+                    <div className="qual__coupling">
+                      <div className="evp__sub">Runtime coupling (DQ-3)</div>
+                      <p className="qual__couplingtext">
+                        While {humanize(selected.status)}, this incident
+                        {selected.severity === "CRITICAL"
+                          ? " blocks governed tools that depend on this table and refuses agent answers grounded in it (fail-closed), and heavily demotes it in retrieval ranking"
+                          : " demotes this table in retrieval ranking and flags (but does not block) governed tools that depend on it"}
+                        , attaches a trust warning to any agent answer that uses it, and shows on this
+                        table&rsquo;s lineage impact graph — not just here.
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="qual__evjson">
                     <div className="evp__sub">Evidence</div>
                     <pre className="qual__evpre">{JSON.stringify(selected.evidence, null, 2)}</pre>

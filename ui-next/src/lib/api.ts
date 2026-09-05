@@ -1,17 +1,22 @@
 import type {
+  AgentInboxRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
+  AgentRosterRead,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
   AiDecisionRead,
   AnalysisRunRead,
+  AssetDescriptionDraftRead,
   AssetEvidenceRead,
   BusinessMapRead,
   ConsumerFooterRead,
   DataQualityIncidentRead,
   DataQualityIncidentTransition,
+  DataQualityIncidentTriageRead,
   DataQualitySummaryRead,
   DataSourceRead,
+  DisagreementReportRead,
   FleetSummaryRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
@@ -20,8 +25,19 @@ import type {
   MeRead,
   MetadataBusinessAnnotationRead,
   MetadataIngestionBatchRead,
+  OrganizationRead,
   OutboxEventRead,
+  Page,
+  PlaybookCreate,
+  PlaybookRead,
+  PlaybookRunResultRead,
+  PlaybookUpdate,
+  PortfolioAnalyticsSummaryRead,
+  PortfolioAnalyticsTrendsRead,
   ProjectRead,
+  ReviewAuditSampleRead,
+  ReviewerAgentRunResult,
+  ReviewerAgentStateRead,
   ReviewQueueRead,
   SemanticMetricVersionRead,
   SemanticModelVersionRead,
@@ -30,8 +46,15 @@ import type {
   StudioDiffRead,
   StudioImpactPreview,
   UnifiedLineageImpactRead,
+  UnifiedLineageGraphRead,
+  SourceBindingCreate,
+  SourceBindingRead,
+  WorkspaceCreate,
+  WorkspaceRead,
 } from "./types";
 import type {
+  AssetDescriptionDraftGenerateResponse,
+  AssetDescriptionDraftListResponse,
   AuditEventRead,
   CatalogRowRead,
   CursorPage,
@@ -41,6 +64,8 @@ import type {
 } from "./ui-types";
 import {
   makeFixtureAgentAnalysis,
+  makeFixtureAgentInbox,
+  makeFixtureAgentRoster,
   makeFixtureAgentRun,
   makeFixtureAgentRunGroundingReceipts,
   makeFixtureAgentRuns,
@@ -50,20 +75,36 @@ import {
   makeFixtureBusinessMap,
   makeFixtureCatalog,
   makeFixtureDecideReview,
+  makeFixtureDisagreementRates,
   makeFixtureEvidence,
   makeFixtureFleetSummary,
   makeFixtureIngestionBatches,
   makeFixtureLineageImpact,
+  makeFixtureLineageGraph,
   makeFixtureMarketplaceAccessRequest,
   makeFixtureMarketplaceProducts,
   makeFixtureMe,
   makeFixtureOrgDatasources,
+  makeFixtureOrgWorkspaces,
+  makeFixtureOrganizations,
   makeFixtureOrgProjects,
+  makeFixtureWorkspaceSourceBindings,
   makeFixtureOutboxEvents,
+  makeFixtureCreatePlaybook,
+  makeFixtureDeletePlaybook,
+  makeFixturePlaybooks,
+  makeFixtureRunPlaybook,
+  makeFixtureUpdatePlaybook,
+  makeFixturePortfolioAnalyticsSummary,
+  makeFixturePortfolioAnalyticsTrends,
   makeFixtureQualityIncidents,
   makeFixtureQualitySummary,
   makeFixtureRefusals,
   makeFixtureRequeueOutboxEvent,
+  makeFixtureReviewerAgentPreReview,
+  makeFixtureReviewerAgentRun,
+  makeFixtureReviewerAgentSamples,
+  makeFixtureReviewerAgentState,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
   makeFixtureSemanticMetricConsumers,
@@ -77,6 +118,7 @@ import {
   makeFixtureSubmitStudioChangeSet,
   makeFixtureTableBusinessAnnotation,
   makeFixtureTransitionQualityIncident,
+  makeFixtureQualityIncidentTriage,
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -104,17 +146,69 @@ export class ApiError extends Error {
 /** Set VITE_USE_FIXTURES=0 to run against a live API on :8000 via the dev proxy. */
 const USE_FIXTURES = import.meta.env.VITE_USE_FIXTURES !== "0";
 
-async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+/**
+ * Development-mode identity headers.
+ *
+ * The backend's `get_security_context` (security.py) fail-closes any
+ * request with no `X-Principal-Id` when `identity_provider == "development"`
+ * -- the same INV-4 fail-closed default used everywhere else in this app.
+ * The legacy portal (ui/scripts/api.js -> baseHeaders()) has always sent
+ * these on every request; this client never did, which is why every
+ * live-API screen here 401s under the default `VITE_USE_FIXTURES=0`
+ * compose config even though the backend and its data are fine -- the
+ * legacy portal proves both work against the identical API.
+ *
+ * Mirrors the legacy defaults so both UIs exercise the same dev principal.
+ * Override with VITE_DEV_PRINCIPAL_ID / VITE_DEV_ROLES if needed.
+ *
+ * Not gated on the Vite build mode on purpose: `ui-next`'s default compose
+ * service serves a *production* build (`import.meta.env.DEV` is false
+ * there) against the same `identity_provider=development` backend, so a
+ * dev-build-only gate would silently skip these headers on exactly the
+ * deployment that needs them. The real safety net is server-side: under
+ * `identity_provider=oidc` (security.py's other branch) the backend never
+ * consults `X-Principal-Id` at all -- it requires `Authorization: Bearer`
+ * instead -- so sending this in an OIDC environment is inert, not a leak.
+ */
+const DEV_PRINCIPAL_ID = import.meta.env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin";
+const DEV_ROLES =
+  import.meta.env.VITE_DEV_ROLES ||
+  "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin,SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer";
+
+/* A few routes (observability/SLO, notification-rules, tool-plans) take no
+ * `{organization_id}` path segment and resolve the org purely from this
+ * header server-side -- see `org.tsx`'s `getCurrentOrgId()` for why this is
+ * read from outside React rather than threaded through every call site. */
+import { getCurrentOrgId } from "./org";
+
+function identityHeaders(): Record<string, string> {
+  if (USE_FIXTURES) return {};
+  return { "X-Principal-Id": DEV_PRINCIPAL_ID, "X-Roles": DEV_ROLES, "X-Organization-Id": getCurrentOrgId() };
+}
+
+function serverErrorDetail(value: unknown, fallback: string): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(item => {
+    if (item && typeof item === "object" && "msg" in item) {
+      const loc = "loc" in item && Array.isArray(item.loc) ? item.loc.join(".") : "Request";
+      return `${loc}: ${String(item.msg)}`;
+    }
+    return "Request validation failed";
+  }).join("; ");
+  return fallback;
+}
+
+export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     signal,
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json", ...identityHeaders() },
     credentials: "same-origin",
   });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
+      if (body.detail) detail = serverErrorDetail(body.detail, detail);
     } catch {
       /* non-JSON error body; the status line is what we have */
     }
@@ -123,16 +217,31 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Downloads use the same identity and authorization boundary as screen reads. */
+export async function exportAssetEvidence(tableId: string): Promise<void> {
+  const data = USE_FIXTURES
+    ? await fetchAssetEvidence(tableId)
+    : await get<AssetEvidenceRead>(`/v1/metadata/tables/${encodeURIComponent(tableId)}/evidence/export`);
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `table-${tableId}-evidence.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** Same contract as `get`, for the write endpoints UX-15's screens call
  *  (governance decisions, marketplace access requests, Studio submit). No
  *  request body is optional here on purpose: every write this app makes
  *  carries one, even if it is `{}` -- an empty POST invites a caller to
  *  forget the body a route actually requires. */
-async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+export async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
     signal,
-    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
     credentials: "same-origin",
     body: JSON.stringify(body),
   });
@@ -140,13 +249,81 @@ async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): P
     let detail = `${res.status} ${res.statusText}`;
     try {
       const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = errBody.detail;
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
     } catch {
       /* non-JSON error body; the status line is what we have */
     }
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;
+}
+
+/** Same contract as `postJson`, for the few endpoints that mutate an existing
+ *  resource with PUT (e.g. advancing an AI remediation's status). */
+export async function putJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: "PUT",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const errBody = (await res.json()) as { detail?: string };
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+/** Same contract as `postJson`/`putJson`, for endpoints that partially update
+ *  an existing resource with PATCH (e.g. `PlaybookUpdate` — every field
+ *  optional, send only the fields actually changing). */
+export async function patchJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: "PATCH",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const errBody = (await res.json()) as { detail?: string };
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+/** Same contract as `get`, for the endpoints that delete a resource with no
+ *  response body (e.g. `DELETE /v1/playbooks/{id}` -> 204). */
+export async function deleteRequest(path: string, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(path, {
+    method: "DELETE",
+    signal,
+    headers: { Accept: "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = serverErrorDetail(body.detail, detail);
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
 }
 
 export interface CatalogQuery {
@@ -233,6 +410,18 @@ export async function fetchAssetEvidence(
 export async function fetchMe(signal?: AbortSignal): Promise<MeRead> {
   if (USE_FIXTURES) return makeFixtureMe();
   return get<MeRead>("/v1/me", signal);
+}
+
+/**
+ * `GET /v1/organizations` (api.py) — the tenant list the shell's organization
+ * picker needs. Fixture mode returns the single development organization every
+ * screen historically hard-coded, so pure-frontend iteration is unchanged;
+ * live mode returns the real (e.g. seeded) organizations so one can be chosen.
+ */
+export async function fetchOrganizations(signal?: AbortSignal): Promise<OrganizationRead[]> {
+  if (USE_FIXTURES) return makeFixtureOrganizations();
+  const page = await get<PageOf<OrganizationRead>>("/v1/organizations?limit=200", signal);
+  return page.items;
 }
 
 /* ---------------------------------------------------------------------------
@@ -329,6 +518,58 @@ export async function requestMarketplaceAccess(
   return postJson<MarketplaceAccessRequestRead>(
     `/v1/marketplace/products/${versionId}/access-requests`,
     body,
+    signal,
+  );
+}
+
+export interface PortfolioAnalyticsSummaryQuery {
+  organizationId: string;
+  windowDays?: number;
+  lowQualityThreshold?: number;
+  topProductsLimit?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/summary`
+ *  (`product_marketplace_api.py::portfolio_analytics_summary`) — the org-wide
+ *  operator dashboard over the marketplace: lifecycle counts, the
+ *  access-request funnel, usage, quality and review-queue depth, plus a
+ *  ranked `top_products` list, all as of `generated_at`. */
+export async function fetchPortfolioAnalyticsSummary(
+  query: PortfolioAnalyticsSummaryQuery,
+  signal?: AbortSignal,
+): Promise<PortfolioAnalyticsSummaryRead> {
+  if (USE_FIXTURES) return makeFixturePortfolioAnalyticsSummary(query);
+  const params = new URLSearchParams();
+  params.set("window_days", String(query.windowDays ?? 30));
+  params.set("low_quality_threshold", String(query.lowQualityThreshold ?? 80));
+  params.set("top_products_limit", String(query.topProductsLimit ?? 10));
+  return get<PortfolioAnalyticsSummaryRead>(
+    `/v1/organizations/${query.organizationId}/portfolio-analytics/summary?${params}`,
+    signal,
+  );
+}
+
+export interface PortfolioAnalyticsTrendsQuery {
+  organizationId: string;
+  windowDays?: number;
+  bucketDays?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/trends`
+ *  (`product_marketplace_api.py::portfolio_analytics_trends`) — the same
+ *  window bucketed into `bucket_days`-wide points, oldest first, for the
+ *  dashboard's trend panel. A separate call from the summary above so one
+ *  failing does not blank the other. */
+export async function fetchPortfolioAnalyticsTrends(
+  query: PortfolioAnalyticsTrendsQuery,
+  signal?: AbortSignal,
+): Promise<PortfolioAnalyticsTrendsRead> {
+  if (USE_FIXTURES) return makeFixturePortfolioAnalyticsTrends(query);
+  const params = new URLSearchParams();
+  params.set("window_days", String(query.windowDays ?? 30));
+  params.set("bucket_days", String(query.bucketDays ?? 7));
+  return get<PortfolioAnalyticsTrendsRead>(
+    `/v1/organizations/${query.organizationId}/portfolio-analytics/trends?${params}`,
     signal,
   );
 }
@@ -441,6 +682,31 @@ export async function fetchOrgDatasources(
   );
 }
 
+/** Access-axis workspaces for an organization (ADR-0018). A workspace does
+ * not own projects; it reaches project-owned sources through bindings. */
+export async function fetchOrgWorkspaces(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<WorkspaceRead>> {
+  if (USE_FIXTURES) return makeFixtureOrgWorkspaces(organizationId);
+  return get<PageOf<WorkspaceRead>>(
+    `/v1/organizations/${organizationId}/workspaces?limit=200`,
+    signal,
+  );
+}
+
+/** Grants connecting the selected workspace to one or more datasources. */
+export async function fetchWorkspaceSourceBindings(
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<SourceBindingRead>> {
+  if (USE_FIXTURES) return makeFixtureWorkspaceSourceBindings(workspaceId);
+  return get<PageOf<SourceBindingRead>>(
+    `/v1/workspaces/${workspaceId}/source-bindings`,
+    signal,
+  );
+}
+
 export interface LineageImpactQuery {
   depth?: number;
   nodeLimit?: number;
@@ -466,6 +732,20 @@ export async function fetchLineageImpact(
   params.set("node_limit", String(query.nodeLimit ?? 200));
   return get<UnifiedLineageImpactRead>(
     `/v1/datasources/${datasourceId}/unified-lineage/impact/${encodeURIComponent(nodeId)}?${params}`,
+    signal,
+  );
+}
+
+/** Complete, server-bounded lineage graph for a datasource. Edges retain
+ * their source, confidence and approval status so inferred relationships are
+ * visually distinguishable from declared foreign keys. */
+export async function fetchLineageGraph(
+  datasourceId: string,
+  signal?: AbortSignal,
+): Promise<UnifiedLineageGraphRead> {
+  if (USE_FIXTURES) return makeFixtureLineageGraph(datasourceId);
+  return get<UnifiedLineageGraphRead>(
+    `/v1/datasources/${datasourceId}/unified-lineage/graph?node_limit=200&edge_limit=500`,
     signal,
   );
 }
@@ -585,6 +865,7 @@ export type AgentAskErrorKind =
   | "DATASOURCE_DISABLED"
   | "POLICY_REJECTED"
   | "MODEL_UNAVAILABLE"
+  | "MODEL_THROTTLED"
   | "CLARIFICATION_NEEDED"
   | "SERVER_ERROR"
   | "UNKNOWN";
@@ -645,6 +926,7 @@ export function classifyAgentAskError(error: ApiError): AgentAskError {
   }
   if (status === 409) return { kind: "CLARIFICATION_NEEDED", status, detail, alternatives: [] };
   if (status === 422) return { kind: "POLICY_REJECTED", status, detail, alternatives: [] };
+  if (status === 429) return { kind: "MODEL_THROTTLED", status, detail, alternatives: [] };
   if (status === 503) return { kind: "MODEL_UNAVAILABLE", status, detail, alternatives: [] };
   if (status === 502) return { kind: "SERVER_ERROR", status, detail, alternatives: [] };
   return { kind: "UNKNOWN", status, detail, alternatives: [] };
@@ -833,6 +1115,19 @@ export async function transitionQualityIncident(
     signal,
   );
 }
+
+/** `GET /v1/quality-incidents/{id}/triage` (`quality_api.py::
+ *  get_quality_incident_triage`, `dq_triage_agent.suggest_triage`) -- a
+ *  deterministic root-cause hint for one incident. Read-only, computed
+ *  fresh every call, nothing persisted. */
+export async function fetchQualityIncidentTriage(
+  incidentId: string,
+  signal?: AbortSignal,
+): Promise<DataQualityIncidentTriageRead> {
+  if (USE_FIXTURES) return makeFixtureQualityIncidentTriage(incidentId);
+  return get<DataQualityIncidentTriageRead>(`/v1/quality-incidents/${incidentId}/triage`, signal);
+}
+
 /* ---------------------------------------------------------------------------
    UX-16: Business meaning — datasource-scoped browse of approved business
    annotations, plus an org-wide taxonomy view (business-map).
@@ -1035,6 +1330,420 @@ export async function fetchDatasourceHealth(
 }
 
 /* ---------------------------------------------------------------------------
+   Context snapshot — an on-demand, downloadable "what do we know about this
+   datasource" document. Not a new backend endpoint: it composes five reads
+   this file already exposes (health, quality summary, open incidents,
+   approved business annotations, table inventory) into one client-side
+   object, the same "assemble from what's already governed" idiom
+   `agent_roster.py`'s own module docstring insists on server-side. No
+   curation step, unlike Context Products — every table the datasource
+   actually has is included, documented or not, so the gap itself is visible
+   rather than only ever showing what someone already wrote up.
+
+   Each of the five reads is fetched independently and can fail on its own
+   (a role without quality-incident access, say) without blanking the rest
+   of the snapshot — failures are recorded in `warnings`, never silently
+   dropped, matching this file's own honesty convention elsewhere (see
+   `PortfolioAnalyticsScreen`'s independent summary/trends error states).
+--------------------------------------------------------------------------- */
+
+//: Table inventory is capped, not silently truncated -- `truncated` on the
+//: snapshot tells the caller when a datasource has more tables than this.
+const CONTEXT_SNAPSHOT_TABLE_CAP = 500;
+
+export interface ContextSnapshotDatasource {
+  id: string;
+  name: string;
+  connector_type: string;
+  dialect: string;
+  environment: string;
+  network_zone: string | null;
+  status: string;
+  project_id: string;
+  organization_id: string;
+}
+
+export interface ContextSnapshotDocumentedTable {
+  table_id: string;
+  schema_name: string;
+  table_name: string;
+  domain_name: string;
+  entity_name: string;
+  business_name: string;
+  business_description: string;
+  table_role: string;
+  grain_statement: string;
+  synonyms: string[];
+  suggested_questions: string[];
+}
+
+export interface ContextSnapshotUndocumentedTable {
+  name: string;
+  object_type: string;
+  status: string;
+}
+
+export interface ContextSnapshotIncident {
+  table_name: string;
+  anomaly_type: string;
+  severity: string;
+  status: string;
+  summary: string;
+  first_observed_at: string;
+}
+
+export interface DatasourceContextSnapshot {
+  generated_at: string;
+  datasource: ContextSnapshotDatasource;
+  health: { score: number; status: string; computed_at: string } | null;
+  quality: {
+    table_count: number;
+    observed_table_count: number;
+    open_incident_count: number;
+    critical_incident_count: number;
+    average_quality_score: number | null;
+    metadata_scan_status: string;
+  } | null;
+  open_incidents: ContextSnapshotIncident[];
+  documented_tables: ContextSnapshotDocumentedTable[];
+  undocumented_tables: ContextSnapshotUndocumentedTable[];
+  documented_count: number;
+  undocumented_count: number;
+  truncated: boolean;
+  warnings: string[];
+}
+
+async function settleOrWarn<T>(
+  label: string,
+  warnings: string[],
+  action: () => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await action();
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") throw e;
+    warnings.push(`${label} could not be loaded: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+    return null;
+  }
+}
+
+/** Assembles a `DatasourceContextSnapshot` from five independent, already-real
+ *  reads. Never throws for a single section failing — see the module comment
+ *  above — only for the caller's own `AbortSignal` firing. */
+export async function buildDatasourceContextSnapshot(
+  datasource: DataSourceRead,
+  signal?: AbortSignal,
+): Promise<DatasourceContextSnapshot> {
+  const warnings: string[] = [];
+
+  const [health, annotations, quality, incidents, tables] = await Promise.all([
+    settleOrWarn("Health", warnings, () => fetchDatasourceHealth(datasource.id, signal)),
+    settleOrWarn("Business annotations", warnings, () =>
+      fetchBusinessAnnotations(
+        { datasourceId: datasource.id, limit: CONTEXT_SNAPSHOT_TABLE_CAP },
+        signal,
+      ),
+    ),
+    settleOrWarn("Quality summary", warnings, () => fetchQualitySummary(datasource.id, signal)),
+    settleOrWarn("Open incidents", warnings, () =>
+      fetchQualityIncidents(datasource.id, { status: "OPEN", limit: 100 }, signal),
+    ),
+    settleOrWarn("Table inventory", warnings, () =>
+      fetchTablesLegacy(datasource.id, { limit: CONTEXT_SNAPSHOT_TABLE_CAP }, signal),
+    ),
+  ]);
+
+  const documentedTableIds = new Set((annotations?.items ?? []).map((a) => a.table_id));
+  const documentedTables: ContextSnapshotDocumentedTable[] = (annotations?.items ?? []).map((a) => ({
+    table_id: a.table_id,
+    schema_name: a.schema_name,
+    table_name: a.table_name,
+    domain_name: a.domain_name,
+    entity_name: a.entity_name,
+    business_name: a.business_name,
+    business_description: a.business_description,
+    table_role: a.table_role,
+    grain_statement: a.grain_statement,
+    synonyms: a.synonyms,
+    suggested_questions: a.suggested_questions,
+  }));
+  const undocumentedTables: ContextSnapshotUndocumentedTable[] = (tables?.items ?? [])
+    .filter((t) => !documentedTableIds.has(t.id))
+    .map((t) => ({ name: t.name, object_type: t.object_type, status: t.status }));
+
+  const truncated =
+    (annotations !== null && annotations.total > annotations.items.length) ||
+    (tables !== null && tables.items.length >= CONTEXT_SNAPSHOT_TABLE_CAP);
+
+  return {
+    generated_at: new Date().toISOString(),
+    datasource: {
+      id: datasource.id,
+      name: datasource.name,
+      connector_type: datasource.connector_type,
+      dialect: datasource.dialect,
+      environment: datasource.environment,
+      network_zone: datasource.network_zone ?? null,
+      status: datasource.status,
+      project_id: datasource.project_id,
+      organization_id: datasource.organization_id,
+    },
+    health: health ? { score: health.score, status: health.status, computed_at: health.computed_at } : null,
+    quality: quality
+      ? {
+          table_count: quality.table_count,
+          observed_table_count: quality.observed_table_count,
+          open_incident_count: quality.open_incident_count,
+          critical_incident_count: quality.critical_incident_count,
+          average_quality_score: quality.average_quality_score,
+          metadata_scan_status: quality.metadata_scan_status,
+        }
+      : null,
+    open_incidents: (incidents?.items ?? []).map((i) => ({
+      table_name: i.table_name,
+      anomaly_type: i.anomaly_type,
+      severity: i.severity,
+      status: i.status,
+      summary: i.summary,
+      first_observed_at: i.first_observed_at,
+    })),
+    documented_tables: documentedTables,
+    undocumented_tables: undocumentedTables,
+    documented_count: documentedTables.length,
+    undocumented_count: undocumentedTables.length,
+    truncated,
+    warnings,
+  };
+}
+
+/** Renders a snapshot as a readable Markdown document — the "wiki page" a
+ *  steward or an incoming analyst can actually read, not a JSON dump. */
+export function renderContextSnapshotMarkdown(snapshot: DatasourceContextSnapshot): string {
+  const lines: string[] = [];
+  const ds = snapshot.datasource;
+  lines.push(`# ${ds.name}`);
+  lines.push("");
+  lines.push(
+    `${ds.connector_type} · ${ds.dialect} · ${ds.environment}${ds.network_zone ? ` · ${ds.network_zone}` : ""} · ${ds.status.toLowerCase()}`,
+  );
+  lines.push("");
+  lines.push(`_Generated ${snapshot.generated_at}_`);
+  lines.push("");
+
+  if (snapshot.warnings.length > 0) {
+    lines.push("> **Some sections could not be loaded:**");
+    for (const w of snapshot.warnings) lines.push(`> - ${w}`);
+    lines.push("");
+  }
+
+  if (snapshot.health) {
+    lines.push("## Health");
+    lines.push(
+      `Score **${snapshot.health.score}** (${snapshot.health.status.toLowerCase()}), computed ${snapshot.health.computed_at}.`,
+    );
+    lines.push("");
+  }
+
+  if (snapshot.quality) {
+    const q = snapshot.quality;
+    lines.push("## Quality");
+    lines.push(
+      `${q.observed_table_count}/${q.table_count} tables observed · ` +
+        `${q.open_incident_count} open incidents (${q.critical_incident_count} critical) · ` +
+        `average score ${q.average_quality_score === null ? "—" : q.average_quality_score} · ` +
+        `metadata scan ${q.metadata_scan_status.toLowerCase()}.`,
+    );
+    lines.push("");
+  }
+
+  if (snapshot.open_incidents.length > 0) {
+    lines.push("## Open incidents");
+    for (const inc of snapshot.open_incidents) {
+      lines.push(`- **${inc.table_name}** — ${inc.anomaly_type} (${inc.severity.toLowerCase()}): ${inc.summary}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`## Documented tables (${snapshot.documented_count})`);
+  lines.push("");
+  if (snapshot.documented_tables.length === 0) {
+    lines.push("_No table in this datasource has an approved business annotation yet._");
+    lines.push("");
+  }
+  for (const t of snapshot.documented_tables) {
+    lines.push(`### ${t.schema_name}.${t.table_name}`);
+    if (t.business_name) lines.push(`**${t.business_name}**`);
+    lines.push("");
+    if (t.business_description) lines.push(t.business_description);
+    lines.push("");
+    const facts: string[] = [];
+    if (t.domain_name) facts.push(`domain: ${t.domain_name}`);
+    if (t.entity_name) facts.push(`entity: ${t.entity_name}`);
+    if (t.table_role) facts.push(`role: ${t.table_role}`);
+    if (t.grain_statement) facts.push(`grain: ${t.grain_statement}`);
+    if (facts.length > 0) lines.push(facts.join(" · "));
+    if (t.synonyms.length > 0) lines.push(`Synonyms: ${t.synonyms.join(", ")}`);
+    if (t.suggested_questions.length > 0) {
+      lines.push("");
+      lines.push("Questions this table answers:");
+      for (const q of t.suggested_questions) lines.push(`- ${q}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`## Undocumented tables (${snapshot.undocumented_count})`);
+  lines.push("");
+  if (snapshot.undocumented_tables.length === 0) {
+    lines.push("_Every table this snapshot saw has an approved business annotation._");
+  } else {
+    for (const t of snapshot.undocumented_tables) {
+      lines.push(`- ${t.name} (${t.object_type.toLowerCase()}, ${t.status.toLowerCase()})`);
+    }
+  }
+  lines.push("");
+
+  if (snapshot.truncated) {
+    lines.push(
+      `> This snapshot is capped at ${CONTEXT_SNAPSHOT_TABLE_CAP} tables/annotations; this datasource has more than fit.`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/** Builds the snapshot and triggers a same-origin blob download, the same
+ *  idiom `exportAssetEvidence` above uses (a bare `<a download href>` can't
+ *  carry this app's identity headers). */
+export async function downloadDatasourceContextSnapshot(
+  datasource: DataSourceRead,
+  format: "markdown" | "json",
+  signal?: AbortSignal,
+): Promise<DatasourceContextSnapshot> {
+  const snapshot = await buildDatasourceContextSnapshot(datasource, signal);
+  const slug = datasource.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const isMarkdown = format === "markdown";
+  const content = isMarkdown ? renderContextSnapshotMarkdown(snapshot) : JSON.stringify(snapshot, null, 2);
+  const blob = new Blob([content], { type: isMarkdown ? "text/markdown" : "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `context-${slug}.${isMarkdown ? "md" : "json"}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return snapshot;
+}
+
+/* ---------------------------------------------------------------------------
+   Project context snapshot — the same idea rolled up across every datasource
+   in one project, for the operator question "what do we know about this
+   project as a whole" rather than one datasource at a time. Built entirely
+   from `buildDatasourceContextSnapshot` above, run once per datasource in
+   the project — no new fetch shape, no new backend route.
+--------------------------------------------------------------------------- */
+
+export interface ProjectContextSnapshot {
+  generated_at: string;
+  project: { id: string; name: string; slug: string };
+  datasource_count: number;
+  documented_count: number;
+  undocumented_count: number;
+  open_incident_count: number;
+  datasources: DatasourceContextSnapshot[];
+  warnings: string[];
+}
+
+/** Runs `buildDatasourceContextSnapshot` for every datasource in `datasources`
+ *  and rolls the totals up. A project with 20+ datasources runs 20+ fetches
+ *  in parallel per datasource (five each) — fine for the modest per-project
+ *  fleet sizes this is meant for, not something to fan out at organization
+ *  scale without a limit. */
+export async function buildProjectContextSnapshot(
+  project: ProjectRead,
+  datasources: DataSourceRead[],
+  signal?: AbortSignal,
+): Promise<ProjectContextSnapshot> {
+  const warnings: string[] = [];
+  const results = await Promise.all(
+    datasources.map((ds) =>
+      buildDatasourceContextSnapshot(ds, signal).catch((e: unknown) => {
+        if ((e as Error)?.name === "AbortError") throw e;
+        warnings.push(`${ds.name}: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+        return null;
+      }),
+    ),
+  );
+  const perDatasource = results.filter((r): r is DatasourceContextSnapshot => r !== null);
+
+  return {
+    generated_at: new Date().toISOString(),
+    project: { id: project.id, name: project.name, slug: project.slug },
+    datasource_count: datasources.length,
+    documented_count: perDatasource.reduce((sum, r) => sum + r.documented_count, 0),
+    undocumented_count: perDatasource.reduce((sum, r) => sum + r.undocumented_count, 0),
+    open_incident_count: perDatasource.reduce((sum, r) => sum + r.open_incidents.length, 0),
+    datasources: perDatasource,
+    warnings,
+  };
+}
+
+/** Renders a project rollup as one Markdown document: a project-level
+ *  summary followed by each datasource's own section, reusing
+ *  `renderContextSnapshotMarkdown`'s per-datasource body so the two documents
+ *  never describe the same datasource differently. */
+export function renderProjectContextSnapshotMarkdown(snapshot: ProjectContextSnapshot): string {
+  const lines: string[] = [];
+  lines.push(`# ${snapshot.project.name}`);
+  lines.push("");
+  lines.push(`_Generated ${snapshot.generated_at}_`);
+  lines.push("");
+  lines.push(
+    `${snapshot.datasource_count} datasource(s) · ${snapshot.documented_count} documented tables · ` +
+      `${snapshot.undocumented_count} undocumented tables · ${snapshot.open_incident_count} open incidents.`,
+  );
+  lines.push("");
+  if (snapshot.warnings.length > 0) {
+    lines.push("> **Some datasources could not be included:**");
+    for (const w of snapshot.warnings) lines.push(`> - ${w}`);
+    lines.push("");
+  }
+  lines.push("---");
+  lines.push("");
+  for (const ds of snapshot.datasources) {
+    lines.push(renderContextSnapshotMarkdown(ds));
+    lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
+/** Builds the project rollup and triggers a same-origin blob download,
+ *  mirroring `downloadDatasourceContextSnapshot`. */
+export async function downloadProjectContextSnapshot(
+  project: ProjectRead,
+  datasources: DataSourceRead[],
+  format: "markdown" | "json",
+  signal?: AbortSignal,
+): Promise<ProjectContextSnapshot> {
+  const snapshot = await buildProjectContextSnapshot(project, datasources, signal);
+  const slug = project.slug || project.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const isMarkdown = format === "markdown";
+  const content = isMarkdown ? renderProjectContextSnapshotMarkdown(snapshot) : JSON.stringify(snapshot, null, 2);
+  const blob = new Blob([content], { type: isMarkdown ? "text/markdown" : "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `context-project-${slug}.${isMarkdown ? "md" : "json"}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return snapshot;
+}
+
+/* ---------------------------------------------------------------------------
    UX-16: Relationships — the review queue for N4's impact-ordered,
    diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
    plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
@@ -1055,12 +1764,33 @@ import {
   makeFixtureBulkDecideRelationshipCandidates,
   makeFixtureDecideRelationshipCandidate,
   makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidates,
   makeFixtureRelationshipCandidateReviewQueue,
 } from "./fixtures";
 
 export interface RelationshipCandidateReviewQueueQuery {
   limit?: number;
   offset?: number;
+}
+
+/** `GET /v1/datasources/{datasourceId}/relationship-candidates` (the raw list
+ *  behind the review queue, `list_relationship_candidates`). Unlike the
+ *  review-queue read model this can return candidates in ANY state via
+ *  `candidate_status`, so a reviewer can see what was already approved or
+ *  rejected — the decision history the PENDING-only queue drops. Read-only. */
+export async function fetchRelationshipCandidates(
+  datasourceId: string,
+  opts: { status?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<RelationshipCandidateRead>> {
+  if (USE_FIXTURES) return makeFixtureRelationshipCandidates(datasourceId, opts.status);
+  const params = new URLSearchParams();
+  if (opts.status && opts.status !== "ALL") params.set("candidate_status", opts.status);
+  params.set("limit", String(opts.limit ?? 200));
+  return get<PageOf<RelationshipCandidateRead>>(
+    `/v1/datasources/${datasourceId}/relationship-candidates?${params}`,
+    signal,
+  );
 }
 
 /** `GET /v1/datasources/{datasourceId}/relationship-candidates/review-queue`
@@ -1199,3 +1929,2648 @@ export async function fetchAuditEvents(
     signal,
   );
 }
+
+/* ---------------------------------------------------------------------------
+   Negative knowledge (Phase E / EE.3, `negative_knowledge_api.py`) — the
+   registry of assertions a human has previously rejected, each carrying a
+   suppression flag so the platform stops re-proposing something already
+   rejected, plus a manual lift path for once something material changes.
+
+   Org-wide like the audit ledger above: none of these three routes take an
+   organization id in the path or query at all -- scope is implicit
+   server-side (`context.require_organization()`), unlike most other calls in
+   this file.
+--------------------------------------------------------------------------- */
+
+import type { LiftSuppressionRequest, NegativeAssertionRead } from "./types";
+import {
+  makeFixtureLiftSuppression,
+  makeFixtureNegativeKnowledgeSearch,
+  makeFixtureNegativeKnowledgeSubject,
+} from "./fixtures";
+
+export interface NegativeKnowledgeSearchQuery {
+  assertionType?: string;
+  suppressionActive?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/negative-knowledge/search` — filterable browse across every
+ *  negative assertion recorded for the organization. Both filters are
+ *  optional on the wire (`Query(default=None)`) and are omitted from the
+ *  query string entirely when unset, never sent as an empty string. */
+export async function searchNegativeKnowledge(
+  query: NegativeKnowledgeSearchQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<NegativeAssertionRead>> {
+  if (USE_FIXTURES) return makeFixtureNegativeKnowledgeSearch(query);
+  const params = new URLSearchParams();
+  if (query.assertionType) params.set("assertion_type", query.assertionType);
+  if (query.suppressionActive !== undefined) {
+    params.set("suppression_active", String(query.suppressionActive));
+  }
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<NegativeAssertionRead>>(`/v1/negative-knowledge/search?${params}`, signal);
+}
+
+export interface NegativeKnowledgeSubjectQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/negative-knowledge/{subject_id}` — every assertion recorded
+ *  against one specific subject; a distinct lookup from the filtered
+ *  `search` above, not a special case of it. */
+export async function fetchNegativeKnowledgeForSubject(
+  subjectId: string,
+  query: NegativeKnowledgeSubjectQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<NegativeAssertionRead>> {
+  if (USE_FIXTURES) return makeFixtureNegativeKnowledgeSubject(subjectId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<NegativeAssertionRead>>(
+    `/v1/negative-knowledge/${encodeURIComponent(subjectId)}?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/negative-knowledge/{id}/lift-suppression` — manually lifts
+ *  suppression on one assertion. The endpoint requires a >=3-char `reason`
+ *  (`LiftSuppressionRequest.reason`, `Field(min_length=3)`); callers should
+ *  collect one before calling this. */
+export async function liftNegativeAssertionSuppression(
+  assertionId: string,
+  body: LiftSuppressionRequest,
+  signal?: AbortSignal,
+): Promise<NegativeAssertionRead> {
+  if (USE_FIXTURES) return makeFixtureLiftSuppression(assertionId, body);
+  return postJson<NegativeAssertionRead>(
+    `/v1/negative-knowledge/${assertionId}/lift-suppression`,
+    body,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   AI governance (module 15 / CP-7,CP-8) — the AI registry, trust scoring and
+   remediation loop. The backend (ai_registry_api.py) has carried these since
+   the AI-trust slice landed; ui-next had the types but no screen. Same
+   USE_FIXTURES gate and self-contained-block convention as the relationships
+   block above.
+--------------------------------------------------------------------------- */
+
+import type {
+  AiAssessmentTemplateRead,
+  AiAssetVersionRead,
+  AiRemediationRead,
+  AiRemediationUpdate,
+  AiTrustScoreRead,
+} from "./types";
+import {
+  makeFixtureAiAssessmentTemplates,
+  makeFixtureAiAssets,
+  makeFixtureAiRemediations,
+  makeFixtureAiTrust,
+  makeFixtureUpdateAiRemediation,
+} from "./fixtures";
+
+/** `GET /v1/organizations/{org}/ai-assets` — one row per AI asset at its
+ *  latest version (name, provider, risk tier, and the version id the trust and
+ *  remediation calls below are scoped by). */
+export async function fetchAiAssets(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<AiAssetVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureAiAssets(organizationId);
+  return get<PageOf<AiAssetVersionRead>>(
+    `/v1/organizations/${organizationId}/ai-assets?limit=200`,
+    signal,
+  );
+}
+
+/** `GET /v1/ai-asset-versions/{id}/trust` — the deterministic trust score,
+ *  grade, per-factor breakdown and blocking findings for one asset version. */
+export async function fetchAiAssetTrust(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<AiTrustScoreRead> {
+  if (USE_FIXTURES) return makeFixtureAiTrust(versionId);
+  return get<AiTrustScoreRead>(`/v1/ai-asset-versions/${versionId}/trust`, signal);
+}
+
+/** `GET /v1/ai-asset-versions/{id}/remediations` — the findings-to-remediation
+ *  log for one asset version. */
+export async function fetchAiRemediations(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<AiRemediationRead>> {
+  if (USE_FIXTURES) return makeFixtureAiRemediations(versionId);
+  return get<PageOf<AiRemediationRead>>(
+    `/v1/ai-asset-versions/${versionId}/remediations?limit=200`,
+    signal,
+  );
+}
+
+/** `PUT /v1/ai-remediations/{id}` — advance a remediation's status. Moving one
+ *  to ACCEPTED_RISK is enforced server-side to an independent risk role. */
+export async function updateAiRemediation(
+  remediationId: string,
+  body: AiRemediationUpdate,
+  signal?: AbortSignal,
+): Promise<AiRemediationRead> {
+  if (USE_FIXTURES) return makeFixtureUpdateAiRemediation(remediationId, body);
+  return putJson<AiRemediationRead>(`/v1/ai-remediations/${remediationId}`, body, signal);
+}
+
+/** `GET /v1/ai-assessment-templates` — the built-in control checklists
+ *  (EU AI Act, NIST AI RMF, enterprise use-case) an assessment is seeded from. */
+export async function fetchAiAssessmentTemplates(
+  signal?: AbortSignal,
+): Promise<AiAssessmentTemplateRead[]> {
+  if (USE_FIXTURES) return makeFixtureAiAssessmentTemplates();
+  return get<AiAssessmentTemplateRead[]>("/v1/ai-assessment-templates", signal);
+}
+
+/* ---------------------------------------------------------------------------
+   Context products — the legacy portal's `context-products` view
+   (`ui/scripts/features/context-lineage-control-plane.js`), ported onto the
+   same real, already-merged `context_product_api.py` routes that view calls.
+   Added here as a clearly-delimited block, same convention as the AI
+   registry and Relationships blocks above.
+
+   Endpoints used (all `src/aida/context_product_api.py` unless noted):
+     - POST   /v1/projects/{project_id}/context-products                  create_context_product          :308
+     - GET    /v1/projects/{project_id}/context-products                  list_context_products            :381
+     - POST   /v1/context-product-versions/{id}/submit                    submit_context_product_version   :826
+     - POST   /v1/context-product-versions/{id}/deprecate                 request_context_product_deprecation :887
+     - GET    /v1/context-product-versions/{id}/compile                   compile_context_product_version
+       (`src/aida/context_compiler_api.py:208`)
+
+   Deliberately not ported: `GET /context-products/{id}/versions` (:445,
+   version history — the legacy screen never showed it, only the latest
+   version via `ContextProductRead.latest_version`), the AT-7(b) consumer-
+   binding routes (:965/:1039/:1081 — a staged-rollout registry the legacy
+   UI never exposed either), `PUT /context-product-versions/{id}` (:796,
+   in-place version edit — legacy only ever created new drafts), and
+   `/compile/download` (`context_compiler_api.py:258` — legacy's compiler
+   panel only ever called the plain `/compile` GET, never the download
+   variant).
+--------------------------------------------------------------------------- */
+
+import type { ContextCompilationRead, ContextProductCreate, ContextProductRead } from "./types";
+import {
+  makeFixtureCompileContextProductVersion,
+  makeFixtureContextProducts,
+  makeFixtureCreateContextProduct,
+  makeFixtureDeprecateContextProductVersion,
+  makeFixtureSubmitContextProductVersion,
+} from "./fixtures";
+
+export interface ContextProductQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/projects/{project_id}/context-products` (`list_context_products`,
+ *  `context_product_api.py:381`) — one row per product at its latest
+ *  version, exactly what `ContextProductRead.latest_version` carries;
+ *  matches `loadContextProducts()`'s call in the legacy screen. */
+export async function fetchContextProducts(
+  projectId: string,
+  query: ContextProductQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ContextProductRead>> {
+  if (USE_FIXTURES) return makeFixtureContextProducts(projectId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 200));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ContextProductRead>>(
+    `/v1/projects/${projectId}/context-products?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/projects/{project_id}/context-products` (`create_context_product`,
+ *  `context_product_api.py:308`) — creates the product and its version-1
+ *  DRAFT in one call, matching `createContextProduct()` in the legacy
+ *  screen. Every referenced table/semantic/glossary/tool version id is
+ *  server-validated against that same project's approved, PUBLISHED
+ *  versions (`validate_context_product_references`); an unresolved id comes
+ *  back as this endpoint's own 4xx detail string. */
+export async function createContextProduct(
+  projectId: string,
+  body: ContextProductCreate,
+  signal?: AbortSignal,
+): Promise<ContextProductRead> {
+  if (USE_FIXTURES) return makeFixtureCreateContextProduct(projectId, body);
+  return postJson<ContextProductRead>(`/v1/projects/${projectId}/context-products`, body, signal);
+}
+
+/** `POST /v1/context-product-versions/{id}/submit` (`submit_context_product_version`,
+ *  `context_product_api.py:826`) — moves a DRAFT version to REVIEW_REQUIRED
+ *  and opens the same `GovernanceReview` `ReviewQueueScreen` reads; matches
+ *  the legacy screen's `data-context-submit` action. */
+export async function submitContextProductVersion(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  if (USE_FIXTURES) return makeFixtureSubmitContextProductVersion(versionId);
+  return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/submit`, {}, signal);
+}
+
+/** `POST /v1/context-product-versions/{id}/deprecate` (`request_context_product_deprecation`,
+ *  `context_product_api.py:887`) — requests retirement review for a
+ *  PUBLISHED (or SUPPORTED) version; matches the legacy screen's
+ *  `data-context-deprecate` action. */
+export async function requestContextProductDeprecation(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  if (USE_FIXTURES) return makeFixtureDeprecateContextProductVersion(versionId);
+  return postJson<GovernanceReviewRead>(`/v1/context-product-versions/${versionId}/deprecate`, {}, signal);
+}
+
+/** `GET /v1/context-product-versions/{id}/compile` (`compile_context_product_version`,
+ *  `context_compiler_api.py:208`) — deterministic compilation of one
+ *  immutable version to a target format; matches the legacy screen's
+ *  `compileVersion()` (`data-context-compile`). Repeating this call against
+ *  the same version and target reproduces the same `artifact_hash`. */
+export async function compileContextProductVersion(
+  versionId: string,
+  target: string,
+  signal?: AbortSignal,
+): Promise<ContextCompilationRead> {
+  if (USE_FIXTURES) return makeFixtureCompileContextProductVersion(versionId, target);
+  const params = new URLSearchParams({ target });
+  return get<ContextCompilationRead>(
+    `/v1/context-product-versions/${versionId}/compile?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Administration -- nav id `administration`, the tenant/onboarding wizard
+   ported from the legacy portal's `administration-view` (`ui/app.js`'s
+   `#organization-form`/`#lob-form`/`#project-form`/`#datasource-form`
+   handlers). Every call below hits a real, already-merged route the legacy
+   portal itself posts to -- the deliberate four-step hierarchy the backend
+   enforces (organization -> line of business -> project -> datasource), not
+   an invented "setup" API. `fetchOrganizations`, `fetchOrgProjects` and
+   `fetchOrgDatasources` above already cover this screen's organization,
+   project and datasource reads; `fetchOrgLinesOfBusiness` below is the one
+   read nothing existing exposed yet.
+--------------------------------------------------------------------------- */
+
+import type {
+  DataSourceCreate,
+  LineOfBusinessCreate,
+  LineOfBusinessRead,
+  OrganizationCreate,
+  ProjectCreate,
+} from "./types";
+import {
+  makeFixtureCreateLineOfBusiness,
+  makeFixtureCreateOrganization,
+  makeFixtureCreateProject,
+  makeFixtureCreateWorkspace,
+  makeFixtureOrgLinesOfBusiness,
+  makeFixtureRequestSourceBinding,
+  makeFixtureRegisterDatasource,
+} from "./fixtures";
+
+/** `POST /v1/organizations` (`create_organization`, `api.py:584`) -- the
+ *  platform-admin-gated tenant creation the legacy portal's
+ *  `#organization-form` posts to. Requires the `PlatformAdmin` role. */
+export async function createOrganization(
+  body: OrganizationCreate,
+  signal?: AbortSignal,
+): Promise<OrganizationRead> {
+  if (USE_FIXTURES) return makeFixtureCreateOrganization(body);
+  return postJson<OrganizationRead>("/v1/organizations", body, signal);
+}
+
+/** Create an access workspace. Projects remain a separate technical axis;
+ * sources are attached to this workspace with `requestSourceBinding`. */
+export async function createWorkspace(
+  organizationId: string,
+  body: WorkspaceCreate,
+  signal?: AbortSignal,
+): Promise<WorkspaceRead> {
+  if (USE_FIXTURES) return makeFixtureCreateWorkspace(organizationId, body);
+  return postJson<WorkspaceRead>(
+    `/v1/organizations/${organizationId}/workspaces`,
+    body,
+    signal,
+  );
+}
+
+/** Request maker-checker-governed access from a workspace to a source. */
+export async function requestSourceBinding(
+  workspaceId: string,
+  body: SourceBindingCreate,
+  signal?: AbortSignal,
+): Promise<SourceBindingRead> {
+  if (USE_FIXTURES) return makeFixtureRequestSourceBinding(workspaceId, body);
+  return postJson<SourceBindingRead>(
+    `/v1/workspaces/${workspaceId}/source-bindings`,
+    body,
+    signal,
+  );
+}
+
+/** `GET /v1/organizations/{organization_id}/lines-of-business`
+ *  (`list_lines_of_business`, `api.py:463`) -- the one hierarchy read
+ *  `fetchOrgProjects`/`fetchOrgDatasources` above don't already cover; feeds
+ *  both the "Add project" line-of-business picker and the scope-summary
+ *  tree in `AdministrationScreen`. */
+export async function fetchOrgLinesOfBusiness(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<LineOfBusinessRead>> {
+  if (USE_FIXTURES) return makeFixtureOrgLinesOfBusiness(organizationId);
+  return get<PageOf<LineOfBusinessRead>>(
+    `/v1/organizations/${organizationId}/lines-of-business?limit=500`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/lines-of-business`
+ *  (`create_line_of_business`, `api.py:677`). Requires `PlatformAdmin` or
+ *  `OrganizationAdmin`. */
+export async function createLineOfBusiness(
+  organizationId: string,
+  body: LineOfBusinessCreate,
+  signal?: AbortSignal,
+): Promise<LineOfBusinessRead> {
+  if (USE_FIXTURES) return makeFixtureCreateLineOfBusiness(organizationId, body);
+  return postJson<LineOfBusinessRead>(
+    `/v1/organizations/${organizationId}/lines-of-business`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/lines-of-business/{lob_id}/projects` (`create_project`,
+ *  `api.py:901`). `body.data_domain_id` is left unset on purpose --
+ *  `create_project`'s own `resolve_domain` falls back to the line of
+ *  business's default domain when it is omitted (`api.py:922`), and this
+ *  screen has no data-domain picker of its own (a stated scope cut, see
+ *  `AdministrationScreen`'s file-top comment). Requires `PlatformAdmin` or
+ *  `ProjectAdmin`. */
+export async function createProject(
+  lobId: string,
+  body: ProjectCreate,
+  signal?: AbortSignal,
+): Promise<ProjectRead> {
+  if (USE_FIXTURES) return makeFixtureCreateProject(lobId, body);
+  return postJson<ProjectRead>(`/v1/lines-of-business/${lobId}/projects`, body, signal);
+}
+
+/** `POST /v1/projects/{project_id}/datasources` (`create_datasource`,
+ *  `api.py:1021`) -- the same registration path `SourcesScreen`'s fleet is
+ *  read back from (via `fetchOrgDatasources`), scoped to one project.
+ *  `credential_reference` must reference the configured secret provider
+ *  (`_validate_datasource_create`, `api.py:960`); a raw connection string
+ *  comes back as a 422, same as the legacy portal. Requires `PlatformAdmin`
+ *  or `DataAdmin`. No post-registration connectivity test is fired here
+ *  (`POST /v1/datasources/{id}/test`, `api.py:1299`, is the legacy portal's
+ *  own separate follow-up call, `ui/app.js:1683`) -- a stated scope cut, not
+ *  a silently dropped step. */
+export async function registerDatasource(
+  projectId: string,
+  body: DataSourceCreate,
+  signal?: AbortSignal,
+): Promise<DataSourceRead> {
+  if (USE_FIXTURES) return makeFixtureRegisterDatasource(projectId, body);
+  return postJson<DataSourceRead>(`/v1/projects/${projectId}/datasources`, body, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   Tool registry -- nav id `tools`, `ToolRegistryScreen`'s own routes. See
+   that screen's file-top comment for the full endpoint list and what was
+   deliberately left out of scope (the multi-table blueprint helper and the
+   certification-cases/certification-runs sub-flow -- legacy's `tools-view`
+   never calls either). Datasource options for the create panel reuse the
+   already-existing `fetchOrgDatasources` above, filtered client-side by
+   `project_id` -- exactly what the legacy screen's own
+   `populateProjectSources()` (`ui/scripts/core.js`) does against its
+   org-wide `state.sources`; there is no project-scoped datasource-list
+   endpoint to call instead. */
+
+import type { GovernedToolVersionCreate, GovernedToolVersionRead, ToolExecutionRequest, ToolExecutionResponse } from "./types";
+import {
+  makeFixtureCreateToolVersion,
+  makeFixtureExecuteToolVersion,
+  makeFixtureRequestToolDeprecation,
+  makeFixtureSubmitToolForReview,
+  makeFixtureTools,
+} from "./fixtures";
+
+export interface ToolQuery {
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/projects/{project_id}/tools` (`list_tools`, `tool_api.py:609`)
+ *  -- usage-ranked, optionally filtered by `status` (`DRAFT` /
+ *  `REVIEW_REQUIRED` / `PUBLISHED` / `DEPRECATED`); matches the legacy
+ *  screen's own `loadTools()`. */
+export async function fetchTools(
+  projectId: string,
+  query: ToolQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<GovernedToolVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureTools(projectId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  params.set("limit", String(query.limit ?? 200));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<GovernedToolVersionRead>>(`/v1/projects/${projectId}/tools?${params}`, signal);
+}
+
+/** `POST /v1/projects/{project_id}/tools` (`create_tool_version`,
+ *  `tool_api.py:348`) -- validates the SQL template server-side (guarded
+ *  table access, placeholders matching declared parameters exactly) and
+ *  persists a new `DRAFT` version; matches the legacy screen's
+ *  `#tool-author-form` submit. Reusing an existing `slug` within this
+ *  project attaches the draft to that tool as its next version instead of
+ *  creating a new one (`_persist_tool_version_draft`, `tool_api.py:201`) --
+ *  what "New version" in this screen relies on. */
+export async function createToolVersion(
+  projectId: string,
+  body: GovernedToolVersionCreate,
+  signal?: AbortSignal,
+): Promise<GovernedToolVersionRead> {
+  if (USE_FIXTURES) return makeFixtureCreateToolVersion(projectId, body);
+  return postJson<GovernedToolVersionRead>(`/v1/projects/${projectId}/tools`, body, signal);
+}
+
+/** `POST /v1/tool-versions/{version_id}/submit` (`submit_tool_for_review`,
+ *  `tool_api.py:692`) -- moves a `DRAFT` version into the same
+ *  `GovernanceReview` queue `ReviewQueueScreen` reads; matches the legacy
+ *  screen's `data-submit-tool` action. */
+export async function submitToolForReview(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  if (USE_FIXTURES) return makeFixtureSubmitToolForReview(versionId);
+  return postJson<GovernanceReviewRead>(`/v1/tool-versions/${versionId}/submit`, {}, signal);
+}
+
+/** `POST /v1/tool-versions/{version_id}/deprecation-submit`
+ *  (`submit_tool_deprecation`, `tool_api.py:756`) -- requests retirement
+ *  review for a `PUBLISHED` version, recording its computed blast radius as
+ *  audit evidence before the review is even decided; matches the legacy
+ *  screen's `data-deprecate-tool` action. */
+export async function requestToolDeprecation(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  if (USE_FIXTURES) return makeFixtureRequestToolDeprecation(versionId);
+  return postJson<GovernanceReviewRead>(`/v1/tool-versions/${versionId}/deprecation-submit`, {}, signal);
+}
+
+/** `POST /v1/tool-versions/{version_id}/execute` (`execute_tool`,
+ *  `tool_api.py:881`, `response_model=ToolExecutionResponse`) -- runs a
+ *  `PUBLISHED` version's SQL template through the same governed query
+ *  gateway `AskScreen`'s freeform path uses, bound to the caller-supplied
+ *  parameters; matches the legacy screen's `executeSelectedTool()`. A
+ *  non-null `quality_gate` on the response means `check_tool_gate` demoted
+ *  this run to WARN over an open, non-critical upstream incident -- a BLOCK
+ *  never reaches this response at all (refused with 409 before execution). */
+export async function executeToolVersion(
+  versionId: string,
+  body: ToolExecutionRequest,
+  signal?: AbortSignal,
+): Promise<ToolExecutionResponse> {
+  if (USE_FIXTURES) return makeFixtureExecuteToolVersion(versionId, body);
+  return postJson<ToolExecutionResponse>(`/v1/tool-versions/${versionId}/execute`, body, signal);
+}
+
+
+/* ---------------------------------------------------------------------------
+   AI governance -- the legacy portal's `agents-view` (`ui/index.html`,
+   heading "Models, agents, and evaluations"), ported onto the real,
+   already-merged `ai_governance_api.py` model-route routes plus `api.py`'s
+   `/ai/runtime-status` and `/agent-evaluations` routes that view calls.
+   Added here as a clearly-delimited block, same convention as the Context
+   Products block above. See `AiGovernanceScreen.tsx`'s own header comment
+   for the full endpoint list, file:line citations, and what was
+   deliberately left out (the kill switch; `AgentEvalGateRead`, which is
+   `AiRegistryScreen`'s per-asset-version concern, not this org-wide suite).
+--------------------------------------------------------------------------- */
+
+import type {
+  AgentEvaluationRunRead,
+  AiRuntimeStatusRead,
+  ModelRouteConfigurationCreate,
+  ModelRouteConfigurationRead,
+} from "./types";
+import {
+  makeFixtureAgentEvaluations,
+  makeFixtureAiRuntimeStatus,
+  makeFixtureCreateModelRoute,
+  makeFixtureModelRoutes,
+  makeFixtureRunAgentEvaluation,
+  makeFixtureSubmitModelRoute,
+} from "./fixtures";
+
+export interface ModelRouteQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/model-routes` (`list_model_routes`,
+ *  `ai_governance_api.py:167`) -- one row per route version, newest version
+ *  first per `route_key`, exactly as the query orders them server-side;
+ *  matches `loadModelRoutes()`'s call in the legacy screen. */
+export async function fetchModelRoutes(
+  organizationId: string,
+  query: ModelRouteQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ModelRouteConfigurationRead>> {
+  if (USE_FIXTURES) return makeFixtureModelRoutes(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ModelRouteConfigurationRead>>(
+    `/v1/organizations/${organizationId}/model-routes?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/model-routes` (`create_model_route`,
+ *  `ai_governance_api.py:94`) -- creates a new `DRAFT` version for the given
+ *  `route_key` (version auto-incremented server-side); matches the legacy
+ *  screen's `#model-route-form` submit handler field-for-field. */
+export async function createModelRoute(
+  organizationId: string,
+  body: ModelRouteConfigurationCreate,
+  signal?: AbortSignal,
+): Promise<ModelRouteConfigurationRead> {
+  if (USE_FIXTURES) return makeFixtureCreateModelRoute(organizationId, body);
+  return postJson<ModelRouteConfigurationRead>(
+    `/v1/organizations/${organizationId}/model-routes`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/model-routes/{route_id}/submit` (`submit_model_route`,
+ *  `ai_governance_api.py:209`) -- moves a `DRAFT` route to `PENDING_REVIEW`
+ *  and opens the same `GovernanceReview` `ReviewQueueScreen` reads; matches
+ *  the legacy screen's `data-submit-route` action. */
+export async function submitModelRoute(
+  routeId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  if (USE_FIXTURES) return makeFixtureSubmitModelRoute(routeId);
+  return postJson<GovernanceReviewRead>(`/v1/model-routes/${routeId}/submit`, {}, signal);
+}
+
+/** `GET /v1/ai/runtime-status` (`ai_runtime_status`, `api.py:181`) -- the
+ *  orchestration/model-route/identity/secrets posture the legacy screen's
+ *  `#ai-runtime` rail renders via `renderRuntime()`. Org-independent (the
+ *  route takes no organization id -- it reflects process-wide `Settings`,
+ *  not a tenant's data). */
+export async function fetchAiRuntimeStatus(signal?: AbortSignal): Promise<AiRuntimeStatusRead> {
+  if (USE_FIXTURES) return makeFixtureAiRuntimeStatus();
+  return get<AiRuntimeStatusRead>("/v1/ai/runtime-status", signal);
+}
+
+export interface AgentEvaluationQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/agent-evaluations`
+ *  (`list_agent_evaluations`, `api.py:349`) -- the legacy screen's
+ *  `#evaluation-table` evidence, newest run first. */
+export async function fetchAgentEvaluations(
+  organizationId: string,
+  query: AgentEvaluationQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AgentEvaluationRunRead>> {
+  if (USE_FIXTURES) return makeFixtureAgentEvaluations(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AgentEvaluationRunRead>>(
+    `/v1/organizations/${organizationId}/agent-evaluations?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/agent-evaluations`
+ *  (`run_agent_evaluation`, `api.py:294`) -- executes the deterministic
+ *  repeatable control suite (`run_control_evaluation`, `agent_evals.py`)
+ *  and records one `AgentEvaluationRunRead`; matches the legacy screen's
+ *  `#run-evaluation` button. */
+export async function runAgentEvaluation(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<AgentEvaluationRunRead> {
+  if (USE_FIXTURES) return makeFixtureRunAgentEvaluation(organizationId);
+  return postJson<AgentEvaluationRunRead>(
+    `/v1/organizations/${organizationId}/agent-evaluations`,
+    {},
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Agent contract requests -- the reviewed, eval-gated path alongside the
+   direct-write `PUT .../agents/{version}/contract`. A `CONTRACT_AUTHORS`
+   principal submits a requested `AgentContractDefinition`; a different
+   principal decides it through the ordinary `GovernanceReview` queue
+   (`object_type=AGENT_CONTRACT_REQUEST`); on APPROVE the AT-8/N17 eval gate
+   is checked live before the contract is actually written. See
+   `agent_contract_request_api.py`'s module docstring for the full flow and
+   its honestly-scoped limitation (reuses `CONTRACT_AUTHORS`, does not invent
+   a narrower "external agent" role).
+--------------------------------------------------------------------------- */
+
+import { makeFixtureAgentContractRequests, makeFixtureSubmitAgentContractRequest } from "./fixtures";
+import type { AgentContractRequestCreate, AgentContractRequestRead } from "./types";
+
+export interface AgentContractRequestQuery {
+  status?: "PENDING" | "ACTIVATED" | "REJECTED" | "EVAL_BLOCKED";
+  aiAssetVersionId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/agent-contract-requests`
+ *  (`list_agent_contract_requests`) -- newest submission first. */
+export async function fetchAgentContractRequests(
+  organizationId: string,
+  query: AgentContractRequestQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AgentContractRequestRead>> {
+  if (USE_FIXTURES) return makeFixtureAgentContractRequests(organizationId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.aiAssetVersionId) params.set("ai_asset_version_id", query.aiAssetVersionId);
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AgentContractRequestRead>>(
+    `/v1/organizations/${organizationId}/agent-contract-requests?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/agent-contract-requests`
+ *  (`submit_agent_contract_request`) -- opens a `GovernanceReview` rather
+ *  than activating the contract; returns `202 Accepted` with the new
+ *  request's `PENDING` state. */
+export async function submitAgentContractRequest(
+  organizationId: string,
+  body: AgentContractRequestCreate,
+  signal?: AbortSignal,
+): Promise<AgentContractRequestRead> {
+  if (USE_FIXTURES) return makeFixtureSubmitAgentContractRequest(organizationId, body);
+  return postJson<AgentContractRequestRead>(
+    `/v1/organizations/${organizationId}/agent-contract-requests`,
+    body,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Unified lineage -- nav id `unified-lineage`, `UnifiedLineageScreen`'s own
+   routes. See that screen's file-top comment for the full endpoint list and
+   what was deliberately left out of scope (domain scope / cross-boundary
+   grants, the legacy force-directed graph engine).
+--------------------------------------------------------------------------- */
+
+import { makeFixtureUnifiedLineageGraph } from "./fixtures";
+
+export interface UnifiedLineageGraphQuery {
+  nodeLimit?: number;
+  edgeLimit?: number;
+  suggestionStatus?: "ALL" | "PENDING" | "APPROVED" | "REJECTED";
+}
+
+/** `GET /v1/datasources/{datasourceId}/unified-lineage/graph`
+ *  (`unified_lineage_api.py::get_unified_lineage_graph`, ~line 1181) -- the
+ *  merged FK + suggested + dbt + OpenLineage + view/procedure graph for one
+ *  datasource, with the real, configurable `node_limit`/`edge_limit`/
+ *  `suggestion_status` query params `UnifiedLineageScreen`'s own controls
+ *  need. `fetchLineageGraph` (above) already exists but hardcodes
+ *  `node_limit=200&edge_limit=500` with no `suggestion_status` param -- it
+ *  was built for a different, narrower purpose and is left exactly as it
+ *  landed rather than edited in place, matching this file's own established
+ *  convention of adding a new function alongside an earlier one instead of
+ *  changing a shipped call site's behaviour out from under it. */
+export async function fetchUnifiedLineageGraph(
+  datasourceId: string,
+  query: UnifiedLineageGraphQuery = {},
+  signal?: AbortSignal,
+): Promise<UnifiedLineageGraphRead> {
+  if (USE_FIXTURES) return makeFixtureUnifiedLineageGraph(datasourceId, query);
+  const params = new URLSearchParams();
+  params.set("node_limit", String(query.nodeLimit ?? 300));
+  params.set("edge_limit", String(query.edgeLimit ?? 1500));
+  params.set("suggestion_status", query.suggestionStatus ?? "APPROVED");
+  return get<UnifiedLineageGraphRead>(
+    `/v1/datasources/${datasourceId}/unified-lineage/graph?${params}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Transformations -- nav id `transformations`, `TransformationsScreen`'s own
+   routes (`src/aida/dbt_api.py`). See that screen's file-top comment for how
+   this screen was actually located (the nav button is real but hidden
+   behind an organization integration-policy flag, not missing) and for what
+   was deliberately left out of scope (the legacy Cytoscape DAG canvas).
+--------------------------------------------------------------------------- */
+
+import type {
+  DbtArtifactImportRead,
+  DbtArtifactImportRequest,
+  DbtLineageRead,
+  DbtProjectCreate,
+  DbtProjectRead,
+} from "./types";
+import {
+  makeFixtureCreateDbtProject,
+  makeFixtureDbtArtifactImports,
+  makeFixtureDbtLineage,
+  makeFixtureDbtProjects,
+  makeFixtureDbtResources,
+  makeFixtureImportDbtManifest,
+} from "./fixtures";
+
+/** `GET /v1/projects/{project_id}/dbt-projects` (`list_dbt_projects`,
+ *  `dbt_api.py:200`) -- delivery-project-scoped dbt project registrations,
+ *  the same scoping level `fetchOrgProjects`'s callers already use one level
+ *  up. Every dbt route this file calls scopes through `_project_scope`/
+ *  `_dbt_project_scope`/`_artifact_scope` (`dbt_api.py:58-92`), each of
+ *  which calls `_require_dbt_integration` (`dbt_api.py:138`) before doing
+ *  anything else -- so THIS call, not only the create calls below, 403s with
+ *  `"dbt integration is disabled for this organization"` whenever the
+ *  organization's integration policy has not enabled dbt. Callers should
+ *  render that detail string, not a generic error (`TransformationsScreen`'s
+ *  `DbtDisabledState` does). */
+export async function fetchDbtProjects(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<DbtProjectRead>> {
+  if (USE_FIXTURES) return makeFixtureDbtProjects(projectId);
+  return get<PageOf<DbtProjectRead>>(`/v1/projects/${projectId}/dbt-projects?limit=500`, signal);
+}
+
+/** `POST /v1/projects/{project_id}/dbt-projects` (`create_dbt_project`,
+ *  `dbt_api.py:149`) -- registers ownership + warehouse mapping only. No
+ *  repository credentials accepted, matching the legacy dialog's own
+ *  privacy note (`ui/index.html#dbt-project-dialog`). */
+export async function createDbtProject(
+  projectId: string,
+  body: DbtProjectCreate,
+  signal?: AbortSignal,
+): Promise<DbtProjectRead> {
+  if (USE_FIXTURES) return makeFixtureCreateDbtProject(projectId, body);
+  return postJson<DbtProjectRead>(`/v1/projects/${projectId}/dbt-projects`, body, signal);
+}
+
+/** `GET /v1/dbt-projects/{dbt_project_id}/artifact-imports`
+ *  (`list_dbt_artifact_imports`, `dbt_api.py:432`) -- one dbt project's
+ *  immutable import history, newest first. */
+export async function fetchDbtArtifactImports(
+  dbtProjectId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<DbtArtifactImportRead>> {
+  if (USE_FIXTURES) return makeFixtureDbtArtifactImports(dbtProjectId);
+  return get<PageOf<DbtArtifactImportRead>>(
+    `/v1/dbt-projects/${dbtProjectId}/artifact-imports?limit=100`,
+    signal,
+  );
+}
+
+/** `POST /v1/dbt-projects/{dbt_project_id}/artifact-imports`
+ *  (`import_dbt_manifest`, `dbt_api.py:232`). The body carries the already
+ *  PARSED JSON of manifest.json (required) plus optional catalog.json /
+ *  run_results.json -- reading those `File` objects and calling
+ *  `JSON.parse` is the screen's job (matching the legacy form's own
+ *  `FileReader`/`JSON.parse`, `ui/app.js`'s `#dbt-import-form` handler);
+ *  this call only posts the already-parsed objects. Idempotent by manifest
+ *  fingerprint server-side: re-importing an unchanged manifest returns the
+ *  existing artifact instead of creating a duplicate (`dbt_api.py:265-271`). */
+export async function importDbtManifest(
+  dbtProjectId: string,
+  body: DbtArtifactImportRequest,
+  signal?: AbortSignal,
+): Promise<DbtArtifactImportRead> {
+  if (USE_FIXTURES) return makeFixtureImportDbtManifest(dbtProjectId, body);
+  return postJson<DbtArtifactImportRead>(
+    `/v1/dbt-projects/${dbtProjectId}/artifact-imports`,
+    body,
+    signal,
+  );
+}
+
+/** Mirrors `schemas.py`'s `DbtResourceRead` (`dbt_api.py:467`'s response
+ *  item shape). Not added to the shared `types.ts` -- `TransformationsScreen`
+ *  is this port's only consumer, matching this file's existing precedent for
+ *  a response shape with one caller (`AgentAskError`, `ReviewQueueQuery`)
+ *  rather than growing the large shared file for it. */
+export interface DbtResourceRead {
+  id: string;
+  artifact_import_id: string;
+  unique_id: string;
+  resource_type: string;
+  package_name: string;
+  name: string;
+  database_name: string | null;
+  schema_name: string | null;
+  relation_name: string | null;
+  materialization: string | null;
+  original_file_path: string | null;
+  description: string | null;
+  compiled_sql_hash: string | null;
+  compiled_sql_redacted: string | null;
+  sql_parse_status: string;
+  column_names: string[];
+  column_descriptions: Record<string, string>;
+  column_types: Record<string, string>;
+  tags: string[];
+  depends_on_unique_ids: string[];
+  matched_table_id: string | null;
+  test_status: string | null;
+  test_failures: number | null;
+  test_execution_time: number | null;
+  extra_metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbtResourceQuery {
+  resourceType?: string | null;
+  matched?: boolean | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/dbt-artifact-imports/{artifact_id}/resources`
+ *  (`list_dbt_resources`, `dbt_api.py:467`) -- one immutable artifact's
+ *  parsed models/sources/tests/seeds/snapshots, each carrying its catalog
+ *  match, SQL-parse evidence, and (for TEST resources) the last reconciled
+ *  execution outcome (`reconcile_dbt_test_quality`, `dbt_quality_bridge.py`). */
+export async function fetchDbtResources(
+  artifactImportId: string,
+  query: DbtResourceQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DbtResourceRead>> {
+  if (USE_FIXTURES) return makeFixtureDbtResources(artifactImportId, query);
+  const params = new URLSearchParams();
+  if (query.resourceType) params.set("resource_type", query.resourceType);
+  if (query.matched !== undefined && query.matched !== null) {
+    params.set("matched", String(query.matched));
+  }
+  params.set("limit", String(query.limit ?? 500));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<DbtResourceRead>>(
+    `/v1/dbt-artifact-imports/${artifactImportId}/resources?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/dbt-artifact-imports/{artifact_id}/lineage` (`get_dbt_lineage`,
+ *  `dbt_api.py:507`) -- table-level dependency edges (`edge_type
+ *  DEPENDS_ON`) plus column-level edges (`COLUMN_DEPENDS_ON`,
+ *  `dbt_column_lineage.py::extract_column_lineage`) across the same
+ *  resource set `fetchDbtResources` returns for this artifact. */
+export async function fetchDbtLineage(
+  artifactImportId: string,
+  signal?: AbortSignal,
+): Promise<DbtLineageRead> {
+  if (USE_FIXTURES) return makeFixtureDbtLineage(artifactImportId);
+  return get<DbtLineageRead>(`/v1/dbt-artifact-imports/${artifactImportId}/lineage?limit=2000`, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   ABAC access policies + authorization simulation -- nav id `access-policies`.
+   Both routes live in `workspace_api.py` despite the domain name (confirmed
+   by direct source read, not `api.py`):
+
+     - GET  /v1/organizations/{organization_id}/access-policies      list_access_policies, workspace_api.py:511
+     - POST /v1/organizations/{organization_id}/access-policies       create_access_policy, workspace_api.py:527
+     - POST /v1/workspaces/{workspace_id}/authorization-simulations   simulate_authorization, workspace_api.py:620
+
+   `subject_match` / `resource_match` / `transform` / `condition` / `subjects`
+   are genuinely free-form policy data (matches the legacy portal's
+   `#abac-policy-form` / `#abac-simulate-form`, `control-center.js:201-202`) --
+   the screen parses their raw JSON textareas client-side rather than
+   building a structured editor for them.
+--------------------------------------------------------------------------- */
+
+import type {
+  AccessPolicyCreate,
+  AccessPolicyRead,
+  AuthorizationSimulationRead,
+  AuthorizationSimulationRequest,
+} from "./types";
+import { makeFixtureAccessPolicies, makeFixtureCreateAccessPolicy, makeFixtureSimulateAuthorization } from "./fixtures";
+
+export interface AccessPolicyQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/access-policies` -- visible to
+ *  `PlatformAdmin`/`OrganizationAdmin`/`DataAdmin`/`Reviewer`, a wider set
+ *  than who may create one below. Multiple rows can share a `code`: creating
+ *  again under the same code auto-increments `version` server-side rather
+ *  than replacing the row, so the list carries `version` per row. */
+export async function fetchAccessPolicies(
+  organizationId: string,
+  query: AccessPolicyQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AccessPolicyRead>> {
+  if (USE_FIXTURES) return makeFixtureAccessPolicies(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 200));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AccessPolicyRead>>(
+    `/v1/organizations/${organizationId}/access-policies?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/access-policies` -- narrower
+ *  than the list above (`PlatformAdmin`/`OrganizationAdmin` only). A new
+ *  policy always starts `DRAFT` unless the caller explicitly sets
+ *  `status: "ACTIVE"` in the body. */
+export async function createAccessPolicy(
+  organizationId: string,
+  body: AccessPolicyCreate,
+  signal?: AbortSignal,
+): Promise<AccessPolicyRead> {
+  if (USE_FIXTURES) return makeFixtureCreateAccessPolicy(organizationId, body);
+  return postJson<AccessPolicyRead>(`/v1/organizations/${organizationId}/access-policies`, body, signal);
+}
+
+/** `POST /v1/workspaces/{workspace_id}/authorization-simulations` --
+ *  "who could see this?" against the live policy engine, open to any
+ *  workspace member. `body.workspace_id` must match the path param or the
+ *  real endpoint returns 422; callers must set both from the same picked
+ *  workspace id. */
+export async function simulateAuthorization(
+  workspaceId: string,
+  body: AuthorizationSimulationRequest,
+  signal?: AbortSignal,
+): Promise<AuthorizationSimulationRead> {
+  if (USE_FIXTURES) return makeFixtureSimulateAuthorization(workspaceId, body);
+  return postJson<AuthorizationSimulationRead>(
+    `/v1/workspaces/${workspaceId}/authorization-simulations`,
+    body,
+    signal,
+  );
+}
+
+
+/* ---------------------------------------------------------------------------
+   Workspace membership, source-binding decisions, BI/Tableau lineage
+   connections -- the piece of the legacy Enterprise Control Center's
+   `renderAccess`/`renderBi` this file's own `fetchOrgWorkspaces`/
+   `fetchWorkspaceSourceBindings`/`createWorkspace`/`requestSourceBinding`
+   (above) do not cover: workspace *members* (`workspace_api.py:160-208`),
+   the *decision* half of the maker-checker source-binding flow
+   (`workspace_api.py:293`, `createWorkspace`/`requestSourceBinding` only
+   create/request), and BI connections (`bi_api.py`, new -- nothing in this
+   file touches it yet).
+--------------------------------------------------------------------------- */
+
+import type {
+  BiArtifactImportRead,
+  BiArtifactImportRequest,
+  BiConnectionCreate,
+  BiConnectionRead,
+  SourceBindingDecision,
+  WorkspaceMembershipCreate,
+  WorkspaceMembershipRead,
+} from "./types";
+import {
+  makeFixtureAddWorkspaceMember,
+  makeFixtureCreateBiConnection,
+  makeFixtureDecideSourceBinding,
+  makeFixtureImportBiArtifact,
+  makeFixtureProjectBiConnections,
+  makeFixtureWorkspaceMembers,
+} from "./fixtures";
+
+/** `POST /v1/workspaces/{workspace_id}/members` (`workspace_api.py:160`,
+ *  `_ADMIN` only: PlatformAdmin/OrganizationAdmin/DataAdmin). 409s if the
+ *  principal already has a membership in this workspace. */
+export async function addWorkspaceMember(
+  workspaceId: string,
+  body: WorkspaceMembershipCreate,
+  signal?: AbortSignal,
+): Promise<WorkspaceMembershipRead> {
+  if (USE_FIXTURES) return makeFixtureAddWorkspaceMember(workspaceId, body);
+  return postJson<WorkspaceMembershipRead>(
+    `/v1/workspaces/${workspaceId}/members`,
+    body,
+    signal,
+  );
+}
+
+/** `GET /v1/workspaces/{workspace_id}/members` (`workspace_api.py:207`,
+ *  `_ANY_MEMBER`: the `_ADMIN` roles plus Steward/Analyst/Reviewer). No
+ *  limit/offset -- the route returns every membership unpaginated. */
+export async function fetchWorkspaceMembers(
+  workspaceId: string,
+  signal?: AbortSignal,
+): Promise<PageOf<WorkspaceMembershipRead>> {
+  if (USE_FIXTURES) return makeFixtureWorkspaceMembers(workspaceId);
+  return get<PageOf<WorkspaceMembershipRead>>(
+    `/v1/workspaces/${workspaceId}/members`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   PG-4: delegations -- time-bounded, audited handoff of a principal's own
+   governance roles to another principal (e.g. a steward or reviewer going on
+   leave). Real, already-merged routes (`delegation_api.py`); `DelegationsScreen`
+   is the first frontend for this. `status` on the wire is only `"ACTIVE"` or
+   `"REVOKED"` -- nothing flips the column at expiry by design (the module's
+   own docstring), so the screen computes an "expired" state client-side from
+   `status === "ACTIVE"` plus `expires_at` having passed.
+--------------------------------------------------------------------------- */
+import type { DelegationCreate, DelegationRead } from "./types";
+import {
+  makeFixtureDelegations,
+  makeFixtureGrantDelegation,
+  makeFixtureRevokeDelegation,
+} from "./fixtures";
+
+export interface DelegationsQuery {
+  delegatePrincipalId?: string | null;
+  delegatorPrincipalId?: string | null;
+  /** Server-side status filter only ever sees `"ACTIVE"`/`"REVOKED"` -- the
+   *  "expired" split is computed client-side, never sent on the wire. */
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/delegations` (`delegation_api.py::list_delegations`).
+ *  All three filters are optional and omitted from the query string when unset
+ *  (never sent as an empty string). */
+export async function fetchDelegations(
+  organizationId: string,
+  query: DelegationsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DelegationRead>> {
+  if (USE_FIXTURES) return makeFixtureDelegations(organizationId, query);
+  const params = new URLSearchParams();
+  if (query.delegatePrincipalId) params.set("delegate_principal_id", query.delegatePrincipalId);
+  if (query.delegatorPrincipalId) params.set("delegator_principal_id", query.delegatorPrincipalId);
+  if (query.status) params.set("status", query.status);
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<DelegationRead>>(
+    `/v1/organizations/${organizationId}/delegations?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/delegations` (`delegation_api.py::grant_delegation`).
+ *  422s on self-delegation, on delegating a role the caller does not itself
+ *  hold, if `expires_at <= starts_at`, or if the window exceeds 180 days --
+ *  all surfaced as-is via `postJson`'s `ApiError`. */
+export async function grantDelegation(
+  organizationId: string,
+  body: DelegationCreate,
+  signal?: AbortSignal,
+): Promise<DelegationRead> {
+  if (USE_FIXTURES) return makeFixtureGrantDelegation(organizationId, body);
+  return postJson<DelegationRead>(
+    `/v1/organizations/${organizationId}/delegations`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/delegations/{delegation_id}/revoke` (`delegation_api.py::revoke_delegation`).
+ *  409s if the delegation is not currently ACTIVE, 403s if the caller is
+ *  neither the original delegator nor a platform admin. No request body --
+ *  `{}` matches this file's own convention of never sending an
+ *  optional-looking empty POST without an explicit body. */
+export async function revokeDelegation(
+  delegationId: string,
+  signal?: AbortSignal,
+): Promise<DelegationRead> {
+  if (USE_FIXTURES) return makeFixtureRevokeDelegation(delegationId);
+  return postJson<DelegationRead>(`/v1/delegations/${delegationId}/revoke`, {}, signal);
+}
+
+/** `POST /v1/source-bindings/{binding_id}/decision` (`workspace_api.py:293`,
+ *  roles `_ADMIN` + Reviewer) -- the maker-checker approve/reject a pending
+ *  binding from `requestSourceBinding` above needs. The endpoint 403/409s
+ *  when the decider is the same principal who requested the binding; that
+ *  detail string is surfaced as-is by `postJson`'s `ApiError`, not swallowed. */
+export async function decideSourceBinding(
+  bindingId: string,
+  body: SourceBindingDecision,
+  signal?: AbortSignal,
+): Promise<SourceBindingRead> {
+  if (USE_FIXTURES) return makeFixtureDecideSourceBinding(bindingId, body);
+  return postJson<SourceBindingRead>(
+    `/v1/source-bindings/${bindingId}/decision`,
+    body,
+    signal,
+  );
+}
+
+export interface BiConnectionQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/projects/{project_id}/bi-connections` (`bi_api.py:226`) -- roles
+ *  add DataSteward/Auditor/Viewer on top of the create roles below. 403s via
+ *  `_require_bi_integration` when the organization's integration policy has
+ *  not enabled `"bi"`; that detail is a legitimate expected state for orgs
+ *  that have not opted in, not a bug, and is surfaced the same way. */
+export async function fetchProjectBiConnections(
+  projectId: string,
+  opts: BiConnectionQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<BiConnectionRead>> {
+  if (USE_FIXTURES) return makeFixtureProjectBiConnections(projectId, opts);
+  const params = new URLSearchParams();
+  params.set("limit", String(opts.limit ?? 100));
+  params.set("offset", String(opts.offset ?? 0));
+  return get<PageOf<BiConnectionRead>>(
+    `/v1/projects/${projectId}/bi-connections?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/projects/{project_id}/bi-connections` (`bi_api.py:171`, roles
+ *  PlatformAdmin/DataAdmin/MetadataAdmin) -- registers a Tableau/Power BI/
+ *  Looker connection against one of the project's own datasources. */
+export async function createBiConnection(
+  projectId: string,
+  body: BiConnectionCreate,
+  signal?: AbortSignal,
+): Promise<BiConnectionRead> {
+  if (USE_FIXTURES) return makeFixtureCreateBiConnection(projectId, body);
+  return postJson<BiConnectionRead>(
+    `/v1/projects/${projectId}/bi-connections`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/bi-connections/{connection_id}/artifact-imports` (`bi_api.py:258`,
+ *  same create roles) -- `body.artifact` is the raw exported BI artifact
+ *  JSON, same as the legacy `#bi-import-form`'s textarea (`control-center.js`);
+ *  parsing that text into JSON is the caller's job, not this function's. */
+export async function importBiArtifact(
+  connectionId: string,
+  body: BiArtifactImportRequest,
+  signal?: AbortSignal,
+): Promise<BiArtifactImportRead> {
+  if (USE_FIXTURES) return makeFixtureImportBiArtifact(connectionId, body);
+  return postJson<BiArtifactImportRead>(
+    `/v1/bi-connections/${connectionId}/artifact-imports`,
+    body,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   Compliance packs (module EE.4/OB-5) -- audit-ready evidence bundles
+   generated from runtime evidence and downloaded as structured JSON
+   (`compliance_api.py`). Org is derived server-side from the auth context
+   (`context.require_organization()`, `compliance_api.py:74/128/152/181`) --
+   none of these three routes take an `organization_id` path segment, unlike
+   most of this file's other calls, so no org id is threaded through here.
+--------------------------------------------------------------------------- */
+
+import type { CompliancePackRead, GeneratePackRequest } from "./types";
+import {
+  makeFixtureCompliancePacks,
+  makeFixtureDownloadCompliancePack,
+  makeFixtureGenerateCompliancePack,
+} from "./fixtures";
+
+export interface CompliancePackQuery {
+  framework?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/compliance/packs` (`list_compliance_packs`, `compliance_api.py:119`).
+ *  Gated server-side behind `PlatformAdmin`/`ComplianceOfficer`/`DataSteward`/
+ *  `Viewer` -- a Viewer can see the list (name/framework/status/generated_at)
+ *  but not a pack's evidence body, see `downloadCompliancePack` below. */
+export async function fetchCompliancePacks(
+  query: CompliancePackQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<CompliancePackRead>> {
+  if (USE_FIXTURES) return makeFixtureCompliancePacks(query);
+  const params = new URLSearchParams();
+  if (query.framework) params.set("framework", query.framework);
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<CompliancePackRead>>(`/v1/compliance/packs?${params}`, signal);
+}
+
+/** `POST /v1/compliance/packs/generate` (`generate_compliance_pack`,
+ *  `compliance_api.py:62`) -- gated behind `PlatformAdmin`/`ComplianceOfficer`/
+ *  `DataSteward` (no `Viewer`). The route itself 422s when `period_end` is
+ *  not after `period_start`; that detail string is surfaced as-is, not
+ *  re-validated client-side. */
+export async function generateCompliancePack(
+  body: GeneratePackRequest,
+  signal?: AbortSignal,
+): Promise<CompliancePackRead> {
+  if (USE_FIXTURES) return makeFixtureGenerateCompliancePack(body);
+  return postJson<CompliancePackRead>("/v1/compliance/packs/generate", body, signal);
+}
+
+/** `GET /v1/compliance/packs/{pack_id}/download` (`download_compliance_pack`,
+ *  `compliance_api.py:174`) -- the pack's structured evidence body
+ *  (`response_model=dict[str, Any]`, no dedicated Pydantic model on the
+ *  wire, hence the plain `Record` return type here). Gated behind
+ *  `PlatformAdmin`/`ComplianceOfficer`/`DataSteward` ONLY -- deliberately
+ *  narrower than the list/get-by-id routes above, which also allow
+ *  `Viewer`. A Viewer's 403 here is the route working as designed (they can
+ *  see a pack exists, not its evidence body), not a bug to route around --
+ *  render it as the same `ErrorState` any other 403 in this app gets. */
+export async function downloadCompliancePack(
+  packId: string,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  if (USE_FIXTURES) return makeFixtureDownloadCompliancePack(packId);
+  return get<Record<string, unknown>>(`/v1/compliance/packs/${packId}/download`, signal);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Catalog bulk actions + unowned-asset stewardship backlog.
+
+   Ported from the legacy portal's single `#catalog-bulk-form` (one filter,
+   four actions keyed off `<select name="action">`, `ui/scripts/features/
+   control-center.js`'s `renderCatalog`/submit handler) and its separate
+   `#route-unowned` button. Every write here requires one of
+   `CATALOG_BULK_ACTION_WRITE_ROLES` (`api.py:161`) for the four table
+   actions, or `WRITE_ROLES` (`stewardship_api.py:98`) for routing the
+   backlog -- both already satisfied by this app's dev-mode principal
+   (`identityHeaders()` above).
+
+     POST /v1/organizations/{organization_id}/tables/bulk-tag       (api.py:3199)
+     POST /v1/organizations/{organization_id}/tables/bulk-classify  (api.py:3271)
+     POST /v1/organizations/{organization_id}/tables/bulk-own       (api.py:3360)
+     POST /v1/organizations/{organization_id}/tables/bulk-certify   (api.py:3435)
+     GET  /v1/organizations/{organization_id}/stewardship/unowned-backlog
+                                                        (stewardship_api.py:1606)
+     POST /v1/organizations/{organization_id}/stewardship/unowned-backlog/route
+                                                        (stewardship_api.py:1645)
+
+   Every bulk-* body carries exactly one of `table_ids`/`column_ids` (explicit
+   selection) or `filter` (datasource + match field/pattern) -- the backend
+   has no third, broader "match everything" mode, so this client sends
+   whichever one the caller already built rather than inventing a union type
+   of its own. Each matched subject succeeds or fails independently
+   server-side; that per-item detail comes back on `CatalogBulkActionRunRead.
+   results`, not just an aggregate count.
+--------------------------------------------------------------------------- */
+
+import type {
+  CatalogBulkCertifyRequest,
+  CatalogBulkClassifyRequest,
+  CatalogBulkOwnRequest,
+  CatalogBulkTagRequest,
+  CatalogBulkActionRunRead,
+  DocumentationWorklistEntryRead,
+  UnownedAssetBacklogRouteRequest,
+  UnownedAssetBacklogRouteResult,
+  UnownedAssetEscalationRead,
+} from "./types";
+import {
+  makeFixtureBulkCertifyCatalogTables,
+  makeFixtureBulkClassifyCatalogColumns,
+  makeFixtureBulkOwnCatalogTables,
+  makeFixtureBulkTagCatalogTables,
+  makeFixtureDocumentationWorklist,
+  makeFixtureRouteUnownedAssetBacklog,
+  makeFixtureUnownedAssetBacklog,
+} from "./fixtures";
+
+/** `POST /v1/organizations/{organization_id}/tables/bulk-tag`
+ *  (`bulk_tag_tables`, `api.py:3199`) -- applies `tag_key`/`tag_value` to
+ *  every table `body.table_ids` names, or every table `body.filter` (a
+ *  datasource + match field/pattern) resolves to. */
+export async function bulkTagCatalogTables(
+  organizationId: string,
+  body: CatalogBulkTagRequest,
+  signal?: AbortSignal,
+): Promise<CatalogBulkActionRunRead> {
+  if (USE_FIXTURES) return makeFixtureBulkTagCatalogTables(organizationId, body);
+  return postJson<CatalogBulkActionRunRead>(
+    `/v1/organizations/${organizationId}/tables/bulk-tag`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/tables/bulk-classify`
+ *  (`bulk_classify_tables`, `api.py:3271`) -- sets `classification` on every
+ *  column `body.column_ids` names, every column matching
+ *  `body.column_name_pattern` under `body.table_ids`/`body.filter`'s
+ *  matched tables, or (default pattern `"*"`) every column of those tables. */
+export async function bulkClassifyCatalogColumns(
+  organizationId: string,
+  body: CatalogBulkClassifyRequest,
+  signal?: AbortSignal,
+): Promise<CatalogBulkActionRunRead> {
+  if (USE_FIXTURES) return makeFixtureBulkClassifyCatalogColumns(organizationId, body);
+  return postJson<CatalogBulkActionRunRead>(
+    `/v1/organizations/${organizationId}/tables/bulk-classify`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/tables/bulk-own`
+ *  (`bulk_own_tables`, `api.py:3360`) -- assigns `owner_principal` (an
+ *  INDIVIDUAL principal id or GROUP name) as owner of every matched table. */
+export async function bulkAssignCatalogOwnership(
+  organizationId: string,
+  body: CatalogBulkOwnRequest,
+  signal?: AbortSignal,
+): Promise<CatalogBulkActionRunRead> {
+  if (USE_FIXTURES) return makeFixtureBulkOwnCatalogTables(organizationId, body);
+  return postJson<CatalogBulkActionRunRead>(
+    `/v1/organizations/${organizationId}/tables/bulk-own`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/tables/bulk-certify`
+ *  (`bulk_certify_tables`, `api.py:3435`) -- certifies every matched table
+ *  with `rationale` (server-required, >=10 chars) and a future `expires_at`. */
+export async function bulkCertifyCatalogTables(
+  organizationId: string,
+  body: CatalogBulkCertifyRequest,
+  signal?: AbortSignal,
+): Promise<CatalogBulkActionRunRead> {
+  if (USE_FIXTURES) return makeFixtureBulkCertifyCatalogTables(organizationId, body);
+  return postJson<CatalogBulkActionRunRead>(
+    `/v1/organizations/${organizationId}/tables/bulk-certify`,
+    body,
+    signal,
+  );
+}
+
+export interface UnownedAssetBacklogQuery {
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/stewardship/unowned-backlog`
+ *  (`list_unowned_backlog`, `stewardship_api.py:1606`) -- one row per table
+ *  the platform has detected has no assigned owner, at whatever stage
+ *  (UNOWNED/ROUTED/ESCALATED/ESCALATED_TIER_2/RESOLVED) its escalation has
+ *  reached; matches the legacy screen's "unowned backlog" list. */
+export async function fetchUnownedAssetBacklog(
+  organizationId: string,
+  query: UnownedAssetBacklogQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<UnownedAssetEscalationRead>> {
+  if (USE_FIXTURES) return makeFixtureUnownedAssetBacklog(organizationId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<UnownedAssetEscalationRead>>(
+    `/v1/organizations/${organizationId}/stewardship/unowned-backlog?${params}`,
+    signal,
+  );
+}
+
+export interface DocumentationWorklistQuery {
+  limit?: number;
+  offset?: number;
+  includeZeroVolume?: boolean;
+  ranking?: "priority" | "query_volume";
+}
+
+/** `GET /v1/organizations/{organization_id}/stewardship/documentation-worklist`
+ *  (`stewardship_api.py::list_documentation_worklist`, AT-5/SW-1) -- the
+ *  ranked "document this next" backlog: real query volume x downstream
+ *  impact x a five-field documentation deficit, not usage alone. */
+export async function fetchDocumentationWorklist(
+  organizationId: string,
+  query: DocumentationWorklistQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DocumentationWorklistEntryRead>> {
+  if (USE_FIXTURES) return makeFixtureDocumentationWorklist(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  if (query.includeZeroVolume) params.set("include_zero_volume", "true");
+  if (query.ranking) params.set("ranking", query.ranking);
+  return get<PageOf<DocumentationWorklistEntryRead>>(
+    `/v1/organizations/${organizationId}/stewardship/documentation-worklist?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/stewardship/unowned-backlog/route`
+ *  (`route_unowned_backlog`, `stewardship_api.py:1645`) -- advances every
+ *  in-scope escalation one notification-rule-driven step (UNOWNED -> ROUTED,
+ *  ROUTED -> ESCALATED, ESCALATED -> ESCALATED_TIER_2, or straight to
+ *  RESOLVED where ownership was already found), optionally scoped to one
+ *  datasource/domain/line of business; an empty body routes the whole
+ *  organization. Matches the legacy screen's `#route-unowned` button. */
+export async function routeUnownedAssetBacklog(
+  organizationId: string,
+  body: UnownedAssetBacklogRouteRequest,
+  signal?: AbortSignal,
+): Promise<UnownedAssetBacklogRouteResult> {
+  if (USE_FIXTURES) return makeFixtureRouteUnownedAssetBacklog(organizationId, body);
+  return postJson<UnownedAssetBacklogRouteResult>(
+    `/v1/organizations/${organizationId}/stewardship/unowned-backlog/route`,
+    body,
+    signal,
+  );
+}
+
+
+/* ---------------------------------------------------------------------------
+   Tool plans -- multi-step tool orchestration, distinct from the single
+   governed-tool-version CRUD/execute `ToolRegistryScreen` already owns. All
+   in `tool_plans_api.py`, `/v1` prefix:
+
+     - POST /v1/tool-plans                       create_tool_plan,   tool_plans_api.py:174
+     - GET  /v1/tool-plans/{plan_id}              get_tool_plan,      tool_plans_api.py:233
+     - POST /v1/tool-plans/{plan_id}/validate     validate_tool_plan, tool_plans_api.py:275
+     - POST /v1/tool-plans/{plan_id}/execute      execute_tool_plan,  tool_plans_api.py:350
+     - POST /v1/tool-plans/{plan_id}/cancel       cancel_tool_plan,   tool_plans_api.py:469
+     - GET  /v1/tool-plans/{plan_id}/evidence     list_tool_plan_evidence, tool_plans_api.py:512
+
+   None of these carry `{organization_id}` in the path, unlike every sibling
+   domain above -- each handler calls `context.require_organization()` and
+   scopes/verifies against the row's own `organization_id` instead
+   (`enforce_organization`), so the org is derived from auth context alone.
+
+   Every route is additionally gated by an edition entitlement check
+   (`_deny_unless_entitled`, `tool_plans_api.py:138`) for capability
+   `"multi_step_tool_plans"`, on top of the ordinary `require_roles` check.
+   A denial from the entitlement gate is a plain 403 whose `detail` is the
+   reason code itself (`ENTITLEMENT_EDITION_INSUFFICIENT` /
+   `ENTITLEMENT_CAPABILITY_UNREGISTERED`, `edition_entitlements.py`), while a
+   plain role denial's `detail` reads
+   `"one of these roles is required: ..."` -- distinguishable string shapes,
+   which is what `ToolPlansScreen` keys off of to show "this org's edition
+   doesn't include multi-step tool plans" instead of a generic Forbidden.
+--------------------------------------------------------------------------- */
+
+import type {
+  ExecutionRead,
+  ToolPlanCreate,
+  ToolPlanDetailRead,
+  ToolPlanRead,
+  ValidationResponse,
+} from "./types";
+import {
+  makeFixtureCancelToolPlan,
+  makeFixtureCreateToolPlan,
+  makeFixtureExecuteToolPlan,
+  makeFixtureToolPlan,
+  makeFixtureToolPlanEvidence,
+  makeFixtureValidateToolPlan,
+} from "./fixtures";
+
+/** `POST /v1/tool-plans` -- creates a `DRAFT` plan from one or more steps
+ *  plus a budget (both default-filled server-side if omitted beyond
+ *  `name`/`steps`). Matches the legacy `#tool-plan-form` submit, which only
+ *  ever built a single-step plan -- the create form here does the same;
+ *  the model supports many steps, but multi-step plan *authoring* in the UI
+ *  is left as a documented future enhancement (see `ToolPlansScreen.tsx`). */
+export async function createToolPlan(
+  body: ToolPlanCreate,
+  signal?: AbortSignal,
+): Promise<ToolPlanRead> {
+  if (USE_FIXTURES) return makeFixtureCreateToolPlan(body);
+  return postJson<ToolPlanRead>(`/v1/tool-plans`, body, signal);
+}
+
+/** `GET /v1/tool-plans/{plan_id}` -- the plan plus its ordered steps. */
+export async function fetchToolPlan(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<ToolPlanDetailRead> {
+  if (USE_FIXTURES) return makeFixtureToolPlan(planId);
+  return get<ToolPlanDetailRead>(`/v1/tool-plans/${planId}`, signal);
+}
+
+/** `POST /v1/tool-plans/{plan_id}/validate` -- no body. Checks step
+ *  ordering/dependencies/budget without executing anything; matches
+ *  legacy's `plan-validate` button. */
+export async function validateToolPlan(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<ValidationResponse> {
+  if (USE_FIXTURES) return makeFixtureValidateToolPlan(planId);
+  return postJson<ValidationResponse>(`/v1/tool-plans/${planId}/validate`, {}, signal);
+}
+
+/** `POST /v1/tool-plans/{plan_id}/execute` -- no body. 409s when the plan's
+ *  `status` is not `DRAFT`/`VALIDATED`; matches legacy's `plan-execute`
+ *  button. */
+export async function executeToolPlan(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<ExecutionRead> {
+  if (USE_FIXTURES) return makeFixtureExecuteToolPlan(planId);
+  return postJson<ExecutionRead>(`/v1/tool-plans/${planId}/execute`, {}, signal);
+}
+
+/** `POST /v1/tool-plans/{plan_id}/cancel` -- no body, narrower roles than
+ *  the rest of this file (`PlatformAdmin`/`ToolDeveloper` only, no
+ *  `DataEngineer`). 409s when the plan is already `COMPLETED`/`CANCELLED`;
+ *  matches legacy's `plan-cancel` button. */
+export async function cancelToolPlan(
+  planId: string,
+  signal?: AbortSignal,
+): Promise<ToolPlanRead> {
+  if (USE_FIXTURES) return makeFixtureCancelToolPlan(planId);
+  return postJson<ToolPlanRead>(`/v1/tool-plans/${planId}/cancel`, {}, signal);
+}
+
+export interface ToolPlanEvidenceQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/tool-plans/{plan_id}/evidence` -- paged `ExecutionRead` history
+ *  for the plan; matches legacy's `plan-evidence` button. */
+export async function fetchToolPlanEvidence(
+  planId: string,
+  query: ToolPlanEvidenceQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ExecutionRead>> {
+  if (USE_FIXTURES) return makeFixtureToolPlanEvidence(planId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ExecutionRead>>(`/v1/tool-plans/${planId}/evidence?${params}`, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   Reliability -- SLOs, notification rules, archive/WORM evidence posture,
+   and runtime data-contract evaluation. Ports the legacy portal's
+   `renderReliability()` (`ui/scripts/features/control-center.js`) onto the
+   real, already-merged `observability_api.py` / `notification_api.py` /
+   `runtime_contracts_api.py` routes -- the legacy screen's own
+   `loadControlCenter()` calls these exact paths.
+
+   Honest scope note: `organizationId` is accepted below on the SLO and
+   notification-rule functions for parity with every other org-scoped fetch
+   in this file (and to key fixture data the same way other screens do), but
+   it has nowhere to go on the wire for these particular routes.
+   `observability_api.py`'s and `notification_api.py`'s routes take no
+   `organization_id` path or query param at all -- unlike, say,
+   `fetchModelRoutes`'s `/v1/organizations/{organization_id}/model-routes` --
+   because the server instead reads `context.require_organization()`, which
+   resolves from the `X-Organization-Id` header
+   (`security.py::get_security_context`). `identityHeaders()` above does not
+   send that header today. That gap is pre-existing, shared infrastructure
+   (identityHeaders is explicitly out of this addition's scope) and the
+   legacy portal has the identical gap -- its own `api()` helper never sends
+   `X-Organization-Id` either, so this is not a regression, just a limit on
+   what a live (`VITE_USE_FIXTURES=0`) run of this screen can do today: those
+   two endpoint families will 400 with "organization context is required for
+   this operation" until that header is added, exactly as they would against
+   the legacy UI. Fixture mode (the default) is unaffected -- it never
+   depended on the header.
+--------------------------------------------------------------------------- */
+
+import type {
+  ArchiveStatusRead,
+  EvaluationResponse,
+  NotificationRuleCreate,
+  NotificationRuleRead,
+  SlaStatusResponse,
+  SloBudgetRead,
+  SloDefinitionCreate,
+  SloDefinitionRead,
+} from "./types";
+import type { ViolationRead } from "./ui-types";
+import {
+  makeFixtureArchiveStatus,
+  makeFixtureContractSlaStatus,
+  makeFixtureContractViolations,
+  makeFixtureCreateNotificationRule,
+  makeFixtureCreateSloDefinition,
+  makeFixtureEvaluateDataContract,
+  makeFixtureNotificationRules,
+  makeFixtureSloBudget,
+  makeFixtureSloDefinitions,
+} from "./fixtures";
+
+export interface SloDefinitionQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/observability/slo` (`observability_api.py::list_slo_definitions`,
+ *  roles PlatformAdmin/DataAdmin/Operations/Viewer) -- every SLO definition
+ *  for the caller's organization, newest first. */
+export async function fetchSloDefinitions(
+  organizationId: string,
+  query: SloDefinitionQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<SloDefinitionRead>> {
+  if (USE_FIXTURES) return makeFixtureSloDefinitions(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<SloDefinitionRead>>(`/v1/observability/slo?${params}`, signal);
+}
+
+/** `POST /v1/observability/slo` (`observability_api.py::create_slo_definition`,
+ *  roles PlatformAdmin/DataAdmin/Operations) -- 409s if `slo_key` already
+ *  exists for this organization. */
+export async function createSloDefinition(
+  organizationId: string,
+  body: SloDefinitionCreate,
+  signal?: AbortSignal,
+): Promise<SloDefinitionRead> {
+  if (USE_FIXTURES) return makeFixtureCreateSloDefinition(organizationId, body);
+  return postJson<SloDefinitionRead>("/v1/observability/slo", body, signal);
+}
+
+/** `GET /v1/observability/slo/{slo_id}/budget` (`observability_api.py::get_slo_budget`)
+ *  -- computed live from the SLO's most recent `SloMeasurement`, never
+ *  stored: `status` is HEALTHY/AT_RISK/BREACHED once a measurement exists
+ *  (compared against `target`/`threshold`), NO_DATA when none ever landed. */
+export async function fetchSloBudget(
+  sloId: string,
+  signal?: AbortSignal,
+): Promise<SloBudgetRead> {
+  if (USE_FIXTURES) return makeFixtureSloBudget(sloId);
+  return get<SloBudgetRead>(`/v1/observability/slo/${sloId}/budget`, signal);
+}
+
+/** `GET /v1/observability/archive/status` (`observability_api.py::get_archive_status`)
+ *  -- WORM audit-archive posture: counts, latest archive id/checksum, and
+ *  legal-hold count, rolled into one of NO_ARCHIVES/LEGAL_HOLD_ACTIVE/HEALTHY.
+ *  Org-scoped via the security context only, same gap noted in this block's
+ *  banner comment -- no `organizationId` parameter to thread through. */
+export async function fetchArchiveStatus(signal?: AbortSignal): Promise<ArchiveStatusRead> {
+  if (USE_FIXTURES) return makeFixtureArchiveStatus();
+  return get<ArchiveStatusRead>("/v1/observability/archive/status", signal);
+}
+
+export interface NotificationRuleQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/notification-rules` (`notification_api.py::list_notification_rules`,
+ *  roles PlatformAdmin/DataAdmin/Operations/Viewer). */
+export async function fetchNotificationRules(
+  organizationId: string,
+  query: NotificationRuleQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<NotificationRuleRead>> {
+  if (USE_FIXTURES) return makeFixtureNotificationRules(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<NotificationRuleRead>>(`/v1/notification-rules?${params}`, signal);
+}
+
+/** `POST /v1/notification-rules` (`notification_api.py::create_notification_rule`,
+ *  roles PlatformAdmin/DataAdmin/Operations). `conditions` is a free-form
+ *  JSON matcher object -- the screen collects it from a raw JSON textarea,
+ *  same as the legacy `#notification-rule-form`. */
+export async function createNotificationRule(
+  organizationId: string,
+  body: NotificationRuleCreate,
+  signal?: AbortSignal,
+): Promise<NotificationRuleRead> {
+  if (USE_FIXTURES) return makeFixtureCreateNotificationRule(organizationId, body);
+  return postJson<NotificationRuleRead>("/v1/notification-rules", body, signal);
+}
+
+/** `POST /v1/data-contracts/{contract_id}/evaluate`
+ *  (`runtime_contracts_api.py::evaluate_data_contract`, roles PlatformAdmin/
+ *  DataSteward/DataEngineer/Viewer) -- no request body, just the path id.
+ *  Evaluates the contract against current schema/quality/freshness state,
+ *  persists any violations found, and returns the same evaluation the
+ *  enforcement path itself acts on (`allowed`/`enforcement_action`). */
+export async function evaluateDataContract(
+  contractId: string,
+  signal?: AbortSignal,
+): Promise<EvaluationResponse> {
+  if (USE_FIXTURES) return makeFixtureEvaluateDataContract(contractId);
+  return postJson<EvaluationResponse>(`/v1/data-contracts/${contractId}/evaluate`, {}, signal);
+}
+
+export interface ContractViolationsQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/data-contracts/{contract_id}/violations`
+ *  (`runtime_contracts_api.py::list_contract_violations`, same roles as
+ *  evaluate above). `ViolationRead` (`./ui-types`) is hand-written -- see
+ *  its own comment for why. */
+export async function fetchContractViolations(
+  contractId: string,
+  query: ContractViolationsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ViolationRead>> {
+  if (USE_FIXTURES) return makeFixtureContractViolations(contractId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ViolationRead>>(`/v1/data-contracts/${contractId}/violations?${params}`, signal);
+}
+
+/** `GET /v1/data-contracts/{contract_id}/sla-status`
+ *  (`runtime_contracts_api.py::get_sla_status`, same roles as evaluate
+ *  above) -- rolling compliance over the trailing `period_days` (server
+ *  `Query` bounds: default 30, 1-365). */
+export async function fetchContractSlaStatus(
+  contractId: string,
+  periodDays = 30,
+  signal?: AbortSignal,
+): Promise<SlaStatusResponse> {
+  if (USE_FIXTURES) return makeFixtureContractSlaStatus(contractId, periodDays);
+  const params = new URLSearchParams();
+  params.set("period_days", String(periodDays));
+  return get<SlaStatusResponse>(`/v1/data-contracts/${contractId}/sla-status?${params}`, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   P1-04: Asset description drafts.
+
+   Backend routes live in `src/aida/asset_description_api.py`:
+     * POST /v1/organizations/{org}/asset-description-drafts/generate
+     * GET  /v1/organizations/{org}/asset-description-drafts
+     * POST /v1/asset-description-drafts/{draft_id}/submit
+
+   Before this file added them the UI had zero references to any of the three
+   -- drafts could only be created and moved to PENDING_APPROVAL from `curl`,
+   which is why the ReviewQueueScreen renders ASSET_DESCRIPTION_DRAFT items
+   but nothing in the app submits them. The server-side batch cap is
+   `_GENERATE_BATCH_LIMIT = 100`; the client mirrors it as a fast-fail so
+   selecting 101+ rows in the Catalog does not round-trip only to be trimmed
+   silently on the server (the server slices `table_ids[:100]` rather than
+   422-ing). The submit endpoint's minimum-evidence gate
+   (`asset_description_service.ensure_reviewable`) returns HTTP 422 with
+   detail "draft carries too little evidence for independent review" when the
+   deterministic `overall_score < MINIMUM_EVIDENCE_FOR_REVIEW = 0.4`; that is
+   a distinct-enough failure mode that `classifyDescriptionDraftError` below
+   surfaces it as a dedicated `DRAFT_BELOW_EVIDENCE_THRESHOLD` kind so the
+   DescriptionDraftsScreen can render specific copy rather than a raw 422.
+--------------------------------------------------------------------------- */
+
+const ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT = 100;
+
+export interface AssetDescriptionDraftListQuery {
+  status?: string;
+  tableId?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+export type DescriptionDraftErrorKind =
+  | "DRAFT_BELOW_EVIDENCE_THRESHOLD"
+  | "DRAFT_NOT_FOUND"
+  | "DRAFT_NOT_SUBMITTABLE"
+  | "UNAUTHORIZED"
+  | "SERVER_ERROR"
+  | "UNKNOWN";
+
+export interface DescriptionDraftError {
+  kind: DescriptionDraftErrorKind;
+  status: number;
+  detail: string;
+}
+
+const DRAFT_BELOW_EVIDENCE_DETAIL =
+  "draft carries too little evidence for independent review";
+
+/** Maps an `ApiError` from any of the three description-draft endpoints to a
+ *  discriminated kind the UI can branch copy on. Only `submit` can raise the
+ *  evidence-gate 422; the other endpoints reach it via the generic branches
+ *  below. */
+export function classifyDescriptionDraftError(error: ApiError): DescriptionDraftError {
+  const { status, detail } = error;
+  if (status === 422 && detail === DRAFT_BELOW_EVIDENCE_DETAIL) {
+    return { kind: "DRAFT_BELOW_EVIDENCE_THRESHOLD", status, detail };
+  }
+  if (status === 404) return { kind: "DRAFT_NOT_FOUND", status, detail };
+  if (status === 409) return { kind: "DRAFT_NOT_SUBMITTABLE", status, detail };
+  if (status === 401 || status === 403) return { kind: "UNAUTHORIZED", status, detail };
+  if (status >= 500) return { kind: "SERVER_ERROR", status, detail };
+  return { kind: "UNKNOWN", status, detail };
+}
+
+/** `POST /v1/organizations/{org}/asset-description-drafts/generate` (see
+ *  `generate_asset_description_drafts` in asset_description_api.py). Server
+ *  silently truncates a >100 table_ids batch; enforce the same limit here
+ *  and reject up-front with a synthetic 400 ApiError so the UI does not have
+ *  to guess why a subset came back. */
+export async function generateAssetDescriptionDrafts(
+  organizationId: string,
+  tableIds: string[],
+  signal?: AbortSignal,
+): Promise<AssetDescriptionDraftGenerateResponse> {
+  if (tableIds.length === 0) {
+    throw new ApiError(400, "at least one table_id is required");
+  }
+  if (tableIds.length > ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT) {
+    throw new ApiError(
+      400,
+      `at most ${ASSET_DESCRIPTION_DRAFT_BATCH_LIMIT} tables can be drafted in one batch`,
+    );
+  }
+  const page = await postJson<Page>(
+    `/v1/organizations/${organizationId}/asset-description-drafts/generate`,
+    { table_ids: tableIds },
+    signal,
+  );
+  return {
+    drafts: (page.items as AssetDescriptionDraftRead[]) ?? [],
+    limit: page.limit,
+    offset: page.offset,
+    total: page.total,
+  };
+}
+
+/** `GET /v1/organizations/{org}/asset-description-drafts` (see
+ *  `list_asset_description_drafts`). The server orders by
+ *  `overall_score DESC, created_at DESC` -- that is the reviewer-priority
+ *  order the DescriptionDraftsScreen defaults to, so no `order_by` param is
+ *  exposed here. `tableId` is a client-side convenience filter: the server
+ *  has no `table_id` query param on this route, so pass-through is a no-op
+ *  and callers filter locally. `cursor` here is the string form of the
+ *  next `offset` — the server's `Page` shape is offset-based and has no
+ *  opaque cursor of its own; the response's `next_cursor` is derived from
+ *  `offset + limit < total`. */
+export async function listAssetDescriptionDrafts(
+  organizationId: string,
+  filters: AssetDescriptionDraftListQuery = {},
+  signal?: AbortSignal,
+): Promise<AssetDescriptionDraftListResponse & { next_cursor?: string }> {
+  const params = new URLSearchParams();
+  if (filters.status) params.set("status", filters.status);
+  if (typeof filters.limit === "number") params.set("limit", String(filters.limit));
+  if (filters.cursor) params.set("offset", filters.cursor);
+  const qs = params.toString();
+  const path = qs
+    ? `/v1/organizations/${organizationId}/asset-description-drafts?${qs}`
+    : `/v1/organizations/${organizationId}/asset-description-drafts`;
+  const page = await get<Page>(path, signal);
+  const drafts = (page.items as AssetDescriptionDraftRead[]) ?? [];
+  const nextOffset = page.offset + page.limit;
+  const hasMore = typeof page.total === "number" && nextOffset < page.total;
+  return {
+    drafts,
+    limit: page.limit,
+    offset: page.offset,
+    total: page.total,
+    ...(hasMore ? { next_cursor: String(nextOffset) } : {}),
+  };
+}
+
+/** `POST /v1/asset-description-drafts/{draft_id}/submit` (see
+ *  `submit_asset_description_draft`). Server responds 202 Accepted with the
+ *  freshly-created `GovernanceReview`; the DescriptionDraftsScreen only
+ *  needs to know the draft flipped to PENDING_APPROVAL, so this refetches
+ *  the draft rather than returning the review. If refetch fails, an
+ *  optimistically-updated `AssetDescriptionDraftRead` is synthesised from
+ *  the review response so the row still flips. */
+export async function submitAssetDescriptionDraft(
+  draftId: string,
+  signal?: AbortSignal,
+): Promise<GovernanceReviewRead> {
+  return postJson<GovernanceReviewRead>(
+    `/v1/asset-description-drafts/${draftId}/submit`,
+    {},
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   P2-08: manual revoke of an ACTIVE asset certification.
+
+   Wired to `POST /v1/tables/{table_id}/certification/revoke` -- the ONLY
+   place `AssetCertification.status = "REVOKED"` is produced (before P2-08 the
+   REVOKED value existed in the state machine but no code ever wrote it, so a
+   revoked-by-policy certification could only be worked around by letting it
+   expire).
+
+   Auth: same roles as the certify endpoint (PlatformAdmin, MetadataAdmin,
+   DataAdmin, DataSteward). Maker-checker is enforced server-side by default
+   (a principal cannot revoke a certification they themselves granted); the
+   flag `certification_revoke_enforce_maker_checker` toggles that for
+   single-steward deployments. Server responses this call must handle at the
+   UI layer:
+     - 200 AssetCertificationRead .. success (`status === "REVOKED"`)
+     - 404 no active certification to revoke, or table not found
+     - 409 detail === "same_principal_cannot_revoke_own_certification"
+
+   UI follow-up (not in this pass): CatalogTable.tsx should expose a
+   "Revoke" button in the certification cell that opens a small dialog for
+   the reason (>=10 chars) and column_id (optional), with an explicit
+   confirmation copy ("This will affect downstream policy decisions."). The
+   api.ts function is landed now so the follow-up UI slice is a
+   copy-and-paste against an already-typed call. --------------------------- */
+
+import type {
+  AssetCertificationRead as _AssetCertificationRead_p208,
+  CertificationRevokeRequest as _CertificationRevokeRequest_p208,
+} from "./types";
+
+export async function revokeAssetCertification(
+  tableId: string,
+  body: _CertificationRevokeRequest_p208,
+  signal?: AbortSignal,
+): Promise<_AssetCertificationRead_p208> {
+  return postJson<_AssetCertificationRead_p208>(
+    `/v1/tables/${tableId}/certification/revoke`,
+    body,
+    signal,
+  );
+}
+
+// -------------------------------------------------------------------------
+// P1-05 / ADR-0026: parsed-lineage-edge review queue.
+//
+// The five non-governed parser-produced lineage edge tables all share the
+// same review lifecycle. `listParsedLineageReviewQueue` composes across all
+// five; `decideParsedLineageEdge` / `bulkDecideParsedLineageEdges` mirror
+// the shape and semantics of `decideRelationshipCandidate` /
+// `bulkDecideRelationshipCandidates` above.
+// -------------------------------------------------------------------------
+
+/** `GET /v1/lineage/parsed-edges/review-queue` -- one paginated view across
+ *  the five non-governed parser-produced lineage edge tables, filtered to
+ *  review_status="PROPOSED". */
+export interface ParsedLineageReviewQueueQuery {
+  edgeType?: import("./ui-types").ParsedLineageEdgeType | null;
+  minConfidence?: number | null;
+  limit?: number;
+  offset?: number;
+}
+
+export async function listParsedLineageReviewQueue(
+  query: ParsedLineageReviewQueueQuery,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeReviewQueueRead> {
+  const params = new URLSearchParams();
+  if (query.edgeType) params.set("edge_type", query.edgeType);
+  if (query.minConfidence != null)
+    params.set("min_confidence", String(query.minConfidence));
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<import("./types").ParsedLineageEdgeReviewQueueRead>(
+    `/v1/lineage/parsed-edges/review-queue?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/lineage/parsed-edges/{edge_id}/decision` -- maker-checker
+ *  approve/reject of one PROPOSED parsed lineage edge. A reason is
+ *  required by the schema; callers should collect one before posting. */
+export async function decideParsedLineageEdge(
+  edgeId: string,
+  body: import("./types").ParsedLineageEdgeDecisionRequest,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeDecisionRead> {
+  return postJson<import("./types").ParsedLineageEdgeDecisionRead>(
+    `/v1/lineage/parsed-edges/${edgeId}/decision`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/lineage/parsed-edges/bulk-decide` -- up to 100 edges per call.
+ *  A per-item failure marks that item FAILED in the response and the rest
+ *  still commit (partial-success, per-item SAVEPOINT semantics). */
+export async function bulkDecideParsedLineageEdges(
+  body: import("./types").ParsedLineageEdgeBulkDecisionRequest,
+  signal?: AbortSignal,
+): Promise<import("./types").ParsedLineageEdgeBulkDecisionResultRead> {
+  return postJson<import("./types").ParsedLineageEdgeBulkDecisionResultRead>(
+    `/v1/lineage/parsed-edges/bulk-decide`,
+    body,
+    signal,
+  );
+}
+
+
+// -------------------------------------------------------------------------
+// P2-07: OwnershipAssignment re-affirmation (`reaffirm`, `bulk-reaffirm`) +
+// the "expiring soon" banner listing that the OwnershipExpiryBanner screen
+// reads. The types are declared inline (rather than in `./types`) because
+// they are a small P2-07-specific surface; if a second screen consumes them
+// they should move to `./types` on the next codegen pass.
+// -------------------------------------------------------------------------
+
+/** Server row shape. Mirrors `aida.schemas.OwnershipAssignmentRead`. */
+export interface OwnershipAssignmentRead {
+  id: string;
+  organization_id: string;
+  subject_type: string;
+  subject_id: string;
+  owner_type: string;
+  owner_principal: string;
+  assignment_kind: string;
+  source_rule_id: string | null;
+  status: string;
+  assigned_by: string;
+  expires_at: string | null;
+  expiry_warning_emitted_at: string | null;
+  reaffirmed_at: string | null;
+  reaffirmed_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OwnershipAssignmentBulkReaffirmItemResult {
+  assignment_id: string;
+  outcome: "REAFFIRMED" | "NOT_FOUND" | "FORBIDDEN" | "ERROR";
+  detail: string | null;
+}
+
+export interface OwnershipAssignmentBulkReaffirmResult {
+  reaffirmed: number;
+  skipped: number;
+  items: OwnershipAssignmentBulkReaffirmItemResult[];
+}
+
+/** `POST /v1/ownership-assignments/{id}/reaffirm` -- the owner (or admin)
+ *  reaffirms one ACTIVE assignment. Extends `expires_at` by
+ *  `settings.ownership_reaffirm_days` (default 180). */
+export async function reaffirmOwnershipAssignment(
+  assignmentId: string,
+  signal?: AbortSignal,
+): Promise<OwnershipAssignmentRead> {
+  if (USE_FIXTURES) return makeFixtureReaffirmOwnershipAssignment(assignmentId);
+  return postJson<OwnershipAssignmentRead>(
+    `/v1/ownership-assignments/${assignmentId}/reaffirm`,
+    {},
+    signal,
+  );
+}
+
+/** `POST /v1/ownership-assignments/bulk-reaffirm` -- up to 100 ids per call
+ *  with per-item SAVEPOINT semantics (one failure does not block the rest). */
+export async function bulkReaffirmOwnershipAssignments(
+  assignmentIds: string[],
+  signal?: AbortSignal,
+): Promise<OwnershipAssignmentBulkReaffirmResult> {
+  if (USE_FIXTURES) return makeFixtureBulkReaffirmOwnershipAssignments(assignmentIds);
+  return postJson<OwnershipAssignmentBulkReaffirmResult>(
+    `/v1/ownership-assignments/bulk-reaffirm`,
+    { assignment_ids: assignmentIds },
+    signal,
+  );
+}
+
+export interface OwnershipAssignmentListQuery {
+  subject_type?: string | null;
+  subject_id?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/ownership-assignments` --
+ *  ACTIVE-only paginated listing. Used by the P2-07 "expiring soon" banner
+ *  which client-side filters to rows whose `expires_at` lies inside
+ *  `warn_days` and whose `owner_principal` matches the current principal. */
+export async function fetchOwnershipAssignments(
+  organizationId: string,
+  query: OwnershipAssignmentListQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<OwnershipAssignmentRead>> {
+  if (USE_FIXTURES) return makeFixtureOwnershipAssignments(query);
+  const params = new URLSearchParams();
+  if (query.subject_type) params.set("subject_type", query.subject_type);
+  if (query.subject_id) params.set("subject_id", query.subject_id);
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<OwnershipAssignmentRead>>(
+    `/v1/organizations/${organizationId}/ownership-assignments?${params}`,
+    signal,
+  );
+}
+
+/**
+ * `GET /v1/organizations/{org}/agent-inbox` (agent_contract_api.py) — the
+ * one screen a supervisor opens: what their agents did, and what is waiting
+ * on a human. Composed server-side in a fixed number of queries, so this is
+ * a single call rather than the five the screen would otherwise make.
+ */
+export async function fetchAgentInbox(
+  organizationId: string,
+  persona: string,
+  signal?: AbortSignal,
+): Promise<AgentInboxRead> {
+  if (USE_FIXTURES) return makeFixtureAgentInbox(organizationId, persona);
+  return get<AgentInboxRead>(
+    `/v1/organizations/${organizationId}/agent-inbox?persona=${encodeURIComponent(persona)}`,
+    signal,
+  );
+}
+
+/**
+ * `POST .../agents/{version}/contract/kill` — engage one agent's kill switch.
+ * Takes effect on that agent's very next run: the orchestrator queries the
+ * switch live rather than caching it. Fixture mode refuses rather than
+ * pretending, because a kill switch that silently did nothing is the worst
+ * possible thing to mock.
+ */
+export async function engageAgentKillSwitch(
+  organizationId: string,
+  versionId: string,
+  reason: string,
+): Promise<void> {
+  if (USE_FIXTURES) {
+    throw new Error("Kill switch is unavailable in fixture mode — run against the API.");
+  }
+  await postJson<unknown>(
+    `/v1/organizations/${organizationId}/agents/${versionId}/contract/kill`,
+    { reason },
+  );
+}
+
+/**
+ * `GET /v1/organizations/{org}/ai-agents/roster` (`get_agent_roster`,
+ * `agent_roster_api.py`) — UX-19: every registered `AGENT`-kind AI asset's
+ * published purpose, an aggregated method summary (recent
+ * `AgentRun.plan_evidence`/`generation_source`), a bounded window of recent
+ * live results, and an honest auto-apply determination.
+ */
+export async function fetchAgentRoster(
+  organizationId: string,
+  query: { windowDays?: number; recentResultsLimit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AgentRosterRead> {
+  if (USE_FIXTURES) return makeFixtureAgentRoster(organizationId, query.windowDays ?? 30);
+  const params = new URLSearchParams();
+  if (query.windowDays) params.set("window_days", String(query.windowDays));
+  if (query.recentResultsLimit) params.set("recent_results_limit", String(query.recentResultsLimit));
+  const suffix = params.toString() ? `?${params}` : "";
+  return get<AgentRosterRead>(
+    `/v1/organizations/${organizationId}/ai-agents/roster${suffix}`,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   ADR-0027: the reviewer agent console. Every one of these hits a real,
+   already-merged route in `agent_contract_api.py` — pre-review/auto-decide
+   are governed writes with visible, honest counts; suspend/resume/resolve
+   are safety-critical human actions that fixture mode refuses rather than
+   pretends to perform, the same rule `engageAgentKillSwitch` above follows.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{org}/reviewer-agent` — the agent's own state:
+ *  enabled/suspended, the tier ceiling it may auto-decide up to, its
+ *  sampling rate, and the principal it acts as. */
+export async function fetchReviewerAgentState(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentState(organizationId);
+  return get<ReviewerAgentStateRead>(`/v1/organizations/${organizationId}/reviewer-agent`, signal);
+}
+
+/** `POST .../reviewer-agent/pre-review` — attaches tier/evidence/recommendation
+ *  to pending review items. Decides nothing, and works even while the agent
+ *  is disabled or suspended, so fixture mode returns real-looking counts
+ *  rather than refusing. */
+export async function runReviewerAgentPreReview(
+  organizationId: string,
+  limit = 200,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentRunResult> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentPreReview();
+  return postJson<ReviewerAgentRunResult>(
+    `/v1/organizations/${organizationId}/reviewer-agent/pre-review?limit=${limit}`,
+    {},
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/run` — actually auto-decides T0/T1 items. 409s
+ *  (via `ApiError`) when the agent is disabled or suspended; the caller
+ *  should read `err.message` for the reason. */
+export async function runReviewerAgent(
+  organizationId: string,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentRunResult> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentRun();
+  return postJson<ReviewerAgentRunResult>(
+    `/v1/organizations/${organizationId}/reviewer-agent/run?limit=${limit}`,
+    {},
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/suspend` — ADR-0027 condition (c): one human
+ *  action, effective immediately. Fixture mode refuses rather than
+ *  pretending, same rationale as `engageAgentKillSwitch`. */
+export async function suspendReviewerAgent(
+  organizationId: string,
+  reason: string,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Suspend is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewerAgentStateRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/suspend`,
+    { reason },
+  );
+}
+
+/** `POST .../reviewer-agent/resume` — same rule as `suspendReviewerAgent`. */
+export async function resumeReviewerAgent(
+  organizationId: string,
+  reason: string,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Resume is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewerAgentStateRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/resume`,
+    { reason },
+  );
+}
+
+/** `GET .../reviewer-agent/disagreement-rates` — ADR-0027's 5% revisit
+ *  trigger, as a number per object type rather than a sentence. */
+export async function fetchDisagreementRates(
+  organizationId: string,
+  windowDays: number,
+  signal?: AbortSignal,
+): Promise<DisagreementReportRead> {
+  if (USE_FIXTURES) return makeFixtureDisagreementRates(windowDays);
+  return get<DisagreementReportRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/disagreement-rates?window_days=${windowDays}`,
+    signal,
+  );
+}
+
+export interface ReviewerAgentSamplesQuery {
+  outcome?: "PENDING" | "AGREED" | "DISAGREED" | "ALL";
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET .../reviewer-agent/samples` — the sampled-decision audit queue, one
+ *  outcome filter at a time (`outcome=PENDING` is the endpoint's own default). */
+export async function fetchReviewerAgentSamples(
+  organizationId: string,
+  query: ReviewerAgentSamplesQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ReviewAuditSampleRead>> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentSamples(query);
+  const params = new URLSearchParams();
+  params.set("outcome", query.outcome ?? "PENDING");
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ReviewAuditSampleRead>>(
+    `/v1/organizations/${organizationId}/reviewer-agent/samples?${params}`,
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/samples/{id}/resolve` — a human's verdict on one
+ *  of the agent's sampled auto-decisions. `rationale` is mandatory. Fixture
+ *  mode refuses rather than pretending, same rule as the actions above: the
+ *  fixture list is recomputed fresh on every fetch, so a fake "resolved"
+ *  here could never actually move the item out of the pending queue. */
+export async function resolveAuditSample(
+  organizationId: string,
+  sampleId: string,
+  body: { human_outcome: "AGREED" | "DISAGREED"; rationale: string },
+): Promise<ReviewAuditSampleRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Resolving a sample is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewAuditSampleRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/resolve`,
+    body,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   AT-1: Playbooks — saved, scheduled bulk-metadata automation rules
+   (`playbooks_api.py`, prefix `/v1`). Every route here is real and
+   already-merged; `USE_FIXTURES` gates each the same way as every call
+   above, so `npm run dev`/`npm run test` need no backend.
+--------------------------------------------------------------------------- */
+
+export interface PlaybooksQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/playbooks`. */
+export async function fetchPlaybooks(
+  organizationId: string,
+  query: PlaybooksQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<PlaybookRead>> {
+  if (USE_FIXTURES) return makeFixturePlaybooks(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<PlaybookRead>>(
+    `/v1/organizations/${organizationId}/playbooks?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/playbooks` — 409 if a playbook
+ *  with this name already exists in the org. */
+export async function createPlaybook(
+  organizationId: string,
+  body: PlaybookCreate,
+  signal?: AbortSignal,
+): Promise<PlaybookRead> {
+  if (USE_FIXTURES) return makeFixtureCreatePlaybook(organizationId, body);
+  return postJson<PlaybookRead>(`/v1/organizations/${organizationId}/playbooks`, body, signal);
+}
+
+/** `PATCH /v1/playbooks/{playbook_id}` — every field optional; send only
+ *  what changed (e.g. `{ enabled: !current }` to toggle). */
+export async function updatePlaybook(
+  playbookId: string,
+  body: PlaybookUpdate,
+  signal?: AbortSignal,
+): Promise<PlaybookRead> {
+  if (USE_FIXTURES) return makeFixtureUpdatePlaybook(playbookId, body);
+  return patchJson<PlaybookRead>(`/v1/playbooks/${playbookId}`, body, signal);
+}
+
+/** `DELETE /v1/playbooks/{playbook_id}` — 204, no response body. */
+export async function deletePlaybook(playbookId: string, signal?: AbortSignal): Promise<void> {
+  if (USE_FIXTURES) return makeFixtureDeletePlaybook(playbookId);
+  return deleteRequest(`/v1/playbooks/${playbookId}`, signal);
+}
+
+/** `POST /v1/playbooks/{playbook_id}/run` — manual out-of-cycle trigger;
+ *  409 if the playbook is disabled. Takes no meaningful body, but this file's
+ *  own convention (see `submitStudioChangeSet`) is to always send an explicit
+ *  `{}` rather than an optional-looking empty POST. */
+export async function runPlaybookNow(
+  playbookId: string,
+  signal?: AbortSignal,
+): Promise<PlaybookRunResultRead> {
+  if (USE_FIXTURES) return makeFixtureRunPlaybook(playbookId);
+  return postJson<PlaybookRunResultRead>(`/v1/playbooks/${playbookId}/run`, {}, signal);
+}
+
+/* ---------------------------------------------------------------------------
+   Context product staged rollout, scope, and agent consumption (P3-01).
+
+   These are the routes that made a Context Product publishable but not
+   *operable* from the UI: a steward could create, submit and compile a
+   version, then had no way to say which consumer gets which version, no way
+   to see the domain scope the package actually spans, no way to hand an
+   agent the compiled artifact as a file, and no way to see what any agent
+   had consumed. The endpoints all shipped; only the client did not.
+
+     - GET    /v1/context-products/{id}/versions                       list_context_product_versions
+     - GET    /v1/context-products/{id}/bindings                       list_context_product_consumer_bindings
+     - PUT    /v1/context-products/{id}/bindings/{consumer}            set_context_product_consumer_binding
+     - DELETE /v1/context-products/{id}/bindings/{consumer}            delete_context_product_consumer_binding
+     - GET    /v1/context-product-versions/{id}/scope                  get_context_product_scope
+     - GET    /v1/context-product-versions/{id}/compile/download       download_compiled_context_product
+     - GET    /v1/organizations/{org}/consumption-lineage/by-consumer  list_consumption_by_consumer
+     - GET    /v1/organizations/{org}/consumption-lineage/graph        list_consumption_graph
+     - GET    /v1/organizations/{org}/consumption-lineage/by-resource  list_consumption_for_resource
+
+   The three consumption-lineage routes are read against `/v1`. They were
+   mounted only under `/api/v1` until `consumption_lineage_api.py` made `/v1`
+   canonical; the old prefix still answers as a deprecated alias, but new
+   callers should not learn it.
+--------------------------------------------------------------------------- */
+
+import type {
+  ConsumptionRecordPage,
+  ContextProductConsumerBindingRead,
+  ContextProductScopeRead,
+  ContextProductVersionRead,
+} from "./types";
+import {
+  makeFixtureConsumptionRecords,
+  makeFixtureContextProductBindings,
+  makeFixtureContextProductVersions,
+  makeFixtureRemoveContextProductBinding,
+  makeFixtureSetContextProductBinding,
+} from "./fixtures";
+
+/** `GET /v1/context-products/{product_id}/versions` — the full version
+ *  history behind `ContextProductRead.latest_version`. A staged rollout needs
+ *  this: you cannot pin a consumer to v1 while v2 publishes if the only
+ *  version the client can name is the latest one. */
+export async function fetchContextProductVersions(
+  productId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ContextProductVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureContextProductVersions(productId);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ContextProductVersionRead>>(
+    `/v1/context-products/${productId}/versions?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-products/{product_id}/bindings` — who is pinned to which
+ *  version. A consumer with no binding resolves to the product's published
+ *  version, so an empty list is the normal state, not an error. */
+export async function fetchContextProductBindings(
+  productId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ContextProductConsumerBindingRead>> {
+  if (USE_FIXTURES) return makeFixtureContextProductBindings(productId);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ContextProductConsumerBindingRead>>(
+    `/v1/context-products/${productId}/bindings?${params}`,
+    signal,
+  );
+}
+
+/** `PUT /v1/context-products/{product_id}/bindings/{consumer_principal_id}`
+ *  — pin or move one named consumer onto one version. Idempotent by
+ *  (product, consumer): calling it again moves the existing binding rather
+ *  than creating a second one. 422 if the version belongs to another product. */
+export async function setContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+  boundVersionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductConsumerBindingRead> {
+  if (USE_FIXTURES)
+    return makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId);
+  return putJson<ContextProductConsumerBindingRead>(
+    `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
+    { bound_version_id: boundVersionId },
+    signal,
+  );
+}
+
+/** `DELETE /v1/context-products/{product_id}/bindings/{consumer_principal_id}`
+ *  — 204. Unpinning returns the consumer to the published version; it does
+ *  not revoke their access, which is governed by `allowed_consumer_roles`. */
+export async function removeContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (USE_FIXTURES) return makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId);
+  return deleteRequest(
+    `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-product-versions/{version_id}/scope` — both ADR-0017 SS9
+ *  tenancy axes for one version: which data domains it spans, which of those
+ *  it has no cross-boundary grant for, and which table ids did not resolve.
+ *  This is the honest answer to "is this package safe to publish". */
+export async function fetchContextProductScope(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductScopeRead> {
+  return get<ContextProductScopeRead>(
+    `/v1/context-product-versions/${versionId}/scope`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-product-versions/{version_id}/compile/download` — the
+ *  same deterministic artifact `compileContextProductVersion` returns, served
+ *  with a `Content-Disposition` filename so an agent developer can commit it
+ *  next to their client config. Saved through a same-origin blob URL because
+ *  the download needs this app's identity headers, which a bare
+ *  `<a download href>` cannot send. */
+export async function downloadCompiledContextProduct(
+  versionId: string,
+  target: string,
+): Promise<void> {
+  let blob: Blob;
+  let filename = `context-product-${versionId}-${target.toLowerCase()}.json`;
+  if (USE_FIXTURES) {
+    const artifact = await compileContextProductVersion(versionId, target);
+    blob = new Blob([artifact.content], { type: artifact.content_type });
+    if (artifact.content_type.includes("yaml")) filename = filename.replace(/\.json$/, ".yaml");
+  } else {
+    const res = await fetch(
+      `/v1/context-product-versions/${versionId}/compile/download?target=${encodeURIComponent(target)}`,
+      { headers: { Accept: "*/*", ...identityHeaders() }, credentials: "same-origin" },
+    );
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const body = (await res.json()) as { detail?: string };
+        if (body.detail) detail = serverErrorDetail(body.detail, detail);
+      } catch {
+        /* non-JSON error body; the status line is what we have */
+      }
+      throw new ApiError(res.status, detail);
+    }
+    blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") || "";
+    filename = disposition.match(/filename="([^"]+)"/)?.[1] || filename;
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export interface ConsumptionQuery {
+  /** Filter to one consumer principal (`by-consumer`). */
+  consumerId?: string;
+  /** Filter to one resource (`by-resource`); both fields are required
+   *  together by the server, so pass neither or both. */
+  resourceType?: string;
+  resourceId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** The CX-4 consumption edges: one row per allowed *or refused* read that the
+ *  MCP server or the Context Product REST API recorded. This is the only
+ *  place the platform answers "what has this agent actually seen".
+ *
+ *  Routes to `by-consumer`, `by-resource` or `graph` depending on which
+ *  filter the caller supplied — three endpoints with one shape, so screens
+ *  do not have to pick. */
+export async function fetchConsumptionRecords(
+  organizationId: string,
+  query: ConsumptionQuery = {},
+  signal?: AbortSignal,
+): Promise<ConsumptionRecordPage> {
+  if (USE_FIXTURES)
+    return makeFixtureConsumptionRecords(
+      { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
+      query,
+    );
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  if (query.consumerId) {
+    params.set("consumer_id", query.consumerId);
+    return get<ConsumptionRecordPage>(
+      `/v1/organizations/${organizationId}/consumption-lineage/by-consumer?${params}`,
+      signal,
+    );
+  }
+  if (query.resourceType && query.resourceId) {
+    params.set("resource_type", query.resourceType);
+    params.set("resource_id", query.resourceId);
+    return get<ConsumptionRecordPage>(
+      `/v1/organizations/${organizationId}/consumption-lineage/by-resource?${params}`,
+      signal,
+    );
+  }
+  return get<ConsumptionRecordPage>(
+    `/v1/organizations/${organizationId}/consumption-lineage/graph?${params}`,
+    signal,
+  );
+}
+
+import {
+  makeFixtureBulkReaffirmOwnershipAssignments,
+  makeFixtureOwnershipAssignments,
+  makeFixtureReaffirmOwnershipAssignment,
+} from "./fixtures";

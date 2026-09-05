@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 
@@ -78,6 +79,36 @@ class DiscoveredPartition:
     ordinal_position: int
     key_columns: tuple[str, ...] = ()
     high_value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class QueryLogEntry:
+    """CN-9. One row of a warehouse's own query history, exactly as a
+    connector's `get_query_history()` surfaces it -- the connector-side
+    counterpart to `aida.query_history_miner.WarehouseQueryLogEntry` (that
+    module's own docstring calls this shape out by name as what a connector
+    implementation "only has to produce"). Kept as its own type here rather
+    than importing the miner's dataclass: `aida.connectors` is a lower layer
+    than the modules that mine query history (module 02 vs. 05/07/12), and a
+    connector must not depend upward on a feature module to describe what it
+    itself returns. The two are structurally identical by construction; the
+    call site that wires a connector's output into
+    `mine_and_land_query_history_candidates` does the one-line mapping.
+
+    `sql_text` is the query's own literal SQL text, deliberately including
+    any literal values it contains -- INV-6 is not enforced by scrubbing it
+    here. It is enforced by what happens to it next: this type is never
+    itself a persisted model, `get_query_history()` returns it only in
+    memory, and nothing downstream may write `sql_text` to any table --
+    only a `query_id` reference and a value-free `QueryStructure` derived by
+    parsing past every literal (`extract_query_structure`) may land in
+    platform state. See CN-9's tracker row for the gap-proof test this
+    invariant still needs once a connector implements this method.
+    """
+
+    query_id: str
+    sql_text: str
+    executed_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +277,18 @@ class ConnectorValueProfilingUnsupported(NotImplementedError):
     """
 
 
+class ConnectorQueryHistoryUnsupported(NotImplementedError):
+    """Raised by the default `Connector.get_query_history` implementation.
+
+    CN-9 / INV-9: a connector that has not implemented real warehouse
+    query-history extraction fails closed with this rather than silently
+    returning an empty sequence -- callers (and `capabilities.query_history`,
+    which must independently be `True` before this is even attempted) must
+    be able to tell "unsupported" apart from "the warehouse logged nothing
+    in this window."
+    """
+
+
 class Connector(ABC):
     """Source access with structured arguments only.
 
@@ -330,4 +373,36 @@ class Connector(ABC):
         """
         raise ConnectorValueProfilingUnsupported(
             f"{type(self).__name__} does not support value-range profiling"
+        )
+
+    async def get_query_history(
+        self,
+        *,
+        since: datetime,
+        limit: int = 5_000,
+        timeout_seconds: int = 30,
+    ) -> tuple[QueryLogEntry, ...]:
+        """CN-9: read this warehouse's own record of queries it has run,
+        bounded to `limit` rows no older than `since`.
+
+        Deliberately NOT `@abstractmethod`, the same shape as
+        `profile_column_values`: most connectors have not implemented this
+        yet, and the default must fail closed rather than every connector
+        subclass needing a no-op override. Callers must gate a call here
+        behind `self.capabilities.query_history` -- per module 02 §11 that
+        flag is derived from a certification result, never hand-declared,
+        so it stays `False` (INV-9) until a real end-to-end mining run has
+        been proven against a live account, not merely until this method
+        has been overridden.
+
+        Returns entries in memory only. A connector implementation must
+        read only the query's own SQL text and timing -- never the rows or
+        bytes that query itself returned -- and a caller must never persist
+        `entry.sql_text` verbatim to any table (INV-6); only a `query_id`
+        reference and structure derived by parsing past every literal may
+        land in platform state, exactly as `aida.query_history_miner`
+        already does for every candidate it produces.
+        """
+        raise ConnectorQueryHistoryUnsupported(
+            f"{type(self).__name__} does not support query-history extraction"
         )

@@ -124,7 +124,7 @@ def _load_sql_guard_corpus() -> list[tuple[str, str]]:
     """(sql, dialect) pairs from every case in QG-1's adversarial SQL corpus."""
     cases: list[tuple[str, str]] = []
     for path in sorted(CORPUS_DIR.glob("*.json")):
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         dialect = data["dialect"]
         for case in data["cases"]:
             cases.append((case["sql"], dialect))
@@ -354,7 +354,7 @@ def find_regressions(
 
 
 def _load_baseline(path: Path) -> dict[str, float]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     benchmarks = data.get("benchmarks")
     if not isinstance(benchmarks, dict):
         raise ValueError(f"baseline at {path} has no 'benchmarks' object")
@@ -376,7 +376,7 @@ def _write_baseline(path: Path, benchmarks: list[Benchmark], medians: dict[str, 
         },
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

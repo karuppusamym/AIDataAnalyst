@@ -41,3 +41,9 @@
 
 .rq__evidence{position:fixed;right:24px;bottom:24px;top:auto;max-height:70vh;z-index:5;box-shadow:0 8px 28px rgba(0,0,0,.18)}
 @media (max-width:900px){.rq__evidence{position:static;width:auto;max-height:none;box-shadow:none;margin-top:14px}}
+
+/* P1-03: one-liner summary rendered by renderRowExtras() when a glossary
+   row has a resolvable subtitle (target table + confidence for a link
+   proposal; reason for a term-version). Sits between the title and the
+   diff, matching the .prop__subject spacing rhythm. */
+.prop__extra{font-size:12.5px;color:var(--ink-2);margin-top:3px;line-height:1.35}

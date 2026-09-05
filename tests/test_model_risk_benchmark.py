@@ -224,9 +224,9 @@ def test_load_tool_selection_cases_round_trips_preferred_tool_uuid() -> None:
 
 
 def _load_committed_corpora() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
-    refusal = json.loads((CORPUS_DIR / "refusal_corpus.json").read_text())
-    sql = json.loads((CORPUS_DIR / "sql_safety_corpus.json").read_text())
-    tool = json.loads((CORPUS_DIR / "tool_selection_corpus.json").read_text())
+    refusal = json.loads((CORPUS_DIR / "refusal_corpus.json").read_text(encoding="utf-8"))
+    sql = json.loads((CORPUS_DIR / "sql_safety_corpus.json").read_text(encoding="utf-8"))
+    tool = json.loads((CORPUS_DIR / "tool_selection_corpus.json").read_text(encoding="utf-8"))
     return refusal, sql, tool
 
 

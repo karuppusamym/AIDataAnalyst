@@ -309,6 +309,14 @@ async def load_unified_lineage_projection(
         datasource = await session.get(DataSource, datasource_id)
         if datasource is None or datasource.organization_id != organization_id:
             return {"nodes": [], "edges": []}
+        # P1-05 / ADR-0026: the Neo4j projection is the shared, tenant-
+        # facing graph. PROPOSED parsed lineage edges (view/procedure/dbt/
+        # OpenLineage under `require_review` mode) are NOT part of it --
+        # they belong to the review queue only until a human accepts
+        # them. `include_pending_edges=False` (the default) filters
+        # every one of the five edge tables inside
+        # `build_unified_lineage_graph_payload`, so this projection
+        # inherits the filter without a change to the MERGE below.
         graph = await build_unified_lineage_graph_payload(
             session,
             datasource,
@@ -316,6 +324,7 @@ async def load_unified_lineage_projection(
             edge_limit=settings.lineage_projection_max_edges,
             suggestion_status="ALL",
             settings=None,
+            include_pending_edges=False,
         )
     # ADR-0017 SS2 -- same tenancy-path tagging as load_projection, so a domain-
     # scoped unified-lineage traversal can filter before it walks edges.

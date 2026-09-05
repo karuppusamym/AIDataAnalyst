@@ -397,7 +397,7 @@ def _load_current_spec() -> dict[str, Any]:
 
 
 def _load_baseline(path: Path) -> dict[str, Any]:
-    data: Any = json.loads(path.read_text())
+    data: Any = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"baseline at {path} is not a JSON object")
     return data
@@ -426,7 +426,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.accept_baseline:
         args.baseline.parent.mkdir(parents=True, exist_ok=True)
-        args.baseline.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
+        args.baseline.write_text(
+            json.dumps(current, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         print(f"Baseline regenerated at {args.baseline}.")
         print("Review `git diff` for that file before committing it.")
         return 0

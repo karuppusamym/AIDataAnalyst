@@ -12,12 +12,12 @@ from uuid import uuid4
 
 import pytest
 
-from aida.api import test_datasource as call_test_datasource
 from aida.config import Settings
 from aida.connectors.base import ConnectorCapabilities
 from aida.connectors.registry import connector_registry
 from aida.models import DataSource
 from aida.security_types import SecurityContext
+from atlas.modules.connectivity.router import test_datasource as call_test_datasource
 
 
 @dataclass

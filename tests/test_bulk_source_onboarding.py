@@ -21,7 +21,6 @@ from pydantic import ValidationError
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from aida.api import bulk_onboard_datasources, create_datasource
 from aida.config import Settings
 from aida.db import Base
 from aida.models import (
@@ -39,6 +38,7 @@ from aida.schemas import (
     DataSourceCreate,
 )
 from aida.security_types import SecurityContext
+from atlas.modules.connectivity.router import bulk_onboard_datasources, create_datasource
 
 pytestmark = pytest.mark.asyncio
 

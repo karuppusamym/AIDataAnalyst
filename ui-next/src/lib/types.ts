@@ -82,6 +82,59 @@ export interface AgentAutoApplyRead {
   evidence: string;
 }
 
+export interface AgentContractRead {
+  id: string;
+  organization_id: string;
+  ai_asset_version_id: string;
+  agent_principal_id: string;
+  capability_envelope: Record<string, unknown>;
+  autonomy_tier: string;
+  supervisor_persona: string;
+  kill_scope: string;
+  kill_engaged: boolean;
+  sampling_rate: number;
+  daily_token_cap: number | null;
+  per_run_token_cap: number | null;
+  wall_clock_seconds_cap: number | null;
+  eval_gate_threshold: number | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentContractWrite {
+  agent_principal_id: string;
+  capability_envelope?: CapabilityEnvelopeModel;
+  autonomy_tier?: "T0" | "T1" | "T2" | "T3";
+  supervisor_persona: "ANALYST" | "CONSUMER" | "STEWARD" | "REVIEWER" | "OPERATOR" | "AUDITOR";
+  kill_scope?: "AGENT" | "TIER" | "ALL";
+  sampling_rate?: number;
+  daily_token_cap?: number | null;
+  per_run_token_cap?: number | null;
+  wall_clock_seconds_cap?: number | null;
+  eval_gate_threshold?: number | null;
+}
+
+/** `POST .../agent-contract-requests` body -- the reviewed, eval-gated path
+ *  alongside the direct-write `AgentContractWrite`/`PUT .../contract`. */
+export interface AgentContractRequestCreate extends AgentContractWrite {
+  ai_asset_version_id: string;
+}
+
+export interface AgentContractRequestRead {
+  id: string;
+  organization_id: string;
+  ai_asset_version_id: string;
+  requested_by: string;
+  definition: Record<string, unknown>;
+  status: "PENDING" | "ACTIVATED" | "REJECTED" | "EVAL_BLOCKED";
+  governance_review_id: string | null;
+  eval_gate_verdict: string | null;
+  activated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
 export interface AgentEvalGateEvaluateRequest {
   steward_authored_verdicts?: AgentEvalGateVerdictInput[];
@@ -130,6 +183,17 @@ export interface AgentEvaluationRunRead {
   findings: Record<string, unknown>[];
   created_at: string;
   updated_at: string;
+}
+
+export interface AgentInboxRead {
+  organization_id: string;
+  persona: string;
+  generated_at: string;
+  summary: InboxSummary;
+  agents: InboxAgent[];
+  pending: InboxPendingItem[];
+  auto_applied: InboxAutoApplied[];
+  recent_tasks: InboxRecentTask[];
 }
 
 /** The "task plan" half of this row's exit condition: not a static, */
@@ -464,6 +528,12 @@ export interface AnalysisTaskRead {
   updated_at: string;
 }
 
+export interface AnalysisToolBlueprintRead {
+  project_id: string;
+  definition: GovernedToolVersionCreate;
+  parameter_review_required: boolean;
+}
+
 export interface ArchiveStatusRead {
   total_archives: number;
   total_events_archived: number;
@@ -484,6 +554,10 @@ export interface AssetCertificationRead {
   certified_by: string;
   expires_at: string;
   is_active: boolean;
+  revoked_at?: string | null;
+  revoked_by?: string | null;
+  revocation_reason?: string | null;
+  evidence?: CertificationEvidence | null;
   created_at: string;
   updated_at: string;
 }
@@ -889,6 +963,12 @@ export interface CanonicalTableOverrideRequest {
   rationale: string;
 }
 
+export interface CapabilityEnvelopeModel {
+  tool_slugs?: string[];
+  context_product_ids?: string[];
+  write_lanes?: string[];
+}
+
 export interface CatalogBulkActionItemRead {
   subject_id: string;
   status: "SUCCEEDED" | "FAILED";
@@ -950,6 +1030,26 @@ export interface CertificationDecisionRequest {
   column_id?: string | null;
   rationale: string;
   expires_at: string;
+}
+
+/** P3-09: structured, machine-consumable snapshot of what a certifier */
+export interface CertificationEvidence {
+  schema_version?: string;
+  captured_at?: string | null;
+  description_version_id?: string | null;
+  ownership_assignment_ids?: string[];
+  quality_snapshot?: Record<string, unknown>;
+  glossary_term_ids?: string[];
+  supporting_dq_check_ids?: string[];
+  certifier_notes?: string | null;
+  backfilled?: boolean;
+  backfilled_at?: string | null;
+}
+
+/** P2-08: request body for */
+export interface CertificationRevokeRequest {
+  reason: string;
+  column_id?: string | null;
 }
 
 export interface ClassificationDecisionRead {
@@ -1588,6 +1688,19 @@ export interface DataQualityIncidentTransition {
   reason: string;
 }
 
+/** `quality_api.py::get_quality_incident_triage` -- a deterministic
+ *  root-cause hint (`dq_triage_agent.suggest_triage`), computed fresh on
+ *  every call, never persisted. `basis` names which evidence field(s) each
+ *  hint traces to, so it can be checked against the incident's own
+ *  `evidence` blob rather than trusted blindly. */
+export interface DataQualityIncidentTriageRead {
+  incident_id: string;
+  anomaly_type: string;
+  likely_causes: string[];
+  recommended_next_steps: string[];
+  basis: string[];
+}
+
 export interface DataQualityPolicyRead {
   table_id?: string | null;
   name?: string;
@@ -1819,6 +1932,11 @@ export interface DelegationRead {
   updated_at: string;
 }
 
+export interface DescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
 export interface DetokenizeRead {
   value: string;
   detokenized_at: string;
@@ -1828,6 +1946,28 @@ export interface DetokenizeRequest {
   token: string;
   purpose: string;
   datasource_id?: string | null;
+}
+
+export interface DisagreementRateRead {
+  object_type: string;
+  sampled: number;
+  resolved: number;
+  agreed: number;
+  disagreed: number;
+  pending: number;
+  disagreement_rate: number | null;
+  sufficient_sample: boolean;
+  breaches_revisit_trigger: boolean;
+}
+
+export interface DisagreementReportRead {
+  window_days: number;
+  computed_at: string;
+  measured: boolean;
+  threshold: number;
+  minimum_resolved_for_signal: number;
+  breaching_object_types: string[];
+  by_object_type: DisagreementRateRead[];
 }
 
 export interface DocumentCreate {
@@ -2369,6 +2509,68 @@ export interface ImpactAnalysisRead {
   downstream_object_count: number;
 }
 
+export interface InboxAgent {
+  ai_asset_id: string;
+  version_id: string | null;
+  name: string;
+  risk_tier: string | null;
+  autonomy_tier: string;
+  runs_recent: number;
+  success_rate: number | null;
+  budget: InboxBudget;
+  kill_scope: string;
+  kill_engaged: boolean;
+  supervisor_persona: string | null;
+}
+
+export interface InboxAutoApplied {
+  task_id: string;
+  agent_name: string;
+  action: string;
+  object_type: string;
+  object_id: string | null;
+  applied_at: string;
+  sampled_for_audit: boolean;
+  audit_outcome: string | null;
+}
+
+export interface InboxBudget {
+  daily_token_cap: number | null;
+  daily_tokens_estimated: number | null;
+}
+
+export interface InboxPendingItem {
+  review_id: string;
+  object_type: string;
+  object_id: string | null;
+  title: string;
+  proposed_by: string;
+  proposed_by_kind: "HUMAN" | "AGENT";
+  risk_tier: string;
+  confidence: number | null;
+  blast_radius: number | null;
+  negative_knowledge_hits: number;
+  recommendation: "APPROVE" | "REJECT" | "NONE";
+  created_at: string;
+}
+
+export interface InboxRecentTask {
+  task_id: string;
+  agent_name: string;
+  intent: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface InboxSummary {
+  pending_decisions: number;
+  auto_applied_since: number;
+  sampled_for_audit: number;
+  agents_active: number;
+  kill_switch_engaged: boolean;
+}
+
 export interface KillSwitchEngageRequest {
   reason: string;
   route_key?: string | null;
@@ -2377,6 +2579,10 @@ export interface KillSwitchEngageRequest {
 export interface KillSwitchReleaseRequest {
   reason: string;
   route_key?: string | null;
+}
+
+export interface KillSwitchRequest {
+  reason: string;
 }
 
 export interface KillSwitchStateRead {
@@ -2730,6 +2936,11 @@ export interface MetadataViewDefinitionEnvelope {
   unavailable_reason?: string | null;
 }
 
+export interface MetricDraftEdit {
+  definition: SemanticMetricCreate;
+  expected_fingerprint: string;
+}
+
 export interface MetricSuggestionProposalGenerate {
   limit?: number;
 }
@@ -2885,6 +3096,12 @@ export interface NotificationRuleUpdate {
   enabled?: boolean | null;
 }
 
+export interface NotificationTestResult {
+  organization_id: string;
+  enabled: boolean;
+  outcomes: Record<string, string>;
+}
+
 export interface OpenLineageColumnEdgeRead {
   id: string;
   input_dataset_namespace: string;
@@ -2997,6 +3214,42 @@ export interface OutboxEventRead {
   published_at: string | null;
 }
 
+export interface OwnershipAssignmentBulkReaffirmItemResult {
+  assignment_id: string;
+  outcome: string;
+  detail?: string | null;
+}
+
+/** P2-07: body for `POST /v1/ownership-assignments/bulk-reaffirm`. */
+export interface OwnershipAssignmentBulkReaffirmRequest {
+  assignment_ids: string[];
+}
+
+export interface OwnershipAssignmentBulkReaffirmResult {
+  reaffirmed: number;
+  skipped: number;
+  items: OwnershipAssignmentBulkReaffirmItemResult[];
+}
+
+export interface OwnershipAssignmentRead {
+  id: string;
+  organization_id: string;
+  subject_type: string;
+  subject_id: string;
+  owner_type: string;
+  owner_principal: string;
+  assignment_kind: string;
+  source_rule_id: string | null;
+  status: string;
+  assigned_by: string;
+  expires_at?: string | null;
+  expiry_warning_emitted_at?: string | null;
+  reaffirmed_at?: string | null;
+  reaffirmed_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface OwnershipRuleCreate {
   rule_key: string;
   display_name: string;
@@ -3028,11 +3281,79 @@ export interface Page {
   total: number;
 }
 
+export interface ParsedLineageEdgeBulkDecisionItem {
+  edge_id: string;
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+}
+
+export interface ParsedLineageEdgeBulkDecisionItemRead {
+  edge_id: string;
+  edge_type: string;
+  status: "SUCCEEDED" | "FAILED";
+  reason?: string | null;
+}
+
+export interface ParsedLineageEdgeBulkDecisionRequest {
+  items: ParsedLineageEdgeBulkDecisionItem[];
+  decision: "APPROVED" | "REJECTED";
+  reason: string;
+}
+
+export interface ParsedLineageEdgeBulkDecisionResultRead {
+  decision: "APPROVED" | "REJECTED";
+  requested_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  results: ParsedLineageEdgeBulkDecisionItemRead[];
+}
+
+export interface ParsedLineageEdgeDecisionRead {
+  edge_id: string;
+  edge_type: string;
+  review_status: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_reason: string | null;
+}
+
+/** Decision on one PROPOSED parsed-lineage edge. */
+export interface ParsedLineageEdgeDecisionRequest {
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  decision: "APPROVED" | "REJECTED";
+  reason: string;
+}
+
+/** One PROPOSED parsed-lineage edge as it appears in the review queue. */
+export interface ParsedLineageEdgeReviewQueueItemRead {
+  edge_id: string;
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  organization_id: string;
+  created_at: string;
+  created_by: string | null;
+  confidence: string | number | null;
+  source_label: string;
+  target_label: string;
+  transformation_type: string | null;
+  source_sql_reference: Record<string, string>;
+}
+
+export interface ParsedLineageEdgeReviewQueueRead {
+  items: ParsedLineageEdgeReviewQueueItemRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
 export interface PlanBudgetCreate {
   max_steps?: number;
   max_time_seconds?: number;
   max_tokens?: number;
   max_cost_units?: number;
+}
+
+export interface PlanRecommendationRequest {
+  project_id: string;
+  prompt: string;
 }
 
 export interface PlanStepCreate {
@@ -3533,6 +3854,7 @@ export interface RelationshipCandidateReviewItemRead {
   candidate: RelationshipCandidateRead;
   diff: RelationshipCandidateDiffEntryRead[];
   impact: RelationshipCandidateImpactRead;
+  can_review?: boolean;
 }
 
 export interface RelationshipCandidateReviewQueueRead {
@@ -3571,6 +3893,25 @@ export interface RenameCandidateRead {
   updated_at: string;
 }
 
+export interface ResolveSampleRequest {
+  human_outcome: "AGREED" | "DISAGREED";
+  rationale: string;
+}
+
+export interface ReviewAuditSampleRead {
+  sample_id: string;
+  governance_review_id: string;
+  agent_principal_id: string;
+  object_type: string;
+  risk_tier: string;
+  decision: string;
+  sampled_at: string;
+  human_outcome: string;
+  human_principal_id: string | null;
+  human_rationale: string | null;
+  resolved_at: string | null;
+}
+
 /** One governance-review-queue proposal: its own review/decision fields */
 export interface ReviewQueueProposalRead {
   review_id: string;
@@ -3601,6 +3942,23 @@ export interface ReviewQueueRead {
   by_status: Record<string, number>;
   by_object_type: Record<string, number>;
   diffable_count: number;
+}
+
+export interface ReviewerAgentRunResult {
+  pre_reviewed?: number;
+  decided?: number;
+  approved?: number;
+  rejected?: number;
+  sampled_for_audit?: number;
+}
+
+export interface ReviewerAgentStateRead {
+  organization_id: string;
+  enabled: boolean;
+  suspended: boolean;
+  max_tier: string;
+  sampling_rate: number;
+  agent_principal_id: string;
 }
 
 export interface ScanPolicyRead {
@@ -3878,6 +4236,31 @@ export interface StewardshipCoverageRead {
   dimensions: Record<string, CoverageDimensionRead>;
   unowned_table_ids: string[];
   computed_at: string;
+}
+
+/** AT-5 / SW-1: `stewardship_api.list_documentation_worklist`'s ranked
+ *  backlog. `usage x impact x deficit` -- see `stewardship_worklist.py`'s
+ *  own module docstring: a zero on any factor is a zero overall, so a table
+ *  nobody queries never reaches the top however undocumented it is, and a
+ *  fully documented table needs no work at all however busy it is. */
+export interface DocumentationWorklistEntryRead {
+  table_id: string;
+  table_name: string;
+  schema_name: string;
+  datasource_name: string;
+  rank: number;
+  query_execution_count: number;
+  consumption_read_count: number;
+  query_volume: number;
+  last_queried_at: string | null;
+  last_consumed_at: string | null;
+  description_is_proposed: boolean;
+  score: number;
+  usage: number;
+  impact: number;
+  deficit: number;
+  downstream_count: number;
+  missing: string[];
 }
 
 export interface StudioChangeItemCreate {
@@ -4360,6 +4743,7 @@ export interface UnifiedLineageImpactNodeRead {
   qualified_name: string;
   depth: number;
   contributing_edge_sources: ("FOREIGN_KEY" | "SUGGESTED_RELATIONSHIP" | "DBT_DEPENDENCY" | "OPENLINEAGE_ETL" | "VIEW_DEFINITION" | "PROCEDURE_DEFINITION")[];
+  quality_state?: string;
 }
 
 /** Transitive upstream/downstream impact, replacing direct-reference */
@@ -4439,6 +4823,27 @@ export interface ValidationIssueRead {
 export interface ValidationResponse {
   valid: boolean;
   issues: ValidationIssueRead[];
+}
+
+export interface VectorIndexRebuildRead {
+  organization_id: string;
+  signature: string;
+  backend: string;
+  considered: number;
+  embedded: number;
+  skipped_unchanged: number;
+}
+
+export interface VectorIndexStatusRead {
+  organization_id: string;
+  usable: boolean;
+  reason: string;
+  entries: number;
+  signature: string;
+  built_at: string | null;
+  age_minutes: number | null;
+  backend: string;
+  max_age_minutes: number;
 }
 
 export interface ViewLineageEdgeRead {

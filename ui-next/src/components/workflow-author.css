@@ -1,0 +1,13 @@
+.workflow-author{flex:none;min-width:0;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:12px 14px;font-size:13px;overflow-wrap:anywhere}
+.workflow-author>summary{cursor:pointer;font-weight:650;padding:3px 0}
+.workflow-author>p{color:var(--ink-2);line-height:1.5;max-width:85ch}
+.workflow-author__hint{color:var(--ink-3);font-size:12.5px;margin:8px 0;padding:8px 10px;border:1px dashed var(--line);border-radius:var(--radius-sm);background:var(--sunk)}
+.workflow-author .field{display:flex;flex-direction:column;gap:5px;margin:10px 0;min-width:0}
+.workflow-author textarea,.workflow-author input:not([type=checkbox]),.workflow-author select{max-width:100%;width:100%;box-sizing:border-box}
+.workflow-author textarea{min-height:72px;resize:vertical}
+.workflow-author article{padding:12px 0;border-top:1px solid var(--line)}
+.workflow-author button{margin:4px 6px 4px 0}
+.trparams__row{flex-wrap:wrap}
+.tpform fieldset{min-width:0;margin:12px 0;border:1px solid var(--line)}
+.tpform fieldset input,.tpform fieldset textarea{max-width:100%;box-sizing:border-box}
+.cat__rowaction .workflow-author{width:min(680px,100%)}

@@ -42,8 +42,8 @@ def main() -> int:
         "constructs": [asdict(row) for row in matrix.constructs],
         "unparsed_reasons": list(matrix.unparsed_reasons),
     }
-    _JSON_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    _MD_PATH.write_text(render_markdown(matrix))
+    _JSON_PATH.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _MD_PATH.write_text(render_markdown(matrix), encoding="utf-8")
 
     print(f"Wrote {_JSON_PATH.relative_to(REPO_ROOT)}")
     print(f"Wrote {_MD_PATH.relative_to(REPO_ROOT)}")

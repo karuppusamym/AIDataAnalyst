@@ -18,7 +18,7 @@
 .btn--primary:hover:not(:disabled){background:var(--accent-hover);border-color:var(--accent-hover);color:var(--accent-ink)}
 
 .field{display:flex;flex-direction:column;gap:4px;min-width:0}
-.field__label{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.field__label{font-family:var(--sans);font-size:12px;font-weight:550;line-height:1.4;letter-spacing:.01em;color:var(--ink-2)}
 .field input,.field select{font:inherit;font-size:13px;padding:6px 9px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);color:var(--ink);min-width:0}
 .field input::placeholder{color:var(--ink-3)}
 

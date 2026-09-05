@@ -266,9 +266,19 @@ async def resolve_resource_attributes(
     """Resolve the gate's `classifications`/`certification`/`quality_state`/
     `freshness_state` for one query, from the tables it actually references.
 
-    An empty `table_ids` (an unresolvable or table-less statement) resolves
-    every axis to its empty/`None` default -- the same behaviour the gate had
-    before this module existed -- rather than guessing.
+    An empty `table_ids` resolves every axis to its empty/`None` default --
+    the same shape the gate had before this module existed. This is correct
+    ONLY for a genuinely table-less statement (e.g. `SELECT 1`); on a
+    statement that DOES reference tables which then fail leaf-name lookup
+    against `ACTIVE` `MetadataTable`, the caller must fail closed BEFORE
+    calling this -- otherwise every classification/certification/quality/
+    freshness-keyed policy rule is silently bypassed.
+
+    `query_gateway.QueryExecutionGateway.validate`/`execute` (the only
+    callers today, 2026-09-03) enforce the check with an explicit
+    `if guard_result.referenced_tables and not table_ids: raise` before
+    calling this; a new caller must do the same. See AU-11 in
+    `Docs/60-delivery/03-tracker.md` for why this matters on the money path.
     """
     moment = now or datetime.now(UTC)
     return ResourceAttributes(

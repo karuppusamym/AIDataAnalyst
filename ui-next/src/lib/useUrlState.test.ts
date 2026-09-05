@@ -22,6 +22,16 @@ describe("useUrlState", () => {
     expect(new URLSearchParams(location.search).get("type")).toBe("TABLE");
   });
 
+  it("preserves the active hash route when filters change", () => {
+    history.replaceState(null, "", "/?q=orders#/catalog");
+    const { result } = renderHook(() => useUrlState());
+
+    act(() => result.current[1]({ type: "TABLE" }));
+
+    expect(location.search).toBe("?q=orders&type=TABLE");
+    expect(location.hash).toBe("#/catalog");
+  });
+
   it("deletes a key when the patch value is null or empty", () => {
     history.replaceState(null, "", "/?q=orders&type=TABLE");
     const { result } = renderHook(() => useUrlState());

@@ -64,6 +64,8 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `secret_reference.rotated` | Reference updated | reference_scheme, path_hash |
 | `organization.integration_policy.updated.v1` | Organization integration policy updated | organization_id, transformation_metadata_integrations |
 | `data_domain.created.v1` | Data domain created under a line of business | data_domain_id, line_of_business_id, parent_domain_id |
+| `identity.principal.deleted.v1` | A principal was removed at the identity provider; consumed by the ownership leaver handler, which flips that principal's ACTIVE ownership rows to LAPSED and routes the ones it orphaned | principal_id, organization_id |
+| `identity.principal.merged.v1` | Two identity-provider principals were merged; active ownership held by the source principal is redirected to the target | source_principal_id, target_principal_id, organization_id |
 
 ### Connectivity — topic `atlas.operational.v1`
 
@@ -105,8 +107,14 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `catalog.object.reactivated` | Reappeared | object_id |
 | `catalog.drift.detected` | Run completed with drift | run_id, created, changed, deprecated |
 | `catalog.asset.certified` | Certification granted | object_id, certifier, expires_at |
+| `catalog.asset.certification_expired.v1` | DQ-3: a table's certification expired because it crossed `quality_certification_sustained_threshold` unresolved quality incidents (off by default -- `quality_certification_expiry_enabled`) | table_id, certification_id |
+| `catalog.asset.certification_revoked.v1` | P2-08: a steward manually revoked an active certification. Maker != checker applies -- the principal who certified cannot revoke. Downstream readers (`asset_usage_decision`'s `REVOKED -> BLOCKED`) invalidate promptly | certification_id, table_id, column_id, revoked_by, reason |
+| `catalog.asset.certification_expiry_warning.v1` | A certification inside the expiry-warning window, emitted once per cooldown so a steward can re-certify before it lapses | certification_id, table_id, expires_at, days_until |
 | `rename_candidate.decided.v1` | CT-4: steward approved/rejected a proposed rename | candidate_id, status |
 | `cross_source_resolution_candidate.decided.v1` | CT-6: steward approved/rejected a proposed cross-source match | candidate_id, status |
+| `catalog.table.newly_created.v1` | ING-4 / P0-01: `persist_discovery_snapshot` observed a table this call actually created (as opposed to reactivated/updated); consumed by `aida.newly_created_table_drafter.run_newly_created_table_drafter_consumer` to auto-enqueue an asset-description draft and unblock a semantic-inference proposal without a steward manually POSTing each drafter endpoint | organization_id, datasource_id, table_id, analysis_run_id |
+| `asset_description.draft.auto_enqueued.v1` | ING-4 / P0-01: `handle_newly_created_table` created an `AssetDescriptionDraft` for a table that had none. Downstream analytics / notification consumers pick this up as "a draft is now waiting for the steward" | asset_description_draft_id, table_id, datasource_id, overall_score |
+| `business_semantics.inference.auto_enqueue_deferred.v1` | ING-4 / P0-01: `handle_newly_created_table` deferred kicking off semantic inference because no `AnalysisRun` has reached `COMPLETED` yet for the datasource (mirrors the HTTP 409 gate in `create_semantic_inference_run`). Advisory; a later profiling-completion pass picks the table back up | table_id, datasource_id, reason |
 
 ### Profiling — topic `atlas.catalog.v1`
 
@@ -163,6 +171,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `glossary.term_deprecated.v1` | Approved term deprecation applied | operation_id, applied_count |
 | `certification.granted.v1` | Approved asset certification applied | operation_id, expires_at, applied_count |
 | `ownership.leaver_reassigned.v1` | Approved leaver-reassignment bulk operation applied | operation_id, applied_count |
+| `ownership.assignment.expiry_warning.v1` | An ownership assignment is inside its expiry-warning window, emitted once per cooldown so the owner can reaffirm before it lapses | assignment_id, notify_principal, expires_at, days_until |
+| `ownership.assignment.lapsed.v1` | An ownership assignment passed its `expires_at` without being reaffirmed and was flipped to LAPSED; routed for reassignment when it was the subject's last owner | assignment_id, subject_type, subject_id, was_last_owner |
+| `ownership.assignment.reaffirmed.v1` | An owner reaffirmed an assignment before it lapsed, extending `expires_at` by the configured ownership term | assignment_id, subject_type, subject_id, expires_at |
+| `ownership.assignment.lapsed_leaver.v1` | An `identity.principal.deleted.v1` event flipped this principal's ACTIVE ownership to LAPSED. Distinct from `ownership.assignment.lapsed.v1`, which is time-based: this one is identity-driven and carries no grace period | assignment_id, principal_id, subject_type, subject_id |
+| `ownership.assignment.merged.v1` | An `identity.principal.merged.v1` event redirected an active ownership assignment from the source principal to the target | assignment_id, source_principal_id, target_principal_id |
 | `metadata.playbook.created.v1` | AT-1: a saved, scheduled bulk-metadata playbook was created | playbook_id, name, action |
 | `document.uploaded.v1` | N8: a data-dictionary document was uploaded and parsed into sections | document_id, project_id, section_count |
 | `document.mapped.v1` | N8: a document's sections were resolved against the live catalog | document_id, matched_count, unmatched_count |
@@ -175,6 +188,13 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `stewardship.unowned_asset_escalated_tier2.v1` | Backlog entry still unaddressed after tier-1 escalation; opened as an ITSM ticket unconditionally (GL-6) | table_id |
 | `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
 | `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
+| `model_import.submitted.v1` | An uploaded model workbook entered the review queue as one batch | batch_id, datasource_id, review_id, change_count |
+| `model_import.applied.v1` / `.rejected.v1` | Governed decision on one workbook import batch. `applied_count` can be lower than `change_count`: a change superseded between export and approval is skipped, not applied | batch_id, datasource_id, filename, content_sha256, change_count, applied_count, skipped_count, review_id |
+| `description.withdrawal.requested.v1` | A steward asked for an approved table or column description to be retired. Nothing is un-published yet | withdrawal_id, subject_type, subject_id, review_id |
+| `description.withdrawal.approved.v1` / `.rejected.v1` | Governed decision on a withdrawal. Approval moves the version to `WITHDRAWN`, preserving its text | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
+| `description.withdrawal.superseded.v1` | The withdrawal was approved, but a newer version had been published since it was raised, so nothing was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
+| `description.reinstatement.approved.v1` / `.rejected.v1` | Governed decision on bringing a withdrawn description back. Approval republishes the retired text as a **new** version; the withdrawn row is never flipped back, so the chain still records that it was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
+| `description.reinstatement.superseded.v1` | The reinstatement was approved, but the asset had been described again since it was raised, so nothing was republished | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 
@@ -256,6 +276,27 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `context.product_tool_consumed.v1` | Governed tool invoked while scoped to a published context product | product_key, version, tool_version_id, principal_id |
 | `context.product_consumer_binding_set.v1` | Consumer pinned (or moved) to a specific version for staged rollout (AT-7b) | product_key, consumer_principal_id, bound_version |
 | `context.product_consumer_binding_removed.v1` | Consumer unpinned; falls back to the current published version (AT-7b) | product_key, consumer_principal_id |
+
+### Governance notifications (NT-1) — no topic (outbound webhook)
+
+NT-1 does not publish to the outbox. It delivers seven existing governance
+events outward to Slack or Teams and records one `NotificationEventRecord`
+per channel per attempt. The event kinds it renders are
+`REVIEW_REQUESTED`, `REVIEW_DECIDED`, `QUALITY_INCIDENT_OPENED`,
+`QUALITY_INCIDENT_RESOLVED`, `KILL_SWITCH_ENGAGED`, `KILL_SWITCH_RELEASED`
+and `CERTIFICATION_EXPIRING`. Messages are value-free -- object type, id,
+principal, risk tier and a deep link, never a row, SQL, or description text --
+and carry no actions: a notification here is never a control surface.
+
+### Agent workforce (AG-10 / ADR-0027) — topic `atlas.governance.v1`
+
+| Event | Trigger | Key payload |
+|---|---|---|
+| `agent.contract_published.v1` | AG-10: an agent version's contract was created or replaced -- its workload identity, capability envelope, autonomy tier, budget caps and kill scope. The contract is the agent's authority, so a change here is the change an auditor most wants to see | ai_asset_version_id, agent_principal_id, autonomy_tier |
+| `agent_contract_request.submitted.v1` | AG-10 extension: a `CONTRACT_AUTHORS` principal submitted a contract definition for review rather than writing it directly -- opens a `GovernanceReview` (`AGENT_CONTRACT_REQUEST`) that a different principal must decide, and which is blocked on a live AT-8/N17 eval-gate PASS at decision time before the contract is actually written | agent_contract_request_id, ai_asset_version_id, review_id |
+| `agent.kill_switch_engaged.v1` | AG-10: an agent's kill switch was engaged. Takes effect on the agent's very next run -- the orchestrator queries the switch live rather than caching it | ai_asset_version_id, kill_scope, agent_principal_id |
+| `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
+| `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |
 
 ### AI registry — topic `atlas.governance.v1`
 

@@ -42,11 +42,11 @@ describe("OnboardingWizard persona branching", () => {
     expect(screen.queryByText("Studio change sets")).not.toBeInTheDocument();
   });
 
-  it("marks a legacy-served step distinctly from a migrated one", () => {
+  it("does not mark migrated operator steps as legacy", () => {
     render(<OnboardingWizard persona="Operator" onNavigate={() => {}} />);
 
     const sourcesItem = screen.getByText("Sources").closest("li")!;
-    expect(sourcesItem.querySelector(".pill")).toHaveTextContent("legacy");
+    expect(sourcesItem.querySelector(".pill")).toBeNull();
     const catalogItem = screen.getByText("Catalog").closest("li")!;
     expect(catalogItem.querySelector(".pill")).toBeNull();
   });

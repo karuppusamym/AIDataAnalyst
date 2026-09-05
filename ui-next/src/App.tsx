@@ -1,167 +1,402 @@
-import { useEffect, useState } from "react";
-import { CatalogScreen } from "./screens/CatalogScreen";
-import { ReviewQueueScreen } from "./screens/ReviewQueueScreen";
-import { MarketplaceScreen } from "./screens/MarketplaceScreen";
-import { LineageRefusalScreen } from "./screens/LineageRefusalScreen";
-import { StudioChangeSetsScreen } from "./screens/StudioChangeSetsScreen";
-import { NarratedLineageScreen } from "./screens/NarratedLineageScreen";
-import { AskScreen } from "./screens/AskScreen";
-import { RelationshipsScreen } from "./screens/RelationshipsScreen";
-import { SemanticsScreen } from "./screens/SemanticsScreen";
-import { BusinessMeaningScreen } from "./screens/BusinessMeaningScreen";
-import { QualityScreen } from "./screens/QualityScreen";
-import { AuditLedgerScreen } from "./screens/AuditLedgerScreen";
-import { SourcesScreen } from "./screens/SourcesScreen";
-import { OperationsScreen } from "./screens/OperationsScreen";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { HomeScreen } from "./screens/HomeScreen";
+import { AgentInboxScreen } from "./screens/AgentInboxScreen";
 import { PersonaNav } from "./components/PersonaNav";
-import { OnboardingWizard } from "./components/OnboardingWizard";
+import { ScopePicker } from "./components/ScopePicker";
 import { fetchMe } from "./lib/api";
 import type { MeRead } from "./lib/types";
 import { asIdentityProvider, asPersona } from "./lib/ui-types";
 import type { Persona } from "./lib/ui-types";
 import "./App.css";
 
-/* ---------------------------------------------------------------------------
-   The shell.
+const CatalogScreen = lazy(() => import("./screens/CatalogScreen").then((module) => ({ default: module.CatalogScreen })));
+const DescriptionDraftsScreen = lazy(() => import("./screens/DescriptionDraftsScreen").then((module) => ({ default: module.DescriptionDraftsScreen })));
+const ReviewQueueScreen = lazy(() => import("./screens/ReviewQueueScreen").then((module) => ({ default: module.ReviewQueueScreen })));
+const ParsedLineageReviewScreen = lazy(() => import("./screens/ParsedLineageReviewScreen").then((module) => ({ default: module.ParsedLineageReviewScreen })));
+const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then((module) => ({ default: module.MarketplaceScreen })));
+const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
+const StudioChangeSetsScreen = lazy(() => import("./screens/StudioChangeSetsScreen").then((module) => ({ default: module.StudioChangeSetsScreen })));
+const NarratedLineageScreen = lazy(() => import("./screens/NarratedLineageScreen").then((module) => ({ default: module.NarratedLineageScreen })));
+const CrossSourceScreen = lazy(() => import("./screens/CrossSourceScreen").then((module) => ({ default: module.CrossSourceScreen })));
+const AskScreen = lazy(() => import("./screens/AskScreen").then((module) => ({ default: module.AskScreen })));
+const RelationshipsScreen = lazy(() => import("./screens/RelationshipsScreen").then((module) => ({ default: module.RelationshipsScreen })));
+const SemanticsScreen = lazy(() => import("./screens/SemanticsScreen").then((module) => ({ default: module.SemanticsScreen })));
+const BusinessMeaningScreen = lazy(() => import("./screens/BusinessMeaningScreen").then((module) => ({ default: module.BusinessMeaningScreen })));
+const QualityScreen = lazy(() => import("./screens/QualityScreen").then((module) => ({ default: module.QualityScreen })));
+const AuditLedgerScreen = lazy(() => import("./screens/AuditLedgerScreen").then((module) => ({ default: module.AuditLedgerScreen })));
+const SourcesScreen = lazy(() => import("./screens/SourcesScreen").then((module) => ({ default: module.SourcesScreen })));
+const OperationsScreen = lazy(() => import("./screens/OperationsScreen").then((module) => ({ default: module.OperationsScreen })));
+const AiRegistryScreen = lazy(() => import("./screens/AiRegistryScreen").then((module) => ({ default: module.AiRegistryScreen })));
+const ContextProductsScreen = lazy(() => import("./screens/ContextProductsScreen").then((module) => ({ default: module.ContextProductsScreen })));
+const AgentGatewayScreen = lazy(() => import("./screens/AgentGatewayScreen").then((module) => ({ default: module.AgentGatewayScreen })));
+const AdministrationScreen = lazy(() => import("./screens/AdministrationScreen").then((module) => ({ default: module.AdministrationScreen })));
+const ToolRegistryScreen = lazy(() => import("./screens/ToolRegistryScreen").then((module) => ({ default: module.ToolRegistryScreen })));
+const UnifiedLineageScreen = lazy(() => import("./screens/UnifiedLineageScreen").then((module) => ({ default: module.UnifiedLineageScreen })));
+const AiGovernanceScreen = lazy(() => import("./screens/AiGovernanceScreen").then((module) => ({ default: module.AiGovernanceScreen })));
+const TransformationsScreen = lazy(() => import("./screens/TransformationsScreen").then((module) => ({ default: module.TransformationsScreen })));
+const StewardshipScreen = lazy(() => import("./screens/StewardshipScreen").then((module) => ({ default: module.StewardshipScreen })));
+const WorkspaceAccessScreen = lazy(() => import("./screens/WorkspaceAccessScreen").then((module) => ({ default: module.WorkspaceAccessScreen })));
+const AccessPolicyScreen = lazy(() => import("./screens/AccessPolicyScreen").then((module) => ({ default: module.AccessPolicyScreen })));
+const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then((module) => ({ default: module.ReliabilityScreen })));
+const ComplianceScreen = lazy(() => import("./screens/ComplianceScreen").then((module) => ({ default: module.ComplianceScreen })));
+const ToolPlansScreen = lazy(() => import("./screens/ToolPlansScreen").then((module) => ({ default: module.ToolPlansScreen })));
+const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then((module) => ({ default: module.AgentRosterScreen })));
+const ReviewerAgentScreen = lazy(() => import("./screens/ReviewerAgentScreen").then((module) => ({ default: module.ReviewerAgentScreen })));
+const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((module) => ({ default: module.PlaybooksScreen })));
+const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
+const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
+const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
+const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
 
-   Module 21 §5: in production the persona is DERIVED from OIDC group claims,
-   via `GET /v1/me` (persona_api.py), which itself derives it from
-   `oidc.context_from_claims` -- the same configurable claim-path mechanism
-   module 01 already uses for role mapping, extended to groups. The switcher
-   in `PersonaNav` is a development convenience, gated by the identity
-   provider `/v1/me` reports (module 01's existing prod-vs-dev-identity
-   switch): it renders only under the development identity provider, and
-   never under OIDC, where persona is not a user-selectable value. See
-   `PersonaNav.tsx` for the enforcement point itself.
+/* UX-20: navigation is organised by *persona workbench*, not by feature area.
+   Thirty flat items grouped by what the code does is a feature map; a person
+   opening Atlas is one of six personas with a job, and the six groups below
+   are `Docs/00-product/02-personas-and-jobs.md`'s own list. Every screen id
+   is unchanged, so every existing deep link (`#/catalog`, `#/governance`, …)
+   still resolves -- only the grouping moved. */
+type Workbench =
+  | "Inbox"
+  | "Analyst"
+  | "Consumer"
+  | "Developer"
+  | "Steward"
+  | "Reviewer"
+  | "Operator"
+  | "Auditor";
 
-   Nav marked "legacy" still renders from ui/ (the existing portal). This is
-   the strangle seam: the new shell owns routing and chrome from day one, and
-   each screen moves across on its own schedule without a cutover.
---------------------------------------------------------------------------- */
+type NavItem = {
+  id: string;
+  label: string;
+  group: Workbench;
+  icon: string;
+  keywords: string;
+};
 
-const NAV: { id: string; label: string; group: string; ready?: boolean }[] = [
-  { id: "home", label: "Get started", group: "Work", ready: true },
-  { id: "analyst", label: "Ask", group: "Work", ready: true },
-  { id: "catalog", label: "Catalog", group: "Discover", ready: true },
-  { id: "marketplace", label: "Marketplace", group: "Discover", ready: true },
-  { id: "relationships", label: "Relationships", group: "Discover", ready: true },
-  { id: "lineage", label: "Lineage", group: "Understand", ready: true },
-  { id: "semantics", label: "Semantics", group: "Understand", ready: true },
-  { id: "meaning", label: "Business meaning", group: "Understand", ready: true },
-  { id: "governance", label: "Review queue", group: "Govern", ready: true },
-  { id: "studio", label: "Studio change sets", group: "Govern", ready: true },
-  { id: "quality", label: "Quality", group: "Govern", ready: true },
-  { id: "refusals", label: "Lineage refusals", group: "Govern", ready: true },
-  { id: "audit", label: "Audit ledger", group: "Govern", ready: true },
-  { id: "sources", label: "Sources", group: "Operate", ready: true },
-  { id: "operations", label: "Operations", group: "Operate", ready: true },
+const NAV: NavItem[] = [
+  // --- Inbox: the supervisor's front door ---------------------------------
+  { id: "home", label: "Overview", group: "Inbox", icon: "⌂", keywords: "home dashboard get started" },
+  { id: "inbox", label: "Agent inbox", group: "Inbox", icon: "⧉", keywords: "agents proposals waiting decisions auto-applied sampled kill switch supervise" },
+  // --- Analyst: answer a question, and trust the answer -------------------
+  { id: "analyst", label: "Ask Atlas", group: "Analyst", icon: "✦", keywords: "question query analyst ai" },
+  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables data search" },
+  { id: "semantics", label: "Semantic layer", group: "Analyst", icon: "ƒ", keywords: "metrics models measures" },
+  { id: "tools", label: "Tool registry", group: "Analyst", icon: "⛭", keywords: "sql tool version execute registry" },
+  { id: "tool-plans", label: "Tool plans", group: "Analyst", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
+  { id: "lineage", label: "Lineage", group: "Analyst", icon: "↗", keywords: "impact upstream downstream narrated" },
+  { id: "unified-lineage", label: "Unified lineage", group: "Analyst", icon: "⇄", keywords: "graph impact upstream downstream unified" },
+  // --- Consumer: use what has been approved -------------------------------
+  { id: "marketplace", label: "Marketplace", group: "Consumer", icon: "◇", keywords: "products access request" },
+  // --- Developer: the audience that consumes context rather than reads it --
+  //
+  //   Context products moved out of Consumer deliberately. A Consumer browses
+  //   the marketplace and requests access to a product; a Developer *packages*
+  //   context and points an agent at it. Those are different jobs done by
+  //   different people, and keeping them in one group is why the gateway had
+  //   nowhere obvious to live. Screen ids are unchanged, so every existing
+  //   `#/context` deep link still resolves.
+  { id: "context", label: "Context products", group: "Developer", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
+  { id: "developer", label: "Agent gateway", group: "Developer", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
+  { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
+  // --- Steward: make the estate mean something ----------------------------
+  { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
+  { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
+  { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
+  { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
+  { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
+  { id: "description-drafts", label: "Description drafts", group: "Steward", icon: "✎", keywords: "asset description draft generate submit steward" },
+  { id: "relationships", label: "Relationships", group: "Steward", icon: "⌁", keywords: "keys graph links" },
+  { id: "cross-source", label: "Cross-source", group: "Steward", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
+  { id: "transformations", label: "Transformations", group: "Steward", icon: "▤", keywords: "dbt models sql transforms manifest" },
+  { id: "quality", label: "Data quality", group: "Steward", icon: "◎", keywords: "incidents score checks" },
+  { id: "studio", label: "Studio", group: "Steward", icon: "△", keywords: "change sets author" },
+  // --- Reviewer: decide, with the evidence in one pane --------------------
+  { id: "governance", label: "Review queue", group: "Reviewer", icon: "✓", keywords: "approve reject proposals" },
+  { id: "parsed-lineage-review", label: "Parsed lineage review", group: "Reviewer", icon: "↯", keywords: "lineage parsed view procedure dbt openlineage proposed approve reject p1-05" },
+  { id: "refusals", label: "Policy refusals", group: "Reviewer", icon: "!", keywords: "lineage blocked denied" },
+  { id: "reviewer-agent", label: "Reviewer agent", group: "Reviewer", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
+  // --- Operator: keep the estate and the AI running -----------------------
+  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health" },
+  { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
+  { id: "agents", label: "AI governance", group: "Operator", icon: "⌬", keywords: "model routes agents evaluations runtime" },
+  { id: "ai", label: "AI registry", group: "Operator", icon: "◆", keywords: "agents models tools" },
+  { id: "agent-roster", label: "Agent roster", group: "Operator", icon: "▥", keywords: "agent roster purpose method tool-first confidence auto-apply inspect" },
+  { id: "access-policies", label: "Access policies", group: "Operator", icon: "⚖", keywords: "abac policy authorization simulation mask deny allow filter" },
+  { id: "workspace-access", label: "Workspace access", group: "Operator", icon: "⚿", keywords: "members roles bindings approve reject bi tableau lineage connections" },
+  { id: "delegations", label: "Delegations", group: "Operator", icon: "⇌", keywords: "delegation grant revoke governance authority pg-4 time-bounded" },
+  { id: "reliability", label: "Reliability", group: "Operator", icon: "⏱", keywords: "slo error budget notification escalation archive worm audit archive data contract sla violations" },
+  { id: "administration", label: "Administration", group: "Operator", icon: "⚙", keywords: "organization project datasource setup" },
+  // --- Auditor: see everything, change nothing ----------------------------
+  { id: "audit", label: "Audit ledger", group: "Auditor", icon: "≣", keywords: "events evidence history" },
+  { id: "compliance", label: "Compliance packs", group: "Auditor", icon: "▣", keywords: "evidence audit framework generate download checksum" },
 ];
 
+const GROUPS: Workbench[] = [
+  "Inbox",
+  "Analyst",
+  "Consumer",
+  "Developer",
+  "Steward",
+  "Reviewer",
+  "Operator",
+  "Auditor",
+];
+
+/** The workbench a persona lands in. Everyone can open every workbench they
+ *  are entitled to -- this only chooses the first one. */
+const WORKBENCH_BY_PERSONA: Record<string, Workbench> = {
+  Analyst: "Analyst",
+  Consumer: "Consumer",
+  Steward: "Steward",
+  Reviewer: "Reviewer",
+  Operator: "Operator",
+  Auditor: "Auditor",
+};
+
+function currentFromHash(): string {
+  const candidate = location.hash.replace(/^#\/?/, "");
+  return NAV.some((item) => item.id === candidate) ? candidate : "home";
+}
+
+function Screen({
+  view,
+  personaKey,
+  onNavigate,
+}: {
+  view: string;
+  personaKey: string;
+  onNavigate: (view: string, params?: Record<string, string>) => void;
+}) {
+  switch (view) {
+    case "catalog": return <CatalogScreen />;
+    case "governance": return <ReviewQueueScreen />;
+    case "parsed-lineage-review": return <ParsedLineageReviewScreen />;
+    case "description-drafts": return <DescriptionDraftsScreen />;
+    case "marketplace": return <MarketplaceScreen />;
+    case "refusals": return <LineageRefusalScreen />;
+    case "reviewer-agent": return <ReviewerAgentScreen />;
+    case "studio": return <StudioChangeSetsScreen />;
+    case "lineage": return <NarratedLineageScreen />;
+    case "analyst": return <AskScreen />;
+    case "relationships": return <RelationshipsScreen />;
+    case "cross-source": return <CrossSourceScreen />;
+    case "semantics": return <SemanticsScreen />;
+    case "meaning": return <BusinessMeaningScreen />;
+    case "quality": return <QualityScreen />;
+    case "ai": return <AiRegistryScreen />;
+    case "agent-roster": return <AgentRosterScreen />;
+    case "audit": return <AuditLedgerScreen />;
+    case "sources": return <SourcesScreen />;
+    case "operations": return <OperationsScreen />;
+    case "context": return <ContextProductsScreen />;
+    case "developer": return <AgentGatewayScreen />;
+    case "portfolio-analytics": return <PortfolioAnalyticsScreen />;
+    case "tools": return <ToolRegistryScreen />;
+    case "unified-lineage": return <UnifiedLineageScreen />;
+    case "transformations": return <TransformationsScreen />;
+    case "agents": return <AiGovernanceScreen />;
+    case "administration": return <AdministrationScreen />;
+    case "stewardship": return <StewardshipScreen />;
+    case "worklist": return <DocumentationWorklistScreen />;
+    case "playbooks": return <PlaybooksScreen />;
+    case "negative-knowledge": return <NegativeKnowledgeScreen />;
+    case "access-policies": return <AccessPolicyScreen />;
+    case "compliance": return <ComplianceScreen />;
+    case "tool-plans": return <ToolPlansScreen />;
+    case "workspace-access": return <WorkspaceAccessScreen />;
+    case "delegations": return <DelegationsScreen />;
+    case "reliability": return <ReliabilityScreen />;
+    case "inbox":
+      return <AgentInboxScreen persona={personaKey} onNavigate={onNavigate} />;
+    default: return null;
+  }
+}
+
 export default function App() {
-  const [view, setView] = useState("home");
+  const [view, setView] = useState(currentFromHash);
   const [me, setMe] = useState<MeRead | null>(null);
-  // The dev switcher's own choice. Irrelevant, and never read, once `me` reports
-  // OIDC -- PersonaNav ignores `onPersonaChange` in that mode -- but kept as
-  // state (rather than derived) so a dev's selection survives re-renders.
   const [devPersona, setDevPersona] = useState<Persona>("Steward");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(() => NAV.find(item => item.id === currentFromHash())?.group ?? GROUPS[0]!);
+  useEffect(() => { setExpandedGroup(NAV.find(item => item.id === view)?.group ?? null); }, [view]);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchMe(controller.signal)
-      .then(setMe)
-      .catch(() => {
-        // Fail closed (module 01 INV-4): an unreachable /v1/me leaves `me` null,
-        // which PersonaNav renders as nothing rather than guessing a mode.
-      });
+    fetchMe(controller.signal).then(setMe).catch(() => undefined);
     return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const onHashChange = () => setView(currentFromHash());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+      if (event.key === "Escape") {
+        setPaletteOpen(false);
+        setNavOpen(false);
+      }
+    };
+    window.addEventListener("hashchange", onHashChange);
+    window.addEventListener("popstate", onHashChange);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener("popstate", onHashChange);
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   const identityProvider = asIdentityProvider(me?.identity_provider);
   const persona = identityProvider === "OIDC" ? asPersona(me?.persona) : devPersona;
+  const personaKey = String(persona).toUpperCase();
 
-  const groups = [...new Set(NAV.map((n) => n.group))];
-  const current = NAV.find((n) => n.id === view);
+  // UX-20: with no explicit route, land in the persona's own workbench
+  // rather than always on Overview. Runs once, and only when the URL names
+  // no screen -- a deep link always wins over the default.
+  const [landed, setLanded] = useState(false);
+  useEffect(() => {
+    if (landed || !me) return;
+    setLanded(true);
+    if (location.hash.replace(/^#\/?/, "") !== "") return;
+    const workbench = WORKBENCH_BY_PERSONA[String(persona)];
+    const first = workbench ? NAV.find((item) => item.group === workbench) : undefined;
+    if (first) {
+      setView(first.id);
+      history.replaceState(null, "", `${location.pathname}${location.search}#/${first.id}`);
+    }
+  }, [landed, me, persona]);
+  const current = NAV.find((item) => item.id === view) ?? NAV[0]!;
+  const sectionItems = NAV.filter((item) => item.group === current.group);
+
+  const navigate = (id: string, params?: Record<string, string>) => {
+    setView(id);
+    setPaletteOpen(false);
+    setNavOpen(false);
+    // Query params ride alongside the hash route so a screen the inbox opened
+    // lands focused on the right row (the `useUrlState` convention every
+    // migrated screen already reads).
+    const query = params ? `?${new URLSearchParams(params).toString()}` : location.search;
+    const target = `${location.pathname}${query}#/${id}`;
+    if (`${location.search}${location.hash}` !== `${query}#/${id}`) {
+      history.pushState(null, "", target);
+    }
+  };
+
+  const matches = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return NAV;
+    return NAV.filter((item) => `${item.label} ${item.group} ${item.keywords}`.toLowerCase().includes(needle));
+  }, [query]);
 
   return (
-    <div className="shell">
+    <div className={`shell${navOpen ? " shell--nav-open" : ""}`}>
       <nav className="snav" aria-label="Main">
         <div className="snav__brand">
-          <span className="snav__mark" aria-hidden="true" />
-          <span className="snav__name">Atlas</span>
+          <span className="snav__mark" aria-hidden="true">A</span>
+          <span>
+            <span className="snav__name">Atlas</span>
+            <span className="snav__edition">Data intelligence</span>
+          </span>
+          <button className="snav__mobile-close" onClick={() => setNavOpen(false)} aria-label="Close navigation">×</button>
         </div>
 
-        <PersonaNav
-          identityProvider={identityProvider}
-          persona={persona}
-          onPersonaChange={setDevPersona}
-        />
+        <div className="snav__context">
+          <ScopePicker />
+          <PersonaNav identityProvider={identityProvider} persona={persona} onPersonaChange={setDevPersona} />
+        </div>
 
-        {groups.map((g) => (
-          <div key={g} className="snav__group">
-            <div className="snav__ghead">{g}</div>
-            {NAV.filter((n) => n.group === g).map((n) => (
+        <div className="snav__links">
+          {GROUPS.map((group) => (
+            <div key={group} className="snav__group">
+              <button className="snav__ghead" aria-expanded={expandedGroup === group} aria-controls={`nav-${group}`} onClick={() => setExpandedGroup(expandedGroup === group ? null : group)}><span>{group}</span><span aria-hidden="true">{expandedGroup === group ? "-" : "+"}</span></button>
+              <div id={`nav-${group}`} hidden={expandedGroup !== group}>
+              {NAV.filter((item) => item.group === group).map((item) => (
+                <button key={item.id} className="snav__item" data-nav={item.id} aria-current={item.id === view ? "page" : undefined} onClick={() => navigate(item.id)}>
+                  <span className="snav__icon" aria-hidden="true">{item.icon}</span>
+                  <span>{item.label}</span>
+                </button>
+              ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="snav__footer">
+          <span className="snav__avatar" aria-hidden="true">{persona?.slice(0, 1) ?? "U"}</span>
+          <span className="snav__who">
+            <b>{persona ?? "Workspace user"}</b>
+            <small><i aria-hidden="true" /> Platform connected</small>
+          </span>
+        </div>
+      </nav>
+
+      <button className="shell__scrim" onClick={() => setNavOpen(false)} aria-label="Close navigation" />
+
+      <main className="smain">
+        <header className="topbar">
+          <div className="topbar__trail">
+            <button className="topbar__menu" onClick={() => setNavOpen(true)} aria-label="Open navigation">☰</button>
+            <span className="topbar__workspace">Workspace</span>
+            <span className="topbar__slash" aria-hidden="true">/</span>
+            <strong>{current.label}</strong>
+          </div>
+          <div className="topbar__actions">
+            <button className="quickfind" onClick={() => setPaletteOpen(true)}>
+              <span aria-hidden="true">⌕</span>
+              <span className="quickfind__label">Jump to…</span>
+              <kbd>Ctrl K</kbd>
+            </button>
+            <span className="topbar__status"><i aria-hidden="true" /> Live</span>
+          </div>
+        </header>
+
+        <nav className="sectionnav" aria-label={`${current.group} pages`}>
+          <span className="sectionnav__label">{current.group}</span>
+          <div className="sectionnav__scroll">
+            {sectionItems.map((item) => (
               <button
-                key={n.id}
-                className="snav__item"
-                data-nav={n.id}
-                aria-current={n.id === view ? "page" : undefined}
-                onClick={() => setView(n.id)}
+                key={item.id}
+                className="sectionnav__item"
+                aria-current={item.id === view ? "page" : undefined}
+                onClick={() => navigate(item.id)}
               >
-                <span>{n.label}</span>
-                {n.ready ? null : <span className="snav__legacy">legacy</span>}
+                {item.label}
               </button>
             ))}
           </div>
-        ))}
-      </nav>
+        </nav>
 
-      <main className="smain">
-        {view === "home" ? (
-          <OnboardingWizard persona={persona} onNavigate={setView} />
-        ) : view === "catalog" ? (
-          <CatalogScreen />
-        ) : view === "governance" ? (
-          <ReviewQueueScreen />
-        ) : view === "marketplace" ? (
-          <MarketplaceScreen />
-        ) : view === "refusals" ? (
-          <LineageRefusalScreen />
-        ) : view === "studio" ? (
-          <StudioChangeSetsScreen />
-        ) : view === "lineage" ? (
-          <NarratedLineageScreen />
-        ) : view === "analyst" ? (
-          <AskScreen />
-        ) : view === "relationships" ? (
-          <RelationshipsScreen />
-        ) : view === "semantics" ? (
-          <SemanticsScreen />
-        ) : view === "meaning" ? (
-          <BusinessMeaningScreen />
-        ) : view === "quality" ? (
-          <QualityScreen />
-        ) : view === "audit" ? (
-          <AuditLedgerScreen />
-        ) : view === "sources" ? (
-          <SourcesScreen />
-        ) : view === "operations" ? (
-          <OperationsScreen />
-        ) : (
-          <div className="stub">
-            <h1>{current?.label}</h1>
-            <p>
-              Still served by the existing portal. Under the strangle plan this screen
-              renders inside the new shell until it is rebuilt — the nav, persona and
-              chrome above are already the new ones.
-            </p>
-            <p className="stub__hint">
-              Catalog is the reference implementation. Every screen that moves across
-              copies its pattern: URL-held state, one abortable request in flight,
-              virtualized list, evidence pane with a permalink.
-            </p>
-          </div>
-        )}
+        <div className="sview" key={view} data-screen={view}>
+          <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
+            {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
+          </Suspense>
+        </div>
       </main>
+
+      {paletteOpen ? (
+        <div className="palette" role="presentation" onMouseDown={() => setPaletteOpen(false)}>
+          <section className="palette__dialog" role="dialog" aria-modal="true" aria-label="Quick navigation" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="palette__search">
+              <span aria-hidden="true">⌕</span>
+              <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search pages and tools…" aria-label="Search pages" />
+              <kbd>Esc</kbd>
+            </div>
+            <div className="palette__results">
+              {matches.length ? matches.map((item) => (
+                <button key={item.id} className="palette__item" onClick={() => navigate(item.id)}>
+                  <span className="snav__icon" aria-hidden="true">{item.icon}</span>
+                  <span><b>{item.label}</b><small>{item.group}</small></span>
+                  <span className="palette__arrow" aria-hidden="true">→</span>
+                </button>
+              )) : <div className="palette__empty">No matching page</div>}
+            </div>
+            <footer className="palette__foot">Type to filter · choose a page to open it</footer>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

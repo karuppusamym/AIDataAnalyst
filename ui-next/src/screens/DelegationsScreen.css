@@ -1,0 +1,52 @@
+/* Delegations (PG-4). Time-bounded, audited handoff of governance authority
+   between principals. Built entirely on the shared design tokens
+   (tokens.css) so it themes correctly in dark mode instead of hard-coded
+   fallback colours. The "Grant delegation" form reuses workflow-author.css
+   (`.workflow-author`), the codebase's shared collapsible-create-form
+   pattern -- only the list/filters/row chrome below is this screen's own. */
+
+.deleg { display: flex; flex-direction: column; gap: 16px; max-width: 980px; margin: 0 auto; padding-bottom: 32px; }
+
+.deleg__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.deleg__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.deleg__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 66ch; }
+
+.deleg__notice {
+  margin: 0; padding: 9px 13px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--sunk); color: var(--ink-2); font-size: 12.5px;
+}
+
+.deleg__filters {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-end;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  padding: 12px 14px;
+}
+.deleg__filters .field { min-width: 200px; }
+
+.deleg__loading { margin: 0; padding: 24px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.deleg__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.deleg__row {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  box-shadow: var(--shadow-1); padding: 13px 16px; display: flex; flex-direction: column; gap: 8px;
+}
+.deleg__rowhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.deleg__rowhead strong { font-size: 13.5px; }
+.deleg__arrow { color: var(--ink-3); }
+
+.deleg__roles { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.deleg__reason { margin: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
+
+.deleg__window { color: var(--ink-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.deleg__muted { color: var(--ink-3); font-size: 11.5px; }
+
+.deleg__rolesfield { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 10px; margin: 10px 0; }
+.deleg__rolesfield legend { font-size: 11px; color: var(--ink-3); padding: 0 4px; }
+.deleg__rolecheck { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin: 4px 12px 4px 0; }
+
+@media (max-width: 620px) {
+  .deleg__head { flex-direction: column; align-items: flex-start; }
+  .deleg__filters { flex-direction: column; align-items: stretch; }
+}

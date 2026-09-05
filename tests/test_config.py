@@ -138,7 +138,7 @@ def test_settings_construct_from_env_example_template(monkeypatch: pytest.Monkey
     boot cleanly from it -- the whole point is failing on typos, not on legitimate
     configuration."""
     env_example = Path(__file__).resolve().parent.parent / ".env.example"
-    for line in env_example.read_text().splitlines():
+    for line in env_example.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue

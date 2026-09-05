@@ -178,6 +178,14 @@ allowed_importers = [
   "atlas.modules.identity_tenancy.tests",
   "aida.models",
   "aida.schemas",
+  # ST-07 Commit C for identity_tenancy (2026-09-03): workspace_api moved into
+  # atlas.modules.identity_tenancy.router (Part 1, verbatim), and 11 org/lob/
+  # data-domain/project/cross-boundary-grant endpoints moved there from aida.api
+  # (Part 2). The old path aida.workspace_api stays as a re-export shim so
+  # main.py and any handler-importing test keep working unchanged. Same
+  # technique as the catalog, connectivity, ingestion and observability_audit
+  # shims above.
+  "aida.workspace_api",
 ]
 
 [[tool.importlinter.contracts]]
@@ -235,6 +243,12 @@ allowed_importers = [
   "atlas.modules.ingestion.tests",
   "aida.models",
   "aida.schemas",
+  # ST-07 Commit C for ingestion (2026-09-03): ingestion_api moved into
+  # atlas.modules.ingestion.router; the old path stays as a re-export
+  # shim so main.py and tests/test_in2_batch_controls.py's direct
+  # handler imports keep working unchanged. Same technique as the
+  # catalog + observability_audit shims.
+  "aida.ingestion_api",
 ]
 
 [[tool.importlinter.contracts]]
@@ -264,6 +278,17 @@ allowed_importers = [
   "atlas.modules.catalog.tests",
   "aida.models",
   "aida.schemas",
+  # ST-07 Commit A (2026-09-03): the read-model composer + its `_prefixed`
+  # batch helpers moved from `aida.catalog_read_model` into
+  # `atlas.modules.catalog.service`/`.repository`; the old path stays as
+  # a re-export shim (same technique as `aida.models`/`aida.schemas`), so
+  # this contract has to name it too or the shim's own imports fail here.
+  "aida.catalog_read_model",
+  # ST-07 Commit B (2026-09-03): the bulk stewardship actions (tag,
+  # classify, own, certify) moved from `aida.catalog_bulk_actions` into
+  # the "Bulk actions" section of `atlas.modules.catalog.service`; the
+  # old path stays as a re-export shim for the same reason as Commit A.
+  "aida.catalog_bulk_actions",
 ]
 
 [[tool.importlinter.contracts]]
@@ -292,6 +317,12 @@ allowed_importers = [
   "atlas.modules.observability_audit.tests",
   "aida.models",
   "aida.schemas",
+  # ST-07 Commit C for observability_audit (2026-09-03): observability_api
+  # moved into atlas.modules.observability_audit.router; the old path stays
+  # as a re-export shim so main.py and two tests that import handler
+  # functions directly keep working unchanged. Same technique as the
+  # catalog module's aida.catalog_read_model + aida.catalog_bulk_actions.
+  "aida.observability_api",
 ]
 
 [[tool.importlinter.contracts]]

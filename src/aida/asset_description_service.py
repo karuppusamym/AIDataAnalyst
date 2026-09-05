@@ -351,6 +351,67 @@ def ensure_reviewable(overall_score: float) -> None:
         )
 
 
+async def publish_asset_documentation_version(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    table_id: UUID,
+    readme: str,
+    created_by: str,
+    approved_by: str,
+    approved_at: datetime,
+) -> AssetDocumentationVersion:
+    """Publish `readme` as the table's new current `AssetDocumentationVersion`.
+
+    Extracted from `apply_asset_description_draft` (below, its original and
+    still its main caller) once a second approval route needed the same
+    publish: an approved table-subject `DocumentClaim`, whose content is a
+    steward-reviewed description from an uploaded data dictionary rather than
+    a GL-9 evidence draft. Both are authored table descriptions reaching the
+    same store through the same maker-checker guard, so they must not grow
+    two different append-and-supersede implementations that can drift.
+
+    Append-only: the prior `APPROVED` row moves to `SUPERSEDED` in this same
+    transaction and is never edited for content.
+    """
+    documentation = await session.scalar(
+        select(AssetDocumentation).where(AssetDocumentation.table_id == table_id)
+    )
+    if documentation is None:
+        documentation = AssetDocumentation(
+            organization_id=organization_id,
+            table_id=table_id,
+        )
+        session.add(documentation)
+        await session.flush()
+    latest_version = await session.scalar(
+        select(func.max(AssetDocumentationVersion.version)).where(
+            AssetDocumentationVersion.documentation_id == documentation.id
+        )
+    )
+    await session.execute(
+        update(AssetDocumentationVersion)
+        .where(
+            AssetDocumentationVersion.documentation_id == documentation.id,
+            AssetDocumentationVersion.status == "APPROVED",
+        )
+        .values(status="SUPERSEDED", updated_at=approved_at)
+    )
+    version = AssetDocumentationVersion(
+        organization_id=organization_id,
+        documentation_id=documentation.id,
+        version=(latest_version or 0) + 1,
+        status="APPROVED",
+        readme=readme,
+        created_by=created_by,
+        approved_by=approved_by,
+        approved_at=approved_at,
+    )
+    session.add(version)
+    await session.flush()
+    return version
+
+
 async def apply_asset_description_draft(
     session: AsyncSession,
     draft: AssetDescriptionDraft,
@@ -367,41 +428,15 @@ async def apply_asset_description_draft(
     """
     if draft.status != "PENDING_APPROVAL":
         raise HTTPException(status_code=409, detail="draft is no longer pending review")
-    documentation = await session.scalar(
-        select(AssetDocumentation).where(AssetDocumentation.table_id == draft.table_id)
-    )
-    if documentation is None:
-        documentation = AssetDocumentation(
-            organization_id=draft.organization_id,
-            table_id=draft.table_id,
-        )
-        session.add(documentation)
-        await session.flush()
-    latest_version = await session.scalar(
-        select(func.max(AssetDocumentationVersion.version)).where(
-            AssetDocumentationVersion.documentation_id == documentation.id
-        )
-    )
-    await session.execute(
-        update(AssetDocumentationVersion)
-        .where(
-            AssetDocumentationVersion.documentation_id == documentation.id,
-            AssetDocumentationVersion.status == "APPROVED",
-        )
-        .values(status="SUPERSEDED", updated_at=now)
-    )
-    version = AssetDocumentationVersion(
+    version = await publish_asset_documentation_version(
+        session,
         organization_id=draft.organization_id,
-        documentation_id=documentation.id,
-        version=(latest_version or 0) + 1,
-        status="APPROVED",
+        table_id=draft.table_id,
         readme=draft.drafted_text,
         created_by=draft.created_by,
         approved_by=reviewer,
         approved_at=now,
     )
-    session.add(version)
-    await session.flush()
     draft.status = "APPROVED"
     draft.reviewed_by = reviewer
     draft.reviewed_at = now

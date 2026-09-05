@@ -54,7 +54,7 @@ directly from GovernedAgentOrchestrator.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import UUID
 
@@ -811,10 +811,12 @@ async def hybrid_retrieve_enhanced(
         KnowledgeGraph,
         expand_graph,
     )
+    from aida.vector_index_service import index_freshness, search_persisted_index
     from aida.vector_retrieval import (
         build_embedding_text,
         vector_search,
     )
+    from aida.vector_store import EmbeddingRef, VectorIndexUnavailable
 
     org_id = organization_id or datasource.organization_id
     # Tokenisation and the scan cap belong to `hybrid_retrieve`, which is called below and
@@ -868,47 +870,107 @@ async def hybrid_retrieve_enhanced(
             )
 
     if include_vector and embedding_provider is not None:
-        # One batched call for the question and every candidate text, rather than a call
-        # per candidate: the provider bills and rate-limits per request, and N+1 network
-        # round trips inside a retrieval path is a latency budget spent on nothing.
-        candidate_texts = [
-            build_embedding_text(name=hit.display_name, object_type=hit.object_type)
-            for hit in lexical_hits
-        ]
-        batch = await embedding_provider.embed([question, *candidate_texts])
-        query_emb = list(batch.vectors[0])
-        candidate_embeddings = [list(v) for v in batch.vectors[1:]]
-
-        vector_candidates: list[dict[str, Any]] = []
-        for hit, emb in zip(lexical_hits, candidate_embeddings, strict=True):
-            vector_candidates.append({
-                "object_type": hit.object_type,
-                "object_id": hit.object_id,
-                "display_name": hit.display_name,
-                "embedding": emb,
-                "datasource_id": hit.metadata.get("datasource_id"),
-                "metadata": hit.metadata,
-            })
-
-        vector_hits = vector_search(
-            query_emb,
-            vector_candidates,
-            top_k=retrieval_limit,
+        # RT-1: prefer the *persisted* index when it is fresh. The live path
+        # below embeds every candidate on every query, which is correct but
+        # pays a model call per candidate per query -- cost that grows with
+        # the estate and with traffic at the same time. The persisted index
+        # embeds only the question and compares against vectors built once.
+        #
+        # The fallback is not a degradation: it is the same computation, and
+        # it is what runs whenever the index is empty, stale, built under a
+        # different embedding model, or the estate has changed since the last
+        # build. Which path ran is recorded per hit (`vector_path`) so
+        # "why was this ranked here" stays answerable.
+        freshness = await index_freshness(session, org_id, settings=settings)
+        hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in lexical_hits}
+        vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
+        logger.info(
+            "retrieval_vector_stage_path",
+            path=vector_path,
+            reason=freshness.reason,
+            indexed_entries=freshness.entries,
+            datasource_id=str(datasource.id),
         )
 
-        for vhit in vector_hits:
-            key = f"{vhit.object_type}:{vhit.object_id}"
+        scored: list[tuple[str, str, float]] = []
+        if freshness.usable:
+            batch = await embedding_provider.embed([question])
+            query_emb = tuple(batch.vectors[0])
+            # Policy still filters before ranking: the candidate set handed to
+            # the index is exactly the policy-narrowed lexical set, so the
+            # index can only reorder what the caller was already entitled to.
+            refs = tuple(
+                EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
+                for hit in lexical_hits
+            )
+            try:
+                scored = list(
+                    await search_persisted_index(
+                        session,
+                        org_id,
+                        query_emb,
+                        settings=settings,
+                        candidates=refs or None,
+                        limit=retrieval_limit,
+                    )
+                )
+            except VectorIndexUnavailable as exc:
+                # The index went away between the freshness check and the
+                # search. Fall back rather than losing the stage.
+                logger.info("retrieval_vector_index_unavailable", reason=str(exc))
+                vector_path = "LIVE_EMBED"
+                freshness = replace(freshness, usable=False)
+
+        if not freshness.usable:
+            # One batched call for the question and every candidate text, rather than a
+            # call per candidate: the provider bills and rate-limits per request, and
+            # N+1 network round trips inside a retrieval path is a latency budget spent
+            # on nothing.
+            candidate_texts = [
+                build_embedding_text(name=hit.display_name, object_type=hit.object_type)
+                for hit in lexical_hits
+            ]
+            batch = await embedding_provider.embed([question, *candidate_texts])
+            query_emb_list = list(batch.vectors[0])
+            candidate_embeddings = [list(v) for v in batch.vectors[1:]]
+
+            vector_candidates: list[dict[str, Any]] = []
+            for hit, emb in zip(lexical_hits, candidate_embeddings, strict=True):
+                vector_candidates.append({
+                    "object_type": hit.object_type,
+                    "object_id": hit.object_id,
+                    "display_name": hit.display_name,
+                    "embedding": emb,
+                    "datasource_id": hit.metadata.get("datasource_id"),
+                    "metadata": hit.metadata,
+                })
+
+            scored = [
+                (vhit.object_type, str(vhit.object_id), vhit.similarity)
+                for vhit in vector_search(
+                    query_emb_list, vector_candidates, top_k=retrieval_limit
+                )
+            ]
+
+        for object_type, object_id, similarity in scored:
+            key = f"{object_type}:{object_id}"
+            source_hit = hit_by_key.get(key)
             if key in candidates:
                 candidates[key].signals.append(
-                    SignalScore(signal="vector", raw_score=vhit.similarity)
+                    SignalScore(signal="vector", raw_score=similarity)
                 )
+                candidates[key].metadata.setdefault("vector_path", vector_path)
             else:
+                metadata = dict(source_hit.metadata) if source_hit else {}
+                metadata["vector_path"] = vector_path
                 candidates[key] = RankedCandidate(
-                    object_type=vhit.object_type,
-                    object_id=vhit.object_id,
-                    display_name=vhit.display_name,
-                    signals=[SignalScore(signal="vector", raw_score=vhit.similarity)],
-                    metadata=vhit.metadata or {},
+                    object_type=object_type,
+                    object_id=object_id,
+                    display_name=(
+                        source_hit.display_name if source_hit else str(object_id)
+                    ),
+                    signals=[SignalScore(signal="vector", raw_score=similarity)],
+                    metadata=metadata,
                 )
 
     # ------------------------------------------------------------------

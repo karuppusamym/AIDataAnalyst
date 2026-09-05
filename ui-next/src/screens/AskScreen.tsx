@@ -1,3 +1,4 @@
+import { SaveAnalysisTool } from "../components/SaveAnalysisTool";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAnalysisResponse,
@@ -58,7 +59,7 @@ import "./AskScreen.css";
                          and says so honestly rather than inventing one).
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 const MIN_QUESTION_LEN = 3;
 const MAX_QUESTION_LEN = 10000;
 
@@ -74,6 +75,7 @@ const ERROR_TITLE: Record<Exclude<AgentAskErrorKind, "AMBIGUOUS_DEFINITION">, st
   DATASOURCE_DISABLED: "This datasource is disabled",
   POLICY_REJECTED: "The generated query was rejected by policy",
   MODEL_UNAVAILABLE: "No model route is available right now",
+  MODEL_THROTTLED: "The model provider is throttling us — try again in a moment",
   CLARIFICATION_NEEDED: "This question needs more information",
   SERVER_ERROR: "The analysis failed on the server",
   UNKNOWN: "The question could not be answered",
@@ -181,6 +183,25 @@ function AnswerPanel({
     : (detail?.retrieval_evidence ?? []);
   const planEvidence = isFresh ? askResult.plan_evidence : (detail?.plan_evidence ?? {});
   const failureReason = isFresh ? null : (detail?.failure_reason ?? null);
+  // Provenance the run pinned its answer to — which published semantic model
+  // and policy version grounded it, and (for a stored run) which approved model
+  // route generated the SQL. The fresh POST response omits the route, so it is
+  // only shown once the run is reopened from history.
+  const semanticVersion = isFresh ? askResult.semantic_version : (detail?.semantic_version ?? null);
+  const policyVersion = isFresh ? askResult.policy_version : (detail?.policy_version ?? null);
+  const modelRoute = isFresh ? null : (detail?.model_route ?? null);
+
+  // DQ-3 (module 11 §9): `agent_orchestrator.py`'s EXPLAINED checkpoint folds
+  // every open-incident `quality_coupling.TrustWarning` this answer's own
+  // tables carry into `plan_evidence.trust` -- a machine-readable list, not
+  // prose, so this reads the same `{asset_id, message, severity,
+  // incident_ids}` shape directly rather than parsing it out of the
+  // explanation text below.
+  const trust = record(planEvidence, "trust");
+  const trustWarningsRaw = trust ? record(trust, "warnings") : null;
+  const trustWarnings = Array.isArray(trustWarningsRaw) ? trustWarningsRaw : [];
+  const trustScore = trust ? record(trust, "trust_score") : null;
+  const trustGrade = trust ? record(trust, "trust_grade") : null;
 
   const permalink = `${location.origin}${location.pathname}?run=${runId}`;
 
@@ -198,6 +219,7 @@ function AnswerPanel({
           ×
         </button>
       </header>
+      {status === "COMPLETED" ? <SaveAnalysisTool key={runId} runId={runId} /> : null}
       <div className="evp__body">
         {loading && !isFresh ? (
           <div className="evp__load" role="status">
@@ -209,6 +231,25 @@ function AnswerPanel({
           </div>
         ) : (
           <>
+            {trustWarnings.length > 0 ? (
+              <div className="ask__trustwarn" role="alert" aria-label="Quality trust warning">
+                <div className="ask__trustwarn_head">
+                  <Pill tone="bad">quality trust warning</Pill>
+                  {typeof trustScore === "number" ? (
+                    <span className="ask__trustscore">
+                      trust score {trustScore.toFixed(0)}
+                      {trustGrade ? ` (${String(trustGrade)})` : ""}
+                    </span>
+                  ) : null}
+                </div>
+                <ul className="ask__trustwarn_list">
+                  {trustWarnings.map((w, i) => (
+                    <li key={i}>{String(record(w, "message") ?? "")}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             {explanation ? (
               <p className="ask__explain">{explanation}</p>
             ) : (
@@ -242,6 +283,39 @@ function AnswerPanel({
               </dl>
             ) : null}
 
+            <div className="evp__sub">Provenance</div>
+            <dl className="ask__exec">
+              <div>
+                <dt>Semantic model</dt>
+                <dd>{semanticVersion ?? "raw technical metadata"}</dd>
+              </div>
+              <div>
+                <dt>Policy version</dt>
+                <dd>{policyVersion ?? "—"}</dd>
+              </div>
+              <div>
+                <dt>Model route</dt>
+                <dd>{modelRoute ?? (isFresh ? "shown on the saved run" : "governed tool · no model")}</dd>
+              </div>
+            </dl>
+
+            {execution?.normalized_sql ? (
+              <details className="ask__trace">
+                <summary>Executed query</summary>
+                <div className="ask__traceinner">
+                  <pre className="ask__json">{execution.normalized_sql}</pre>
+                  {execution.referenced_columns.length > 0 ? (
+                    <>
+                      <div className="evp__sub" style={{ marginTop: 10 }}>
+                        Referenced columns
+                      </div>
+                      <p className="evi__value">{execution.referenced_columns.join(", ")}</p>
+                    </>
+                  ) : null}
+                </div>
+              </details>
+            ) : null}
+
             <details className="ask__trace">
               <summary>How this was answered</summary>
               <div className="ask__traceinner">
@@ -266,12 +340,46 @@ function AnswerPanel({
                   <p className="evp__load">No retrieval evidence recorded.</p>
                 ) : (
                   <ol className="evl">
-                    {retrievalEvidence.map((ev, i) => (
-                      <li key={i} className="evi evi--info">
-                        <div className="evi__label">{String(record(ev, "object_type") ?? "evidence")}</div>
-                        <div className="evi__value">{String(record(ev, "object_id") ?? "")}</div>
-                      </li>
-                    ))}
+                    {retrievalEvidence.map((ev, i) => {
+                      const score = record(ev, "score");
+                      const scoreText =
+                        typeof score === "number"
+                          ? score.toFixed(2)
+                          : score != null
+                            ? String(score)
+                            : null;
+                      const reason = record(ev, "reason") ?? record(ev, "reason_codes");
+                      // DQ-3 (RT-7): `retrieval.py`'s Stage 4 attaches this to
+                      // any candidate whose own or a dependency table has an
+                      // open incident -- the concrete reason this candidate
+                      // ranked lower than it otherwise would have, not just a
+                      // number.
+                      const metadata = record(ev, "metadata");
+                      const demotion = metadata ? record(metadata, "quality_trust_demotion") : null;
+                      const worstFactor = demotion ? record(demotion, "worst_factor") : null;
+                      return (
+                        <li key={i} className={`evi ${demotion ? "evi--warn" : "evi--info"}`}>
+                          <div className="evi__label">
+                            {String(record(ev, "object_type") ?? "evidence")}
+                            {scoreText ? ` · ${scoreText}` : ""}
+                          </div>
+                          <div className="evi__value">{String(record(ev, "object_id") ?? "")}</div>
+                          {reason != null ? (
+                            <div className="evi__source">
+                              {Array.isArray(reason) ? reason.join(", ") : String(reason)}
+                            </div>
+                          ) : null}
+                          {demotion ? (
+                            <div className="evi__source">
+                              demoted in ranking — {String(record(demotion, "reason") ?? "OPEN_QUALITY_INCIDENT")
+                                .replace(/_/g, " ")
+                                .toLowerCase()}
+                              {typeof worstFactor === "number" ? ` (factor ${worstFactor.toFixed(2)})` : ""}
+                            </div>
+                          ) : null}
+                        </li>
+                      );
+                    })}
                   </ol>
                 )}
 
@@ -319,11 +427,12 @@ function AnswerPanel({
 }
 
 export function AskScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
-  const dsId = params.get("ds");
   const runId = params.get("run");
 
-  const { datasources } = useDatasourcePicker(ORG);
+  const { datasources, error: dsPickerError, preferredDatasourceId } = useDatasourcePicker(ORG);
+  const dsId = params.get("ds") ?? preferredDatasourceId;
   const selectedDatasourceName = datasourceName(datasources, dsId);
 
   const [question, setQuestion] = useState("");
@@ -512,6 +621,9 @@ export function AskScreen() {
               </option>
             ))}
           </select>
+          {dsPickerError ? (
+            <p className="askscreen__pickerr" role="alert">{dsPickerError}</p>
+          ) : null}
         </Field>
         <Field label="Question">
           <textarea
@@ -552,7 +664,7 @@ export function AskScreen() {
             </span>
           </div>
           {!dsId ? (
-            <Empty title="Pick a datasource to see its history" />
+            <Empty title="Pick a datasource to see its history" hint={dsPickerError ?? undefined} />
           ) : historyError ? (
             <ErrorState
               title="History could not be loaded"

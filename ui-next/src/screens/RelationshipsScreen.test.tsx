@@ -200,6 +200,23 @@ describe("RelationshipsScreen", () => {
     expect(fetchRelationshipCandidateReviewQueue).not.toHaveBeenCalled();
   });
 
+  it("offers a decision-history section that lazy-loads decided candidates on expand", async () => {
+    fetchRelationshipCandidateReviewQueue.mockResolvedValue(queueOf([HIGH_IMPACT]));
+    const RelationshipsScreen = await loadScreen();
+    render(<RelationshipsScreen />);
+    await pickDatasource();
+
+    // The section is present but not yet loaded (lazy).
+    const summary = await screen.findByText("Decision history");
+    fireEvent.click(summary);
+
+    // ds_1 has no decided candidates in the fixture path, so the section
+    // resolves to its empty state rather than staying blank.
+    await waitFor(() =>
+      expect(screen.getByText("No decisions yet")).toBeInTheDocument(),
+    );
+  });
+
   it("picking a datasource loads the review queue in the real impact order the API returns, unsorted client-side", async () => {
     fetchRelationshipCandidateReviewQueue.mockResolvedValue(queueOf([HIGH_IMPACT, MID_IMPACT, LOW_IMPACT]));
     const RelationshipsScreen = await loadScreen();

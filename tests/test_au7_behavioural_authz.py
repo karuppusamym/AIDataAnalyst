@@ -117,16 +117,29 @@ _NOT_ROLE_GATED_ROUTES: dict[str, str] = {
         "same reasoning as token revoke above; see detokenization_api.py's module docstring "
         "(QG-6) for why this mirrors token_revocation_api.py's shape deliberately"
     ),
-    "GET /api/v1/organizations/{organization_id}/consumption-lineage/by-resource": (
+    "GET /v1/organizations/{organization_id}/consumption-lineage/by-resource": (
         "any authenticated, tenant-scoped principal may read consumption lineage for their "
         "own organization; enforce_organization gates tenancy, there is no role restriction "
         "by design (CX-4)"
     ),
-    "GET /api/v1/organizations/{organization_id}/consumption-lineage/by-consumer": (
+    "GET /v1/organizations/{organization_id}/consumption-lineage/by-consumer": (
         "same as consumption-lineage/by-resource above (CX-4)"
     ),
-    "GET /api/v1/organizations/{organization_id}/consumption-lineage/graph": (
+    "GET /v1/organizations/{organization_id}/consumption-lineage/graph": (
         "same as consumption-lineage/by-resource above (CX-4)"
+    ),
+    # The same three handlers, still mounted on their original `/api/v1`
+    # prefix as a deprecated alias so pre-existing consumers keep working.
+    # See `consumption_lineage_api.py`'s mounting block for why `/v1` is now
+    # canonical.
+    "GET /api/v1/organizations/{organization_id}/consumption-lineage/by-resource": (
+        "deprecated alias of the /v1 route above (CX-4)"
+    ),
+    "GET /api/v1/organizations/{organization_id}/consumption-lineage/by-consumer": (
+        "deprecated alias of the /v1 route above (CX-4)"
+    ),
+    "GET /api/v1/organizations/{organization_id}/consumption-lineage/graph": (
+        "deprecated alias of the /v1 route above (CX-4)"
     ),
     "POST /v1/access-review/entitlements/generate": (
         "self-service by design (OB-7): any authenticated principal may pull their own "

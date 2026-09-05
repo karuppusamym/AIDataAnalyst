@@ -548,7 +548,7 @@ def test_committed_baseline_matches_current_app_openapi_output() -> None:
         f"OpenAPI baseline missing at {DEFAULT_BASELINE}; regenerate with "
         "`uv run python scripts/openapi_diff.py --accept-baseline`."
     )
-    baseline = json.loads(DEFAULT_BASELINE.read_text())
+    baseline = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))
     current = json.loads(json.dumps(app.openapi()))
 
     assert baseline == current, (
@@ -559,7 +559,7 @@ def test_committed_baseline_matches_current_app_openapi_output() -> None:
 
 
 def test_diff_of_baseline_against_itself_has_no_breaking_changes() -> None:
-    baseline = json.loads(DEFAULT_BASELINE.read_text())
+    baseline = json.loads(DEFAULT_BASELINE.read_text(encoding="utf-8"))
     current = json.loads(json.dumps(app.openapi()))
 
     changes = diff_specs(baseline, current)

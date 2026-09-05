@@ -93,17 +93,20 @@ def test_the_validation_path_is_gated() -> None:
 
 
 @pytest.mark.parametrize(
-    "handler",
+    ("module", "handler"),
     [
-        "list_tables",
-        "list_columns",
-        "list_constraints",
-        "get_latest_table_profile",
-        "list_catalog_rows",
+        ("aida.api", "list_tables"),
+        ("aida.api", "list_columns"),
+        ("aida.api", "list_constraints"),
+        ("aida.api", "get_latest_table_profile"),
+        # ST-07 moved this handler out of `aida.api` into the extracted
+        # catalog router; the module is named per-handler so the next move
+        # fails loudly here rather than silently asserting nothing.
+        ("atlas.modules.catalog.router", "list_catalog_rows"),
     ],
 )
-def test_the_catalog_read_handlers_are_gated(handler: str) -> None:
-    assert reaches_call("aida.api", handler, _GATE_CALLS)
+def test_the_catalog_read_handlers_are_gated(module: str, handler: str) -> None:
+    assert reaches_call(module, handler, _GATE_CALLS)
 
 
 def test_the_retrieval_preview_is_gated() -> None:

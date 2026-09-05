@@ -24,6 +24,7 @@ x-app-environment: &app-environment
   AIDA_SAMPLE_MSSQL_SOURCE_DSN: mssql://source:S0urce!LocalOnly1@sample-mssql-source:1433/bank_demo_mssql
   AIDA_MODEL_GENERATION_ENABLED: ${AIDA_MODEL_GENERATION_ENABLED:-false}
   AIDA_MODEL_ROUTE: ${AIDA_MODEL_ROUTE:-openai-bank-sql}
+  AIDA_MODEL_ROUTE_FALLBACKS: ${AIDA_MODEL_ROUTE_FALLBACKS:-}
   AIDA_OPENAI_BASE_URL: ${AIDA_OPENAI_BASE_URL:-https://api.openai.com/v1}
   AIDA_GEMINI_BASE_URL: ${AIDA_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta}
   AIDA_MODEL_PROVIDER_MAX_ATTEMPTS: ${AIDA_MODEL_PROVIDER_MAX_ATTEMPTS:-3}
@@ -312,12 +313,33 @@ services:
       context: ./ui-next
       args:
         VITE_USE_FIXTURES: ${UI_NEXT_USE_FIXTURES:-0}
+        VITE_DEV_PRINCIPAL_ID: ${UI_NEXT_DEV_PRINCIPAL_ID:-local-ui-admin}
+        VITE_DEV_ROLES: ${UI_NEXT_DEV_ROLES:-}
     depends_on:
       api:
         condition: service_healthy
     ports:
       - "3001:80"
     restart: unless-stopped
+
+  # Opt-in demonstration seed. Runs only when explicitly requested:
+  #   docker compose --profile seed run --rm seed
+  # It populates a value-free sample banking estate through the API so the
+  # catalog, knowledge graph and unified lineage render non-empty on a fresh
+  # install. Never enabled by a plain `docker compose up`.
+  seed:
+    build: .
+    profiles: ["seed"]
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      <<: *app-environment
+      AIDA_BASE_URL: http://api:8000
+    volumes:
+      - ./scripts:/app/scripts:ro
+    command: ["python", "scripts/seed_sample_estate.py"]
+    restart: "no"
 
   metadata-worker:
     build: .

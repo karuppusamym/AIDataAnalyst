@@ -1,8 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DataSourceRead, ConnectorHealthScoreRead } from "../lib/types";
-import { ApiError, fetchDatasourceHealth, fetchOrgDatasources } from "../lib/api";
+import {
+  ApiError,
+  downloadDatasourceContextSnapshot,
+  downloadProjectContextSnapshot,
+  fetchDatasourceHealth,
+  fetchOrgDatasources,
+} from "../lib/api";
+import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
+import { WorkbookImport } from "../components/WorkbookImport";
+import { useScopeSelection } from "../lib/scope";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -55,7 +65,7 @@ import "./SourcesScreen.css";
    below is the one this row's tracker context leads with.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const statusTone = (status: string): Tone =>
   status === "ACTIVE" ? "ok" : status === "DISABLED" ? "bad" : "mute";
@@ -110,6 +120,44 @@ function HealthPane({
   const [health, setHealth] = useState<ConnectorHealthScoreRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [copied, setCopied] = useState(false);
+  const [generating, setGenerating] = useState<"markdown" | "json" | null>(null);
+  const [generateNotice, setGenerateNotice] = useState<string | null>(null);
+  const [exportingWorkbook, setExportingWorkbook] = useState(false);
+
+  const exportWorkbook = useCallback(async () => {
+    setExportingWorkbook(true);
+    setGenerateNotice(null);
+    try {
+      await downloadDatasourceModelWorkbook(source.id, source.name);
+      setGenerateNotice(
+        "Workbook downloaded. Edit the business_description columns only — the README sheet says which cells apply on re-upload.",
+      );
+    } catch (e) {
+      setGenerateNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setExportingWorkbook(false);
+    }
+  }, [source]);
+
+  const generateSnapshot = useCallback(
+    async (format: "markdown" | "json") => {
+      setGenerating(format);
+      setGenerateNotice(null);
+      try {
+        const snapshot = await downloadDatasourceContextSnapshot(source, format);
+        setGenerateNotice(
+          snapshot.warnings.length > 0
+            ? `Downloaded with ${snapshot.warnings.length} section(s) unavailable — see the file for details.`
+            : `Downloaded: ${snapshot.documented_count} documented / ${snapshot.undocumented_count} undocumented tables.`,
+        );
+      } catch (e) {
+        setGenerateNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setGenerating(null);
+      }
+    },
+    [source],
+  );
 
   useEffect(() => {
     const ac = new AbortController();
@@ -196,6 +244,27 @@ function HealthPane({
         )}
       </div>
 
+      {/* The other half of the workbook round trip the footer's export button
+          opens. Placed on the same pane as the export, because the two are one
+          workflow: download here, edit offline, come back here. */}
+      <div className="evp__links">
+        <WorkbookImport datasourceId={source.id} />
+      </div>
+
+      <div className="evp__links">
+        {/* Everything downstream of a source is scoped by its id. Sources was
+            a leaf screen; these are the four places an operator goes next. */}
+        <CrossLinks
+          label="This source in"
+          links={[
+            { screen: "operations", label: "Operations", params: { ds: source.id, batch_ds: source.id }, title: "Analysis runs and ingestion batches for this source" },
+            { screen: "quality", label: "Quality", params: { ds: source.id }, title: "Open incidents for this source" },
+            { screen: "relationships", label: "Relationships", params: { ds: source.id }, title: "Key and relationship candidates" },
+            { screen: "lineage", label: "Lineage", params: { ds: source.id }, title: "Narrated lineage for this source" },
+          ]}
+        />
+      </div>
+
       <footer className="evp__foot">
         <Button
           onClick={() => {
@@ -205,13 +274,45 @@ function HealthPane({
         >
           {copied ? "Link copied" : "Copy source link"}
         </Button>
+        <Button
+          disabled={generating !== null}
+          onClick={() => void generateSnapshot("markdown")}
+          title="Generate a Markdown context document for this datasource — table inventory, business meaning, quality and health, on demand"
+        >
+          {generating === "markdown" ? "Generating…" : "Generate context (.md)"}
+        </Button>
+        <Button
+          disabled={generating !== null}
+          onClick={() => void generateSnapshot("json")}
+          title="Same snapshot as JSON, for programmatic use"
+        >
+          {generating === "json" ? "Generating…" : "Generate context (.json)"}
+        </Button>
+        {/* The workbook is the bulk-review surface, not another rendering of
+            the context snapshot above: it carries every table, column and
+            relationship with stable ids, so a steward can work through the
+            whole model offline. */}
+        <Button
+          disabled={exportingWorkbook}
+          onClick={() => void exportWorkbook()}
+          title="Download every table, column and relationship for this source as an Excel workbook, for offline bulk review"
+        >
+          {exportingWorkbook ? "Exporting…" : "Export model (.xlsx)"}
+        </Button>
         <span className="evp__hint">Per-source · not fanned out to every row</span>
       </footer>
+      {generateNotice && (
+        <p className="evp__notice" role="status">
+          {generateNotice}
+        </p>
+      )}
     </aside>
   );
 }
 
 export function SourcesScreen() {
+  const ORG = useOrgId();
+  const scope = useScopeSelection();
   const [params, setParams] = useUrlState();
   const q = params.get("q") ?? "";
   const statusFilter = params.get("status") ?? "ALL";
@@ -222,6 +323,8 @@ export function SourcesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [draftQ, setDraftQ] = useState(q);
+  const [projectGenerating, setProjectGenerating] = useState<"markdown" | "json" | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
 
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
@@ -282,6 +385,41 @@ export function SourcesScreen() {
 
   const activeCount = sources.filter((s) => s.status === "ACTIVE").length;
 
+  // Project rollup: the current scope's project, and the datasources within
+  // it that this screen already loaded (org-wide) — filtered client-side,
+  // no second fetch. `scope` is `null` for exactly one tick before
+  // `ScopeProvider` resolves; every derived value below degrades to "no
+  // project selected" rather than throwing.
+  const currentProject = useMemo(
+    () => scope?.projects.find((p) => p.id === scope.projectId) ?? null,
+    [scope],
+  );
+  const projectDatasources = useMemo(
+    () => (currentProject ? sources.filter((s) => s.project_id === currentProject.id) : []),
+    [sources, currentProject],
+  );
+
+  const generateProjectSnapshot = useCallback(
+    async (format: "markdown" | "json") => {
+      if (!currentProject || projectDatasources.length === 0) return;
+      setProjectGenerating(format);
+      setProjectNotice(null);
+      try {
+        const snapshot = await downloadProjectContextSnapshot(currentProject, projectDatasources, format);
+        setProjectNotice(
+          snapshot.warnings.length > 0
+            ? `Downloaded — ${snapshot.warnings.length} of ${snapshot.datasource_count} datasource(s) could not be included.`
+            : `Downloaded: ${snapshot.datasource_count} datasource(s), ${snapshot.documented_count} documented / ${snapshot.undocumented_count} undocumented tables.`,
+        );
+      } catch (e) {
+        setProjectNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setProjectGenerating(null);
+      }
+    },
+    [currentProject, projectDatasources],
+  );
+
   return (
     <div className="srcscreen">
       <header className="srcscreen__head">
@@ -297,6 +435,29 @@ export function SourcesScreen() {
           <span><b className="tnum">{activeCount}</b> active</span>
         </div>
       </header>
+
+      {currentProject && (
+        <div className="srcscreen__project" role="group" aria-label="Project context">
+          <span className="srcscreen__projectlabel">
+            Project <b>{currentProject.name}</b> — {projectDatasources.length} datasource(s) in scope
+          </span>
+          <Button
+            disabled={projectGenerating !== null || projectDatasources.length === 0}
+            onClick={() => void generateProjectSnapshot("markdown")}
+            title="Generate one combined Markdown context document across every datasource in this project"
+          >
+            {projectGenerating === "markdown" ? "Generating…" : "Generate project context (.md)"}
+          </Button>
+          <Button
+            disabled={projectGenerating !== null || projectDatasources.length === 0}
+            onClick={() => void generateProjectSnapshot("json")}
+            title="Same rollup as JSON"
+          >
+            {projectGenerating === "json" ? "Generating…" : "Generate project context (.json)"}
+          </Button>
+          {projectNotice && <span className="srcscreen__projectnotice">{projectNotice}</span>}
+        </div>
+      )}
 
       <div className="srcscreen__filters">
         <Field label="Search">

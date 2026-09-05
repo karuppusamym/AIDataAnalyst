@@ -34,6 +34,15 @@ export default defineConfig({
           runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
         changeOrigin: true,
       },
+      // The MCP transport is mounted at `/mcp`, outside `/v1`. The Agent
+      // gateway screen tells an engineer the endpoint is
+      // `<this origin>/mcp`; without this proxy that statement would be true
+      // in every deployment except the one they are looking at.
+      "/mcp": {
+        target:
+          runtimeEnvironment?.VITE_API_PROXY_TARGET ?? "http://localhost:8000",
+        changeOrigin: true,
+      },
     },
   },
   build: { outDir: "dist", sourcemap: true },

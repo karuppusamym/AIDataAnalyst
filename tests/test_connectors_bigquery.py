@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
@@ -759,3 +760,75 @@ async def test_bigquery_declines_grants_and_records_why() -> None:
     assert catalogs[0].schemas[0].grants == ()
     assert "IAM" in catalogs[0].attributes["grants"]
     assert BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN).capabilities.grants is False
+
+
+# --- CN-9: get_query_history() reads region-qualified JOBS_BY_PROJECT, value-free
+# at the connector boundary -- see `QueryLogEntry`'s own docstring for why the raw
+# SQL text this returns is not itself an INV-6 breach (nothing here persists it).
+
+
+class _FakeQueryHistoryJob:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    def result(self, timeout: int | None = None) -> list[_FakeRow]:
+        return [_FakeRow(row) for row in self._rows]
+
+
+class _FakeQueryHistoryClient:
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+        self.last_query: str | None = None
+        self.last_job_config: Any = None
+
+    def query(
+        self, query: str, *, job_config: Any = None, timeout: int | None = None
+    ) -> _FakeQueryHistoryJob:
+        self.last_query = query
+        self.last_job_config = job_config
+        return _FakeQueryHistoryJob(self._rows)
+
+
+@pytest.mark.asyncio
+async def test_bigquery_get_query_history_maps_rows() -> None:
+    connector = BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN)
+    executed_at = datetime(2026, 9, 1, tzinfo=UTC)
+    client = _FakeQueryHistoryClient(
+        [
+            {
+                "job_id": "job-123",
+                "query": "SELECT a.id FROM a JOIN b USING (id)",
+                "creation_time": executed_at,
+            }
+        ]
+    )
+
+    with patch.object(connector, "_get_client", return_value=client):
+        entries = await connector.get_query_history(
+            since=datetime(2026, 8, 1, tzinfo=UTC), limit=50
+        )
+
+    assert len(entries) == 1
+    assert entries[0].query_id == "job-123"
+    assert entries[0].sql_text == "SELECT a.id FROM a JOIN b USING (id)"
+    assert entries[0].executed_at == executed_at
+    assert client.last_query is not None
+    assert "JOBS_BY_PROJECT" in client.last_query
+    assert "state = 'DONE'" in client.last_query
+    assert client.last_job_config is not None
+
+
+@pytest.mark.asyncio
+async def test_bigquery_get_query_history_drops_incomplete_rows() -> None:
+    connector = BigQueryConnector(_VALID_SERVICE_ACCOUNT_DSN)
+    client = _FakeQueryHistoryClient(
+        [
+            {"job_id": None, "query": "SELECT 1", "creation_time": None},
+            {"job_id": "job-real", "query": None, "creation_time": None},
+        ]
+    )
+
+    with patch.object(connector, "_get_client", return_value=client):
+        entries = await connector.get_query_history(since=datetime(2026, 8, 1, tzinfo=UTC))
+
+    assert entries == ()

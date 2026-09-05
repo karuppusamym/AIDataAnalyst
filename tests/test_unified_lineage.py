@@ -1,9 +1,11 @@
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from aida.config import Settings
@@ -23,6 +25,7 @@ from aida.models import (
     ContextProductConsumptionEdge,
     ContextProductVersion,
     DataDomain,
+    DataQualityIncident,
     DataSource,
     DbtArtifactImport,
     DbtLineageEdge,
@@ -257,6 +260,26 @@ def _equality_filters(whereclause: Any) -> list[tuple[str, str, Any]]:
     return [(table.name, col_name, value)]
 
 
+def _apply_column_defaults(obj: Any) -> None:
+    """Fill unset columns from their ORM scalar defaults, as a real flush would.
+
+    This store keeps objects exactly as constructed, so a column whose value
+    comes from `mapped_column(default=...)` stayed `None` here while it would
+    be populated against a real database. P1-05 made that visible: it added
+    `review_status` (default "ACTIVE") to the parsed lineage edge tables and a
+    graph filter on `review_status == "ACTIVE"`, so every seeded edge silently
+    dropped out of the graph and tests asserted on an empty result.
+    """
+    mapper = sa_inspect(type(obj))
+    for column in mapper.columns:
+        attr = mapper.get_property_by_column(column).key
+        if getattr(obj, attr, None) is not None:
+            continue
+        default = column.default
+        if default is not None and default.is_scalar:
+            setattr(obj, attr, default.arg)
+
+
 class _FakeScalarsResult:
     def __init__(self, rows: list[Any]) -> None:
         self._rows = rows
@@ -291,6 +314,7 @@ class _FakeUnifiedLineageSession:
     def seed(self, obj: Any) -> Any:
         if getattr(obj, "id", None) is None:
             obj.id = uuid4()
+        _apply_column_defaults(obj)
         self._store[type(obj)][obj.id] = obj
         return obj
 
@@ -624,6 +648,66 @@ async def test_unified_lineage_impact_node_bound_stops_before_the_second_hop(db_
     assert str(vw_orders.id) in downstream_ids
     assert str(fct_orders.id) not in downstream_ids
     assert result.downstream_truncated is True
+
+
+@pytest.mark.asyncio
+async def test_unified_lineage_impact_surfaces_open_quality_incident(db_session) -> None:
+    """DQ-3 "Impact surfacing": a table with an OPEN incident reports
+    quality_state="INCIDENT_OPEN" on the impact surface -- not just on its
+    Catalog row -- and a table with no incident and no observation history
+    reports "UNKNOWN" (never a bare, un-stated PASSING it has no evidence
+    for). A non-TABLE node (no `MetadataTable` match) is never looked up
+    against `DataQualityIncident` at all, and reports "NOT_APPLICABLE"."""
+    datasource, schema = await _seed_org_and_datasource(db_session)
+    raw_orders = await _seed_table(db_session, datasource, schema, "raw_orders")
+    fct_orders = await _seed_table(db_session, datasource, schema, "fct_orders")
+
+    db_session.add(
+        MetadataConstraint(
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=fct_orders.id,
+            name="fk_fct_orders_raw_orders",
+            constraint_type="FOREIGN_KEY",
+            columns=["raw_orders_id"],
+            referenced_table_id=raw_orders.id,
+            referenced_columns=["id"],
+            status="ACTIVE",
+            fingerprint="fp",
+        )
+    )
+    now = datetime.now(UTC)
+    db_session.add(
+        DataQualityIncident(
+            id=uuid4(),
+            organization_id=datasource.organization_id,
+            datasource_id=datasource.id,
+            table_id=fct_orders.id,
+            fingerprint=uuid4().hex,
+            anomaly_type="VOLUME_CHANGE",
+            severity="WARNING",
+            status="OPEN",
+            summary="Volume dropped below baseline.",
+            first_observed_at=now,
+            last_observed_at=now,
+        )
+    )
+    await db_session.flush()
+
+    result = await build_unified_lineage_impact_payload(
+        db_session, datasource, str(raw_orders.id), depth=5, node_limit=50, settings=None
+    )
+
+    downstream_by_id = {row.node_id: row for row in result.downstream}
+    assert downstream_by_id[str(fct_orders.id)].quality_state == "INCIDENT_OPEN"
+
+    # A table with no incident and no observation history is UNKNOWN, not a
+    # bare, unstated "PASSING" it has no evidence for (ADR-0016 fail-closed).
+    upstream_result = await build_unified_lineage_impact_payload(
+        db_session, datasource, str(fct_orders.id), depth=5, node_limit=50, settings=None
+    )
+    upstream_by_id = {row.node_id: row for row in upstream_result.upstream}
+    assert upstream_by_id[str(raw_orders.id)].quality_state == "UNKNOWN"
 
 
 @pytest.mark.asyncio

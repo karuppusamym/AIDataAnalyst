@@ -1,6 +1,7 @@
 .onb{padding:28px 28px 60px;max-width:780px;overflow-y:auto}
 .onb__head{margin-bottom:20px}
 .onb__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.onb__eyebrow{font-family:var(--mono);font-size:9px;font-weight:650;letter-spacing:.13em;text-transform:uppercase;color:#6a5bd5}
 .onb__lede{margin:6px 0 0;color:var(--ink-2);font-size:13.5px;max-width:66ch;line-height:1.5}
 
 .onb__progress{display:flex;align-items:center;gap:10px;margin-top:14px}
@@ -19,3 +20,17 @@
 .onb__title{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:600}
 .onb__n{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
 .onb__blurb{margin:5px 0 0;font-size:12.5px;color:var(--ink-2);line-height:1.5}
+
+.onb--compact{padding:0;max-width:none;overflow:visible;border:1px solid var(--line);border-radius:11px;background:var(--surface);box-shadow:var(--shadow-1)}
+.onb--compact .onb__head{padding:15px 17px 11px;margin:0;border-bottom:1px solid var(--line-soft)}
+.onb--compact .onb__h1{font-size:14px;margin-top:2px}
+.onb--compact .onb__lede{font-size:11px}
+.onb--compact .onb__progress{margin-top:10px}
+.onb--compact .onb__bar{max-width:none}
+.onb--compact .onb__list{gap:0;padding:5px 9px}
+.onb--compact .onb__item{border:0;border-bottom:1px solid var(--line-soft);border-radius:0;padding:10px 6px;gap:9px;align-items:center}
+.onb--compact .onb__item:last-child{border-bottom:0}
+.onb--compact .onb__check input{width:15px;height:15px}
+.onb--compact .onb__title{font-size:11.5px;gap:5px}
+.onb--compact .onb__blurb{display:none}
+.onb--compact .btn{font-size:10.5px;padding:4px 8px}

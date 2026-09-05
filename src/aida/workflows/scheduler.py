@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
+from aida.certification_expiry_warning import run_certification_expiry_warning_pass
 from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
+from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
 from aida.models import (
@@ -26,8 +28,10 @@ from aida.models import (
     ScanPolicy,
     UnownedAssetEscalation,
 )
+from aida.ownership_expiry_warning import run_ownership_expiry_pass
 from aida.playbooks import run_due_playbooks_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
+from aida.reaper_service import run_reaper_scheduler_pass
 from aida.security import SecurityContext
 from aida.stewardship_api import (
     UNOWNED_BACKLOG_ROUTE_LIMIT,
@@ -615,6 +619,30 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # purged every iteration, bounded by profiling_exception_purge_batch_size,
     # the same "bounded pass every iteration" shape as the two calls above.
     await purge_expired_value_profile_artifacts(settings, now=now)
+    # P2-06: generic reaper. Sweeps stale rows across artifact types (rejected
+    # enrichment proposals past retention, orphan asset-term links whose glossary
+    # term was deprecated, stale pending drafts, ...). Guarded by
+    # `settings.reaper_enabled` and rate-limited to
+    # `settings.reaper_sweep_interval_seconds` inside `run_reaper_scheduler_pass`,
+    # so calling it every iteration here is cheap (a no-op between windows).
+    await run_reaper_scheduler_pass(settings, now=now)
+    # P2-08: daily "your certification expires in N days" sweep, rate-limited
+    # inside `run_certification_expiry_warning_pass` by
+    # `settings.certification_expiry_warn_interval_seconds` (default 86_400),
+    # so calling it every iteration is cheap (a no-op between windows -- the
+    # exact same shape the reaper above uses).
+    await run_certification_expiry_warning_pass(settings, now=now)
+    # P2-07: daily "your ownership expires in N days" sweep + expire-lapsed
+    # sweep. Rate-limited inside `run_ownership_expiry_pass` by
+    # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
+    # the same in-process cadence tracker the cert pass above uses.
+    await run_ownership_expiry_pass(settings, now=now)
+    # NT-1: relay REVIEW_REQUESTED. Review creation has 27 call sites and no
+    # shared funnel, so this is a sweep over a watermark column rather than a
+    # hook -- see `governance_review_relay`'s module docstring for why that is
+    # the better shape here and not just the cheaper one. Returns immediately
+    # when governance notifications are off, which is the default.
+    await run_review_notification_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

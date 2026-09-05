@@ -29,6 +29,8 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.asset_description_service import publish_asset_documentation_version
+from aida.column_documentation import publish_column_description
 from aida.models import (
     DataSource,
     Document,
@@ -84,6 +86,7 @@ def parse_csv_data_dictionary(content: str) -> ParseResult:
     rows: list[ParsedDictionaryRow] = []
     error_count = 0
     truncated = False
+
     def _field(row: dict[str, str | None], key: str) -> str:
         source_key = header_map.get(key)
         if source_key is None:
@@ -196,9 +199,7 @@ async def resolve_structural_mappings(
     tables_by_key: dict[tuple[str, str], list[MetadataTable]] = {}
     tables_by_name: dict[str, list[MetadataTable]] = {}
     for table, schema_name in candidate_rows:
-        tables_by_key.setdefault((schema_name.casefold(), table.name.casefold()), []).append(
-            table
-        )
+        tables_by_key.setdefault((schema_name.casefold(), table.name.casefold()), []).append(table)
         tables_by_name.setdefault(table.name.casefold(), []).append(table)
 
     mappings: list[DocumentMapping] = []
@@ -326,24 +327,74 @@ async def extract_description_claims(
 
 
 async def apply_document_claim(
-    claim: DocumentClaim, *, reviewer: str, now: datetime
-) -> str:
-    """Publish an approved claim to its terminal state.
+    session: AsyncSession, claim: DocumentClaim, *, reviewer: str, now: datetime
+) -> tuple[str, UUID | None]:
+    """Publish an approved claim into the description store for its subject.
 
-    No existing column-level description surface in this codebase consumes
-    an approved claim yet (see `DocumentClaim`'s own docstring) -- this is
-    deliberately the end of the line for this pass, not a stub awaiting a
-    follow-up write that was simply forgotten.
+    When this pipeline was first built there was nowhere to publish to: a
+    column-level description store did not exist, so an approved claim's
+    terminal state was this row (see `DocumentClaim`'s own docstring, written
+    at that time). `aida.column_documentation` is now that store, so a claim
+    approval publishes for real:
+
+    * `subject_type="COLUMN"` -> a new `ColumnDocumentationVersion`.
+    * `subject_type="TABLE"`  -> a new `AssetDocumentationVersion`, the same
+      store a GL-9 `AssetDescriptionDraft` approval publishes to, through the
+      same shared `publish_asset_documentation_version` helper. A data
+      dictionary carries both table and column rows, so approving its
+      table rows had to land somewhere too rather than silently do nothing.
+
+    `created_by` carries the claim's uploader, not the reviewer -- maker and
+    checker stay distinguishable on the published version exactly as they do
+    for a GL-9 draft.
+
+    Returns the event type and the published version's id (`None` only if the
+    claim's subject id is unresolvable, which can happen when the catalog
+    object was dropped between mapping and review; the claim still moves to
+    APPROVED, since a steward's decision on the text stands regardless of a
+    later catalog change, but nothing is published against a dead id).
     """
     claim.status = "APPROVED"
     claim.reviewed_by = reviewer
     claim.reviewed_at = now
-    return "document.claim.approved.v1"
+    try:
+        subject_id = UUID(claim.subject_id)
+    except ValueError:
+        return "document.claim.approved.v1", None
+
+    if claim.subject_type == "COLUMN":
+        column = await session.get(MetadataColumn, subject_id)
+        if column is None:
+            return "document.claim.approved.v1", None
+        version = await publish_column_description(
+            session,
+            organization_id=claim.organization_id,
+            table_id=column.table_id,
+            column_id=column.id,
+            description=claim.object_value,
+            created_by=claim.created_by,
+            approved_by=reviewer,
+            approved_at=now,
+            source_claim_id=claim.id,
+        )
+        return "document.claim.approved.v1", version.id
+
+    table = await session.get(MetadataTable, subject_id)
+    if table is None:
+        return "document.claim.approved.v1", None
+    asset_version = await publish_asset_documentation_version(
+        session,
+        organization_id=claim.organization_id,
+        table_id=table.id,
+        readme=claim.object_value,
+        created_by=claim.created_by,
+        approved_by=reviewer,
+        approved_at=now,
+    )
+    return "document.claim.approved.v1", asset_version.id
 
 
-async def reject_document_claim(
-    claim: DocumentClaim, *, reviewer: str, now: datetime
-) -> str:
+async def reject_document_claim(claim: DocumentClaim, *, reviewer: str, now: datetime) -> str:
     claim.status = "REJECTED"
     claim.reviewed_by = reviewer
     claim.reviewed_at = now

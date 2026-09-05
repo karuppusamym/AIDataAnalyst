@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MarketplaceProductRead } from "../lib/ui-types";
 import { ApiError, fetchMarketplaceProducts, requestMarketplaceAccess } from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -25,7 +26,7 @@ import "./MarketplaceScreen.css";
    this order" rather than leaving the ranking unexplained.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const classTone = (c: MarketplaceProductRead["classification"]): Tone =>
   c === "PUBLIC" ? "ok" : c === "INTERNAL" ? "info" : c === "CONFIDENTIAL" ? "warn" : "bad";
@@ -51,7 +52,8 @@ function useUrlState() {
         if (v === null || v === "") next.delete(k);
         else next.set(k, v);
       }
-      history.replaceState(null, "", `${location.pathname}?${next}`);
+      const query = next.toString();
+      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
       return next;
     });
   }, []);
@@ -180,6 +182,18 @@ function ProductDetail({
           </div>
         ) : null}
       </div>
+      <div className="evp__links">
+        {/* The marketplace answers "what may I use". Context products answer
+            "what may my agent use" -- the same governance, a different
+            consumer, and previously no path between them. */}
+        <CrossLinks
+          label="Related"
+          links={[
+            { screen: "context", label: "Context products", title: "Package approved assets for agent consumption" },
+            { screen: "developer", label: "Agent gateway", title: "How an external agent reaches approved context" },
+          ]}
+        />
+      </div>
       <footer className="evp__foot">
         <Button
           onClick={() => {
@@ -195,6 +209,7 @@ function ProductDetail({
 }
 
 export function MarketplaceScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const q = params.get("q") ?? "";
   const domain = params.get("domain") ?? "";

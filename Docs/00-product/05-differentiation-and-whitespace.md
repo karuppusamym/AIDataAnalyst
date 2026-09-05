@@ -76,11 +76,9 @@ Ranked by defensibility — how hard it would be for a competitor to copy.
 
 ### D4. Quality and semantics coupled to runtime decisions (moderate to copy)
 
-**What it is** — and this is currently **whitespace, not built**: a data-quality incident on a table should automatically (a) attach a trust warning to any answer using it, (b) demote it in retrieval ranking, (c) block or flag governed tools that depend on it, and (d) appear in the impact graph.
+**What it is** — and this loop is now **built** (2026-09-03): a data-quality incident on a table automatically (a) attaches a trust warning to any answer using it, (b) demotes it in retrieval ranking, (c) blocks or flags governed tools that depend on it, (d) appears in the impact graph, and (e) expires the asset's certification once incidents are sustained (off by default — a real governance write, not just a read-time signal). Surfaced in `ui-next`'s Ask and Quality screens, not just in evidence JSON. See `20-modules/11-data-quality.md` §9 for the row-by-row status.
 
 **Why nobody has it.** Monte Carlo and Anomalo detect superbly but own no query path. Catalogs own no query path either. Only a product that is *both* the governance plane and the execution plane can close this loop. Atlas is the only product in the matrix that is both.
-
-**Priority.** This is the highest-leverage unbuilt differentiator. See `20-modules/11-data-quality.md`.
 
 ### D5. Heterogeneity without migration (structural, not technical)
 

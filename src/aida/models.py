@@ -914,6 +914,26 @@ class AgentRun(Base, TimestampMixin):
         ForeignKey("governed_tool_version.id", ondelete="SET NULL"), index=True
     )
     failure_reason: Mapped[str | None] = mapped_column(String(1000))
+    # AG-10: which registered agent version (an `AGENT`-kind `AiAsset`'s
+    # `AiAssetVersion`, carrying an `AgentContract`) this run executed as.
+    # Nullable: a run invoked directly by a human principal with no agent
+    # identity stays unlinked, and `aida.agent_roster` keeps reporting those
+    # organization-wide. Set only by `GovernedAgentOrchestrator.run` when the
+    # caller names an agent version, after that version's contract has been
+    # loaded and its kill switch / envelope checked.
+    ai_asset_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="SET NULL"), index=True
+    )
+    # AG-10 budget attribution. *Estimated* tokens, by the same
+    # 4-bytes-per-token heuristic `ProviderNeutralModelGateway` enforces the
+    # approved input cap against -- no provider adapter reports real usage, so
+    # a column named `tokens_used` would be a precision claim the platform
+    # cannot make. Summed across every attempt in the run (a failed fallback
+    # attempt sent the same payload and so cost the same input estimate).
+    # NULL means no model call happened -- a query-memory hit or a refusal
+    # before generation -- which is different from a call that used zero.
+    estimated_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
 class AgentEvaluationRun(Base, TimestampMixin):
@@ -1095,7 +1115,21 @@ class SemanticMetricVersion(Base, TimestampMixin):
 
 class GovernanceReview(Base, TimestampMixin):
     __tablename__ = "governance_review"
-    __table_args__ = (Index("ix_governance_review_org_status", "organization_id", "status"),)
+    __table_args__ = (
+        Index("ix_governance_review_org_status", "organization_id", "status"),
+        # NT-1's relay predicate: pending, not yet considered, oldest first.
+        # Without it the sweep scans every review ever raised on every pass.
+        Index(
+            "ix_governance_review_notify_backlog",
+            "status",
+            "review_requested_notified_at",
+            "created_at",
+        ),
+        # AU-8: created by migration `b7e3f19d5c24_adr0027_reviewer_agent` and
+        # never declared here, so the ORM did not know about an index the
+        # database has. Same drift as the two on `ownership_assignment`.
+        Index("ix_governance_review_org_pre_reviewed", "organization_id", "pre_reviewed_at"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -1109,6 +1143,28 @@ class GovernanceReview(Base, TimestampMixin):
     decided_by: Mapped[str | None] = mapped_column(String(255))
     decision_reason: Mapped[str | None] = mapped_column(String(2000))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # --- ADR-0027 pre-review columns ------------------------------------
+    # Written by `reviewer_agent.pre_review_pending`, read by the agent
+    # inbox and by `auto_decide_tier0_tier1`. All nullable: a review that
+    # has never been pre-reviewed is the pre-ADR-0027 shape exactly, and
+    # every read site treats NULL as "no recommendation".
+    risk_tier: Mapped[str | None] = mapped_column(String(2))
+    pre_review_recommendation: Mapped[str | None] = mapped_column(String(20))
+    pre_review_confidence: Mapped[float | None] = mapped_column(Float)
+    pre_review_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    pre_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    pre_reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    # NT-1 watermark. Set by `governance_review_relay` once this review has
+    # been considered for a REVIEW_REQUESTED notification -- whether it was
+    # actually sent or skipped as too old to be news. It exists because the
+    # review-creation path has 27 call sites and no single funnel, so the
+    # notification is driven by a sweep over this column rather than by a
+    # hook none of those sites share. Same shape as
+    # `AssetCertification.expiry_warning_emitted_at`. NULL means "not yet
+    # considered", which is what makes the sweep idempotent.
+    review_requested_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class GovernedTool(Base, TimestampMixin):
@@ -2025,6 +2081,270 @@ class AssetDocumentationVersion(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ColumnDocumentation(Base, TimestampMixin):
+    """Identity/pointer row for one column's business description of record.
+
+    The column-level counterpart to `AssetDocumentation` above, and the store
+    `DocumentClaim`'s docstring named as missing: before this, an APPROVED
+    column `DESCRIBES` claim's terminal state was the claim row itself, so a
+    steward could approve a column description and no reader anywhere could
+    then resolve it. `MetadataColumn.source_description` is a *different*
+    thing and stays where it is -- that is the source system's own comment,
+    overwritten by rediscovery; this is authored, reviewed content that
+    rediscovery must never touch.
+
+    Content lives on the append-only `ColumnDocumentationVersion` below, not
+    here, following the same parent-identity / versioned-content split as
+    `AssetDocumentation`/`AssetDocumentationVersion` and
+    `MetadataBusinessAnnotation`/`MetadataBusinessAnnotationVersion`: an
+    `AgentRun` grounded on a column description has to be replayable against
+    exactly the content it saw, which in-place mutation would destroy.
+
+    `table_id` is denormalized from `MetadataColumn.table_id` so the
+    table-scoped and datasource-scoped reads (the column pane, the workbook
+    export) can filter without a second join through `metadata_column`;
+    `column_id` remains the unique key.
+    """
+
+    __tablename__ = "column_documentation"
+    __table_args__ = (UniqueConstraint("column_id", name="uq_column_documentation_column_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class ColumnDocumentationVersion(Base, TimestampMixin):
+    """Append-only content history for a `ColumnDocumentation`.
+
+    One row per approved description. The previously `APPROVED` row (if any)
+    is flipped to `SUPERSEDED` in the same transaction that inserts the new
+    `APPROVED` row -- see `column_documentation.publish_column_description` --
+    never mutated for content.
+
+    `source_claim_id` records which `DocumentClaim` a version was published
+    from, so the description a reader resolves can always be traced back
+    through the claim to the exact uploaded source text (`DocumentSection`)
+    that asserted it. It is nullable because later authoring routes (a
+    workbook re-import, a direct steward edit) will publish versions that did
+    not come from a document claim.
+    """
+
+    __tablename__ = "column_documentation_version"
+    __table_args__ = (
+        UniqueConstraint("documentation_id", "version"),
+        Index(
+            "ix_column_documentation_version_org_status",
+            "organization_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    documentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("column_documentation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVED", nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    source_claim_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("document_claim.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DescriptionWithdrawal(Base, TimestampMixin):
+    """A governed request to change what an asset's description store *says*,
+    without authoring new text -- retire the current description, or bring a
+    retired one back.
+
+    The table name says "withdrawal" because retirement was the case it was
+    built for; `request_type` now discriminates `WITHDRAW` from `REINSTATE`.
+    Kept as one table deliberately rather than split or renamed: both are the
+    same decision shape -- this asset, this exact version, this reason, decided
+    by someone other than the requester -- and every column below serves both.
+    A rename would cost a migration and every reference for no behavioural
+    gain.
+
+    Publishing a description was governed from the first commit; un-publishing
+    one was not possible at all -- a steward who approved a wrong column
+    description had no way to take it back, and the workbook path deliberately
+    refuses to read a blank cell as a deletion (an empty cell is
+    indistinguishable from one nobody filled in). That left the only remedy as
+    "publish a correction", which does not work when the right answer is that
+    the platform should say nothing at all.
+
+    Withdrawal is not a delete. The `ColumnDocumentationVersion` /
+    `AssetDocumentationVersion` row keeps its content and moves to `WITHDRAWN`,
+    so an `AgentRun` grounded on it stays replayable against exactly the text
+    it saw -- the same append-only guarantee every other status transition on
+    those tables preserves. What changes is that the current-version resolvers
+    (which filter `status == "APPROVED"`) stop returning it, and the asset
+    reads as undescribed again.
+
+    Routed through `GovernanceReview` like every other governed change, with
+    the same maker-checker rule: removing a description an agent may be
+    grounding on is not a smaller decision than adding one.
+    """
+
+    __tablename__ = "description_withdrawal"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        CheckConstraint(
+            "subject_type IN ('TABLE', 'COLUMN')", name="withdrawal_subject_type_is_supported"
+        ),
+        CheckConstraint(
+            "request_type IN ('WITHDRAW', 'REINSTATE')",
+            name="withdrawal_request_type_is_supported",
+        ),
+        Index("ix_description_withdrawal_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    #: WITHDRAW retires the current approved description; REINSTATE republishes
+    #: a previously withdrawn one as a *new* version. Reinstatement never flips
+    #: the old row back to APPROVED -- that would rewrite history and lose the
+    #: fact that it was withdrawn at all. See `description_withdrawal`.
+    request_type: Mapped[str] = mapped_column(String(20), default="WITHDRAW", nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: The column or table this request is about.
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
+    #: The exact version row this request is about -- the one being retired, or
+    #: the withdrawn one being brought back. Re-checked at approval time: if the
+    #: asset has moved on since, the request no longer refers to the text anyone
+    #: reviewed, and is refused rather than applied to content nobody looked at.
+    version_id: Mapped[UUID] = mapped_column(nullable=False)
+    #: The text this request is about, snapshotted when it was raised, so a
+    #: reviewer sees exactly what they are deciding on without resolving the
+    #: version themselves.
+    withdrawn_text: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModelImportBatch(Base, TimestampMixin):
+    """One uploaded model workbook, awaiting or having had a review decision.
+
+    The write half of the download/edit/re-upload round trip
+    (`aida.model_export` is the read half). An upload never applies anything:
+    it parses, diffs against current state, and records the differences as
+    `ModelImportChange` rows for a steward to look at. Only an APPROVE
+    decision on this batch's single `GovernanceReview` publishes them.
+
+    One review per *batch*, not per change -- unlike `DocumentClaim`, which
+    takes one review per claim because deciding a claim means reading its own
+    source paragraph. A workbook's changes share one provenance (this file,
+    this uploader) and are reviewed as one edit; at bulk scale, per-row
+    reviews would be unusable, which is the whole reason this path exists
+    alongside the document-claim one.
+
+    `content_sha256` is over the uploaded bytes. It makes a re-upload of the
+    identical file detectable, and ties an applied batch to exactly the file
+    that was reviewed.
+    """
+
+    __tablename__ = "model_import_batch"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        Index("ix_model_import_batch_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # DRAFT once parsed, PENDING_REVIEW once submitted, then APPLIED/REJECTED.
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    change_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    applied_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Rows the diff could not turn into a change at all -- an unresolvable id,
+    #: an edit to a read-only column, a sheet that is not in the workbook.
+    #: Counted rather than dropped so an upload can never look cleaner than it
+    #: was.
+    rejected_row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModelImportChange(Base, TimestampMixin):
+    """One field on one object that an uploaded workbook would change.
+
+    `expected_version` is the version number the workbook itself carried in
+    its read-only `*_version` column at export time -- the version the person
+    editing it was looking at. At apply time it is compared against the
+    current version, and a change whose expectation no longer holds is
+    SKIPPED_STALE rather than applied: someone else published in the window
+    between export and upload, and silently overwriting them is the lost
+    update this column exists to prevent.
+
+    `old_value` is what the field held when the diff ran, kept so a reviewer
+    can see what is being replaced without re-querying, and so an applied
+    batch remains readable after the fact.
+    """
+
+    __tablename__ = "model_import_change"
+    __table_args__ = (
+        Index("ix_model_import_change_batch_status", "batch_id", "status"),
+        CheckConstraint(
+            "subject_type IN ('TABLE', 'COLUMN')", name="import_subject_type_is_supported"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    batch_id: Mapped[UUID] = mapped_column(
+        ForeignKey("model_import_batch.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sheet_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: 1-based row number in the uploaded sheet, so a reported problem can be
+    #: found in the file the person is still looking at.
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
+    field: Mapped[str] = mapped_column(String(50), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_version: Mapped[int | None] = mapped_column(Integer)
+    # PENDING -> APPLIED, or SKIPPED_STALE / SKIPPED_MISSING / REJECTED.
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    skip_reason: Mapped[str | None] = mapped_column(String(500))
+
+
 class AssetTermLink(Base, TimestampMixin):
     __tablename__ = "asset_term_link"
     __table_args__ = (UniqueConstraint("table_id", "term_id"),)
@@ -2059,6 +2379,14 @@ class OwnershipAssignment(Base, TimestampMixin):
             name="uq_ownership_assignment_subject_owner",
         ),
         Index("ix_ownership_assignment_org_subject", "organization_id", "subject_type"),
+        # AU-8: both of these are created by migration
+        # `a1b2c3d4e5f6_p2_07_ownership_reaffirm_expiry` and were never
+        # declared here, so `alembic upgrade head` built two indexes
+        # `Base.metadata` did not know about -- drift the ORM-vs-migration gate
+        # reports as spurious `remove_index` operations. Declared now so the
+        # model tells the truth about the database it maps.
+        Index("ix_ownership_assignment_status_expires_at", "status", "expires_at"),
+        Index("ix_ownership_assignment_owner_principal_status", "owner_principal", "status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2073,8 +2401,39 @@ class OwnershipAssignment(Base, TimestampMixin):
     source_rule_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("ownership_rule.id", ondelete="SET NULL"), index=True
     )
+    # Status values (P2-07):
+    #   ACTIVE        -- currently in effect; the only value `_earliest_active_owners`
+    #                    and every other policy-decision reader treats as "the owner".
+    #   REASSIGNED    -- superseded by a GL-7 leaver reassignment (an operator-driven
+    #                    successor now owns the subject).
+    #   LAPSED        -- P2-07: `expires_at + grace_days` passed with no re-affirmation.
+    #                    Written by `ownership_expiry_warning.expire_lapsed_ownership_assignments`
+    #                    and by nothing else. Retained as evidence of who *used to*
+    #                    own the subject; never read as the current owner.
+    #   LAPSED_LEAVER -- P2-07: the owner principal was deleted (identity event) and
+    #                    no successor was named in the merge event. Retained as
+    #                    evidence; never the current owner. Written only by
+    #                    `ownership_principal_lifecycle.handle_principal_deleted`.
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE", nullable=False)
     assigned_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    # P2-07: re-affirmation cadence. Nullable because every pre-P2-07 row was
+    # assigned once and never re-affirmed; the sweep skips rows with
+    # `expires_at IS NULL` -- they carry no expiry until the first re-affirm
+    # (or a fresh assignment under P2-07 code) sets one. New ACTIVE rows
+    # written by `apply_bulk_operation` (ASSIGN_OWNERSHIP) get
+    # `now + ownership_reaffirm_days`.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Idempotency stamp: written by `warn_upcoming_ownership_expiries` when it
+    # emits the "expires in N days" notification, so the same row does not
+    # warn twice inside one cycle.
+    expiry_warning_emitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # Last time an owner (or admin) confirmed the assignment via the
+    # `/reaffirm` endpoint; also extends `expires_at` by
+    # `ownership_reaffirm_days`.
+    reaffirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reaffirmed_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class OwnershipRule(Base, TimestampMixin):
@@ -2110,8 +2469,32 @@ class AssetCertification(Base, TimestampMixin):
     """
 
     __tablename__ = "asset_certification"
+    # P2-08: partial unique index on the ACTIVE tuple is the last-mile atomicity
+    # guarantee against two concurrent certify calls both landing an ACTIVE
+    # row for the same (table, asset_type, column, organization) tuple. The
+    # existing app-side "select prior ACTIVE, flip to SUPERSEDED, insert new"
+    # is a read-modify-write with no lock between the read and the insert;
+    # under a two-connection race both requests can read no-prior-active, both
+    # can insert, and only a DB-level uniqueness constraint refuses the second
+    # insert. `column_id` participates via COALESCE to the zero-UUID sentinel
+    # since PostgreSQL treats NULL as distinct in a unique index (so two
+    # concurrent table-level certifies with `column_id IS NULL` would otherwise
+    # both slip past). Declared here for ORM/DDL parity; the alembic migration
+    # ships the identical partial index server-side.
     __table_args__ = (
         Index("ix_asset_certification_org_status", "organization_id", "status"),
+        Index(
+            "ix_asset_certification_active_tuple",
+            "table_id",
+            "asset_type",
+            text(
+                "COALESCE(column_id, '00000000-0000-0000-0000-000000000000')"
+            ),
+            "organization_id",
+            unique=True,
+            postgresql_where=text("status = 'ACTIVE'"),
+            sqlite_where=text("status = 'ACTIVE'"),
+        ),
         CheckConstraint(
             "asset_type IN ('TABLE', 'COLUMN')", name="ck_asset_certification_asset_type"
         ),
@@ -2137,6 +2520,36 @@ class AssetCertification(Base, TimestampMixin):
     rationale: Mapped[str] = mapped_column(String(2000), nullable=False)
     certified_by: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # P2-08: manual revoke via POST /v1/tables/{id}/certification/revoke. These
+    # three columns are nullable because every pre-P2-08 row was written by the
+    # certify or supersede path and never revoked; a REVOKED row (produced only
+    # by the new endpoint) sets all three atomically. `rationale` / `certified_by`
+    # / `expires_at` stay exactly what the table was certified as, so
+    # certification history is never mutated -- the same evidence-preservation
+    # rule DQ-3's EXPIRED path already follows.
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[str | None] = mapped_column(String(255))
+    revocation_reason: Mapped[str | None] = mapped_column(String(2000))
+    # P2-08: daily warning job (`warn_upcoming_certification_expiries`) stamps
+    # this whenever it emits the "expires in N days" notification for a row, so
+    # the same cert never warns twice within one warning cycle. Nullable because
+    # every row starts un-warned; the row is not backfilled by the migration.
+    expiry_warning_emitted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # P3-09: structured evidence blob captured at certify time. Nullable
+    # because every pre-P3-09 row was written with only the free-text
+    # ``rationale`` and has no structured evidence to project; the new
+    # ``compute_certification_evidence`` helper populates this on every new
+    # write and the ``rationale`` column stays populated in parallel for
+    # backward-compat human readability. Shape is validated by
+    # ``aida.schemas.CertificationEvidence`` (description_version_id,
+    # ownership_assignment_ids, quality_snapshot, glossary_term_ids,
+    # supporting_dq_check_ids, certifier_notes) and, for legacy backfills, a
+    # ``backfilled: true`` sentinel flag so readers can distinguish an
+    # evidence blob captured at certify time from one reconstructed from
+    # today's state.
+    evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
 class GlossaryConflict(Base, TimestampMixin):
@@ -2430,6 +2843,13 @@ class OpenLineageTableEdge(Base, TimestampMixin):
             name="uq_openlineage_table_edge_run_input_output",
         ),
         Index("ix_openlineage_table_edge_run", "run_event_id"),
+        # P1-05: parsed-edge review lifecycle -- default ACTIVE preserves the
+        # pre-review-mode contract for every row already in the table and
+        # every row still written under `auto_active` config; only when the
+        # deployment flips `AIDA_LINEAGE_PARSED_EDGES_REVIEW_MODE` to
+        # `require_review` does a new row land as PROPOSED and wait for
+        # `parsed_lineage_review_api` to promote or reject it.
+        Index("ix_openlineage_table_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2450,6 +2870,20 @@ class OpenLineageTableEdge(Base, TimestampMixin):
         ForeignKey("metadata_table.id", ondelete="SET NULL"), index=True
     )
     edge_kind: Mapped[str] = mapped_column(String(30), default="ETL", nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see the module-level comment
+    # on `OpenLineageColumnEdge` below and ADR-0026 for the full rationale.
+    # Default ACTIVE keeps every existing row and every row written under
+    # `auto_active` mode backward-compatible.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("openlineage_table_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class OpenLineageColumnEdge(Base, TimestampMixin):
@@ -2467,6 +2901,8 @@ class OpenLineageColumnEdge(Base, TimestampMixin):
             name="uq_openlineage_column_edge_run_input_output",
         ),
         Index("ix_openlineage_column_edge_run", "run_event_id"),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_openlineage_column_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2491,6 +2927,17 @@ class OpenLineageColumnEdge(Base, TimestampMixin):
     transformation_type: Mapped[str | None] = mapped_column(String(100))
     transformation_subtype: Mapped[str | None] = mapped_column(String(100))
     edge_kind: Mapped[str] = mapped_column(String(30), default="ETL", nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("openlineage_column_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class DbtProject(Base, TimestampMixin):
@@ -2619,6 +3066,8 @@ class DbtLineageEdge(Base, TimestampMixin):
             "target_column",
             name="uq_dbt_lineage_edge_import_source_target_column",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_dbt_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2639,6 +3088,17 @@ class DbtLineageEdge(Base, TimestampMixin):
     target_column: Mapped[str | None] = mapped_column(String(255), default="", server_default="")
     transformation_type: Mapped[str | None] = mapped_column(String(30))
     confidence: Mapped[str | None] = mapped_column(String(30))
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("dbt_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class ContextProduct(Base, TimestampMixin):
@@ -3459,6 +3919,8 @@ class ViewLineageEdge(Base, TimestampMixin):
             "transformation_type",
             name="uq_view_lineage_edge_natural_key",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_view_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -3488,6 +3950,17 @@ class ViewLineageEdge(Base, TimestampMixin):
     confidence: Mapped[str] = mapped_column(String(30), nullable=False)
     dialect: Mapped[str] = mapped_column(String(50), nullable=False)
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("view_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class ProcedureLineageEdge(Base, TimestampMixin):
@@ -3507,6 +3980,8 @@ class ProcedureLineageEdge(Base, TimestampMixin):
             "transformation_type",
             name="uq_procedure_lineage_edge_natural_key",
         ),
+        # P1-05: see OpenLineageTableEdge for the review-lifecycle rationale.
+        Index("ix_procedure_lineage_edge_review_status", "review_status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -3536,6 +4011,17 @@ class ProcedureLineageEdge(Base, TimestampMixin):
     confidence: Mapped[str] = mapped_column(String(30), nullable=False)
     dialect: Mapped[str] = mapped_column(String(50), nullable=False)
     sql_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # P1-05: parsed-edge review lifecycle -- see OpenLineageTableEdge.
+    review_status: Mapped[str] = mapped_column(
+        String(20), default="ACTIVE", server_default="ACTIVE", nullable=False
+    )
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    review_reason: Mapped[str | None] = mapped_column(String(2000))
+    previous_edge_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("procedure_lineage_edge.id", ondelete="SET NULL")
+    )
+    created_by: Mapped[str | None] = mapped_column(String(255))
 
 
 class StudioChangeSet(Base, TimestampMixin):
@@ -3775,11 +4261,18 @@ class NotificationEventRecord(Base, TimestampMixin):
     # AU-8: no separate `index=True` here -- __table_args__ already declares
     # ix_notification_event_incident on this column; a second, differently
     # named index over the same single column was drift with no migration.
-    incident_id: Mapped[UUID] = mapped_column(
-        ForeignKey("data_quality_incident.id", ondelete="CASCADE"), nullable=False
+    # NT-1 (2026-09-04) made both nullable. This table was built for DQ-1,
+    # where every notification is about an incident matched by a rule. A
+    # governance notification -- an approval request, a kill switch, a
+    # certification about to lapse -- has neither, and the alternative was a
+    # second near-identical delivery ledger, which is the duplication this
+    # platform's own research names as a thing not to build. A row with a
+    # NULL incident is a governance notification; a row with one is DQ-1's.
+    incident_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("data_quality_incident.id", ondelete="CASCADE")
     )
-    rule_id: Mapped[UUID] = mapped_column(
-        ForeignKey("notification_rule.id", ondelete="CASCADE"), nullable=False, index=True
+    rule_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("notification_rule.id", ondelete="CASCADE"), index=True
     )
     channel: Mapped[str] = mapped_column(String(30), nullable=False)
     recipients: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
@@ -4874,16 +5367,19 @@ class DocumentClaim(Base, TimestampMixin):
     per claim, since a steward deciding a claim needs to read its specific
     source section text, not a batch of unrelated ones.
 
-    An `APPROVED` claim's terminal state *is* this row: no existing
-    column-level description surface in this codebase yet consumes it (the
-    table-level equivalent, `AssetDocumentationVersion`, is GL-9's target and
-    does not fit a single column claim; a genuine column-level "business
-    description of record" store, or N10's knowledge-compilation wiki, is
-    later, larger work this row does not attempt). What this row delivers is
-    a working, fully-cited ingest -> parse -> map -> claim -> review
-    pipeline with durable provenance back to the exact source text -- not
-    that an approved claim propagates everywhere "description" might later
-    be read from.
+    An `APPROVED` claim used to terminate at this row: when N8 landed there
+    was no column-level "business description of record" store to publish
+    into, so approval moved a status and nothing could read the result.
+    `ColumnDocumentation`/`ColumnDocumentationVersion` is now that store, and
+    `document_ingestion.apply_document_claim` publishes on approval -- a
+    COLUMN claim into `ColumnDocumentationVersion`, a TABLE claim into the
+    `AssetDocumentationVersion` GL-9 also writes to. `source_claim_id` on the
+    published version points back here, so a resolved description traces to
+    the exact `DocumentSection` text that asserted it.
+
+    Still not claimed: that an approved claim propagates everywhere
+    "description" might be read from. It reaches the two description stores
+    named above; N10's knowledge-compilation wiki remains later, larger work.
     """
 
     __tablename__ = "document_claim"
@@ -4963,3 +5459,286 @@ class StudioContextProductMaterialization(Base, TimestampMixin):
         ForeignKey("governance_review.id", ondelete="CASCADE"), nullable=False, index=True
     )
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# --- AG-10: agent contract, AgentRun attribution and the agent task ledger ---
+# ---------------------------------------------------------------------------
+# `Docs/00-product/08-market-deep-dive-and-target-architecture-2026-09.md`
+# section 4.2 ("The agent contract"). Two additive schema changes make the
+# contract real: the `AgentRun.ai_asset_version_id` link the roster module
+# (`aida.agent_roster`) documents as missing, and the `agent_task` ledger
+# below. `AgentContract` itself is the governed declaration -- identity,
+# capability envelope, autonomy tier, budget, eval gate, supervisor and
+# kill scope -- keyed one-to-one to an `AGENT`-kind `AiAssetVersion`.
+
+AGENT_AUTONOMY_TIERS = ("T0", "T1", "T2", "T3")
+AGENT_SUPERVISOR_PERSONAS = (
+    "ANALYST",
+    "CONSUMER",
+    "STEWARD",
+    "REVIEWER",
+    "OPERATOR",
+    "AUDITOR",
+)
+AGENT_KILL_SCOPES = ("AGENT", "TIER", "ALL")
+AGENT_WRITE_LANES = ("MEASURED_FACT", "PLATFORM_OBSERVATION", "MODEL_JUDGEMENT_PROPOSAL")
+AGENT_TASK_STATUSES = ("PROPOSED", "APPLIED", "REJECTED", "FAILED", "SAMPLED")
+AGENT_TASK_AUDIT_OUTCOMES = ("PENDING", "AGREED", "DISAGREED")
+#: ADR-0027 (proposed, section 5.5 of the deep dive): every auto-applied
+#: item is sampled to a human at a configurable rate with a floor of 5%.
+AGENT_SAMPLING_RATE_FLOOR = 0.05
+
+
+class AgentContract(Base, TimestampMixin):
+    """The governed contract for one registered agent version (AG-10).
+
+    One row per `AiAssetVersion` of an `AiAsset` whose `asset_kind` is
+    `AGENT` (enforced app-side in `aida.agent_contracts`, since the kind
+    lives on the parent asset). `agent_principal_id` is the agent's own
+    workload identity -- distinct from every human principal, never equal
+    to the human who authored the contract (INV-8: the identity that makes
+    a proposal is never the identity that checks it, and an agent that
+    borrowed its supervisor's identity would collapse that distinction).
+    `capability_envelope` is value-free configuration (`tool_slugs`,
+    `context_product_ids`, `write_lanes`) that `GovernedAgentOrchestrator.run`
+    enforces on every linked run. `kill_engaged` is the current-state
+    half of the per-agent kill switch, same shape as `KillSwitchState`:
+    the immutable engage/release history lives in `AuditEvent`.
+    """
+
+    __tablename__ = "agent_contract"
+    __table_args__ = (
+        UniqueConstraint("ai_asset_version_id", name="uq_agent_contract_ai_asset_version_id"),
+        Index("ix_agent_contract_org_principal", "organization_id", "agent_principal_id"),
+        Index("ix_agent_contract_org_kill", "organization_id", "kill_engaged"),
+        CheckConstraint(
+            "autonomy_tier IN ('T0', 'T1', 'T2', 'T3')", name="ck_agent_contract_autonomy_tier"
+        ),
+        CheckConstraint(
+            "supervisor_persona IN ('ANALYST', 'CONSUMER', 'STEWARD', 'REVIEWER', "
+            "'OPERATOR', 'AUDITOR')",
+            name="ck_agent_contract_supervisor_persona",
+        ),
+        CheckConstraint(
+            "kill_scope IN ('AGENT', 'TIER', 'ALL')", name="ck_agent_contract_kill_scope"
+        ),
+        CheckConstraint("sampling_rate >= 0.05", name="ck_agent_contract_sampling_rate_floor"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    capability_envelope: Mapped[dict[str, Any]] = mapped_column(
+        JSON, default=dict, nullable=False
+    )
+    autonomy_tier: Mapped[str] = mapped_column(String(2), default="T0", nullable=False)
+    daily_token_cap: Mapped[int | None] = mapped_column(Integer)
+    per_run_token_cap: Mapped[int | None] = mapped_column(Integer)
+    wall_clock_seconds_cap: Mapped[int | None] = mapped_column(Integer)
+    eval_gate_threshold: Mapped[float | None] = mapped_column(Float)
+    supervisor_persona: Mapped[str] = mapped_column(String(20), nullable=False)
+    kill_scope: Mapped[str] = mapped_column(String(10), default="AGENT", nullable=False)
+    kill_engaged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sampling_rate: Mapped[float] = mapped_column(
+        Float, default=AGENT_SAMPLING_RATE_FLOOR, nullable=False
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+#: Terminal/in-flight states for `AgentContractRequest.status`. `PENDING` is
+#: the only state a `GovernanceReview` decision may act on (enforced by the
+#: generic PENDING-only guard every review decision already applies);
+#: `ACTIVATED` means the eval gate passed and the contract was written;
+#: `REJECTED` means a human declined it; `EVAL_BLOCKED` is currently unused
+#: by the write path (see `agent_contract_request_api`'s module docstring for
+#: why a failed eval gate raises rather than lands here) but is kept in the
+#: allowlist so a future row can distinguish "declined" from "not yet
+#: eval-ready" without a migration.
+AGENT_CONTRACT_REQUEST_STATUSES = ("PENDING", "ACTIVATED", "REJECTED", "EVAL_BLOCKED")
+
+
+class AgentContractRequest(Base, TimestampMixin):
+    """AG-10 self-service extension: a *proposed* agent contract, submitted by
+    a trusted-but-not-unilateral principal (an `AgentDeveloper`, typically —
+    see `agent_contract_request_api.AGENT_CONTRACT_REQUEST_SUBMITTERS`) and
+    activated only after both a human governance decision (maker != checker,
+    the existing `GovernanceReview` queue every other proposal in this
+    codebase already uses) AND a passing AT-8/N17 evaluation gate
+    (`aida.agent_eval_gate.compute_agent_eval_gate`) at decision time.
+
+    This does not replace `AgentContract`'s existing direct-write path
+    (`PUT .../agents/{version}/contract`, still available to
+    `PlatformAdmin`/`AgentDeveloper`/`ModelRiskManager` for corrections) — it
+    adds a *reviewed, eval-gated* path alongside it, which is what makes a
+    contract change from an external or newly-onboarded agent developer
+    something the platform actually checked rather than something it merely
+    accepted.
+
+    `definition` stores exactly the fields `agent_contracts.
+    AgentContractDefinition` needs to reconstruct itself
+    (`capability_envelope`/`autonomy_tier`/`supervisor_persona`/`kill_scope`/
+    `sampling_rate`/the three caps/`eval_gate_threshold`) as one JSON blob,
+    the same "one proposal, one payload" shape every other reviewed proposal
+    in this codebase stores next to its own `GovernanceReview` row (there is
+    no shared payload column on `GovernanceReview` itself — see that model's
+    own fields).
+    """
+
+    __tablename__ = "agent_contract_request"
+    __table_args__ = (
+        Index("ix_agent_contract_request_org_status", "organization_id", "status"),
+        Index("ix_agent_contract_request_version", "ai_asset_version_id"),
+        CheckConstraint(
+            "status IN ('PENDING', 'ACTIVATED', 'REJECTED', 'EVAL_BLOCKED')",
+            name="ck_agent_contract_request_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    eval_gate_verdict: Mapped[str | None] = mapped_column(String(20))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AgentTask(Base, TimestampMixin):
+    """One unit of agent work (AG-10): intent, value-free inputs fingerprint,
+    the proposal it produced (if any), its status and the sampled-audit
+    outcome. Written by `aida.agent_tasks.record_agent_task` /
+    `finish_agent_task`; every `GovernedAgentOrchestrator.run` produces
+    exactly one row. `inputs_fingerprint` is a SHA-256 over a canonical,
+    value-free payload (ids, hashes and parameter *names* -- never a source
+    value, a question, or a parameter value; INV-6). `evidence` carries the
+    same discipline. `agent_run_id` ties an orchestrator-produced task back
+    to its `AgentRun`; `proposal_ref_type`/`proposal_ref_id` name the
+    governed object (typically a `GovernanceReview`) the task proposed.
+    """
+
+    __tablename__ = "agent_task"
+    __table_args__ = (
+        Index("ix_agent_task_org_started", "organization_id", "started_at"),
+        Index("ix_agent_task_org_status", "organization_id", "status"),
+        Index("ix_agent_task_org_sampled", "organization_id", "sampled_for_audit"),
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPLIED', 'REJECTED', 'FAILED', 'SAMPLED')",
+            name="ck_agent_task_status",
+        ),
+        CheckConstraint(
+            "audit_outcome IS NULL OR audit_outcome IN ('PENDING', 'AGREED', 'DISAGREED')",
+            name="ck_agent_task_audit_outcome",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="SET NULL"), index=True
+    )
+    agent_run_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("agent_run.id", ondelete="SET NULL"), index=True
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    intent: Mapped[str] = mapped_column(String(100), nullable=False)
+    inputs_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    proposal_ref_type: Mapped[str | None] = mapped_column(String(100))
+    proposal_ref_id: Mapped[UUID | None] = mapped_column()
+    status: Mapped[str] = mapped_column(String(20), default="PROPOSED", nullable=False)
+    sampled_for_audit: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    audit_outcome: Mapped[str | None] = mapped_column(String(20))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+
+
+# ---------------------------------------------------------------------------
+# --- ADR-0027: risk-tiered agent checking (reviewer agent) ---
+# ---------------------------------------------------------------------------
+# `GovernanceReview` gains the pre-review columns below rather than a
+# side table, because every one of them is a property *of that review*
+# and every read of the review queue wants them in the same row. The
+# sampled-audit ledger is separate (`ReviewAuditSample`) because a sample
+# has its own lifecycle: it outlives the decision and is resolved by a
+# different principal at a different time.
+
+REVIEW_PRE_REVIEW_RECOMMENDATIONS = ("APPROVE", "REJECT", "NONE")
+REVIEW_AUDIT_SAMPLE_OUTCOMES = ("PENDING", "AGREED", "DISAGREED")
+
+
+class ReviewAuditSample(Base, TimestampMixin):
+    """One agent decision the deterministic sampler routed to a human.
+
+    ADR-0027 condition (b): every agent-approved item is sampled at a
+    configurable rate with a 5% floor. A row here is the open question
+    "was the agent right?"; `human_outcome` is the answer, and the
+    DISAGREED rate per object type is the metric ADR-0027's revisit
+    trigger watches.
+    """
+
+    __tablename__ = "review_audit_sample"
+    __table_args__ = (
+        Index("ix_review_audit_sample_org_outcome", "organization_id", "human_outcome"),
+        UniqueConstraint("governance_review_id", name="uq_review_audit_sample_review"),
+        CheckConstraint(
+            "decision IN ('APPROVED', 'REJECTED')", name="ck_review_audit_sample_decision"
+        ),
+        CheckConstraint(
+            "human_outcome IN ('PENDING', 'AGREED', 'DISAGREED')",
+            name="ck_review_audit_sample_outcome",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    governance_review_id: Mapped[UUID] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_principal_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    object_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    risk_tier: Mapped[str] = mapped_column(String(2), nullable=False)
+    decision: Mapped[str] = mapped_column(String(20), nullable=False)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    human_outcome: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    human_principal_id: Mapped[str | None] = mapped_column(String(255))
+    human_rationale: Mapped[str | None] = mapped_column(Text)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ReviewerAgentState(Base, TimestampMixin):
+    """Per-organization suspension state (ADR-0027 condition (c)).
+
+    Separate from the process-wide `reviewer_agent_suspended` setting so a
+    single human action can stop one organization's agent decisions without
+    a deployment and without affecting any other tenant.
+    """
+
+    __tablename__ = "reviewer_agent_state"
+    __table_args__ = (UniqueConstraint("organization_id", name="uq_reviewer_agent_state_org"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False
+    )
+    suspended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    suspended_by: Mapped[str | None] = mapped_column(String(255))
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    suspension_reason: Mapped[str | None] = mapped_column(Text)

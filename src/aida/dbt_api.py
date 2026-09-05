@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.config import get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.dbt_artifacts import (
@@ -30,6 +31,9 @@ from aida.models import (
     MetadataSchema,
     MetadataTable,
     Project,
+)
+from aida.parsed_lineage_review_service import (
+    resolve_review_status_for_new_edge,
 )
 from aida.schemas import (
     DbtArtifactImportRead,
@@ -335,6 +339,16 @@ async def import_dbt_manifest(
         session.add(dbt_resource)
         resource_by_unique_id[dbt_resource.unique_id] = dbt_resource
     await session.flush()
+    # P1-05: connector-pushed dbt manifests inherit their trust from the
+    # bound datasource. A trusted-for-lineage datasource lands edges
+    # ACTIVE straight away; every other datasource follows the shared
+    # rule (`auto_active` default → ACTIVE; `require_review` →
+    # PROPOSED unless confidence >= threshold).
+    settings = get_settings()
+    review_mode = settings.lineage_parsed_edges_review_mode
+    high_conf = settings.lineage_high_confidence_auto_active_threshold
+    source_trusted = bool(getattr(datasource, "trusted_for_lineage", False))
+    principal_id = context.principal_id
     for source_unique_id, target_unique_id in parsed.edges:
         session.add(
             DbtLineageEdge(
@@ -347,6 +361,18 @@ async def import_dbt_manifest(
                 # NULL) so the widened unique constraint stays meaningful.
                 source_column="",
                 target_column="",
+                # Table-level DEPENDS_ON edges come from the manifest's
+                # `depends_on` field directly -- no parser judgement --
+                # so they're treated as full-confidence for review
+                # purposes. That still leaves them subject to
+                # `require_review` for an untrusted datasource.
+                review_status=resolve_review_status_for_new_edge(
+                    review_mode=review_mode,
+                    confidence="FULL",
+                    threshold=high_conf,
+                    source_trusted=source_trusted,
+                ),
+                created_by=principal_id,
             )
         )
     column_lineage_edge_count = 0
@@ -383,6 +409,13 @@ async def import_dbt_manifest(
                     target_column=column_edge.target_column,
                     transformation_type=column_edge.transformation_type,
                     confidence=column_edge.confidence,
+                    review_status=resolve_review_status_for_new_edge(
+                        review_mode=review_mode,
+                        confidence=column_edge.confidence,
+                        threshold=high_conf,
+                        source_trusted=source_trusted,
+                    ),
+                    created_by=principal_id,
                 )
             )
             column_lineage_edge_count += 1

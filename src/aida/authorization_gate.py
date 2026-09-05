@@ -33,6 +33,7 @@ from datetime import datetime
 from uuid import UUID
 
 import structlog
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.security_types import SecurityContext
@@ -156,3 +157,47 @@ async def gate(
     return GateOutcome(
         workspace_id=result.workspace_id, reason_code=result.reason_code, decided=True
     )
+
+
+
+async def gate_read(
+    session: AsyncSession,
+    context: SecurityContext,
+    settings: Settings,
+    *,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    datasource_id: UUID,
+) -> None:
+    """Authorize a catalog read, or answer 403 with a reason code.
+
+    A helper rather than a dependency because the resource is not known until
+    the handler has loaded it: `list_columns` is authorized against the
+    *table*, whose datasource it does not learn until after the row is
+    fetched. A dependency would have to re-fetch it, and the version that
+    avoids re-fetching is the version that authorizes against the path
+    parameter instead of the object -- which is how a check ends up
+    describing something other than what the handler returns.
+
+    403 with the bare reason code: enough for a caller to know whether to ask
+    for a grant or stop asking, and nothing about the resource or the policy
+    (INV-6).
+
+    Consolidated here 2026-09-03 -- was previously duplicated between
+    `aida.api` (6 non-catalog callers) and `atlas.modules.catalog.router`
+    (added during ST-07 Commit C). Both call sites now import from this
+    module, so a change to the 403-shape is a one-file change.
+    """
+    try:
+        await gate(
+            session,
+            context,
+            settings=settings,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            datasource_id=datasource_id,
+        )
+    except AuthorizationDenied as exc:
+        raise HTTPException(status_code=403, detail=exc.reason_code) from exc

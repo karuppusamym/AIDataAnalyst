@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.accept_baseline:
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(current)
+        args.output.write_text(current, encoding="utf-8")
         schema_count = len(spec.get("components", {}).get("schemas", {}) or {})
         print(f"{args.output} regenerated ({schema_count} schemas).")
         print("Review `git diff` for that file before committing it.")
@@ -285,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Run `uv run python scripts/generate_ui_types.py --accept-baseline` to create one.")
         return 1
 
-    committed = args.output.read_text()
+    committed = args.output.read_text(encoding="utf-8")
 
     if committed == current:
         schema_count = len(spec.get("components", {}).get("schemas", {}) or {})

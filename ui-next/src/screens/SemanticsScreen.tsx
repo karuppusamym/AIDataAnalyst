@@ -1,3 +1,4 @@
+import { SemanticAuthor, BusinessGeneration } from "../components/SemanticAuthor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConsumerFooterRead,
@@ -50,7 +51,7 @@ import "./SemanticsScreen.css";
    (no semantic-model/metric result kind), so it does not cover this either.
 --------------------------------------------------------------------------- */
 
-const ORG = "00000000-0000-0000-0000-000000000001";
+import { useOrgId } from "../lib/org";
 
 const modelStatusTone = (s: string): Tone =>
   s === "PUBLISHED" ? "ok" : s === "DRAFT" ? "mute" : s === "REJECTED" ? "bad" : s === "DEPRECATED" ? "warn" : "info";
@@ -264,6 +265,7 @@ function SemanticDetail({
 }
 
 export function SemanticsScreen() {
+  const ORG = useOrgId();
   const [params, setParams] = useUrlState();
   const projectId = params.get("project");
   const modelId = params.get("model");
@@ -417,6 +419,8 @@ export function SemanticsScreen() {
         {projectsError ? <p className="smscreen__pickerr" role="alert">{projectsError}</p> : null}
       </div>
 
+      <BusinessGeneration key={ORG} org={ORG} />
+      {projectId ? <SemanticAuthor key={projectId} org={ORG} projectId={projectId} models={models} onSaved={() => void loadModels()} /> : null}
       <div className="smscreen__main">
         {!projectId ? (
           <Empty

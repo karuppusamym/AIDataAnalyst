@@ -121,7 +121,7 @@ def find_regressions(
 
 
 def _load_baseline(path: Path) -> dict[str, float]:
-    data = json.loads(path.read_text())
+    data = json.loads(path.read_text(encoding="utf-8"))
     metrics = data.get("metrics")
     if not isinstance(metrics, dict):
         raise ValueError(f"baseline at {path} has no 'metrics' object")
@@ -135,7 +135,7 @@ def _write_baseline(path: Path, current: dict[str, float], *, threshold_points: 
         "metrics": {name: {"value": round(value, 4)} for name, value in current.items()},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +281,7 @@ def _write_report(
         lines.append("")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +292,9 @@ def _write_report(
 def _run(
     *, refusal_path: Path, sql_path: Path, tool_path: Path, settings: Settings
 ) -> BankModelRiskEvaluation:
-    refusal_corpus = json.loads(refusal_path.read_text())
-    sql_corpus = json.loads(sql_path.read_text())
-    tool_corpus = json.loads(tool_path.read_text())
+    refusal_corpus = json.loads(refusal_path.read_text(encoding="utf-8"))
+    sql_corpus = json.loads(sql_path.read_text(encoding="utf-8"))
+    tool_corpus = json.loads(tool_path.read_text(encoding="utf-8"))
     return run_bank_model_risk_evaluation(
         refusal_corpus=refusal_corpus,
         sql_safety_corpus=sql_corpus,

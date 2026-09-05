@@ -679,7 +679,7 @@ function parseDeepLinkHash() {
  * Content-Disposition header, not guessed client-side. */
 async function exportAssetEvidence(id) {
   try {
-    const response = await fetch(`/api/v1/metadata/tables/${id}/evidence/export`, { headers: window.AtlasUI.baseHeaders() });
+    const response = await fetch(`/v1/metadata/tables/${id}/evidence/export`, { headers: window.AtlasUI.baseHeaders() });
     if (!response.ok) {
       const data = await response.json().catch(() => ({}));
       throw new Error(data.detail || `Export failed (${response.status})`);
