@@ -11664,6 +11664,12 @@
             "title": "Reason",
             "type": "string"
           },
+          "request_type": {
+            "default": "WITHDRAW",
+            "pattern": "^(WITHDRAW|REINSTATE)$",
+            "title": "Request Type",
+            "type": "string"
+          },
           "subject_id": {
             "format": "uuid",
             "title": "Subject Id",
@@ -11710,6 +11716,10 @@
           },
           "reason": {
             "title": "Reason",
+            "type": "string"
+          },
+          "request_type": {
+            "title": "Request Type",
             "type": "string"
           },
           "requested_by": {
@@ -11768,6 +11778,7 @@
         "required": [
           "id",
           "organization_id",
+          "request_type",
           "subject_type",
           "subject_id",
           "subject_label",
@@ -26383,6 +26394,94 @@
           "updated_at"
         ],
         "title": "StudioTestResultRead",
+        "type": "object"
+      },
+      "TableDescriptionRead": {
+        "additionalProperties": false,
+        "description": "One table's authored documentation, in the same shape the column pane\nalready renders per column.\n\nExists because the evidence pane's `items` are *prose claims* -- good for\nreading, useless for driving an action. A withdraw or reinstate control\nneeds to know structurally whether there is an approved description, which\nversion it is, and whether a previous one was retired; none of that can be\nrecovered from a sentence.",
+        "properties": {
+          "approved_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved At"
+          },
+          "approved_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved By"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "readme": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readme"
+          },
+          "readme_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Readme Version"
+          },
+          "source_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Description"
+          },
+          "table_id": {
+            "format": "uuid",
+            "title": "Table Id",
+            "type": "string"
+          },
+          "withdrawn_readme": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withdrawn Readme"
+          }
+        },
+        "required": [
+          "table_id",
+          "name"
+        ],
+        "title": "TableDescriptionRead",
         "type": "object"
       },
       "TableFamilyCandidateDecision": {
@@ -52394,7 +52493,7 @@
         ]
       },
       "post": {
-        "description": "Ask for the subject's current approved description to be retired.\n\n202, not 201: nothing has happened to the description yet. It is still\npublished and still what every reader resolves, until a different principal\napproves the review this creates.",
+        "description": "Ask for a description to be retired, or a retired one brought back.\n\n202, not 201: nothing has happened to the description yet. It is still\nexactly what every reader resolves, until a different principal approves\nthe review this creates.",
         "operationId": "create_description_withdrawal_v1_descriptions_withdrawals_post",
         "parameters": [
           {
@@ -90287,6 +90386,135 @@
           }
         },
         "summary": "List Constraints"
+      }
+    },
+    "/v1/tables/{table_id}/description": {
+      "get": {
+        "description": "The table's own documentation state, gated exactly like its columns.",
+        "operationId": "get_table_description_v1_tables__table_id__description_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "table_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDescriptionRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Table Description",
+        "tags": [
+          "column-documentation"
+        ]
       }
     },
     "/v1/tables/{table_id}/indexes": {

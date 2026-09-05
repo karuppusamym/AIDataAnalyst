@@ -11799,3 +11799,88 @@ entries should treat their "suite green" line as unverified.
 - **Never assert a suite passed from a piped exit code.** The correction above
   cost two entries' worth of false confidence. Redirect to a file and read
   pytest's own summary line.
+
+---
+
+## 2026-09-05 — The description lifecycle closes: a real dialog, reinstatement, and table-level control
+
+The three limitations the previous entry left open, all of them about the same
+feature being half-finished.
+
+### 1. The withdraw dialog
+
+`window.prompt` was functional and honest but the wrong affordance for a
+governed action, in three ways `DescriptionActionDialog` fixes:
+
+- **It shows the text being acted on.** A prompt asks "why?" about a description
+  the steward has to remember. Deciding to retire a paragraph without re-reading
+  it is exactly how the wrong one gets retired.
+- **It says what will and will not happen.** Nothing is published or
+  un-published; a review is filed and someone else decides. A prompt could not
+  say that, so the platform's most important property at that moment was
+  invisible.
+- **Cancel is unambiguous.** `prompt` conflates "cancel" with "empty reason",
+  and the difference matters when the reason is what the reviewer decides on.
+
+Inline rather than a full-screen modal: the pane is already a focused surface,
+and an overlay for a two-field form would be heavier than the decision warrants.
+
+### 2. Reinstatement
+
+Retiring a description was possible; taking that back was not, and the only
+remedy — republish the text — has no direct path by design.
+
+`request_type` (`WITHDRAW` | `REINSTATE`, migration `e4b8d2f71a95`)
+discriminates the two directions on the existing table rather than adding a
+second one: both are the same decision shape (this asset, this exact version,
+this reason, decided by someone else) and every existing column serves both.
+
+**Reinstatement republishes as a new version; it never flips the WITHDRAWN row
+back to APPROVED.** Flipping it back would rewrite history — the version chain
+would stop recording that the description was ever retired, and an audit of why
+an agent cited text that "was always approved" would be misled. It is a fresh
+publish whose provenance happens to be an older version's words. Two guards:
+refused when the asset already has a live description (that is a *correction*,
+which is authored rather than undone), and skipped at approval if someone
+described the asset while the request was pending.
+
+### 3. Table-level control
+
+The API handled `TABLE` subjects from the start; only columns had a button. The
+blocker was that the evidence pane's items are **prose claims** — good for
+reading, useless for driving a control that needs to know structurally whether a
+description exists and which version it is. `GET /v1/tables/{id}/description`
+supplies that, and the table's documentation now renders above its columns in
+the same pane: the same kind of claim about the same asset, so splitting them
+would have meant looking in two places to answer one question.
+
+### Verification
+
+- Backend: `tests/test_description_withdrawal.py` now 26 (up from 15) — 8 for
+  reinstatement, 3 for the table read. `mypy` clean on 327 files,
+  `lint-imports` 8/8, one Alembic head (`e4b8d2f71a95`).
+- The new migration chains after `69702d37d798` rather than after the migration
+  that created the table: that one had already been branched from by a parallel
+  workstream, and two heads is the first thing `test_migration_orm_drift`
+  reports, before it can compare anything.
+- `ui-next`: **376 tests** across 55 files, up from 358 — `ColumnPanel.test.tsx`
+  went 12 → 19. `tsc` and production build clean.
+- Browser-verified against fixtures: the table description row renders with its
+  own Withdraw; the dialog shows the exact text plus "Nothing is un-published
+  now…"; the reinstate dialog shows the retired text plus "the withdrawn one
+  stays withdrawn". No console errors.
+- Event catalog rows added for `description.reinstatement.approved/rejected/
+  superseded.v1`.
+
+### Known limitations
+
+- **Reinstatement always brings back the most recently withdrawn version.**
+  Choosing an older one from the chain would be an edit dressed as an undo, so
+  it is deliberately not offered — but a steward who withdrew twice cannot
+  reach the earlier text this way.
+- **The dialog is inline, not a focus trap.** Escape closes it and it is
+  labelled `role="dialog"` with `aria-modal="false"`, which is honest about what
+  it is, but keyboard focus can still leave it.
+- **No bulk withdraw.** Retiring the descriptions on forty columns is forty
+  requests and forty reviews. The workbook path deliberately cannot express a
+  deletion, so there is no bulk route at all.
