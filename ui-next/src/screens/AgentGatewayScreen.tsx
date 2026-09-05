@@ -331,6 +331,200 @@ function ExposureTab({
   );
 }
 
+function csv(value: string): string[] {
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function RegisterTab({
+  requests,
+  requestsLoading,
+  requestsError,
+  onRetryRequests,
+  submitting,
+  submitError,
+  onSubmit,
+}: {
+  requests: AgentContractRequestRead[];
+  requestsLoading: boolean;
+  requestsError: string | null;
+  onRetryRequests: () => void;
+  submitting: boolean;
+  submitError: string | null;
+  onSubmit: (body: AgentContractRequestCreate) => Promise<boolean>;
+}) {
+  const [aiAssetVersionId, setAiAssetVersionId] = useState("");
+  const [agentPrincipalId, setAgentPrincipalId] = useState("");
+  const [supervisorPersona, setSupervisorPersona] = useState<(typeof SUPERVISOR_PERSONAS)[number]>("ANALYST");
+  const [autonomyTier, setAutonomyTier] = useState<(typeof AUTONOMY_TIERS)[number]>("T0");
+  const [killScope, setKillScope] = useState<(typeof KILL_SCOPES)[number]>("AGENT");
+  const [samplingRate, setSamplingRate] = useState("0.1");
+  const [toolSlugs, setToolSlugs] = useState("");
+  const [contextProductIds, setContextProductIds] = useState("");
+  const [dailyTokenCap, setDailyTokenCap] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setSubmitted(false);
+    const ok = await onSubmit({
+      ai_asset_version_id: aiAssetVersionId.trim(),
+      agent_principal_id: agentPrincipalId.trim(),
+      supervisor_persona: supervisorPersona,
+      autonomy_tier: autonomyTier,
+      kill_scope: killScope,
+      sampling_rate: Number(samplingRate) || 0,
+      capability_envelope: {
+        tool_slugs: csv(toolSlugs),
+        context_product_ids: csv(contextProductIds),
+        write_lanes: [],
+      },
+      daily_token_cap: dailyTokenCap.trim() ? Number(dailyTokenCap) : null,
+    });
+    if (ok) {
+      setSubmitted(true);
+      setAiAssetVersionId("");
+      setAgentPrincipalId("");
+      setToolSlugs("");
+      setContextProductIds("");
+      setDailyTokenCap("");
+    }
+  };
+
+  return (
+    <div className="agregister">
+      <section className="agcard">
+        <h2 className="agcard__h2">Request a contract</h2>
+        <p className="agcard__lede">
+          Submitting does not activate anything. This opens a governance review — a different
+          principal decides it, and on approval the request is still blocked unless the AT-8/N17
+          evaluation gate shows PASS for this agent version at decision time. To change a contract
+          that is already active, use the direct-write path on the agent&apos;s asset version instead.
+        </p>
+        <form className="agform" onSubmit={(e) => void handleSubmit(e)}>
+          <div className="agform__grid">
+            <Field label="AI asset version id">
+              <input
+                required
+                title="The AGENT-kind AiAssetVersion this contract governs"
+                value={aiAssetVersionId}
+                onChange={(e) => setAiAssetVersionId(e.target.value)}
+                placeholder="aiv_…"
+              />
+            </Field>
+            <Field label="Agent principal id">
+              <input
+                required
+                value={agentPrincipalId}
+                onChange={(e) => setAgentPrincipalId(e.target.value)}
+                placeholder="agent-…"
+              />
+            </Field>
+            <Field label="Supervisor persona">
+              <select
+                value={supervisorPersona}
+                onChange={(e) => setSupervisorPersona(e.target.value as typeof supervisorPersona)}
+              >
+                {SUPERVISOR_PERSONAS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Autonomy tier">
+              <select
+                value={autonomyTier}
+                onChange={(e) => setAutonomyTier(e.target.value as typeof autonomyTier)}
+              >
+                {AUTONOMY_TIERS.map((t) => (
+                  <option key={t} value={t}>{t}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Kill scope">
+              <select value={killScope} onChange={(e) => setKillScope(e.target.value as typeof killScope)}>
+                {KILL_SCOPES.map((k) => (
+                  <option key={k} value={k}>{k}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Sampling rate (0.0 – 1.0)">
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.05}
+                value={samplingRate}
+                onChange={(e) => setSamplingRate(e.target.value)}
+              />
+            </Field>
+            <Field label="Tool slugs (comma-separated)">
+              <input value={toolSlugs} onChange={(e) => setToolSlugs(e.target.value)} placeholder="revenue-by-lob, …" />
+            </Field>
+            <Field label="Context product ids (comma-separated)">
+              <input
+                value={contextProductIds}
+                onChange={(e) => setContextProductIds(e.target.value)}
+                placeholder="cp_…, …"
+              />
+            </Field>
+            <Field label="Daily token cap (optional)">
+              <input
+                type="number"
+                min={0}
+                value={dailyTokenCap}
+                onChange={(e) => setDailyTokenCap(e.target.value)}
+              />
+            </Field>
+          </div>
+          {submitError ? <p className="agform__error" role="alert">{submitError}</p> : null}
+          {submitted ? <p className="agform__ok" role="status">Request submitted — awaiting review.</p> : null}
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={submitting || !aiAssetVersionId.trim() || !agentPrincipalId.trim()}
+          >
+            {submitting ? "Submitting…" : "Submit for review"}
+          </Button>
+        </form>
+      </section>
+
+      <section className="agcard">
+        <h2 className="agcard__h2">Requests</h2>
+        <p className="agcard__lede">Every contract request submitted through this form, newest first.</p>
+        {requestsError ? (
+          <ErrorState title="Requests could not be loaded" detail={requestsError} onRetry={onRetryRequests} />
+        ) : requestsLoading ? (
+          <div className="agskeleton" role="status" aria-live="polite">Loading requests…</div>
+        ) : requests.length === 0 ? (
+          <Empty title="No requests yet" hint="Submitted contract requests will appear here." />
+        ) : (
+          <ul className="aglist">
+            {requests.map((r) => (
+              <li key={r.id} className="aglist__row">
+                <div className="aglist__main">
+                  <code className="aglist__name">{String(r.definition.agent_principal_id ?? r.id)}</code>
+                  <span className="aglist__desc">
+                    version {r.ai_asset_version_id} · requested by {r.requested_by}
+                  </span>
+                  <code className="aglist__uri">{new Date(r.created_at).toLocaleString()}</code>
+                </div>
+                <div className="aglist__meta">
+                  <Pill tone={requestStatusTone(r.status)}>{r.status.toLowerCase()}</Pill>
+                  {r.eval_gate_verdict ? (
+                    <span className="aglist__roles">eval gate: {r.eval_gate_verdict.toLowerCase()}</span>
+                  ) : null}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function ConsumptionTab({
   records,
   total,
@@ -480,6 +674,56 @@ export function AgentGatewayScreen() {
     return () => ac.abort();
   }, [loadExposure]);
 
+  /* ---- register (contract requests) ----------------------------------- */
+  const [contractRequests, setContractRequests] = useState<AgentContractRequestRead[]>([]);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const loadContractRequests = useCallback(
+    async (signal?: AbortSignal) => {
+      setRequestsLoading(true);
+      setRequestsError(null);
+      try {
+        const page = await fetchAgentContractRequests(ORG, { limit: 100 }, signal);
+        if (signal?.aborted) return;
+        setContractRequests(page.items);
+      } catch (e) {
+        if (signal?.aborted || (e as Error)?.name === "AbortError") return;
+        setRequestsError(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        if (!signal?.aborted) setRequestsLoading(false);
+      }
+    },
+    [ORG],
+  );
+
+  useEffect(() => {
+    if (tab !== "register") return;
+    const ac = new AbortController();
+    void loadContractRequests(ac.signal);
+    return () => ac.abort();
+  }, [tab, loadContractRequests]);
+
+  const handleSubmitContractRequest = useCallback(
+    async (body: AgentContractRequestCreate): Promise<boolean> => {
+      setSubmitting(true);
+      setSubmitError(null);
+      try {
+        await submitAgentContractRequest(ORG, body);
+        await loadContractRequests();
+        return true;
+      } catch (e) {
+        setSubmitError(e instanceof ApiError ? e.detail : (e as Error).message);
+        return false;
+      } finally {
+        setSubmitting(false);
+      }
+    },
+    [ORG, loadContractRequests],
+  );
+
   /* ---- consumption --------------------------------------------------- */
   const [consumerFilter, setConsumerFilter] = useState("");
   const [records, setRecords] = useState<ConsumptionRecordRead[]>([]);
@@ -571,6 +815,17 @@ export function AgentGatewayScreen() {
           onRetry={() => void loadExposure()}
           projectId={projectId}
           hasProject={Boolean(projectId)}
+        />
+      ) : null}
+      {tab === "register" ? (
+        <RegisterTab
+          requests={contractRequests}
+          requestsLoading={requestsLoading}
+          requestsError={requestsError}
+          onRetryRequests={() => void loadContractRequests()}
+          submitting={submitting}
+          submitError={submitError}
+          onSubmit={handleSubmitContractRequest}
         />
       ) : null}
       {tab === "consumption" ? (

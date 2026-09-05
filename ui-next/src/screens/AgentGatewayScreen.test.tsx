@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ContextProductRead, MeRead, ProjectRead } from "../lib/types";
+import type { AgentContractRequestRead, ContextProductRead, MeRead, ProjectRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
 import { ApiError } from "../lib/api";
 
