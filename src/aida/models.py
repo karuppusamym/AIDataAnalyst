@@ -1125,6 +1125,10 @@ class GovernanceReview(Base, TimestampMixin):
             "review_requested_notified_at",
             "created_at",
         ),
+        # AU-8: created by migration `b7e3f19d5c24_adr0027_reviewer_agent` and
+        # never declared here, so the ORM did not know about an index the
+        # database has. Same drift as the two on `ownership_assignment`.
+        Index("ix_governance_review_org_pre_reviewed", "organization_id", "pre_reviewed_at"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -2353,6 +2357,14 @@ class OwnershipAssignment(Base, TimestampMixin):
             name="uq_ownership_assignment_subject_owner",
         ),
         Index("ix_ownership_assignment_org_subject", "organization_id", "subject_type"),
+        # AU-8: both of these are created by migration
+        # `a1b2c3d4e5f6_p2_07_ownership_reaffirm_expiry` and were never
+        # declared here, so `alembic upgrade head` built two indexes
+        # `Base.metadata` did not know about -- drift the ORM-vs-migration gate
+        # reports as spurious `remove_index` operations. Declared now so the
+        # model tells the truth about the database it maps.
+        Index("ix_ownership_assignment_status_expires_at", "status", "expires_at"),
+        Index("ix_ownership_assignment_owner_principal_status", "owner_principal", "status"),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

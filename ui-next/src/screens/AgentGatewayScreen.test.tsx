@@ -25,6 +25,10 @@ const fetchOrgProjects = vi.fn<(orgId: string, signal?: AbortSignal) => Promise<
 const fetchContextProducts = vi.fn();
 const fetchTools = vi.fn();
 const fetchConsumptionRecords = vi.fn();
+const fetchAgentContractRequests = vi.fn<
+  (orgId: string, query: unknown, signal?: AbortSignal) => Promise<PageOf<AgentContractRequestRead>>
+>();
+const submitAgentContractRequest = vi.fn();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -35,6 +39,9 @@ vi.mock("../lib/api", async (importOriginal) => {
     fetchContextProducts: (...args: unknown[]) => fetchContextProducts(...args),
     fetchTools: (...args: unknown[]) => fetchTools(...args),
     fetchConsumptionRecords: (...args: unknown[]) => fetchConsumptionRecords(...args),
+    fetchAgentContractRequests: (orgId: string, query: unknown, signal?: AbortSignal) =>
+      fetchAgentContractRequests(orgId, query, signal),
+    submitAgentContractRequest: (...args: unknown[]) => submitAgentContractRequest(...args),
   };
 });
 
@@ -77,7 +84,15 @@ async function loadScreen() {
 }
 
 beforeEach(() => {
-  for (const fn of [fetchMe, fetchOrgProjects, fetchContextProducts, fetchTools, fetchConsumptionRecords]) {
+  for (const fn of [
+    fetchMe,
+    fetchOrgProjects,
+    fetchContextProducts,
+    fetchTools,
+    fetchConsumptionRecords,
+    fetchAgentContractRequests,
+    submitAgentContractRequest,
+  ]) {
     fn.mockReset();
   }
   fetchMe.mockResolvedValue(DEV_ME);
@@ -85,6 +100,7 @@ beforeEach(() => {
   fetchContextProducts.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchTools.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
   fetchConsumptionRecords.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  fetchAgentContractRequests.mockResolvedValue({ items: [], limit: 100, offset: 0, total: 0 });
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -170,5 +186,57 @@ describe("AgentGatewayScreen", () => {
 
     expect(await screen.findByText("not entitled to read consumption lineage")).toBeInTheDocument();
     await waitFor(() => expect(screen.queryByText("No consumption recorded")).not.toBeInTheDocument());
+  });
+
+  it("submitting a contract request opens a review, not activation, and refreshes the list", async () => {
+    const created: AgentContractRequestRead = {
+      id: "acr_new", organization_id: "org1", ai_asset_version_id: "aiv_revenue_analyst",
+      requested_by: "local-ui-admin",
+      definition: { agent_principal_id: "agent-new" },
+      status: "PENDING", governance_review_id: "rev_new", eval_gate_verdict: null,
+      activated_at: null, created_at: "2026-09-05T00:00:00Z", updated_at: "2026-09-05T00:00:00Z",
+    };
+    submitAgentContractRequest.mockResolvedValue(created);
+    fetchAgentContractRequests.mockResolvedValueOnce({ items: [], limit: 100, offset: 0, total: 0 });
+    fetchAgentContractRequests.mockResolvedValueOnce({ items: [created], limit: 100, offset: 0, total: 1 });
+
+    const AgentGatewayScreen = await loadScreen();
+    render(<AgentGatewayScreen />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Register" }));
+    await waitFor(() => expect(fetchAgentContractRequests).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByPlaceholderText("aiv_…"), { target: { value: "aiv_revenue_analyst" } });
+    fireEvent.change(screen.getByPlaceholderText("agent-…"), { target: { value: "agent-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit for review" }));
+
+    await waitFor(() =>
+      expect(submitAgentContractRequest).toHaveBeenCalledWith(
+        "00000000-0000-0000-0000-000000000001",
+        expect.objectContaining({ ai_asset_version_id: "aiv_revenue_analyst", agent_principal_id: "agent-new" }),
+      ),
+    );
+    expect(await screen.findByText("Request submitted — awaiting review.")).toBeInTheDocument();
+    await waitFor(() => expect(fetchAgentContractRequests).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("agent-new")).toBeInTheDocument();
+    expect(screen.getByText("pending")).toBeInTheDocument();
+  });
+
+  it("surfaces a submission failure without claiming the request went through", async () => {
+    submitAgentContractRequest.mockRejectedValue(new ApiError(422, "sampling_rate_below_floor"));
+
+    const AgentGatewayScreen = await loadScreen();
+    render(<AgentGatewayScreen />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Register" }));
+    await waitFor(() => expect(fetchAgentContractRequests).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByPlaceholderText("aiv_…"), { target: { value: "aiv_revenue_analyst" } });
+    fireEvent.change(screen.getByPlaceholderText("agent-…"), { target: { value: "agent-new" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit for review" }));
+
+    expect(await screen.findByText("sampling_rate_below_floor")).toBeInTheDocument();
+    expect(screen.queryByText("Request submitted — awaiting review.")).not.toBeInTheDocument();
+    expect(fetchAgentContractRequests).toHaveBeenCalledTimes(1);
   });
 });

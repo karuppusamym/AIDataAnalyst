@@ -10248,6 +10248,50 @@
         "title": "DataQualityIncidentTransition",
         "type": "object"
       },
+      "DataQualityIncidentTriageRead": {
+        "additionalProperties": false,
+        "properties": {
+          "anomaly_type": {
+            "title": "Anomaly Type",
+            "type": "string"
+          },
+          "basis": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Basis",
+            "type": "array"
+          },
+          "incident_id": {
+            "format": "uuid",
+            "title": "Incident Id",
+            "type": "string"
+          },
+          "likely_causes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Likely Causes",
+            "type": "array"
+          },
+          "recommended_next_steps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Recommended Next Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "incident_id",
+          "anomaly_type",
+          "likely_causes",
+          "recommended_next_steps",
+          "basis"
+        ],
+        "title": "DataQualityIncidentTriageRead",
+        "type": "object"
+      },
       "DataQualityPolicyRead": {
         "additionalProperties": false,
         "properties": {
@@ -82581,6 +82625,135 @@
           }
         },
         "summary": "Transition Quality Incident",
+        "tags": [
+          "data-quality"
+        ]
+      }
+    },
+    "/v1/quality-incidents/{incident_id}/triage": {
+      "get": {
+        "description": "A deterministic root-cause hint for one incident (`dq_triage_agent`).\n\nRead-only and computed fresh on every call -- nothing about an incident\nis mutated or persisted by this endpoint (INV-7's read-route gate holds\ntrivially here since there is no write at all). See\n`dq_triage_agent`'s own module docstring for why this stays computed\nrather than stored.",
+        "operationId": "get_quality_incident_triage_v1_quality_incidents__incident_id__triage_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "incident_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Incident Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataQualityIncidentTriageRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Quality Incident Triage",
         "tags": [
           "data-quality"
         ]
