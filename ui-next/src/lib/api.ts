@@ -3253,11 +3253,11 @@ import type {
   CatalogBulkOwnRequest,
   CatalogBulkTagRequest,
   CatalogBulkActionRunRead,
-  DocumentationWorklistEntryRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
 } from "./types";
+import type { DocumentationWorklistEntryRead } from "./ui-types";
 import {
   makeFixtureBulkCertifyCatalogTables,
   makeFixtureBulkClassifyCatalogColumns,
