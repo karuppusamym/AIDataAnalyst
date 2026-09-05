@@ -246,24 +246,23 @@ $sqlServerQuery = Invoke-AidaJson `
     -Uri "$BaseUrl/v1/datasources/$($sqlServerDatasource.id)/query-executions" `
     -Method "POST" -Headers $headers -Body @{
         sql = (
-            "SELECT TOP (2) customer_id, customer_name, email_address " +
-            "FROM retail.customer ORDER BY customer_id"
+            "SELECT TOP (2) dispute_id, reason_code, contact_email " +
+            "FROM payments.dispute ORDER BY dispute_id"
         )
         max_rows = 10
     }
 if (
     $sqlServerConnection.status -ne "CONNECTION_VERIFIED" -or
     $sqlServerRun.status -ne "COMPLETED" -or
-    $sqlServerRun.discovered_tables -ne 4 -or
+    $sqlServerRun.discovered_tables -ne 3 -or
     $sqlServerRun.discovered_columns -ne 22 -or
-    $sqlServerRun.discovered_constraints -ne 7 -or
-    $sqlServerRun.profiled_tables -ne 4 -or
+    $sqlServerRun.discovered_constraints -ne 5 -or
+    $sqlServerRun.profiled_tables -ne 3 -or
     $sqlServerCertification.status -ne "CERTIFIED" -or
     $sqlServerCertification.score -ne 100 -or
     $sqlServerQuery.status -ne "COMPLETED" -or
     $sqlServerQuery.row_count -ne 2 -or
-    $sqlServerQuery.masked_columns -notcontains "customer_name" -or
-    $sqlServerQuery.masked_columns -notcontains "email_address"
+    $sqlServerQuery.masked_columns -notcontains "contact_email"
 ) {
     throw "Live SQL Server discovery, profiling, SHOWPLAN, query, masking, or certification failed"
 }
@@ -436,7 +435,7 @@ try {
         -Uri "$BaseUrl/v1/datasources/$($datasource.id)/agent-analyses" `
         -Method "POST" -Headers $headers -Body @{
             question = $blockedPrompt
-            candidate_sql = "SELECT customer_id FROM retail.customer"
+            candidate_sql = "SELECT customer_id FROM customer.customer"
             max_rows = 100
         }
 } catch {
@@ -451,7 +450,7 @@ $agent = Invoke-AidaJson -Uri "$BaseUrl/v1/datasources/$($datasource.id)/agent-a
         question = "List active customers for control verification"
         candidate_sql = (
             "SELECT customer_id, customer_name, email_address, state_code " +
-            "FROM retail.customer WHERE is_active = true"
+            "FROM customer.customer WHERE is_active = true"
         )
         max_rows = 100
     }
@@ -474,7 +473,7 @@ if (
 $mutationDenied = $false
 try {
     $null = Invoke-AidaJson -Uri "$BaseUrl/v1/datasources/$($datasource.id)/query-executions" `
-        -Method "POST" -Headers $headers -Body @{ sql = "DELETE FROM retail.customer" }
+        -Method "POST" -Headers $headers -Body @{ sql = "DELETE FROM customer.customer" }
 } catch {
     $mutationDenied = [int]$_.Exception.Response.StatusCode -eq 422
 }
@@ -521,15 +520,15 @@ $semanticProposals = Invoke-AidaJson `
     -Method "GET" -Headers $headers
 $customerProposal = $semanticProposals.items | `
     Where-Object { $_.table_name -eq "customer" } | Select-Object -First 1
-$riskProposal = $semanticProposals.items | `
-    Where-Object { $_.table_name -eq "customer_risk_snapshot" } | Select-Object -First 1
+$accountProposal = $semanticProposals.items | `
+    Where-Object { $_.table_name -eq "account" } | Select-Object -First 1
 if (
     $semanticInference.engine_mode -ne "RULES_ONLY" -or
-    $semanticInference.proposal_count -ne 4 -or
+    $semanticInference.proposal_count -ne 3 -or
     $null -eq $customerProposal -or
-    $null -eq $riskProposal -or
+    $null -eq $accountProposal -or
     $customerProposal.payload.domain_key -ne "CUSTOMER" -or
-    $riskProposal.payload.domain_key -ne "RISK" -or
+    $accountProposal.payload.domain_key -ne "ACCOUNTS" -or
     $customerProposal.status -ne "PENDING_REVIEW" -or
     ($semanticProposals | ConvertTo-Json -Depth 20) -match "Example Customer"
 ) {
@@ -538,7 +537,7 @@ if (
 $reviewerHeaders = $headers.Clone()
 $reviewerHeaders["X-Principal-Id"] = "local-checker"
 $reviewerHeaders["X-Roles"] = "PlatformAdmin,Reviewer,DataSteward,MetadataReviewer,Auditor,Operations"
-foreach ($proposal in @($customerProposal, $riskProposal)) {
+foreach ($proposal in @($customerProposal, $accountProposal)) {
     $null = Invoke-AidaJson `
         -Uri "$BaseUrl/v1/governance/reviews/$($proposal.governance_review_id)/decision" `
         -Method "POST" -Headers $reviewerHeaders -Body @{
@@ -590,10 +589,10 @@ $dbtManifest = @{
     nodes = @{
         "model.bank.active_customers" = @{
             resource_type = "model"; package_name = "bank"; name = "active_customers"
-            alias = "active_customers"; database = "bank_demo"; schema = "retail"
+            alias = "active_customers"; database = "bank_demo"; schema = "customer"
             config = @{ materialized = "view" }
             original_file_path = "models/active_customers.sql"
-            compiled_code = "SELECT customer_id FROM retail.customer WHERE status = 'DO_NOT_RETAIN'"
+            compiled_code = "SELECT customer_id FROM customer.customer WHERE customer_name = 'DO_NOT_RETAIN'"
             columns = @{ customer_id = @{ name = "customer_id" } }
             depends_on = @{ nodes = @("source.bank.customer") }
         }
@@ -605,7 +604,7 @@ $dbtManifest = @{
     sources = @{
         "source.bank.customer" = @{
             resource_type = "source"; package_name = "bank"; name = "customer"
-            identifier = "customer"; database = "bank_demo"; schema = "retail"
+            identifier = "customer"; database = "bank_demo"; schema = "customer"
             columns = @{ customer_id = @{ name = "customer_id" } }
             depends_on = @{ nodes = @() }
         }
@@ -712,7 +711,7 @@ $tool = Invoke-AidaJson -Uri "$BaseUrl/v1/projects/$($project.id)/tools" `
         datasource_id = $datasource.id
         semantic_model_version_id = $semanticModel.id
         sql_template = (
-            "SELECT customer_id, state_code FROM retail.customer WHERE is_active = TRUE"
+            "SELECT customer_id, state_code FROM customer.customer WHERE is_active = TRUE"
         )
         parameters = @()
         allowed_roles = @("Analyst")
@@ -1009,10 +1008,10 @@ $knowledgeGraph = Invoke-AidaJson `
     -Uri "$UiUrl/api/v1/datasources/$($datasource.id)/knowledge-graph?limit=500" `
     -Method "GET" -Headers $headers
 if (
-    $knowledgeGraph.total_tables -ne 4 -or
-    $knowledgeGraph.total_declared_edges -ne 3 -or
+    $knowledgeGraph.total_tables -ne 3 -or
+    $knowledgeGraph.total_declared_edges -ne 2 -or
     $knowledgeGraph.total_suggested_edges -lt 1 -or
-    $knowledgeGraph.nodes.Count -ne 4 -or
+    $knowledgeGraph.nodes.Count -ne 3 -or
     ($knowledgeGraph.edges | Where-Object { $_.edge_type -eq "SUGGESTED_RELATIONSHIP" }).Count -lt 1
 ) {
     throw "Knowledge graph topology or enriched relationship suggestions are incomplete"
@@ -1132,7 +1131,7 @@ $disabledDenied = $false
 try {
     $null = Invoke-AidaJson -Uri "$BaseUrl/v1/datasources/$($datasource.id)/query-executions" `
         -Method "POST" -Headers $headers -Body @{
-            sql = "SELECT customer_id FROM retail.customer"
+            sql = "SELECT customer_id FROM customer.customer"
         }
 } catch {
     $disabledDenied = [int]$_.Exception.Response.StatusCode -eq 409

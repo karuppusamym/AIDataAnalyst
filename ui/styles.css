@@ -1,9 +1,0 @@
-/* UI stylesheet entry point. Import order preserves the established cascade. */
-@import url("/styles/base.css");
-@import url("/styles/lineage.css");
-@import url("/styles/workspace.css");
-@import url("/styles/shell.css");
-@import url("/styles/accessibility.css");
-@import url("/styles/context-lineage.css");
-@import url("/styles/product-ai-control-plane.css");
-@import url("/styles/graph-engine.css");
