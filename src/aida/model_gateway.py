@@ -375,6 +375,14 @@ class ModelCallEvidence:
     input_size_bytes: int
     output_size_bytes: int
     schema_name: str
+    #: Tokens *estimated* by the same 4-bytes-per-token heuristic this gateway
+    #: already enforces `model_max_input_tokens` against, not a provider-
+    #: reported count -- no adapter in `build_model_providers` returns usage.
+    #: They are reported because the cap is enforced against this number, so
+    #: consumption measured the same way is the only comparison that means
+    #: anything; every surface that renders them says "estimated".
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
 
 
 class ProviderNeutralModelGateway:
@@ -470,6 +478,8 @@ class ProviderNeutralModelGateway:
             input_size_bytes=len(serialized_input.encode()),
             output_size_bytes=len(serialized_output.encode()),
             schema_name=output_schema.__name__,
+            estimated_input_tokens=estimated_tokens,
+            estimated_output_tokens=max(1, len(serialized_output) // 4),
         )
         return output, evidence
 

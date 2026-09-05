@@ -1063,7 +1063,18 @@ class GovernedAgentOrchestrator:
                     "input_fingerprint": model_evidence.input_fingerprint,
                     "output_fingerprint": model_evidence.output_fingerprint,
                     "schema_name": model_evidence.schema_name,
+                    "estimated_input_tokens": model_evidence.estimated_input_tokens,
+                    "estimated_output_tokens": model_evidence.estimated_output_tokens,
                 }
+                # AG-10 budget attribution. Every attempt in the chain sent
+                # the same payload, so a fallback that fired after a 503 cost
+                # its input estimate again; only the attempt that answered
+                # produced output. Estimated, never provider-reported -- see
+                # `AgentRun.estimated_input_tokens`.
+                agent_run.estimated_input_tokens = model_evidence.estimated_input_tokens * max(
+                    len(model_call_attempts), 1
+                )
+                agent_run.estimated_output_tokens = model_evidence.estimated_output_tokens
                 # Record the attempt chain only when it materially explains
                 # the outcome -- either more than one attempt fired, or a
                 # fallback was configured (so the audit shows "the fallback

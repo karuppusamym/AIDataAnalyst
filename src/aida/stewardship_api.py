@@ -23,6 +23,7 @@ from aida.db import get_session
 from aida.documentation_worklist import (
     DocumentationWorklistEntry,
     TableQuerySignal,
+    WorklistRanking,
     rank_documentation_worklist,
 )
 from aida.events import record_audit, record_outbox
@@ -84,6 +85,7 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.stewardship_service import active_certified_table_ids, build_stewardship_coverage
+from aida.stewardship_worklist import enrich_tables
 
 router = APIRouter(prefix="/v1", tags=["glossary-stewardship"])
 
@@ -2096,6 +2098,15 @@ class DocumentationWorklistEntryRead(ApiModel):
     last_queried_at: datetime | None
     last_consumed_at: datetime | None
     description_is_proposed: bool
+    # SW-1 factors. Every term of the score is on the row for the same reason
+    # `query_volume` always was: a steward asking "why is this first" has to
+    # be answerable from the response, not from reading the ranker.
+    score: float
+    usage: float
+    impact: float
+    deficit: float
+    downstream_count: int
+    missing: list[str]
 
 
 # Mirrors GL-6's own `UNOWNED_BACKLOG_ROUTE_LIMIT` bound: caps both (a) how
@@ -2299,6 +2310,20 @@ async def _documentation_worklist_signals(
     documentation_state = await _documentation_state(
         session, [table for table, _, _ in candidate_rows]
     )
+    # SW-1 adoption: downstream impact and the five-field deficit, from the
+    # same `enrich_tables` `compute_worklist` uses -- so "documented" has one
+    # definition on this platform rather than one per surface. AT-5's own
+    # UX-12 precedence chain still decides the description field; SW-1 is
+    # handed that answer rather than computing a weaker one of its own.
+    enrichment = await enrich_tables(
+        session,
+        organization_id,
+        [table.id for table, _, _ in candidate_rows],
+        descriptions={
+            table.id: documentation_state.get(table.id, (False, False))[0]
+            for table, _, _ in candidate_rows
+        },
+    )
 
     signals: list[TableQuerySignal] = []
     for table, schema, datasource in candidate_rows:
@@ -2307,6 +2332,7 @@ async def _documentation_worklist_signals(
         is_documented, description_is_proposed = documentation_state.get(
             table.id, (False, False)
         )
+        deficit = enrichment.get(table.id)
         signals.append(
             TableQuerySignal(
                 table_id=table.id,
@@ -2319,6 +2345,8 @@ async def _documentation_worklist_signals(
                 last_consumed_at=last_consumed_at,
                 is_documented=is_documented,
                 description_is_proposed=description_is_proposed,
+                downstream_count=deficit.downstream_count if deficit else 0,
+                missing=deficit.missing if deficit else (),
             )
         )
     return signals
@@ -2339,6 +2367,16 @@ async def list_documentation_worklist(
             "MCP consumption read), sorted after every real-volume row. Off by "
             "default: this worklist ranks by real usage, and a zero-volume table "
             "has none to rank it by (see `documentation_worklist.py`)."
+        ),
+    ),
+    ranking: WorklistRanking = Query(
+        default="priority",
+        description=(
+            "`priority` (default) is SW-1's usage x impact x deficit: among "
+            "comparably used tables it puts the hub missing four of five "
+            "documentation fields ahead of the leaf missing one. Usage is still "
+            "a term, so a table nobody queries still cannot reach the top. "
+            "`query_volume` restores the pre-adoption order exactly."
         ),
     ),
     context: SecurityContext = Depends(require_roles(*READ_ROLES)),
@@ -2375,6 +2413,7 @@ async def list_documentation_worklist(
         limit=limit,
         offset=offset,
         include_zero_volume=include_zero_volume,
+        ranking=ranking,
     )
     return Page(
         items=[DocumentationWorklistEntryRead.model_validate(entry) for entry in entries],

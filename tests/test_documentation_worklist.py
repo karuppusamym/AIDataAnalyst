@@ -32,6 +32,8 @@ def _signal(
     last_consumed_at: datetime | None = None,
     is_documented: bool = False,
     description_is_proposed: bool = False,
+    downstream_count: int = 0,
+    missing: tuple[str, ...] = (),
 ) -> TableQuerySignal:
     return TableQuerySignal(
         table_id=table_id or uuid4(),
@@ -44,6 +46,8 @@ def _signal(
         last_consumed_at=last_consumed_at,
         is_documented=is_documented,
         description_is_proposed=description_is_proposed,
+        downstream_count=downstream_count,
+        missing=missing,
     )
 
 
@@ -221,3 +225,106 @@ def test_empty_input_returns_empty_page() -> None:
 
     assert entries == []
     assert total == 0
+
+
+# --- SW-1 adoption ----------------------------------------------------------
+#
+# AT-5 used to rank on query volume alone, which treats "has a description" as
+# the whole of "documented" and cannot see that one table is a hub. These
+# cover the adoption itself and, just as importantly, what it did *not*
+# change.
+
+
+def test_impact_and_deficit_break_a_usage_tie() -> None:
+    """Two equally-queried tables. The one nothing points at and that is only
+    missing a glossary link is not the one a steward should open first."""
+    hub = _signal(
+        table_name="a_hub",
+        query_execution_count=100,
+        downstream_count=12,
+        missing=("description", "owner", "certification", "glossary_term"),
+    )
+    leaf = _signal(
+        table_name="b_leaf",
+        query_execution_count=100,
+        downstream_count=0,
+        missing=("glossary_term",),
+    )
+
+    entries, _total = rank_documentation_worklist([leaf, hub], limit=10)
+
+    assert [entry.table_name for entry in entries] == ["a_hub", "b_leaf"]
+    assert entries[0].downstream_count == 12
+    assert entries[0].deficit > entries[1].deficit
+
+
+def test_usage_still_dominates_a_deficit_nobody_is_affected_by() -> None:
+    """The adoption refines the order; it does not invert it. A table nobody
+    queries must not climb over a heavily used one by being more neglected --
+    that is how a ranked backlog becomes a list of things that do not matter."""
+    unused = _signal(
+        table_name="a_unused",
+        query_execution_count=0,
+        consumption_read_count=1,
+        downstream_count=1,
+        missing=("description", "owner", "certification", "glossary_term", "quality_policy"),
+    )
+    hot = _signal(
+        table_name="b_hot",
+        query_execution_count=1_000,
+        downstream_count=1,
+        missing=("description",),
+    )
+
+    entries, _total = rank_documentation_worklist([unused, hot], limit=10)
+
+    assert [entry.table_name for entry in entries] == ["b_hot", "a_unused"]
+
+
+def test_every_term_of_the_score_is_on_the_row() -> None:
+    """"Why is this first" has to be answerable from the response."""
+    entries, _total = rank_documentation_worklist(
+        [_signal(query_execution_count=10, downstream_count=3, missing=("owner",))],
+        limit=10,
+    )
+
+    entry = entries[0]
+    assert entry.score > 0
+    assert entry.usage > 0 and entry.impact > 0 and entry.deficit > 0
+    assert entry.missing == ("owner",)
+    assert round(entry.usage * entry.impact * entry.deficit, 4) == round(entry.score, 4)
+
+
+def test_query_volume_ranking_restores_the_pre_adoption_order() -> None:
+    """The escape hatch is real, not decorative: a deployment that dislikes the
+    new order reverts it with a query parameter, not a release."""
+    hub = _signal(
+        table_name="a_hub",
+        query_execution_count=10,
+        downstream_count=50,
+        missing=("description", "owner", "certification", "glossary_term", "quality_policy"),
+    )
+    busier = _signal(
+        table_name="b_busier", query_execution_count=90, downstream_count=0, missing=("owner",)
+    )
+
+    by_priority, _t1 = rank_documentation_worklist([busier, hub], limit=10)
+    by_volume, _t2 = rank_documentation_worklist(
+        [busier, hub], limit=10, ranking="query_volume"
+    )
+
+    assert [entry.table_name for entry in by_priority] == ["a_hub", "b_busier"]
+    assert [entry.table_name for entry in by_volume] == ["b_busier", "a_hub"]
+
+
+def test_a_signal_without_sw1_fields_ranks_as_it_did_before() -> None:
+    """`downstream_count` and `missing` are defaulted, so a caller that has not
+    adopted them yet is not silently reordered into nonsense -- every such
+    table has the same impact and the same deficit, leaving usage as the
+    only term that varies."""
+    busy = _signal(table_name="a_busy", query_execution_count=100)
+    quiet = _signal(table_name="b_quiet", query_execution_count=1)
+
+    entries, _total = rank_documentation_worklist([quiet, busy], limit=10)
+
+    assert [entry.table_name for entry in entries] == ["a_busy", "b_quiet"]

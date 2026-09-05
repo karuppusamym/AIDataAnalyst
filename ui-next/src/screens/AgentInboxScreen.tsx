@@ -58,20 +58,27 @@ function percent(value: number | null): string {
 }
 
 function BudgetBar({ agent }: { agent: AgentInboxAgent }) {
-  const { daily_token_cap: cap, daily_tokens_used: used } = agent.budget;
+  const { daily_token_cap: cap, daily_tokens_estimated: used } = agent.budget;
   if (cap === null) return <span className="agentinbox__muted">no cap</span>;
   if (used === null) {
-    // Honest: the cap is real and enforced by the model gateway's budget
-    // contract; per-agent consumption is not attributable yet.
-    return <span className="agentinbox__muted">{cap.toLocaleString()} cap · usage not tracked</span>;
+    // Not "no usage" — no run today reached a model call at all. Saying zero
+    // would read as "this agent is idle" when it may have been busy on
+    // query-memory hits that never cost a token.
+    return <span className="agentinbox__muted">{cap.toLocaleString()} cap · no model call today</span>;
   }
   const share = Math.min(used / cap, 1);
+  // "≈" is load-bearing: no provider adapter reports usage, so this is the
+  // gateway's own estimate — the same one the cap is enforced against, which
+  // is what makes the comparison meaningful rather than decorative.
   return (
-    <span className="agentinbox__budget" title={`${used.toLocaleString()} of ${cap.toLocaleString()}`}>
+    <span
+      className="agentinbox__budget"
+      title={`≈${used.toLocaleString()} of ${cap.toLocaleString()} today (estimated, not provider-reported)`}
+    >
       <span className="agentinbox__budgetbar">
         <span className="agentinbox__budgetfill" style={{ width: `${share * 100}%` }} />
       </span>
-      <span className="agentinbox__muted">{Math.round(share * 100)}%</span>
+      <span className="agentinbox__muted">≈{Math.round(share * 100)}% of today's cap</span>
     </span>
   );
 }

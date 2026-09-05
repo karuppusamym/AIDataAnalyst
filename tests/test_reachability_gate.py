@@ -109,19 +109,6 @@ ALLOWLIST: dict[str, str] = {
         "OW-5: emission half of the identity-lifecycle handler. No IdP webhook or "
         "directory sync calls it yet. Known gap."
     ),
-    # --- Steward prioritisation (SW-1) ---
-    # `stewardship_worklist` is a pure `usage x impact x deficit` scorer with
-    # no router, deliberately: `stewardship_api.list_documentation_worklist`
-    # (AT-5) already owns the "what should a steward document next" surface,
-    # and a second ranked backlog would be the "two catalogues" seam this
-    # platform's own competitive research names as a thing never to build.
-    # It is here for AT-5 to adopt -- it adds the downstream-impact factor and
-    # a five-field deficit that AT-5 lacks. Remove this entry when AT-5 calls
-    # `compute_worklist`, or delete the module if that never happens.
-    "aida.stewardship_worklist": (
-        "SW-1: pure scorer awaiting adoption by AT-5's documentation worklist; "
-        "deliberately not a rival endpoint. Known gap."
-    ),
     "aida.ownership_principal_lifecycle": (
         "OW-5: leaver/merge ownership handler, reached only through aida.identity_events, "
         "which is itself awaiting the IdP integration. Known gap."

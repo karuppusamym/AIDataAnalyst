@@ -19,7 +19,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +56,10 @@ from aida.reviewer_agent import (
     pre_review_pending,
     resolve_audit_sample,
     set_suspended,
+)
+from aida.reviewer_agent_metrics import (
+    REVISIT_TRIGGER_WINDOW_DAYS,
+    disagreement_rates,
 )
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -153,7 +157,11 @@ class AgentTaskRead(ApiModel):
 
 class InboxBudget(ApiModel):
     daily_token_cap: int | None
-    daily_tokens_used: int | None
+    #: Estimated, not provider-reported -- the same 4-bytes-per-token figure
+    #: the gateway enforces `daily_token_cap` against, which is what makes the
+    #: two numbers comparable at all. `None` means no run in the last 24h
+    #: reached a model call, which is not the same as zero consumption.
+    daily_tokens_estimated: int | None
 
 
 class InboxAgent(ApiModel):
@@ -645,15 +653,29 @@ async def get_agent_inbox(
             assets_by_version[version.id] = asset
 
     run_counts: dict[UUID, tuple[int, int]] = {}
+    tokens_today: dict[UUID, int] = {}
     if version_ids:
-        for version_id, total, completed in (
+        # The cap is a *daily* one, so consumption beside it must be today's,
+        # not the whole `since_hours` window the run counts use. Both come out
+        # of one grouped statement.
+        day_start = now - timedelta(hours=24)
+        today_tokens = case(
+            (
+                AgentRun.created_at >= day_start,
+                func.coalesce(AgentRun.estimated_input_tokens, 0)
+                + func.coalesce(AgentRun.estimated_output_tokens, 0),
+            ),
+            else_=0,
+        )
+        for version_id, total, completed, tokens in (
             await session.execute(
                 select(
                     AgentRun.ai_asset_version_id,
                     func.count(),
                     func.sum(
-                        func.case((AgentRun.status == "COMPLETED", 1), else_=0)
+                        case((AgentRun.status == "COMPLETED", 1), else_=0)
                     ),
+                    func.sum(today_tokens),
                 )
                 .where(
                     AgentRun.organization_id == organization_id,
@@ -665,6 +687,7 @@ async def get_agent_inbox(
         ).all():
             if version_id is not None:
                 run_counts[version_id] = (int(total or 0), int(completed or 0))
+                tokens_today[version_id] = int(tokens or 0)
 
     agents: list[InboxAgent] = []
     for contract in contracts:
@@ -682,11 +705,13 @@ async def get_agent_inbox(
                 success_rate=(completed / total) if total else None,
                 budget=InboxBudget(
                     daily_token_cap=contract.daily_token_cap,
-                    # Token accounting per agent is not recorded yet; the
-                    # cap is real and enforced by the model gateway's own
-                    # budget contract, the *consumption* number is not
-                    # attributable per agent until AgentRun carries it.
-                    daily_tokens_used=None,
+                    # A version with no run today reports None rather than 0:
+                    # "nothing ran" and "ran and cost nothing" are different
+                    # answers to "is this agent inside its budget".
+                    daily_tokens_estimated=tokens_today.get(
+                        contract.ai_asset_version_id
+                    )
+                    or None,
                 ),
                 kill_scope=contract.kill_scope,
                 kill_engaged=contract.kill_engaged,
@@ -958,6 +983,79 @@ async def resume_reviewer_agent(
         max_tier=settings.reviewer_agent_max_tier,
         sampling_rate=settings.reviewer_agent_sampling_rate,
         agent_principal_id=settings.reviewer_agent_principal_id,
+    )
+
+
+class DisagreementRateRead(ApiModel):
+    object_type: str
+    sampled: int
+    resolved: int
+    agreed: int
+    disagreed: int
+    pending: int
+    #: None, never 0, when nothing has been resolved: zero would claim a
+    #: measurement that was never taken.
+    disagreement_rate: float | None
+    sufficient_sample: bool
+    breaches_revisit_trigger: bool
+
+
+class DisagreementReportRead(ApiModel):
+    window_days: int
+    computed_at: datetime
+    #: False when nothing in the window has been resolved. A report with this
+    #: false is not evidence the reviewer agent is performing well -- it is
+    #: evidence that nothing has been measured, which is the state of every
+    #: environment while the feature is off.
+    measured: bool
+    threshold: float
+    minimum_resolved_for_signal: int
+    breaching_object_types: list[str]
+    by_object_type: list[DisagreementRateRead]
+
+
+@router.get(
+    "/organizations/{organization_id}/reviewer-agent/disagreement-rates",
+    response_model=DisagreementReportRead,
+)
+async def get_disagreement_rates(
+    organization_id: UUID,
+    window_days: int = Query(default=REVISIT_TRIGGER_WINDOW_DAYS, ge=1, le=365),
+    context: SecurityContext = Depends(require_roles(*CONTRACT_READERS)),
+    session: AsyncSession = Depends(get_session),
+) -> DisagreementReportRead:
+    """ADR-0027's revisit trigger, as a number rather than a sentence.
+
+    The ADR commits to revisiting the risk-tiered-checking decision when the
+    sampled disagreement rate exceeds 5% for any object type over a full
+    month. This is where that is checked. It reports; it never suspends --
+    suspension stays a human action, because a metric that could stop the
+    agent by itself would be a second automated authority arriving through
+    an observability endpoint.
+    """
+    enforce_organization(context, organization_id)
+    report = await disagreement_rates(session, organization_id, window_days=window_days)
+    return DisagreementReportRead(
+        window_days=report.window_days,
+        computed_at=report.computed_at,
+        measured=report.measured,
+        threshold=report.threshold,
+        minimum_resolved_for_signal=report.minimum_resolved_for_signal,
+        breaching_object_types=list(report.breaching_object_types),
+        by_object_type=[
+            DisagreementRateRead(
+                object_type=row.object_type,
+                sampled=row.sampled,
+                resolved=row.resolved,
+                agreed=row.agreed,
+                disagreed=row.disagreed,
+                pending=row.pending,
+                disagreement_rate=row.disagreement_rate,
+                sufficient_sample=row.sufficient_sample,
+                breaches_revisit_trigger=row.breaches_revisit_trigger,
+            )
+            for row in report.by_object_type
+        ],
     )
 
 

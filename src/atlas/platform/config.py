@@ -358,6 +358,18 @@ class Settings(BaseSettings):
     #: notification without a link is still worth sending, so an unset value
     #: degrades the message rather than suppressing it.
     portal_base_url: str | None = None
+    #: REVIEW_REQUESTED is relayed by a sweep rather than a hook, because
+    #: review creation has 27 call sites and no shared funnel. These two bound
+    #: that sweep.
+    #:
+    #: A review that has sat pending for longer than this is stamped as
+    #: considered without being sent: it is not news, and on the day an
+    #: operator first configures a webhook the whole historical backlog would
+    #: otherwise arrive at once.
+    governance_review_notify_max_age_hours: int = Field(default=24, ge=1, le=720)
+    #: Rows examined per sweep. The sweep runs every scheduler iteration and
+    #: is a no-op when the feature is off.
+    governance_review_notify_batch_size: int = Field(default=100, ge=1, le=1_000)
     # C7 / ADR-0020 amendment (2026-08-30, Group J): process-wide default backend for
     # `aida.graph_store.resolve_graph_store_backend` when an organization has not set
     # its own `GraphStoreOrganizationSetting` row. `postgres` needs no second system and

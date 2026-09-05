@@ -208,16 +208,21 @@ async def _worklist(
     limit: int = 100,
     offset: int = 0,
     include_zero_volume: bool = False,
+    ranking: str = "priority",
     context: object | None = None,
 ):
+    # Keyword-passed: this handler's signature grows a query parameter now and
+    # then (SW-1's `ranking` most recently), and a positional call here fails
+    # by silently binding the new argument to `context`.
     return await list_documentation_worklist(
         datasource.organization_id,
-        limit,
-        offset,
-        include_zero_volume,
-        context or _context(datasource),
-        session,
-        _SETTINGS,
+        limit=limit,
+        offset=offset,
+        include_zero_volume=include_zero_volume,
+        ranking=ranking,  # type: ignore[arg-type]
+        context=context or _context(datasource),  # type: ignore[arg-type]
+        session=session,
+        settings=_SETTINGS,
     )
 
 

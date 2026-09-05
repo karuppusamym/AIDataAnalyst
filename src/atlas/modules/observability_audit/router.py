@@ -11,9 +11,9 @@ The old path `aida.observability_api` remains as a re-export shim so
 (`get_cost_showback`, `get_archive_status`) keep working unchanged.
 
 Original module docstring follows.
-"""
 
-"""Observability API (OB-1 through OB-4, OB-6).
+---
+Observability API (OB-1 through OB-4, OB-6).
 
 SLO definitions CRUD, error budget consumption, audit archive status, and
 cost/showback aggregation endpoints.

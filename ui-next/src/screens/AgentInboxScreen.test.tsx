@@ -96,9 +96,21 @@ describe("AgentInboxScreen (UX-21)", () => {
     expect(screen.getByText("PENDING")).toBeInTheDocument();
   });
 
-  it("says so honestly when per-agent token usage is not tracked", async () => {
+  it("shows consumption against the cap, marked as an estimate", async () => {
+    // No provider adapter reports usage, so the number beside the cap is the
+    // gateway's own estimate. The UI must not present it as measured.
     render(<AgentInboxScreen persona="STEWARD" />);
-    await waitFor(() => expect(screen.getByText(/usage not tracked/i)).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByText(/≈43% of today's cap/)).toBeInTheDocument(),
+    );
+  });
+
+  it("distinguishes 'no model call today' from zero consumption", async () => {
+    render(<AgentInboxScreen persona="STEWARD" />);
+    await waitFor(() =>
+      expect(screen.getByText(/no model call today/i)).toBeInTheDocument(),
+    );
+    expect(screen.queryByText(/≈0%/)).toBeNull();
   });
 
   it("offers no kill switch for an agent already killed", async () => {

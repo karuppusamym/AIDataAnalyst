@@ -11,9 +11,9 @@ and any test that imports a handler function directly keep working
 unchanged.
 
 Original module docstring follows.
-"""
 
-"""HTTP surface for the access and classification axes (ADR-0018).
+---
+HTTP surface for the access and classification axes (ADR-0018).
 
 Workspaces, memberships, source bindings, the business graph, access policies, and
 an authorization probe. Every mutation here is audited in the same transaction as

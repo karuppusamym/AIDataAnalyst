@@ -118,64 +118,44 @@ def _scoped(statement: Select[Any], organization_id: UUID, datasource_id: UUID |
     return statement
 
 
-async def compute_worklist(
+@dataclass(frozen=True, slots=True)
+class TableEnrichment:
+    """The two factors a usage-only ranking cannot see.
+
+    `downstream_count` is impact; `missing` is the five-field deficit. Both
+    are returned per table so a caller can rank by them *and* show why.
+    """
+
+    downstream_count: int
+    missing: tuple[str, ...]
+    open_incidents: int
+
+
+async def enrich_tables(
     session: AsyncSession,
     organization_id: UUID,
+    table_ids: list[UUID],
     *,
-    datasource_id: UUID | None = None,
-    limit: int = 50,
-    scan_limit: int = 5_000,
+    descriptions: dict[UUID, bool] | None = None,
     now: datetime | None = None,
-) -> list[WorklistItem]:
-    """The ranked backlog.
+) -> dict[UUID, TableEnrichment]:
+    """Impact and documentation deficit for a set of tables.
 
-    A fixed number of queries regardless of how many tables come back: one
-    for the candidate tables, and one aggregate per signal. No per-row query,
-    which is the difference between a screen that opens and one that times
-    out on a bank's catalogue.
+    Extracted from `compute_worklist` so AT-5
+    (`stewardship_api.list_documentation_worklist`) ranks by the same rules
+    rather than growing a second, drifting definition of "documented" beside
+    this one. A fixed number of aggregate queries regardless of how many
+    tables are passed.
+
+    `descriptions` lets a caller that has already resolved description state
+    through its own precedence chain (UX-12's, which AT-5 uses) supply it:
+    `{table_id: has_a_real_description}`. Without it, the table's own
+    `source_description` and its columns' are used, which is this module's
+    own weaker check.
     """
     moment = now or datetime.now(UTC)
-
-    table_rows = (
-        await session.execute(
-            _scoped(
-                select(
-                    MetadataTable.id,
-                    MetadataTable.name,
-                    MetadataTable.datasource_id,
-                    MetadataTable.source_description,
-                    MetadataSchema.name,
-                ).join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id),
-                organization_id,
-                datasource_id,
-            )
-            .where(MetadataTable.status == "ACTIVE")
-            .limit(scan_limit)
-        )
-    ).all()
-    if not table_rows:
-        return []
-    table_ids = [row[0] for row in table_rows]
-
-    # --- usage: the platform's own consumption edges ----------------------
-    # `ConsumptionRecord` is what Atlas already records every time a resource
-    # is read through a governed surface, so it is the honest usage signal
-    # rather than a proxy. `resource_id` is a string, so counts are keyed by
-    # string and looked up that way.
-    usage_counts: dict[str, int] = {
-        str(resource_id): int(count)
-        for resource_id, count in (
-            await session.execute(
-                select(ConsumptionRecord.resource_id, func.count())
-                .where(
-                    ConsumptionRecord.organization_id == organization_id,
-                    ConsumptionRecord.resource_type == "TABLE",
-                    ConsumptionRecord.resource_id.in_([str(t) for t in table_ids]),
-                )
-                .group_by(ConsumptionRecord.resource_id)
-            )
-        ).all()
-    }
+    if not table_ids:
+        return {}
 
     # --- impact: how many other tables declare a foreign key *into* this one.
     # A table many others point at is a hub, and getting a hub's meaning
@@ -264,13 +244,28 @@ async def compute_worklist(
         ).all()
     }
 
-    usage_ceiling = max([*usage_counts.values(), 1])
-    downstream_ceiling = max([*downstream_counts.values(), 1])
-
-    items: list[WorklistItem] = []
-    for table_id, table_name, source_id, description, schema_name in table_rows:
+    enrichment: dict[UUID, TableEnrichment] = {}
+    described_tables: set[UUID] = set()
+    if descriptions is None:
+        described_tables = {
+            table_id
+            for (table_id,) in (
+                await session.execute(
+                    select(MetadataTable.id).where(
+                        MetadataTable.id.in_(table_ids),
+                        MetadataTable.source_description.is_not(None),
+                    )
+                )
+            ).all()
+        }
+    for table_id in table_ids:
+        has_description = (
+            descriptions.get(table_id, False)
+            if descriptions is not None
+            else (table_id in described_tables or table_id in described_columns)
+        )
         missing: list[str] = []
-        if not description and table_id not in described_columns:
+        if not has_description:
             missing.append("description")
         if str(table_id) not in owned:
             missing.append("owner")
@@ -282,8 +277,99 @@ async def compute_worklist(
             # No quality signal at all: neither an incident nor a
             # certification that implies someone looked.
             missing.append("quality_policy")
+        enrichment[table_id] = TableEnrichment(
+            downstream_count=downstream_counts.get(table_id, 0),
+            missing=tuple(missing),
+            open_incidents=incident_counts.get(table_id, 0),
+        )
+    return enrichment
+
+
+async def compute_worklist(
+    session: AsyncSession,
+    organization_id: UUID,
+    *,
+    datasource_id: UUID | None = None,
+    limit: int = 50,
+    scan_limit: int = 5_000,
+    now: datetime | None = None,
+) -> list[WorklistItem]:
+    """The ranked backlog.
+
+    A fixed number of queries regardless of how many tables come back: one
+    for the candidate tables, and one aggregate per signal. No per-row query,
+    which is the difference between a screen that opens and one that times
+    out on a bank's catalogue.
+    """
+    moment = now or datetime.now(UTC)
+
+    table_rows = (
+        await session.execute(
+            _scoped(
+                select(
+                    MetadataTable.id,
+                    MetadataTable.name,
+                    MetadataTable.datasource_id,
+                    MetadataTable.source_description,
+                    MetadataSchema.name,
+                ).join(MetadataSchema, MetadataSchema.id == MetadataTable.schema_id),
+                organization_id,
+                datasource_id,
+            )
+            .where(MetadataTable.status == "ACTIVE")
+            .limit(scan_limit)
+        )
+    ).all()
+    if not table_rows:
+        return []
+    table_ids = [row[0] for row in table_rows]
+
+    # --- usage: the platform's own consumption edges ----------------------
+    # `ConsumptionRecord` is what Atlas already records every time a resource
+    # is read through a governed surface, so it is the honest usage signal
+    # rather than a proxy. `resource_id` is a string, so counts are keyed by
+    # string and looked up that way.
+    usage_counts: dict[str, int] = {
+        str(resource_id): int(count)
+        for resource_id, count in (
+            await session.execute(
+                select(ConsumptionRecord.resource_id, func.count())
+                .where(
+                    ConsumptionRecord.organization_id == organization_id,
+                    ConsumptionRecord.resource_type == "TABLE",
+                    ConsumptionRecord.resource_id.in_([str(t) for t in table_ids]),
+                )
+                .group_by(ConsumptionRecord.resource_id)
+            )
+        ).all()
+    }
+
+    # Impact and deficit come from `enrich_tables`, the same call AT-5 makes,
+    # so there is exactly one definition of "documented" on the platform.
+    enrichment = await enrich_tables(
+        session,
+        organization_id,
+        table_ids,
+        descriptions={
+            row[0]: bool(row[3]) for row in table_rows
+        },
+        now=moment,
+    )
+    downstream_counts = {
+        table_id: item.downstream_count for table_id, item in enrichment.items()
+    }
+
+    usage_ceiling = max([*usage_counts.values(), 1])
+    downstream_ceiling = max([*downstream_counts.values(), 1])
+
+    items: list[WorklistItem] = []
+    for table_id, table_name, source_id, _description, schema_name in table_rows:
+        signals = enrichment.get(table_id)
+        if signals is None:
+            continue
+        missing = list(signals.missing)
         usage_references = usage_counts.get(str(table_id), 0)
-        downstream = downstream_counts.get(table_id, 0)
+        downstream = signals.downstream_count
         score, usage, impact, deficit = score_item(
             usage_references=usage_references,
             downstream_count=downstream,
@@ -306,7 +392,7 @@ async def compute_worklist(
                 missing=tuple(missing),
                 usage_references=usage_references,
                 downstream_count=downstream,
-                open_incidents=incident_counts.get(table_id, 0),
+                open_incidents=signals.open_incidents,
             )
         )
     # Deterministic tie-break on the id so one estate produces one ordering.

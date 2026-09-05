@@ -16,6 +16,7 @@ from aida.db import session_factory
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
+from aida.governance_review_relay import run_review_notification_pass
 from aida.graph_reconciliation import run_graph_reconciliation_pass
 from aida.logging import configure_logging
 from aida.models import (
@@ -636,6 +637,12 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
     # the same in-process cadence tracker the cert pass above uses.
     await run_ownership_expiry_pass(settings, now=now)
+    # NT-1: relay REVIEW_REQUESTED. Review creation has 27 call sites and no
+    # shared funnel, so this is a sweep over a watermark column rather than a
+    # hook -- see `governance_review_relay`'s module docstring for why that is
+    # the better shape here and not just the cheaper one. Returns immediately
+    # when governance notifications are off, which is the default.
+    await run_review_notification_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

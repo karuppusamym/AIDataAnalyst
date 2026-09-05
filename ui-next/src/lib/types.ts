@@ -4680,7 +4680,7 @@ export interface AgentInboxSummary {
 
 export interface AgentInboxBudget {
   daily_token_cap: number | null;
-  daily_tokens_used: number | null;
+  daily_tokens_estimated: number | null;
 }
 
 export interface AgentInboxAgent {

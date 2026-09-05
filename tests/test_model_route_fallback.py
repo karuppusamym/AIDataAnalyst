@@ -21,6 +21,7 @@ or a purpose-built end-to-end test in a follow-up.
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -32,6 +33,12 @@ import aida.models  # noqa: F401  -- registers every table on the metadata
 from aida.agent_orchestrator import GovernedAgentOrchestrator
 from aida.config import Settings
 from aida.db import Base
+from aida.model_gateway import (
+    ApprovedModelRoute,
+    ModelCallEvidence,
+    ModelGatewayError,
+    SqlGenerationOutput,
+)
 from aida.models import ModelRouteConfiguration, Organization
 
 pytestmark = pytest.mark.asyncio
@@ -273,15 +280,6 @@ async def test_approved_model_routes_skips_route_without_sql_generation_capabili
 # testable without standing up a full retrieval + planning + gateway scenario.
 # ---------------------------------------------------------------------------
 
-
-from typing import Any
-
-from aida.model_gateway import (
-    ApprovedModelRoute,
-    ModelCallEvidence,
-    ModelGatewayError,
-    SqlGenerationOutput,
-)
 
 
 def _approved_route(key: str, provider: str = "OPENAI") -> ApprovedModelRoute:

@@ -924,6 +924,16 @@ class AgentRun(Base, TimestampMixin):
     ai_asset_version_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("ai_asset_version.id", ondelete="SET NULL"), index=True
     )
+    # AG-10 budget attribution. *Estimated* tokens, by the same
+    # 4-bytes-per-token heuristic `ProviderNeutralModelGateway` enforces the
+    # approved input cap against -- no provider adapter reports real usage, so
+    # a column named `tokens_used` would be a precision claim the platform
+    # cannot make. Summed across every attempt in the run (a failed fallback
+    # attempt sent the same payload and so cost the same input estimate).
+    # NULL means no model call happened -- a query-memory hit or a refusal
+    # before generation -- which is different from a call that used zero.
+    estimated_input_tokens: Mapped[int | None] = mapped_column(Integer)
+    estimated_output_tokens: Mapped[int | None] = mapped_column(Integer)
 
 
 class AgentEvaluationRun(Base, TimestampMixin):
@@ -1105,7 +1115,17 @@ class SemanticMetricVersion(Base, TimestampMixin):
 
 class GovernanceReview(Base, TimestampMixin):
     __tablename__ = "governance_review"
-    __table_args__ = (Index("ix_governance_review_org_status", "organization_id", "status"),)
+    __table_args__ = (
+        Index("ix_governance_review_org_status", "organization_id", "status"),
+        # NT-1's relay predicate: pending, not yet considered, oldest first.
+        # Without it the sweep scans every review ever raised on every pass.
+        Index(
+            "ix_governance_review_notify_backlog",
+            "status",
+            "review_requested_notified_at",
+            "created_at",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     organization_id: Mapped[UUID] = mapped_column(
@@ -1130,6 +1150,17 @@ class GovernanceReview(Base, TimestampMixin):
     pre_review_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     pre_reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     pre_reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    # NT-1 watermark. Set by `governance_review_relay` once this review has
+    # been considered for a REVIEW_REQUESTED notification -- whether it was
+    # actually sent or skipped as too old to be news. It exists because the
+    # review-creation path has 27 call sites and no single funnel, so the
+    # notification is driven by a sweep over this column rather than by a
+    # hook none of those sites share. Same shape as
+    # `AssetCertification.expiry_warning_emitted_at`. NULL means "not yet
+    # considered", which is what makes the sweep idempotent.
+    review_requested_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
 
 
 class GovernedTool(Base, TimestampMixin):

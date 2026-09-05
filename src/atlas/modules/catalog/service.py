@@ -75,20 +75,27 @@ callers named in that shim.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from fnmatch import fnmatchcase
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.asset_certification import asset_certification_is_active
 from aida.certification_evidence import summarize_evidence
+from aida.classification import SENSITIVE_CLASSES
 from aida.models import (
     AssetCertification,
     AssetDescriptionDraft,
     AssetDocumentationVersion,
+    AssetTag,
     MetadataBusinessAnnotationVersion,
+    MetadataColumn,
     MetadataTable,
+    OwnershipAssignment,
 )
 
 if TYPE_CHECKING:
@@ -277,14 +284,6 @@ async def compose_catalog_rows(
 # The old path stays as a re-export shim, same pattern as
 # `aida.catalog_read_model`.
 # ---------------------------------------------------------------------------
-
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from fnmatch import fnmatchcase
-from typing import Any
-
-from aida.classification import SENSITIVE_CLASSES
-from aida.models import AssetTag, MetadataColumn, OwnershipAssignment
 
 # A single bulk request may touch at most this many subjects, whether the
 # caller supplied an explicit ID list (rejected outright above this size) or

@@ -11418,6 +11418,118 @@
         "title": "DetokenizeRequest",
         "type": "object"
       },
+      "DisagreementRateRead": {
+        "additionalProperties": false,
+        "properties": {
+          "agreed": {
+            "title": "Agreed",
+            "type": "integer"
+          },
+          "breaches_revisit_trigger": {
+            "title": "Breaches Revisit Trigger",
+            "type": "boolean"
+          },
+          "disagreed": {
+            "title": "Disagreed",
+            "type": "integer"
+          },
+          "disagreement_rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disagreement Rate"
+          },
+          "object_type": {
+            "title": "Object Type",
+            "type": "string"
+          },
+          "pending": {
+            "title": "Pending",
+            "type": "integer"
+          },
+          "resolved": {
+            "title": "Resolved",
+            "type": "integer"
+          },
+          "sampled": {
+            "title": "Sampled",
+            "type": "integer"
+          },
+          "sufficient_sample": {
+            "title": "Sufficient Sample",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "object_type",
+          "sampled",
+          "resolved",
+          "agreed",
+          "disagreed",
+          "pending",
+          "disagreement_rate",
+          "sufficient_sample",
+          "breaches_revisit_trigger"
+        ],
+        "title": "DisagreementRateRead",
+        "type": "object"
+      },
+      "DisagreementReportRead": {
+        "additionalProperties": false,
+        "properties": {
+          "breaching_object_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Breaching Object Types",
+            "type": "array"
+          },
+          "by_object_type": {
+            "items": {
+              "$ref": "#/components/schemas/DisagreementRateRead"
+            },
+            "title": "By Object Type",
+            "type": "array"
+          },
+          "computed_at": {
+            "format": "date-time",
+            "title": "Computed At",
+            "type": "string"
+          },
+          "measured": {
+            "title": "Measured",
+            "type": "boolean"
+          },
+          "minimum_resolved_for_signal": {
+            "title": "Minimum Resolved For Signal",
+            "type": "integer"
+          },
+          "threshold": {
+            "title": "Threshold",
+            "type": "number"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "window_days",
+          "computed_at",
+          "measured",
+          "threshold",
+          "minimum_resolved_for_signal",
+          "breaching_object_types",
+          "by_object_type"
+        ],
+        "title": "DisagreementReportRead",
+        "type": "object"
+      },
       "DocumentCreate": {
         "additionalProperties": false,
         "properties": {
@@ -14746,7 +14858,7 @@
             ],
             "title": "Daily Token Cap"
           },
-          "daily_tokens_used": {
+          "daily_tokens_estimated": {
             "anyOf": [
               {
                 "type": "integer"
@@ -14755,12 +14867,12 @@
                 "type": "null"
               }
             ],
-            "title": "Daily Tokens Used"
+            "title": "Daily Tokens Estimated"
           }
         },
         "required": [
           "daily_token_cap",
-          "daily_tokens_used"
+          "daily_tokens_estimated"
         ],
         "title": "InboxBudget",
         "type": "object"
@@ -71542,6 +71654,147 @@
         ]
       }
     },
+    "/v1/organizations/{organization_id}/reviewer-agent/disagreement-rates": {
+      "get": {
+        "description": "ADR-0027's revisit trigger, as a number rather than a sentence.\n\nThe ADR commits to revisiting the risk-tiered-checking decision when the\nsampled disagreement rate exceeds 5% for any object type over a full\nmonth. This is where that is checked. It reports; it never suspends --\nsuspension stays a human action, because a metric that could stop the\nagent by itself would be a second automated authority arriving through\nan observability endpoint.",
+        "operationId": "get_disagreement_rates_v1_organizations__organization_id__reviewer_agent_disagreement_rates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window_days",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 365,
+              "minimum": 1,
+              "title": "Window Days",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisagreementReportRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Disagreement Rates",
+        "tags": [
+          "agent-workforce"
+        ]
+      }
+    },
     "/v1/organizations/{organization_id}/reviewer-agent/pre-review": {
       "post": {
         "description": "Attach tier, evidence and a recommendation to pending items.\n\nDeliberately available even when the agent is disabled: pre-review\ndecides nothing, and a queue annotated with blast radius and prior\nrejections is worth having whether or not anything auto-decides.",
@@ -73320,6 +73573,22 @@
               "description": "Include tables with zero real query volume (no gateway execution, no MCP consumption read), sorted after every real-volume row. Off by default: this worklist ranks by real usage, and a zero-volume table has none to rank it by (see `documentation_worklist.py`).",
               "title": "Include Zero Volume",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "`priority` (default) is SW-1's usage x impact x deficit: among comparably used tables it puts the hub missing four of five documentation fields ahead of the leaf missing one. Usage is still a term, so a table nobody queries still cannot reach the top. `query_volume` restores the pre-adoption order exactly.",
+            "in": "query",
+            "name": "ranking",
+            "required": false,
+            "schema": {
+              "default": "priority",
+              "description": "`priority` (default) is SW-1's usage x impact x deficit: among comparably used tables it puts the hub missing four of five documentation fields ahead of the leaf missing one. Usage is still a term, so a table nobody queries still cannot reach the top. `query_volume` restores the pre-adoption order exactly.",
+              "enum": [
+                "priority",
+                "query_volume"
+              ],
+              "title": "Ranking",
+              "type": "string"
             }
           },
           {

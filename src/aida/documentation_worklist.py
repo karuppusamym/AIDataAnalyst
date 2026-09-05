@@ -45,9 +45,12 @@ factor that drove the order is on the response, not just the final rank.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
+
+from aida.stewardship_worklist import score_item
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +72,16 @@ class TableQuerySignal:
     last_consumed_at: datetime | None
     is_documented: bool
     description_is_proposed: bool
+    # SW-1 adoption (2026-09-04). The two factors a usage-only ranking cannot
+    # see. Defaulted so every existing caller and test keeps working: a
+    # signal gathered without them ranks exactly as it did before.
+    #: How many other tables declare a foreign key into this one. A hub's
+    #: meaning being wrong is wrong in every direction at once.
+    downstream_count: int = 0
+    #: Which of `stewardship_worklist.DEFICIT_FIELDS` this table lacks. AT-5
+    #: previously treated "undocumented" as description-only, which ranked a
+    #: described-but-unowned, uncertified, unlinked table as finished.
+    missing: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +102,29 @@ class DocumentationWorklistEntry:
     last_queried_at: datetime | None
     last_consumed_at: datetime | None
     description_is_proposed: bool
+    # SW-1 factors, on the response for the same reason `query_volume` is:
+    # the order a steward is shown has to be explainable without reading
+    # this file. `score` is the product; the three factors are its terms.
+    score: float = 0.0
+    usage: float = 0.0
+    impact: float = 0.0
+    deficit: float = 0.0
+    downstream_count: int = 0
+    missing: tuple[str, ...] = field(default_factory=tuple)
+
+
+#: How AT-5 orders its candidates.
+#:
+#: `priority` is SW-1's `usage x impact x deficit`. It is a refinement of
+#: `query_volume`, not a replacement for it -- usage is still a term, so a
+#: table nobody queries still cannot reach the top -- but among comparably
+#: used tables it puts the hub that is missing four of five fields ahead of
+#: the leaf missing one.
+#:
+#: `query_volume` restores the pre-adoption order exactly. It exists so a
+#: deployment that dislikes the new ordering can revert it with a query
+#: parameter instead of a release.
+WorklistRanking = Literal["priority", "query_volume"]
 
 
 def rank_documentation_worklist(
@@ -97,6 +133,7 @@ def rank_documentation_worklist(
     limit: int,
     offset: int = 0,
     include_zero_volume: bool = False,
+    ranking: WorklistRanking = "priority",
 ) -> tuple[list[DocumentationWorklistEntry], int]:
     """Rank undocumented/under-described tables by real query volume.
 
@@ -136,14 +173,38 @@ def rank_documentation_worklist(
             if signal.query_execution_count + signal.consumption_read_count > 0
         ]
 
-    ordered = sorted(
-        candidates,
-        key=lambda signal: (
-            -(signal.query_execution_count + signal.consumption_read_count),
-            signal.table_name.lower(),
-            str(signal.table_id),
-        ),
+    # Ceilings are taken over the *candidate set*, not a constant: "very used"
+    # means very used for this estate. A fixed ceiling would make every table
+    # in a quiet organization score near zero and rank arbitrarily.
+    usage_ceiling = max(
+        [signal.query_execution_count + signal.consumption_read_count for signal in candidates]
+        + [1]
     )
+    downstream_ceiling = max([signal.downstream_count for signal in candidates] + [1])
+
+    scored: dict[UUID, tuple[float, float, float, float]] = {}
+    for signal in candidates:
+        # A signal gathered without SW-1's deficit fields has an empty
+        # `missing`, which would score 0 and drop it. Falling back to
+        # "description is the one thing known to be missing" keeps such a
+        # caller ranking exactly as it did before adoption.
+        missing = signal.missing or (("description",) if not signal.is_documented else ())
+        scored[signal.table_id] = score_item(
+            usage_references=signal.query_execution_count + signal.consumption_read_count,
+            downstream_count=signal.downstream_count,
+            missing=missing,
+            usage_ceiling=usage_ceiling,
+            downstream_ceiling=downstream_ceiling,
+        )
+
+    def _key(signal: TableQuerySignal) -> tuple[float, str, str]:
+        if ranking == "query_volume":
+            primary = float(-(signal.query_execution_count + signal.consumption_read_count))
+        else:
+            primary = -scored[signal.table_id][0]
+        return (primary, signal.table_name.lower(), str(signal.table_id))
+
+    ordered = sorted(candidates, key=_key)
     total = len(ordered)
     page = ordered[offset : offset + limit]
     entries = [
@@ -159,6 +220,12 @@ def rank_documentation_worklist(
             last_queried_at=signal.last_queried_at,
             last_consumed_at=signal.last_consumed_at,
             description_is_proposed=signal.description_is_proposed,
+            score=round(scored[signal.table_id][0], 6),
+            usage=round(scored[signal.table_id][1], 6),
+            impact=round(scored[signal.table_id][2], 6),
+            deficit=round(scored[signal.table_id][3], 6),
+            downstream_count=signal.downstream_count,
+            missing=signal.missing,
         )
         for index, signal in enumerate(page)
     ]
