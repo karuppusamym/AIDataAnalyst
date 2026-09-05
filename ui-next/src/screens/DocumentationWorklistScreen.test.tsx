@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
 import { DocumentationWorklistScreen } from "./DocumentationWorklistScreen";
-import type { DocumentationWorklistEntryRead } from "../lib/types";
+import type { DocumentationWorklistEntryRead } from "../lib/ui-types";
 
 const fetchDocumentationWorklist = vi.fn();
 

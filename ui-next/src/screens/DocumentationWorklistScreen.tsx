@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { DocumentationWorklistEntryRead } from "../lib/types";
+import type { DocumentationWorklistEntryRead } from "../lib/ui-types";
 import { ApiError, fetchDocumentationWorklist } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
