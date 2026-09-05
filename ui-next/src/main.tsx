@@ -4,6 +4,7 @@ import App from "./App";
 import { OrgProvider } from "./lib/org";
 import { ScopeProvider } from "./lib/scope";
 import "./tokens.css";
+import "./components/workflow-author.css";
 
 const el = document.getElementById("root");
 if (!el) throw new Error("#root is missing from index.html");

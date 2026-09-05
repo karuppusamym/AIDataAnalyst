@@ -1,3 +1,4 @@
+import { navigateTo } from "../lib/navigate";
 import { useState } from "react";
 import { createToolVersion, postJson } from "../lib/api";
 import type { GovernedToolVersionCreate } from "../lib/types";
@@ -28,7 +29,7 @@ export function SaveAnalysisTool({ runId }: { runId: string }) {
         const tool = await createToolVersion(project, { ...draft, parameters: definitions });
         setSaved(tool.id); setMessage("Tool draft saved. Open the registry to submit it for independent review.");
       })}>Save as draft tool</Button>
-      {saved ? <Button onClick={() => { location.hash = `/tool-registry?project=${project}&tool=${saved}`; }}>Open saved tool</Button> : null}
+      {saved ? <Button onClick={() => { navigateTo("tools", { project, tool: saved }); }}>Open saved tool</Button> : null}
     </> : null}
     {message ? <p role="status">{message}</p> : null}
   </details>;

@@ -160,6 +160,18 @@ function identityHeaders(): Record<string, string> {
   return { "X-Principal-Id": DEV_PRINCIPAL_ID, "X-Roles": DEV_ROLES, "X-Organization-Id": getCurrentOrgId() };
 }
 
+function serverErrorDetail(value: unknown, fallback: string): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(item => {
+    if (item && typeof item === "object" && "msg" in item) {
+      const loc = "loc" in item && Array.isArray(item.loc) ? item.loc.join(".") : "Request";
+      return `${loc}: ${String(item.msg)}`;
+    }
+    return "Request validation failed";
+  }).join("; ");
+  return fallback;
+}
+
 export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     signal,
@@ -170,7 +182,7 @@ export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
     let detail = `${res.status} ${res.statusText}`;
     try {
       const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
+      if (body.detail) detail = serverErrorDetail(body.detail, detail);
     } catch {
       /* non-JSON error body; the status line is what we have */
     }
@@ -211,7 +223,7 @@ export async function postJson<T>(path: string, body: unknown, signal?: AbortSig
     let detail = `${res.status} ${res.statusText}`;
     try {
       const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = errBody.detail;
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
     } catch {
       /* non-JSON error body; the status line is what we have */
     }
@@ -234,7 +246,7 @@ export async function putJson<T>(path: string, body: unknown, signal?: AbortSign
     let detail = `${res.status} ${res.statusText}`;
     try {
       const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = errBody.detail;
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
     } catch {
       /* non-JSON error body; the status line is what we have */
     }

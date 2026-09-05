@@ -1,8 +1,25 @@
 import { useState } from "react";
 import { fetchOrgProjects, fetchTools, fetchToolPlan, get, postJson } from "../lib/api";
 import { useOrgId } from "../lib/org";
-import type { GovernedToolVersionRead, ProjectRead, ToolPlanCreate, ToolPlanRead } from "../lib/types";
+import type { GovernedToolVersionRead, ProjectRead, ToolParameterDefinition, ToolPlanCreate, ToolPlanRead } from "../lib/types";
 import { Button, Field } from "./primitives";
+
+export function PlanParameterInputs({ definitions, json, onChange }: {
+  definitions: ToolParameterDefinition[]; json: string; onChange: (json: string) => void;
+}) {
+  let values: Record<string, unknown> = {};
+  try { values = JSON.parse(json || "{}"); } catch { return <p role="alert">Fix parameter JSON to use typed inputs.</p>; }
+  if (!values || typeof values !== "object" || Array.isArray(values)) return null;
+  const set = (name: string, value: unknown) => { const next = { ...values }; if (value === undefined) delete next[name]; else next[name] = value; onChange(JSON.stringify(next, null, 2)); };
+  return <>{definitions.map(p => <Field key={p.name} label={`Parameter ${p.name}${p.required ? " (required)" : ""}`}>
+    {p.allowed_values?.length ? <select required={p.required} value={values[p.name] === undefined ? "" : JSON.stringify(values[p.name])} onChange={e => set(p.name, e.target.value ? JSON.parse(e.target.value) : undefined)}>
+      <option value="">Choose value</option>{p.allowed_values.map(v => <option key={JSON.stringify(v)} value={JSON.stringify(v)}>{String(v)}</option>)}
+    </select> : p.parameter_type === "BOOLEAN" ? <select required={p.required} value={values[p.name] === undefined ? "" : String(values[p.name])} onChange={e => set(p.name, e.target.value === "" ? undefined : e.target.value === "true")}><option value="">Choose value</option><option value="true">True</option><option value="false">False</option></select> : <input
+      required={p.required} type={p.sensitive ? "password" : p.parameter_type === "DATE" ? "date" : ["INTEGER", "NUMBER"].includes(p.parameter_type) ? "number" : "text"}
+      step={p.parameter_type === "NUMBER" ? "any" : undefined} min={p.minimum ?? undefined} max={p.maximum ?? undefined} maxLength={p.max_length ?? undefined}
+      value={String(values[p.name] ?? "")} onChange={e => set(p.name, e.target.value === "" ? undefined : ["INTEGER", "NUMBER"].includes(p.parameter_type) ? Number(e.target.value) : e.target.value)} />}
+  </Field>)}</>;
+}
 
 export function PublishedToolPicker({ onSelect }: { onSelect: (tool: GovernedToolVersionRead) => void }) {
   const org = useOrgId();

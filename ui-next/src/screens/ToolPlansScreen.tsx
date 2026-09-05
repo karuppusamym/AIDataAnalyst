@@ -1,7 +1,8 @@
-import { PlanLibrary, PublishedToolPicker } from "../components/PlanToolsControls";
+import { PlanLibrary, PlanParameterInputs, PublishedToolPicker } from "../components/PlanToolsControls";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ExecutionRead,
+  ToolParameterDefinition,
   ToolPlanCreate,
   ToolPlanDetailRead,
   ValidationResponse,
@@ -112,6 +113,7 @@ interface StepDraft {
   timeoutSeconds: string;
   expectedCost: string;
   dependencies?: string;
+  parameterSchema?: ToolParameterDefinition[];
 }
 
 interface BudgetDraft {
@@ -171,7 +173,8 @@ function CreatePlanPanel({
         </div>
       </header>
 
-      <PublishedToolPicker onSelect={tool => setForm({ ...form, step: { ...form.step, toolId: tool.tool_id, toolVersion: String(tool.version), parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } })} />
+      <PublishedToolPicker onSelect={tool => setForm({ ...form, step: { ...form.step, toolId: tool.tool_id, toolVersion: String(tool.version), parameterSchema: tool.parameters, parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } })} />
+      <PlanParameterInputs definitions={form.step.parameterSchema ?? []} json={form.step.parametersJson} onChange={parametersJson => setForm({ ...form, step: { ...form.step, parametersJson } })} />
       <div className="tpform__grid">
         <div className="tpform__span2">
           <Field label="Plan name">
@@ -277,7 +280,8 @@ function CreatePlanPanel({
 
       <div className="tpform__actions">
         {(form.additionalSteps ?? []).map((step, i) => <fieldset key={i}><legend>Step {i + 2}</legend>
-          <PublishedToolPicker onSelect={tool => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, toolId: tool.tool_id, toolVersion: String(tool.version), parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } : s) })} />
+          <PublishedToolPicker onSelect={tool => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, toolId: tool.tool_id, toolVersion: String(tool.version), parameterSchema: tool.parameters, parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } : s) })} />
+          <PlanParameterInputs definitions={step.parameterSchema ?? []} json={step.parametersJson} onChange={parametersJson => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, parametersJson } : s) })} />
           {(["toolId", "toolVersion", "parametersJson", "dependencies", "timeoutSeconds", "expectedCost"] as const).map(key => <Field key={key} label={`Step ${i + 2} ${key}`}><input value={step[key] ?? ""} onChange={e => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, [key]: e.target.value } : s) })} /></Field>)}
         </fieldset>)}
         <Button onClick={() => setForm({ ...form, additionalSteps: [...(form.additionalSteps ?? []), { ...INITIAL_STEP, dependencies: String((form.additionalSteps?.length ?? 0) + 1) }] })}>Add step</Button>

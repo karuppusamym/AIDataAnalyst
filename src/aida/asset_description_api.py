@@ -380,6 +380,7 @@ async def edit_asset_description_draft(
         "origin": "METADATA_WITH_HUMAN_EDITS",
         "original_fingerprint": draft.evidence.get("original_fingerprint", draft.text_fingerprint),
         "edited_by": context.principal_id,
+        "editors": sorted(set(draft.evidence.get("editors", [])) | {context.principal_id}),
     }
     draft.drafted_text = body.drafted_text
     draft.text_fingerprint = text_fingerprint(body.drafted_text)

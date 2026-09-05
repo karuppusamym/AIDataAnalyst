@@ -44,3 +44,5 @@
   .smscreen__main .vlist{height:56vh;flex:none}
   .evp{width:auto;max-height:none}
 }
+
+.smscreen{overflow-y:auto}

@@ -305,8 +305,17 @@ async def recommend_tool_plan(
             .limit(500)
         )
     ).all()
+    clauses = [
+        part.strip()
+        for part in re.split(r"\bthen\b|\n", body.prompt, flags=re.IGNORECASE)
+        if part.strip()
+    ]
+    if len(clauses) > 20:
+        raise HTTPException(
+            status_code=422, detail="Split this request into plans of at most 20 steps"
+        )
     steps = []
-    for clause in re.split(r"\bthen\b|\n", body.prompt, flags=re.IGNORECASE):
+    for clause in clauses:
         terms = set(re.findall(r"[a-z0-9]+", clause.lower())) - {
             "the",
             "a",
@@ -561,8 +570,9 @@ async def execute_tool_plan(
             ToolPlanRecord.status.in_(("DRAFT", "VALIDATED")),
         )
         .values(status="EXECUTING")
+        .returning(ToolPlanRecord.id)
     )
-    if claimed.rowcount != 1:
+    if claimed.scalar_one_or_none() is None:
         raise HTTPException(status_code=409, detail="Plan has already been started or cancelled")
     await session.commit()
 

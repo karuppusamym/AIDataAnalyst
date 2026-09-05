@@ -489,6 +489,83 @@ async def create_metric_version(
     return _metric_read(version, metric)
 
 
+class MetricDraftEdit(ApiModel):
+    definition: SemanticMetricCreate
+    expected_fingerprint: str
+
+
+@router.put("/semantic-metric-versions/{version_id}", response_model=SemanticMetricVersionRead)
+async def edit_metric_draft(
+    version_id: UUID,
+    body: MetricDraftEdit,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "SemanticAdmin", "DataSteward")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> SemanticMetricVersionRead:
+    version = await session.get(SemanticMetricVersion, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Metric version not found")
+    enforce_organization(context, version.organization_id)
+    model = await session.scalar(
+        select(SemanticModelVersion)
+        .where(
+            SemanticModelVersion.id == version.semantic_model_version_id,
+        )
+        .with_for_update()
+    )
+    if model is None or model.status != "DRAFT" or version.fingerprint != body.expected_fingerprint:
+        raise HTTPException(status_code=409, detail="Metric changed or model is no longer a draft")
+    definition = body.definition
+    metric = await session.get(SemanticMetric, version.metric_id)
+    table = await session.get(MetadataTable, definition.source_table_id)
+    source = await session.get(DataSource, table.datasource_id) if table else None
+    if metric is None or definition.slug != metric.slug:
+        raise HTTPException(status_code=422, detail="A metric revision must preserve its slug")
+    if (
+        table is None
+        or table.status != "ACTIVE"
+        or source is None
+        or source.project_id != model.project_id
+    ):
+        raise HTTPException(status_code=422, detail="Choose an active table in the model project")
+    ids = set(definition.allowed_dimension_column_ids)
+    ids.update(i for i in (definition.measure_column_id, definition.default_time_column_id) if i)
+    columns = list(await session.scalars(select(MetadataColumn).where(MetadataColumn.id.in_(ids))))
+    if len(columns) != len(ids) or any(
+        c.table_id != table.id or c.status != "ACTIVE" for c in columns
+    ):
+        raise HTTPException(
+            status_code=422, detail="Metric columns must belong to the active source table"
+        )
+    before = version.fingerprint
+    for key in (
+        "name",
+        "description",
+        "aggregation",
+        "grain",
+        "source_table_id",
+        "measure_column_id",
+        "default_time_column_id",
+    ):
+        setattr(version, key, getattr(definition, key))
+    version.allowed_dimension_column_ids = [str(i) for i in definition.allowed_dimension_column_ids]
+    version.fingerprint = _metric_fingerprint(definition)
+    version.created_by = context.principal_id
+    record_audit(
+        session,
+        context,
+        action="semantic_metric.draft.edit",
+        resource_type="semantic_metric_version",
+        resource_id=str(version.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"before_fingerprint": before, "after_fingerprint": version.fingerprint},
+    )
+    await session.commit()
+    return _metric_read(version, metric)
+
+
 @router.get("/semantic-model-versions/{model_id}/metrics", response_model=Page)
 async def list_metric_versions(
     model_id: UUID,
@@ -1218,9 +1295,7 @@ async def _semantic_model_version_snapshot(
                     if metric_version.default_time_column_id
                     else None
                 ),
-                "allowed_dimension_column_ids": sorted(
-                    metric_version.allowed_dimension_column_ids
-                ),
+                "allowed_dimension_column_ids": sorted(metric_version.allowed_dimension_column_ids),
             }
             for metric_version, metric in rows
         },
@@ -2011,6 +2086,13 @@ async def _apply_governance_review_decision(
         if draft is None or draft.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if decision == "APPROVE":
+            if (
+                context.principal_id in (draft.evidence or {}).get("editors", [])
+                or (draft.evidence or {}).get("edited_by") == context.principal_id
+            ):
+                raise HTTPException(
+                    status_code=409, detail="A description editor cannot approve their own edits"
+                )
             # GL-9: this is the only call site that publishes a drafted
             # description onto the asset, and it only runs after the
             # maker-checker guard above (status PENDING, independent
@@ -2364,15 +2446,18 @@ async def bulk_decide_governance_reviews(
             continue
         try:
             async with session.begin_nested():
-                event_type, aggregate_type, aggregate_id, payload = (
-                    await _apply_governance_review_decision(
-                        session,
-                        review,
-                        decision=body.decision,
-                        reason=item_reason,
-                        context=context,
-                        now=now,
-                    )
+                (
+                    event_type,
+                    aggregate_type,
+                    aggregate_id,
+                    payload,
+                ) = await _apply_governance_review_decision(
+                    session,
+                    review,
+                    decision=body.decision,
+                    reason=item_reason,
+                    context=context,
+                    now=now,
                 )
                 record_outbox(
                     session,

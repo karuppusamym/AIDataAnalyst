@@ -118,6 +118,7 @@ interface FormState {
   allowedRoles: string;
   description: string;
   sqlTemplate: string;
+  semanticModelVersionId?: string | null;
 }
 
 const INITIAL_FORM: FormState = {
@@ -691,6 +692,7 @@ export function ToolRegistryScreen() {
       allowedRoles: tool.allowed_roles.join(","),
       description: tool.description,
       sqlTemplate: tool.sql_template,
+      semanticModelVersionId: tool.semantic_model_version_id,
     });
     setParameters(
       tool.parameters.length
@@ -723,6 +725,7 @@ export function ToolRegistryScreen() {
         description: form.description,
         datasource_id: form.datasourceId,
         sql_template: form.sqlTemplate,
+        ...(form.semanticModelVersionId ? { semantic_model_version_id: form.semanticModelVersionId } : {}),
         parameters: parameters
           .filter((p) => p.name.trim().length > 0)
           .map((p) => {
@@ -745,8 +748,10 @@ export function ToolRegistryScreen() {
               required: p.required,
               sensitive: p.sensitive,
               ...(allowed.length ? { allowed_values: allowed } : {}),
-              default: p.defaultJson?.trim() ? JSON.parse(p.defaultJson) : null,
-              minimum: p.minimum, maximum: p.maximum, max_length: p.max_length,
+              ...(p.defaultJson?.trim() ? { default: JSON.parse(p.defaultJson) } : {}),
+              ...(p.minimum != null ? { minimum: p.minimum } : {}),
+              ...(p.maximum != null ? { maximum: p.maximum } : {}),
+              ...(p.max_length != null ? { max_length: p.max_length } : {}),
             };
           }),
         allowed_roles: splitIds(form.allowedRoles),

@@ -231,4 +231,18 @@ describe("ToolRegistryScreen against the real tool_api.py routes", () => {
     // `openToolAuthor` submit -> `loadOrganizationData()` sequence.
     await waitFor(() => expect(fetchTools).toHaveBeenCalledTimes(2));
   });
+  it("preserves typed constraints when making a new tool version", async () => {
+    const constrained = { ...PUBLISHED_TOOL, parameters: [{ name: "limit_value", parameter_type: "INTEGER" as const, required: true, default: 10, minimum: 1, maximum: 50, allowed_values: [10, 20], max_length: 4 }] };
+    fetchTools.mockResolvedValue({ items: [constrained], limit: 200, offset: 0, total: 1 });
+    createToolVersion.mockResolvedValue(DRAFT_TOOL);
+    const ToolRegistryScreen = await loadScreen();
+    render(<ToolRegistryScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    fireEvent.click(await screen.findByText("Customer lookup"));
+    fireEvent.click(screen.getByRole("button", { name: "New version" }));
+    fireEvent.click(screen.getByRole("button", { name: /Create draft version|Create governed draft|Create tool version|Create draft/ }));
+    await waitFor(() => expect(createToolVersion).toHaveBeenCalled());
+    expect(createToolVersion.mock.calls[0]![1].parameters).toEqual([expect.objectContaining({ default: 10, minimum: 1, maximum: 50, max_length: 4, allowed_values: [10, 20] })]);
+  });
+
 });

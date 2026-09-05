@@ -301,7 +301,7 @@ async def execute_plan(
             continue
 
         elapsed = (datetime.now(UTC) - started_at).total_seconds()
-        if elapsed > plan.budget.max_time_seconds:
+        if elapsed >= plan.budget.max_time_seconds:
             step_results.append(
                 StepResult(
                     sequence=step.sequence,
@@ -330,11 +330,10 @@ async def execute_plan(
 
         step_results.append(result)
 
+        budget_time += (result.completed_at - result.started_at).total_seconds()
         if result.status == "COMPLETED":
             completed_sequences.add(step.sequence)
             budget_cost += step.expected_cost
-            if result.completed_at and result.started_at:
-                budget_time += (result.completed_at - result.started_at).total_seconds()
         elif result.status != "COMPLETED":
             failed = True
 

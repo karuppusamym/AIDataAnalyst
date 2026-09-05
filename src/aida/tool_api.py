@@ -935,8 +935,9 @@ async def prepare_analysis_tool(
         definition=GovernedToolVersionCreate(
             slug=f"analysis_{run.id.hex[:12]}",
             name="Reusable analysis",
-            description=(f"Draft from completed analysis {run.id}. "
-                         "Parameter types require author review."),
+            description=(
+                f"Draft from completed analysis {run.id}. Parameter types require author review."
+            ),
             datasource_id=datasource.id,
             sql_template=statement.sql(dialect=datasource.dialect),
             parameters=parameters,
