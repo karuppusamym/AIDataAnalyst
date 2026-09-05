@@ -1,24 +1,42 @@
 """Shared metadata-only semantic proposal generation; caller owns the transaction."""
+
 import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
+
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from aida.config import Settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
 from aida.fleet import ensure_datasource_enabled
-from aida.models import AnalysisRun, DataSource, GovernanceReview, MetadataColumn, MetadataConstraint, MetadataEnrichmentProposal, MetadataSchema, MetadataTable, SemanticInferenceRun
+from aida.models import (
+    AnalysisRun,
+    DataSource,
+    GovernanceReview,
+    MetadataColumn,
+    MetadataConstraint,
+    MetadataEnrichmentProposal,
+    MetadataSchema,
+    MetadataTable,
+    SemanticInferenceRun,
+)
 from aida.schemas import SemanticInferenceRequest
 from aida.security import SecurityContext, enforce_organization
 from aida.semantic_inference import SEMANTIC_INFERENCE_VERSION, enrich_with_optional_model
 
+
 async def generate_semantic_inference(
-    datasource_id: UUID, body: SemanticInferenceRequest, context: SecurityContext,
-    session: AsyncSession, settings: Settings, table_ids: list[UUID] | None = None,
+    datasource_id: UUID,
+    body: SemanticInferenceRequest,
+    context: SecurityContext,
+    session: AsyncSession,
+    settings: Settings,
+    table_ids: list[UUID] | None = None,
 ) -> SemanticInferenceRun:
     datasource = await session.get(DataSource, datasource_id)
     if datasource is None:
@@ -186,4 +204,3 @@ async def generate_semantic_inference(
         },
     )
     return run
-

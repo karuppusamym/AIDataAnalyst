@@ -1,3 +1,4 @@
+import { layoutTopology } from "../lib/lineageLayout";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   UnifiedLineageEdgeRead,
@@ -101,14 +102,7 @@ function layerOf(source: UnifiedLineageEdgeRead["edge_source"]): LayerKey {
   return LAYER_DEFS.find((l) => l.sources.includes(source))?.key ?? "OTHER";
 }
 
-const NODE_KIND_ORDER: UnifiedLineageNodeRead["node_kind"][] = [
-  "TABLE",
-  "DBT_SOURCE",
-  "DBT_SEED",
-  "DBT_MODEL",
-  "DBT_SNAPSHOT",
-  "UNRESOLVED_DATASET",
-];
+
 
 const kindTone = (k: string): Tone => (k === "UNRESOLVED_DATASET" ? "mute" : "info");
 
@@ -119,52 +113,8 @@ const qualityTone = (q: string): Tone =>
 // can be up to 2000, which no straight-line column layout renders readably.
 // The "Nodes"/"Edges" tabs below are never capped: this only bounds the
 // *diagram*.
-const TOPOLOGY_NODE_CAP = 90;
 const COL_WIDTH = 208;
-const ROW_HEIGHT = 32;
 const MARGIN = 18;
-const HEADER_H = 26;
-
-interface TopologyLayout {
-  width: number;
-  height: number;
-  columns: { kind: string; x: number; nodes: UnifiedLineageNodeRead[] }[];
-  positions: Map<string, { x: number; y: number }>;
-  shown: number;
-  omitted: number;
-}
-
-function layoutTopology(nodes: readonly UnifiedLineageNodeRead[]): TopologyLayout {
-  const shownNodes = nodes.slice(0, TOPOLOGY_NODE_CAP);
-  const byKind = new Map<string, UnifiedLineageNodeRead[]>();
-  for (const n of shownNodes) {
-    const list = byKind.get(n.node_kind) ?? [];
-    list.push(n);
-    byKind.set(n.node_kind, list);
-  }
-  const orderedKinds = [
-    ...NODE_KIND_ORDER.filter((k) => byKind.has(k)),
-    ...[...byKind.keys()].filter((k) => !NODE_KIND_ORDER.includes(k as UnifiedLineageNodeRead["node_kind"])),
-  ];
-  const positions = new Map<string, { x: number; y: number }>();
-  const columns = orderedKinds.map((kind, ci) => {
-    const x = MARGIN + ci * COL_WIDTH + COL_WIDTH / 2;
-    const kindNodes = byKind.get(kind) ?? [];
-    kindNodes.forEach((n, ri) => {
-      positions.set(n.id, { x, y: MARGIN + HEADER_H + ri * ROW_HEIGHT + ROW_HEIGHT / 2 });
-    });
-    return { kind, x, nodes: kindNodes };
-  });
-  const maxRows = Math.max(1, ...columns.map((c) => c.nodes.length));
-  return {
-    width: Math.max(COL_WIDTH, MARGIN * 2 + orderedKinds.length * COL_WIDTH),
-    height: MARGIN * 2 + HEADER_H + maxRows * ROW_HEIGHT,
-    columns,
-    positions,
-    shown: shownNodes.length,
-    omitted: nodes.length - shownNodes.length,
-  };
-}
 
 function NodeRow({
   node,
@@ -234,6 +184,10 @@ function ImpactRow({ direction, item }: { direction: "Upstream" | "Downstream"; 
 
 export function UnifiedLineageScreen() {
   const ORG = useOrgId();
+  const [zoom, setZoom] = useState(1);
+  const [detailsVisible, setDetailsVisible] = useState(true);
+  const [maximized, setMaximized] = useState(false);
+  const [neighborhood, setNeighborhood] = useState(true);
   const [params, setParams] = useUrlState();
   const ds = params.get("ds");
   const selectedNodeId = params.get("node");
@@ -353,7 +307,7 @@ export function UnifiedLineageScreen() {
     [graph, activeLayers],
   );
 
-  const layout = useMemo(() => (graph ? layoutTopology(graph.nodes) : null), [graph]);
+  const layout = useMemo(() => (graph ? layoutTopology(graph.nodes, filteredEdges, selectedNodeId, neighborhood) : null), [graph, filteredEdges, selectedNodeId, neighborhood]);
 
   const topologyEdges = useMemo(() => {
     if (!layout) return [];
@@ -371,7 +325,7 @@ export function UnifiedLineageScreen() {
   }, [impact]);
 
   return (
-    <div className="ult">
+    <div className={`ult${maximized ? " ult--maximized" : ""}`}>
       <header className="ult__head">
         <div>
           <h1 className="ult__h1">Unified lineage</h1>
@@ -438,7 +392,7 @@ export function UnifiedLineageScreen() {
         </p>
       ) : null}
 
-      <div className="ult__layout">
+      <div className={`ult__layout${detailsVisible ? "" : " ult__layout--wide"}`}>
         <article className="ult__main">
           <div className="ult__panelhead">
             <div>
@@ -500,25 +454,33 @@ export function UnifiedLineageScreen() {
               {tab === "topology" ? (
                 layout && layout.columns.length > 0 ? (
                   <div className="ult__topowrap">
+                    <div className="ult__viewtools">
+                      <Button onClick={() => setZoom(Math.max(.5, zoom - .25))}>Zoom out</Button>
+                      <Button onClick={() => setZoom(Math.min(4, zoom + .25))}>Zoom in</Button>
+                      <Button onClick={() => setZoom(1)}>Fit graph</Button>
+                      <Button onClick={() => setDetailsVisible(!detailsVisible)}>{detailsVisible ? "Hide details" : "Show details"}</Button>
+                      <Button onClick={() => setMaximized(!maximized)}>{maximized ? "Exit expanded view" : "Expand graph"}</Button>
+                      <label><input type="checkbox" checked={neighborhood} onChange={e => setNeighborhood(e.target.checked)} />Focus neighborhood (2 hops)</label>
+                    </div>
+                    <div className="ult__canvas">
                     <svg
                       className="ult__topo"
-                      width={layout.width}
-                      height={layout.height}
+                      style={{ width: `${zoom * 100}%`, height: `${zoom * 100}%` }}
                       viewBox={`0 0 ${layout.width} ${layout.height}`}
                       role="img"
-                      aria-label="Estate topology, nodes grouped by kind"
+                      aria-label="Directed lineage, upstream to downstream"
                     >
+                      <defs><marker id="lineage-direction" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="currentColor" /></marker></defs>
                       {topologyEdges.map((e) => {
                         const s = layout.positions.get(e.source_node_id)!;
                         const t = layout.positions.get(e.target_node_id)!;
                         const layer = LAYER_DEFS.find((l) => l.key === layerOf(e.edge_source))!;
                         return (
-                          <line
+                          <path
                             key={e.id}
-                            x1={s.x}
-                            y1={s.y}
-                            x2={t.x}
-                            y2={t.y}
+                            fill="none"
+                            markerEnd="url(#lineage-direction)"
+                            d={`M ${s.x + 94} ${s.y} C ${s.x + 135} ${s.y}, ${t.x - 135} ${t.y}, ${t.x - 94} ${t.y}`}
                             className={`ult__topoedge ult__topoedge--${layer.tone}`}
                           />
                         );
@@ -552,6 +514,7 @@ export function UnifiedLineageScreen() {
                         }),
                       )}
                     </svg>
+                    </div>
                     {layout.omitted > 0 ? (
                       <p className="ult__topocap">
                         Showing {layout.shown} of {graph.nodes.length} nodes in the diagram — the "Nodes" tab lists all of
@@ -588,7 +551,7 @@ export function UnifiedLineageScreen() {
           )}
         </article>
 
-        <aside className="ult__impact" aria-label="Impact">
+        <aside hidden={!detailsVisible} className="ult__impact" aria-label="Impact">
           {!selectedNodeId ? (
             <Empty title="Select a graph node" hint="Bounded upstream and downstream impact will appear here." />
           ) : impactError ? (

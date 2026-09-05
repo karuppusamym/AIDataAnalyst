@@ -97,6 +97,10 @@ interface ParameterDraft {
   required: boolean;
   sensitive: boolean;
   allowedValues: string;
+  defaultJson?: string;
+  minimum?: number | null;
+  maximum?: number | null;
+  max_length?: number | null;
 }
 
 const blankParameter = (): ParameterDraft => ({
@@ -170,13 +174,15 @@ function ParameterBuilder({
             Sensitive
           </label>
           <label>
-            Allowed values
+            Allowed values (JSON array or comma-separated)
             <input
               placeholder="NY,NJ"
               value={p.allowedValues}
               onChange={(e) => update(i, { allowedValues: e.target.value })}
             />
           </label>
+          <label>Default (JSON)<input value={p.defaultJson ?? ""} placeholder='"NY" or 10' onChange={e => update(i, { defaultJson: e.target.value })} /></label>
+          {(["minimum", "maximum", "max_length"] as const).map(key => <label key={key}>{key.replace("_", " ")}<input type="number" value={p[key] ?? ""} onChange={e => update(i, { [key]: e.target.value === "" ? null : Number(e.target.value) })} /></label>)}
           <button
             type="button"
             className="trparams__remove"
@@ -590,7 +596,7 @@ export function ToolRegistryScreen() {
       });
     return () => ac.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [ORG]);
 
   const [tools, setTools] = useState<GovernedToolVersionRead[]>([]);
   const [total, setTotal] = useState<number | null>(null);
@@ -693,7 +699,9 @@ export function ToolRegistryScreen() {
             parameter_type: p.parameter_type,
             required: p.required ?? true,
             sensitive: p.sensitive ?? false,
-            allowedValues: (p.allowed_values ?? []).map(String).join(","),
+            allowedValues: p.allowed_values ? JSON.stringify(p.allowed_values) : "",
+            defaultJson: p.default == null ? "" : JSON.stringify(p.default),
+            minimum: p.minimum, maximum: p.maximum, max_length: p.max_length,
           }))
         : [blankParameter()],
     );
@@ -707,7 +715,9 @@ export function ToolRegistryScreen() {
         setStatusMsg({ text: "Select a project before creating a tool version.", kind: "error" });
         return;
       }
-      const body: GovernedToolVersionCreate = {
+      let body: GovernedToolVersionCreate;
+      try {
+      body = {
         slug: form.slug,
         name: form.name,
         description: form.description,
@@ -716,17 +726,32 @@ export function ToolRegistryScreen() {
         parameters: parameters
           .filter((p) => p.name.trim().length > 0)
           .map((p) => {
-            const allowed = splitIds(p.allowedValues);
+            const convert = (v: string): unknown => {
+              if (p.parameter_type === "NUMBER" || p.parameter_type === "INTEGER") {
+                const number = Number(v);
+                if (!Number.isFinite(number)) throw new Error("Allowed numeric values must be numbers");
+                return number;
+              }
+              if (p.parameter_type === "BOOLEAN") {
+                if (!["true", "false"].includes(v)) throw new Error("Boolean values must be true or false");
+                return v === "true";
+              }
+              return v;
+            };
+            const allowed: unknown[] = p.allowedValues.trim().startsWith("[") ? JSON.parse(p.allowedValues) : splitIds(p.allowedValues).map(convert);
             return {
               name: p.name,
               parameter_type: p.parameter_type,
               required: p.required,
               sensitive: p.sensitive,
               ...(allowed.length ? { allowed_values: allowed } : {}),
+              default: p.defaultJson?.trim() ? JSON.parse(p.defaultJson) : null,
+              minimum: p.minimum, maximum: p.maximum, max_length: p.max_length,
             };
           }),
         allowed_roles: splitIds(form.allowedRoles),
       };
+      } catch (e) { setStatusMsg({ text: (e as Error).message, kind: "error" }); return; }
       setCreating(true);
       setStatusMsg({ text: "Validating SQL contract…", kind: "info" });
       try {

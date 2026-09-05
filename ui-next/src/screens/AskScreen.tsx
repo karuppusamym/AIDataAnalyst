@@ -1,3 +1,4 @@
+import { SaveAnalysisTool } from "../components/SaveAnalysisTool";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentAnalysisResponse,
@@ -218,6 +219,7 @@ function AnswerPanel({
           ×
         </button>
       </header>
+      {status === "COMPLETED" ? <SaveAnalysisTool key={runId} runId={runId} /> : null}
       <div className="evp__body">
         {loading && !isFresh ? (
           <div className="evp__load" role="status">

@@ -4,6 +4,7 @@ Multi-Step Tool Plans API (Phase E - EE.6 / AG-4)
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -19,14 +20,16 @@ from aida.db import get_session, session_factory
 from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit, record_outbox
 from aida.models import (
+    GovernedTool,
+    GovernedToolVersion,
     ToolPlanExecutionRecord,
     ToolPlanRecord,
     ToolPlanStepRecord,
 )
 from aida.schemas import ApiModel, Page, ToolExecutionRequest
+from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_api import execute_tool_version
 from aida.tool_plan_runtime import resolve_plan_tools
-from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_plans import (
     PlanBudget,
     PlanStep,
@@ -236,6 +239,134 @@ async def create_tool_plan(
     return ToolPlanRead.model_validate(record)
 
 
+@router.get("/tool-plans", response_model=Page)
+async def list_tool_plans(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer", "Viewer")
+    ),
+    session: AsyncSession = Depends(get_session),
+) -> Page:
+    filters = (ToolPlanRecord.organization_id == context.require_organization(),)
+    total = await session.scalar(select(func.count()).select_from(ToolPlanRecord).where(*filters))
+    rows = await session.scalars(
+        select(ToolPlanRecord)
+        .where(*filters)
+        .order_by(
+            ToolPlanRecord.created_at.desc(),
+            ToolPlanRecord.id,
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    return Page(
+        items=[ToolPlanRead.model_validate(row) for row in rows],
+        total=total or 0,
+        limit=limit,
+        offset=offset,
+    )
+
+
+class PlanRecommendationRequest(ApiModel):
+    project_id: UUID
+    prompt: str = Field(min_length=3, max_length=4000)
+
+
+@router.post("/tool-plans/recommend", response_model=ToolPlanCreate)
+async def recommend_tool_plan(
+    body: PlanRecommendationRequest,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "DataEngineer")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> ToolPlanCreate:
+    """Deterministic metadata matching. Produces an editable proposal; never executes it."""
+    await _deny_unless_entitled(
+        session, context, settings=settings, action="tool_plan.recommend", resource_id=None
+    )
+    rows = (
+        await session.execute(
+            select(GovernedTool, GovernedToolVersion)
+            .join(
+                GovernedToolVersion,
+                GovernedToolVersion.tool_id == GovernedTool.id,
+            )
+            .where(
+                GovernedTool.organization_id == context.require_organization(),
+                GovernedTool.project_id == body.project_id,
+                GovernedToolVersion.status == "PUBLISHED",
+            )
+            .order_by(
+                GovernedToolVersion.version.desc(),
+                GovernedTool.id,
+            )
+            .limit(500)
+        )
+    ).all()
+    steps = []
+    for clause in re.split(r"\bthen\b|\n", body.prompt, flags=re.IGNORECASE):
+        terms = set(re.findall(r"[a-z0-9]+", clause.lower())) - {
+            "the",
+            "a",
+            "and",
+            "for",
+            "by",
+            "run",
+            "tool",
+            "get",
+        }
+        ranked = sorted(
+            rows,
+            key=lambda row: len(
+                terms
+                & set(
+                    re.findall(
+                        r"[a-z0-9]+",
+                        f"{row[0].slug} {row[1].name} {row[1].description}".lower(),
+                    )
+                )
+            ),
+            reverse=True,
+        )
+        eligible = [
+            row
+            for row in ranked
+            if "PlatformAdmin" in context.roles
+            or not context.roles.isdisjoint(row[1].allowed_roles)
+        ]
+        if not eligible:
+            raise HTTPException(
+                status_code=422, detail="No accessible published tools match this project"
+            )
+        tool, version = eligible[0]
+        if not terms.intersection(
+            re.findall(r"[a-z0-9]+", f"{tool.slug} {version.name} {version.description}".lower())
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="No matching tool; use the names shown in the published-tool picker",
+            )
+        sequence = len(steps) + 1
+        steps.append(
+            PlanStepCreate(
+                sequence=sequence,
+                tool_id=str(tool.id),
+                tool_version=str(version.version),
+                parameters={
+                    p["name"]: p["default"]
+                    for p in version.parameter_schema
+                    if p.get("default") is not None and not p.get("sensitive")
+                },
+                dependencies=[sequence - 1] if sequence > 1 else [],
+            )
+        )
+        if len(steps) >= 20:
+            break
+    return ToolPlanCreate(name=body.prompt[:200], steps=steps)
+
+
 @router.get(
     "/tool-plans/{plan_id}",
     response_model=ToolPlanDetailRead,
@@ -326,7 +457,9 @@ async def validate_tool_plan(
     )
 
     if plan_record.status not in ("DRAFT", "VALIDATED"):
-        raise HTTPException(status_code=409, detail="Only draft or validated plans can be validated")
+        raise HTTPException(
+            status_code=409, detail="Only draft or validated plans can be validated"
+        )
     result, _versions = await resolve_plan_tools(session, plan, context)
 
     if result.valid:
@@ -421,10 +554,14 @@ async def execute_tool_plan(
     validation, versions = await resolve_plan_tools(session, plan, context)
     if not validation.valid:
         raise HTTPException(status_code=422, detail="; ".join(i.issue for i in validation.issues))
-    claimed = await session.execute(update(ToolPlanRecord).where(
-        ToolPlanRecord.id == plan_id,
-        ToolPlanRecord.status.in_(("DRAFT", "VALIDATED")),
-    ).values(status="EXECUTING"))
+    claimed = await session.execute(
+        update(ToolPlanRecord)
+        .where(
+            ToolPlanRecord.id == plan_id,
+            ToolPlanRecord.status.in_(("DRAFT", "VALIDATED")),
+        )
+        .values(status="EXECUTING")
+    )
     if claimed.rowcount != 1:
         raise HTTPException(status_code=409, detail="Plan has already been started or cancelled")
     await session.commit()
@@ -436,18 +573,29 @@ async def execute_tool_plan(
                 return StepResult(step.sequence, "CANCELLED")
             try:
                 result = await execute_tool_version(
-                    versions[step.sequence], ToolExecutionRequest(parameters=step.parameters),
-                    context, step_session, settings,
+                    versions[step.sequence],
+                    ToolExecutionRequest(parameters=step.parameters),
+                    context,
+                    step_session,
+                    settings,
                 )
             except HTTPException as exc:
-                return StepResult(step.sequence, "FAILED", error_message=f"Tool refused execution (HTTP {exc.status_code})")
-            return StepResult(step.sequence, "COMPLETED", evidence={
-                "tool_execution_id": str(result.tool_execution_id),
-                "query_execution_id": str(result.execution.execution_id),
-                "tool_version_id": str(result.tool_version_id),
-                "row_count": result.execution.row_count,
-                "tokens_used": 0,
-            })
+                return StepResult(
+                    step.sequence,
+                    "FAILED",
+                    error_message=f"Tool refused execution (HTTP {exc.status_code})",
+                )
+            return StepResult(
+                step.sequence,
+                "COMPLETED",
+                evidence={
+                    "tool_execution_id": str(result.tool_execution_id),
+                    "query_execution_id": str(result.execution.execution_id),
+                    "tool_version_id": str(result.tool_version_id),
+                    "row_count": result.execution.row_count,
+                    "tokens_used": 0,
+                },
+            )
 
     plan_result = await execute_plan(
         plan, org_id, session, context.principal_id, step_executor=run_step
@@ -470,9 +618,7 @@ async def execute_tool_plan(
             step_record.evidence = sr.evidence
             step_record.error_message = sr.error_message
 
-    execution_record = await persist_execution(
-        session, org_id, plan_result, context.principal_id
-    )
+    execution_record = await persist_execution(session, org_id, plan_result, context.principal_id)
 
     record_audit(
         session,
@@ -511,9 +657,7 @@ async def execute_tool_plan(
 )
 async def cancel_tool_plan(
     plan_id: UUID,
-    context: SecurityContext = Depends(
-        require_roles("PlatformAdmin", "ToolDeveloper")
-    ),
+    context: SecurityContext = Depends(require_roles("PlatformAdmin", "ToolDeveloper")),
     session: AsyncSession = Depends(get_session),
 ) -> ToolPlanRead:
     """Cancel a running or draft tool plan."""

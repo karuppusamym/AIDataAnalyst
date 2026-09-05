@@ -10,6 +10,7 @@ from pydantic import Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlglot import exp, parse_one
 
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
@@ -18,11 +19,13 @@ from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, ensure_datasource_enabled
 from aida.models import (
+    AgentRun,
     DataSource,
     GovernanceReview,
     GovernedTool,
     GovernedToolVersion,
     Project,
+    QueryExecution,
     SemanticModelVersion,
     ToolCertificationCase,
     ToolCertificationRun,
@@ -876,6 +879,71 @@ async def get_tool_deprecation_impact(
         settings=settings,
     )
     return _impact_read(tool, version, impact)
+
+
+class AnalysisToolBlueprintRead(ApiModel):
+    project_id: UUID
+    definition: GovernedToolVersionCreate
+    parameter_review_required: bool
+
+
+@router.post("/agent-runs/{run_id}/tool-blueprint", response_model=AnalysisToolBlueprintRead)
+async def prepare_analysis_tool(
+    run_id: UUID,
+    context: SecurityContext = Depends(
+        require_roles("PlatformAdmin", "ToolDeveloper", "SemanticAdmin")
+    ),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> AnalysisToolBlueprintRead:
+    run = await session.get(AgentRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Analysis run not found")
+    enforce_organization(context, run.organization_id)
+    if "PlatformAdmin" not in context.roles and run.principal_id != context.principal_id:
+        raise HTTPException(status_code=403, detail="Only the analysis author can prepare its tool")
+    query = (
+        await session.get(QueryExecution, run.query_execution_id)
+        if run.query_execution_id
+        else None
+    )
+    if (
+        run.status != "COMPLETED"
+        or query is None
+        or query.status != "COMPLETED"
+        or not query.normalized_sql
+    ):
+        raise HTTPException(
+            status_code=409, detail="A successful analysis with stored SQL is required"
+        )
+    datasource = await session.get(DataSource, run.datasource_id)
+    if datasource is None:
+        raise HTTPException(status_code=409, detail="Analysis datasource is unavailable")
+    statement = parse_one(query.normalized_sql, read=datasource.dialect)
+    # Stored SQL contains redacted literals, including LIMIT. Never invent their values.
+    # The ordinary gateway will enforce its row cap on the reusable operation.
+    statement.set("limit", None)
+    parameters = []
+    for index, placeholder in enumerate(list(statement.find_all(exp.Placeholder)), 1):
+        name = f"value_{index}"
+        placeholder.replace(exp.Placeholder(this=name))
+        parameters.append(
+            ToolParameterDefinition(name=name, parameter_type="STRING", required=True)
+        )
+    return AnalysisToolBlueprintRead(
+        project_id=datasource.project_id,
+        definition=GovernedToolVersionCreate(
+            slug=f"analysis_{run.id.hex[:12]}",
+            name="Reusable analysis",
+            description=(f"Draft from completed analysis {run.id}. "
+                         "Parameter types require author review."),
+            datasource_id=datasource.id,
+            sql_template=statement.sql(dialect=datasource.dialect),
+            parameters=parameters,
+            allowed_roles=["Analyst", "ToolConsumer"],
+        ),
+        parameter_review_required=bool(parameters),
+    )
 
 
 @router.post("/tool-versions/{version_id}/execute", response_model=ToolExecutionResponse)

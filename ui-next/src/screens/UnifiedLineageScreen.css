@@ -75,3 +75,11 @@
 .ult__impactasset{color:var(--ink);font-weight:600}
 .ult__impactqn{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
 .tnum{font-variant-numeric:tabular-nums}
+
+.ult--maximized{position:fixed;inset:0;z-index:1000;background:var(--surface);box-sizing:border-box}
+.ult__layout--wide{grid-template-columns:minmax(0,1fr)}
+.ult__impact[hidden]{display:none}
+.ult__viewtools{display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:8px;flex:none}
+.ult__canvas{height:clamp(350px,55vh,850px);min-height:350px;overflow:auto;flex:1}
+.ult__canvas .ult__topo{min-width:0;min-height:0}
+.ult--maximized .ult__canvas{height:70vh}

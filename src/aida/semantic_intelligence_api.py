@@ -1,8 +1,5 @@
-import hashlib
-import json
 from dataclasses import replace
-from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
@@ -15,13 +12,10 @@ from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
 from aida.db import get_session
 from aida.events import record_audit, record_outbox
-from aida.fleet import ensure_datasource_enabled
 from aida.models import (
-    AnalysisRun,
     BusinessDomain,
     BusinessEntity,
     DataSource,
-    GovernanceReview,
     MetadataBusinessAnnotation,
     MetadataBusinessAnnotationVersion,
     MetadataColumn,
@@ -46,9 +40,7 @@ from aida.schemas import (
 )
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.semantic_inference import (
-    SEMANTIC_INFERENCE_VERSION,
     TableSemanticOutput,
-    enrich_with_optional_model,
 )
 from aida.semantic_inference_service import generate_semantic_inference
 from aida.tool_api import create_tool_version

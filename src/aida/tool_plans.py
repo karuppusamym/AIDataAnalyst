@@ -134,8 +134,7 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
             ValidationIssue(
                 step_sequence=0,
                 issue=(
-                    f"plan has {len(plan.steps)} steps, "
-                    f"exceeds budget of {plan.budget.max_steps}"
+                    f"plan has {len(plan.steps)} steps, exceeds budget of {plan.budget.max_steps}"
                 ),
                 severity="ERROR",
             )
@@ -162,8 +161,7 @@ def validate_plan(plan: ToolPlan, available_tools: set[str] | None = None) -> Va
             ValidationIssue(
                 step_sequence=0,
                 issue=(
-                    f"total timeout {total_time}s "
-                    f"exceeds budget of {plan.budget.max_time_seconds}s"
+                    f"total timeout {total_time}s exceeds budget of {plan.budget.max_time_seconds}s"
                 ),
                 severity="WARNING",
             )
@@ -258,13 +256,18 @@ async def execute_plan(
 
     validation = validate_plan(plan)
     if not validation.valid or step_executor is None:
-        reason = "tool executor is unavailable" if step_executor is None else "; ".join(
-            issue.issue for issue in validation.issues if issue.severity == "ERROR"
+        reason = (
+            "tool executor is unavailable"
+            if step_executor is None
+            else "; ".join(issue.issue for issue in validation.issues if issue.severity == "ERROR")
         )
         return PlanResult(
-            plan.id or uuid4(), "FAILED",
+            plan.id or uuid4(),
+            "FAILED",
             [StepResult(s.sequence, "FAILED", error_message=reason) for s in plan.steps],
-            BudgetConsumed(0, 0, 0, 0), started_at, datetime.now(UTC),
+            BudgetConsumed(0, 0, 0, 0),
+            started_at,
+            datetime.now(UTC),
         )
 
     ordered_steps = _topological_order(plan.steps)
@@ -279,9 +282,7 @@ async def execute_plan(
                     sequence=step.sequence,
                     status="SKIPPED",
                     evidence={
-                        "reason": (
-                            "dependency_not_met" if not deps_met else "earlier_failure"
-                        )
+                        "reason": ("dependency_not_met" if not deps_met else "earlier_failure")
                     },
                 )
             )
@@ -314,9 +315,9 @@ async def execute_plan(
         # Execute step
         step_start = datetime.now(UTC)
         try:
-            async with asyncio.timeout(min(
-                step.timeout_seconds, max(0.001, plan.budget.max_time_seconds - elapsed)
-            )):
+            async with asyncio.timeout(
+                min(step.timeout_seconds, max(0.001, plan.budget.max_time_seconds - elapsed))
+            ):
                 result = await step_executor(step, {"organization_id": str(organization_id)})
         except TimeoutError:
             result = StepResult(step.sequence, "FAILED", error_message="step timeout exceeded")

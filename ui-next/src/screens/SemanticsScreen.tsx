@@ -1,3 +1,4 @@
+import { SemanticAuthor, BusinessGeneration } from "../components/SemanticAuthor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ConsumerFooterRead,
@@ -418,6 +419,8 @@ export function SemanticsScreen() {
         {projectsError ? <p className="smscreen__pickerr" role="alert">{projectsError}</p> : null}
       </div>
 
+      <BusinessGeneration key={ORG} org={ORG} />
+      {projectId ? <SemanticAuthor key={projectId} org={ORG} projectId={projectId} models={models} onSaved={() => void loadModels()} /> : null}
       <div className="smscreen__main">
         {!projectId ? (
           <Empty

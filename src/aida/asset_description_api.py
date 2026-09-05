@@ -185,8 +185,7 @@ async def _load_pending_batch(
         raise HTTPException(
             status_code=409,
             detail=(
-                "one or more asset description drafts in the batch are not "
-                "currently pending review"
+                "one or more asset description drafts in the batch are not currently pending review"
             ),
         )
     return [rows[draft_id] for draft_id in draft_ids]
@@ -357,27 +356,43 @@ class DescriptionDraftEdit(BaseModel):
 
 @router.put("/asset-description-drafts/{draft_id}", response_model=AssetDescriptionDraftRead)
 async def edit_asset_description_draft(
-    draft_id: UUID, body: DescriptionDraftEdit,
+    draft_id: UUID,
+    body: DescriptionDraftEdit,
     context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> AssetDescriptionDraftRead:
-    draft = await session.scalar(select(AssetDescriptionDraft).where(
-        AssetDescriptionDraft.id == draft_id,
-    ).with_for_update())
+    draft = await session.scalar(
+        select(AssetDescriptionDraft)
+        .where(
+            AssetDescriptionDraft.id == draft_id,
+        )
+        .with_for_update()
+    )
     if draft is None:
         raise HTTPException(status_code=404, detail="asset description draft not found")
     enforce_organization(context, draft.organization_id)
     if draft.status != "DRAFT" or draft.drafted_text != body.expected_text:
-        raise HTTPException(status_code=409, detail="Draft changed or is already in review; reload before editing")
-    draft.evidence = {**draft.evidence, "origin": "METADATA_WITH_HUMAN_EDITS",
-                      "original_fingerprint": draft.evidence.get("original_fingerprint", draft.text_fingerprint),
-                      "edited_by": context.principal_id}
+        raise HTTPException(
+            status_code=409, detail="Draft changed or is already in review; reload before editing"
+        )
+    draft.evidence = {
+        **draft.evidence,
+        "origin": "METADATA_WITH_HUMAN_EDITS",
+        "original_fingerprint": draft.evidence.get("original_fingerprint", draft.text_fingerprint),
+        "edited_by": context.principal_id,
+    }
     draft.drafted_text = body.drafted_text
     draft.text_fingerprint = text_fingerprint(body.drafted_text)
-    record_audit(session, context, action="asset_description.draft.edit",
-                 resource_type="asset_description_draft", resource_id=str(draft.id),
-                 outcome="SUCCESS", correlation_id=get_correlation_id(),
-                 details={"fingerprint": draft.text_fingerprint})
+    record_audit(
+        session,
+        context,
+        action="asset_description.draft.edit",
+        resource_type="asset_description_draft",
+        resource_id=str(draft.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={"fingerprint": draft.text_fingerprint},
+    )
     table = await session.get(MetadataTable, draft.table_id)
     await session.commit()
     return _draft_read(draft, table.name if table else str(draft.table_id))
@@ -485,9 +500,7 @@ async def submit_asset_description_draft(
 # requires model output to become authoritative.
 
 
-async def _table_names(
-    session: AsyncSession, table_ids: list[UUID]
-) -> dict[UUID, str]:
+async def _table_names(session: AsyncSession, table_ids: list[UUID]) -> dict[UUID, str]:
     if not table_ids:
         return {}
     rows = (
@@ -521,9 +534,7 @@ async def draw_asset_description_sample_review(
     seed = body.seed if body.seed is not None else generate_seed()
     drawn_ids = draw_reproducible_sample(body.draft_ids, sample_size=sample_size, seed=seed)
     drawn_by_id = {draft.id: draft for draft in batch if draft.id in set(drawn_ids)}
-    table_names = await _table_names(
-        session, [draft.table_id for draft in drawn_by_id.values()]
-    )
+    table_names = await _table_names(session, [draft.table_id for draft in drawn_by_id.values()])
     record_audit(
         session,
         replace(context, organization_id=organization_id),
@@ -634,15 +645,18 @@ async def decide_asset_description_sample_review(
             continue
         try:
             async with session.begin_nested():
-                event_type, aggregate_type, aggregate_id, payload = (
-                    await _apply_governance_review_decision(
-                        session,
-                        review,
-                        decision=body.decision,
-                        reason=body.reason,
-                        context=context,
-                        now=now,
-                    )
+                (
+                    event_type,
+                    aggregate_type,
+                    aggregate_id,
+                    payload,
+                ) = await _apply_governance_review_decision(
+                    session,
+                    review,
+                    decision=body.decision,
+                    reason=body.reason,
+                    context=context,
+                    now=now,
                 )
                 # Additive JSON evidence on the draft itself (no schema
                 # change -- `evidence` is already a free-form JSON column):

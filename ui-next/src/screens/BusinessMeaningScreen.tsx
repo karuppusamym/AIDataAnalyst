@@ -1,3 +1,4 @@
+import { BusinessGeneration } from "../components/SemanticAuthor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetadataBusinessAnnotationRead } from "../lib/types";
 import { ApiError, fetchBusinessAnnotations, fetchBusinessMap, fetchTableBusinessAnnotation, fetchCatalogRows } from "../lib/api";
@@ -904,6 +905,7 @@ export function BusinessMeaningScreen() {
         </Field>
       </div>
 
+      <BusinessGeneration key={dsId ?? ORG} org={ORG} datasourceId={dsId} />
       <div className="bm__tabs" role="tablist">
         <button
           role="tab"

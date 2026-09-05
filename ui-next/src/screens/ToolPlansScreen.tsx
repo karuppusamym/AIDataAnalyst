@@ -1,3 +1,4 @@
+import { PlanLibrary, PublishedToolPicker } from "../components/PlanToolsControls";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ExecutionRead,
@@ -110,6 +111,7 @@ interface StepDraft {
   parametersJson: string;
   timeoutSeconds: string;
   expectedCost: string;
+  dependencies?: string;
 }
 
 interface BudgetDraft {
@@ -122,6 +124,7 @@ interface BudgetDraft {
 interface CreateFormState {
   name: string;
   step: StepDraft;
+  additionalSteps?: StepDraft[];
 }
 
 const INITIAL_STEP: StepDraft = {
@@ -163,12 +166,12 @@ function CreatePlanPanel({
           <p className="tpform__eyebrow">NEW</p>
           <h2 className="tpform__h2">Create plan</h2>
           <p className="tpform__lede">
-            One step to start -- the plan model supports many dependency-ordered
-            steps, but multi-step authoring here is a future enhancement.
+            Choose published tools, supply their parameters, and connect steps by sequence number. Saved plans can be reused as templates.
           </p>
         </div>
       </header>
 
+      <PublishedToolPicker onSelect={tool => setForm({ ...form, step: { ...form.step, toolId: tool.tool_id, toolVersion: String(tool.version), parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } })} />
       <div className="tpform__grid">
         <div className="tpform__span2">
           <Field label="Plan name">
@@ -273,6 +276,12 @@ function CreatePlanPanel({
       </div>
 
       <div className="tpform__actions">
+        {(form.additionalSteps ?? []).map((step, i) => <fieldset key={i}><legend>Step {i + 2}</legend>
+          <PublishedToolPicker onSelect={tool => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, toolId: tool.tool_id, toolVersion: String(tool.version), parametersJson: JSON.stringify(Object.fromEntries(tool.parameters.filter(p => p.default != null).map(p => [p.name, p.default])), null, 2) } : s) })} />
+          {(["toolId", "toolVersion", "parametersJson", "dependencies", "timeoutSeconds", "expectedCost"] as const).map(key => <Field key={key} label={`Step ${i + 2} ${key}`}><input value={step[key] ?? ""} onChange={e => setForm({ ...form, additionalSteps: form.additionalSteps!.map((s, n) => n === i ? { ...s, [key]: e.target.value } : s) })} /></Field>)}
+        </fieldset>)}
+        <Button onClick={() => setForm({ ...form, additionalSteps: [...(form.additionalSteps ?? []), { ...INITIAL_STEP, dependencies: String((form.additionalSteps?.length ?? 0) + 1) }] })}>Add step</Button>
+        {form.additionalSteps?.length ? <Button onClick={() => setForm({ ...form, additionalSteps: form.additionalSteps!.slice(0, -1) })}>Remove last step</Button> : null}
         <Button type="submit" variant="primary" disabled={creating}>
           {creating ? "Creating…" : "Create plan"}
         </Button>
@@ -475,6 +484,17 @@ export function ToolPlansScreen() {
         setStatusMsg({ text: "Parameters must be valid JSON.", kind: "error" });
         return;
       }
+      let extraSteps: ToolPlanCreate["steps"];
+      try {
+        if (!parameters || Array.isArray(parameters) || typeof parameters !== "object") throw new Error("Parameters must be a JSON object.");
+        extraSteps = (form.additionalSteps ?? []).map((step, i) => {
+          const values = JSON.parse(step.parametersJson || "{}");
+          if (!values || Array.isArray(values) || typeof values !== "object") throw new Error("Step parameters must be a JSON object.");
+          return { sequence: i + 2, tool_id: step.toolId, tool_version: step.toolVersion, parameters: values,
+            dependencies: (step.dependencies ?? "").split(",").filter(v => v.trim()).map(Number),
+            timeout_seconds: Number(step.timeoutSeconds), expected_cost: Number(step.expectedCost) };
+        });
+      } catch (e) { setStatusMsg({ text: (e as Error).message, kind: "error" }); return; }
       const body: ToolPlanCreate = {
         name: form.name,
         steps: [
@@ -487,6 +507,7 @@ export function ToolPlansScreen() {
             timeout_seconds: Number(form.step.timeoutSeconds) || 300,
             expected_cost: Number(form.step.expectedCost) || 0,
           },
+          ...extraSteps,
         ],
         budget: {
           max_steps: Number(budget.maxSteps) || 20,
@@ -581,6 +602,11 @@ export function ToolPlansScreen() {
         <div className={`tpscreen__status tpscreen__status--${statusMsg.kind}`} role="status">{statusMsg.text}</div>
       ) : null}
 
+      <PlanLibrary onSelect={id => setParams({ plan: id })} onDraft={draft => {
+        const steps = draft.steps.map(s => ({ toolId: s.tool_id, toolVersion: s.tool_version, parametersJson: JSON.stringify(s.parameters, null, 2), dependencies: (s.dependencies ?? []).join(","), timeoutSeconds: String(s.timeout_seconds ?? 300), expectedCost: String(s.expected_cost ?? 0) }));
+        setForm({ name: draft.name, step: steps[0] ?? INITIAL_STEP, additionalSteps: steps.slice(1) });
+        if (draft.budget) setBudget({ maxSteps: String(draft.budget.max_steps ?? 20), maxTimeSeconds: String(draft.budget.max_time_seconds ?? 600), maxTokens: String(draft.budget.max_tokens ?? 0), maxCostUnits: String(draft.budget.max_cost_units ?? 100) });
+      }} />
       <div className="tpscreen__body">
         <div className="tpscreen__main">
           {!planId ? (

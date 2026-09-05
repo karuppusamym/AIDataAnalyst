@@ -82,8 +82,8 @@ from aida.models import (
     SemanticInferenceRun,
 )
 from aida.schemas import SemanticInferenceRequest
-from aida.semantic_inference_service import generate_semantic_inference
 from aida.security import SecurityContext
+from aida.semantic_inference_service import generate_semantic_inference
 
 logger = structlog.get_logger(__name__)
 
@@ -93,9 +93,7 @@ logger = structlog.get_logger(__name__)
 # each carrying its own copy.
 NEWLY_CREATED_TABLE_EVENT_TYPE = "catalog.table.newly_created.v1"
 _DRAFT_ENQUEUED_EVENT_TYPE = "asset_description.draft.auto_enqueued.v1"
-_SEMANTIC_INFERENCE_DEFERRED_EVENT_TYPE = (
-    "business_semantics.inference.auto_enqueue_deferred.v1"
-)
+_SEMANTIC_INFERENCE_DEFERRED_EVENT_TYPE = "business_semantics.inference.auto_enqueue_deferred.v1"
 _AUTO_ENQUEUE_PRINCIPAL = "auto-enqueue-drafter"
 # The two open-draft statuses `generate_asset_description_drafts` also
 # treats as "already in flight; do not stack another one on top of this".
@@ -117,9 +115,7 @@ def _worker_context(organization_id: UUID) -> SecurityContext:
     )
 
 
-async def _table_has_approved_description(
-    session: Any, table_id: UUID
-) -> bool:
+async def _table_has_approved_description(session: Any, table_id: UUID) -> bool:
     """True when `table_id` already has an APPROVED, stewarded description.
 
     An approved description is the source of truth (see ADR-0018 / GL-9)
@@ -173,16 +169,12 @@ async def _table_has_any_draft(session: Any, table_id: UUID) -> bool:
     identical `DRAFT` rows.
     """
     existing_id = await session.scalar(
-        select(AssetDescriptionDraft.id)
-        .where(AssetDescriptionDraft.table_id == table_id)
-        .limit(1)
+        select(AssetDescriptionDraft.id).where(AssetDescriptionDraft.table_id == table_id).limit(1)
     )
     return existing_id is not None
 
 
-async def _completed_analysis_run_id(
-    session: Any, datasource_id: UUID
-) -> UUID | None:
+async def _completed_analysis_run_id(session: Any, datasource_id: UUID) -> UUID | None:
     """Return the id of the most recently `COMPLETED` `AnalysisRun` for
     `datasource_id`, or None if none has completed yet. Mirrors the
     exact gate `create_semantic_inference_run` uses on the HTTP path
@@ -255,9 +247,7 @@ async def enqueue_description_draft_for_table(
     return draft
 
 
-async def handle_newly_created_table(
-    session: Any, payload: dict[str, Any]
-) -> None:
+async def handle_newly_created_table(session: Any, payload: dict[str, Any]) -> None:
     """Handle one decoded `catalog.table.newly_created.v1` event.
 
     Runs inside the caller's `AsyncSession` -- the caller commits (the
@@ -420,33 +410,58 @@ async def handle_newly_created_table(
 
 
 async def enqueue_semantics_for_source(
-    session: Any, datasource_id: UUID, table_ids: list[UUID] | None = None,
+    session: Any,
+    datasource_id: UUID,
+    table_ids: list[UUID] | None = None,
 ) -> None:
     """Generate actual proposals, once per table and completed scan, in bounded batches."""
-    datasource = await session.scalar(select(DataSource).where(
-        DataSource.id == datasource_id,
-    ).with_for_update())
+    datasource = await session.scalar(
+        select(DataSource)
+        .where(
+            DataSource.id == datasource_id,
+        )
+        .with_for_update()
+    )
     if datasource is None or not get_settings().auto_enqueue_on_ingest:
         return
     run_id = await _completed_analysis_run_id(session, datasource_id)
     if run_id is None:
         return
-    proposed = select(MetadataEnrichmentProposal.table_id).join(
-        SemanticInferenceRun, SemanticInferenceRun.id == MetadataEnrichmentProposal.inference_run_id,
-    ).where(SemanticInferenceRun.analysis_run_id == run_id)
+    proposed = (
+        select(MetadataEnrichmentProposal.table_id)
+        .join(
+            SemanticInferenceRun,
+            SemanticInferenceRun.id == MetadataEnrichmentProposal.inference_run_id,
+        )
+        .where(SemanticInferenceRun.analysis_run_id == run_id)
+    )
     while True:
-        filters = [MetadataTable.datasource_id == datasource_id,
-                   MetadataTable.status == "ACTIVE", MetadataTable.id.not_in(proposed)]
+        filters = [
+            MetadataTable.datasource_id == datasource_id,
+            MetadataTable.status == "ACTIVE",
+            MetadataTable.id.not_in(proposed),
+        ]
         if table_ids is not None:
             filters.append(MetadataTable.id.in_(table_ids))
-        pending = list(await session.scalars(select(MetadataTable.id).where(*filters).order_by(
-            MetadataTable.id,
-        ).limit(100)))
+        pending = list(
+            await session.scalars(
+                select(MetadataTable.id)
+                .where(*filters)
+                .order_by(
+                    MetadataTable.id,
+                )
+                .limit(100)
+            )
+        )
         if not pending:
             return
         await generate_semantic_inference(
-            datasource_id, SemanticInferenceRequest(use_model=False, max_tables=100),
-            _worker_context(datasource.organization_id), session, get_settings(), table_ids=pending,
+            datasource_id,
+            SemanticInferenceRequest(use_model=False, max_tables=100),
+            _worker_context(datasource.organization_id),
+            session,
+            get_settings(),
+            table_ids=pending,
         )
         await session.flush()
 
@@ -493,7 +508,8 @@ async def run_newly_created_table_drafter_consumer() -> None:
         async for message in consumer:
             envelope = _decode_event(message.value)
             if envelope.get("event_type") not in (
-                NEWLY_CREATED_TABLE_EVENT_TYPE, "metadata.analysis.completed.v1",
+                NEWLY_CREATED_TABLE_EVENT_TYPE,
+                "metadata.analysis.completed.v1",
             ):
                 await consumer.commit()
                 if state.stopping:
@@ -503,7 +519,9 @@ async def run_newly_created_table_drafter_consumer() -> None:
                 if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
                     await handle_newly_created_table(session, envelope["payload"])
                 else:
-                    await enqueue_semantics_for_source(session, UUID(envelope["payload"]["datasource_id"]))
+                    await enqueue_semantics_for_source(
+                        session, UUID(envelope["payload"]["datasource_id"])
+                    )
             await consumer.commit()
             logger.info(
                 "newly_created_table_drafter_processed",
