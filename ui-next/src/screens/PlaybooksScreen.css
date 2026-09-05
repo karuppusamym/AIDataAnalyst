@@ -1,0 +1,43 @@
+/* Playbooks (AT-1). Saved, scheduled bulk-metadata rules. Built on the shared
+   design tokens (tokens.css) so it themes correctly; the "Create playbook"
+   collapsible form reuses `.workflow-author` (workflow-author.css). */
+
+.pbk { display: flex; flex-direction: column; gap: 16px; max-width: 900px; margin: 0 auto; padding-bottom: 32px; }
+
+.pbk__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.pbk__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.pbk__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 68ch; }
+
+.pbk__notice {
+  margin: 0; padding: 10px 13px; border: 1px solid var(--info); border-left-width: 3px; border-radius: var(--radius);
+  background: var(--info-soft); color: var(--info); font-size: 12px; line-height: 1.5;
+}
+
+.pbk__loading { margin: 0; padding: 24px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.pbk__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.pbk__row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  box-shadow: var(--shadow-1); padding: 14px 16px;
+}
+
+.pbk__rowmain { display: flex; flex-direction: column; gap: 10px; min-width: 0; flex: 1 1 420px; }
+.pbk__rowtitle { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pbk__rowtitle strong { font-size: 14.5px; letter-spacing: -0.01em; }
+
+.pbk__facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 20px; }
+.pbk__facts div { display: flex; flex-direction: column; gap: 2px; }
+.pbk__facts dt { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.pbk__facts dd { margin: 0; font-size: 12.5px; color: var(--ink); word-break: break-word; }
+.pbk__facts code { font-family: var(--mono); font-size: 11.5px; background: var(--sunk); border-radius: var(--radius-sm); padding: 1px 5px; }
+
+.pbk__mono { font-family: var(--mono); font-size: 11px; word-break: break-all; }
+
+.pbk__rowactions { display: flex; gap: 6px; flex-wrap: wrap; align-items: flex-start; }
+
+@media (max-width: 620px) {
+  .pbk__head { flex-direction: column; align-items: flex-start; }
+  .pbk__row { flex-direction: column; }
+}

@@ -2542,6 +2542,140 @@ export interface MarketplaceAccessRequestRead {
   updated_at: string;
 }
 
+/** `product_marketplace_api.py::portfolio_analytics_summary` -- org-wide
+ *  lifecycle counts for data products/versions, data contract versions and
+ *  context products/versions. Every field is a plain count, not a rate, so
+ *  the screen can render it as a stat grid with no derived math. */
+export interface PortfolioLifecycleRead {
+  data_products_total: number;
+  data_products_active: number;
+  data_products_candidate: number;
+  data_products_retired: number;
+  data_product_versions_draft: number;
+  data_product_versions_review_required: number;
+  data_product_versions_published: number;
+  data_product_versions_retired: number;
+  data_contract_versions_draft: number;
+  data_contract_versions_review_required: number;
+  data_contract_versions_published: number;
+  context_products_total: number;
+  context_product_versions_draft: number;
+  context_product_versions_review_required: number;
+  context_product_versions_published: number;
+  context_product_versions_deprecated: number;
+}
+
+/** Access-request funnel plus grant/fulfillment counts, windowed by
+ *  `window_days` on the summary endpoint (created_at >= now - window_days). */
+export interface PortfolioAccessRead {
+  requests_created: number;
+  requests_pending: number;
+  requests_approved: number;
+  requests_rejected: number;
+  requests_revoked: number;
+  requests_expired: number;
+  active_grants: number;
+  grants_expiring_within_30_days: number;
+  fulfillment_pending: number;
+  fulfillment_provisioned: number;
+  fulfillment_failed: number;
+  fulfillment_revoked: number;
+}
+
+/** Consumption counters for the same window: context-product reads, MCP
+ *  operations broken out by kind, agent runs broken out by generation path,
+ *  and governed-tool/query execution counts. */
+export interface PortfolioUsageRead {
+  unique_context_consumers: number;
+  unique_mcp_consumers: number;
+  unique_agent_principals: number;
+  context_product_reads: number;
+  mcp_operations: number;
+  mcp_resource_reads: number;
+  mcp_prompt_reads: number;
+  mcp_tool_calls: number;
+  mcp_control_operations: number;
+  agent_runs: number;
+  governed_tool_agent_runs: number;
+  model_gateway_agent_runs: number;
+  development_override_agent_runs: number;
+  policy_blocked_agent_runs: number;
+  query_executions: number;
+  governed_tool_executions: number;
+}
+
+/** `average_quality_score`/`average_lineage_coverage` are `null` when no
+ *  published product has been scored yet -- never coerced to 0 client-side. */
+export interface PortfolioQualityRead {
+  published_products: number;
+  scored_products: number;
+  average_quality_score: number | null;
+  low_quality_products: number;
+  certified_products: number;
+  uncertified_products: number;
+  average_lineage_coverage: number | null;
+}
+
+export interface PortfolioQueueRead {
+  review_required_data_product_versions: number;
+  review_required_data_contract_versions: number;
+  review_required_context_product_versions: number;
+  pending_marketplace_access_requests: number;
+}
+
+/** One row of the summary's `top_products` ranking. `quality_score` and
+ *  `lineage_coverage` are already 0-100 integers on the wire (unlike
+ *  `MarketplaceProductRead`'s 0-1 floats) -- render directly with a `%` sign,
+ *  never multiplied by 100. */
+export interface PortfolioTopProductRead {
+  data_product_version_id: string;
+  product_key: string;
+  name: string;
+  domain_name: string;
+  certification_status: string;
+  quality_score: number | null;
+  lineage_coverage: number;
+  access_request_count: number;
+  approved_access_count: number;
+  context_read_count: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/summary`. */
+export interface PortfolioAnalyticsSummaryRead {
+  generated_at: string;
+  window_days: number;
+  low_quality_threshold: number;
+  lifecycle: PortfolioLifecycleRead;
+  access: PortfolioAccessRead;
+  usage: PortfolioUsageRead;
+  quality: PortfolioQualityRead;
+  queues: PortfolioQueueRead;
+  top_products: PortfolioTopProductRead[];
+}
+
+/** One time bucket of the trends endpoint -- `bucket_days`-wide windows
+ *  covering the trailing `window_days`, oldest first. */
+export interface PortfolioTrendPointRead {
+  bucket_start: string;
+  bucket_end: string;
+  access_requests: number;
+  context_reads: number;
+  mcp_operations: number;
+  mcp_tool_calls: number;
+  agent_runs: number;
+  governed_tool_runs: number;
+  model_gateway_runs: number;
+  query_executions: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/trends`. */
+export interface PortfolioAnalyticsTrendsRead {
+  generated_at: string;
+  window_days: number;
+  bucket_days: number;
+  points: PortfolioTrendPointRead[];
+}
+
 /** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
 export interface MarketplaceDiscoveryResponse {
   results: Page;
@@ -4586,6 +4720,38 @@ export interface WorkspaceRead {
   updated_at: string;
 }
 
+/** PG-4: time-bounded, audited handoff of a principal's own governance
+ *  roles to another principal. Mirrors `aida.delegation_api.DelegationCreate`. */
+export interface DelegationCreate {
+  delegate_principal_id: string;
+  delegated_roles: string[];
+  reason: string;
+  starts_at?: string | null;
+  expires_at: string;
+}
+
+/** Mirrors `aida.delegation_api.DelegationRead`. `status` is `"ACTIVE"` or
+ *  `"REVOKED"` on the wire -- nothing flips the column at expiry by design
+ *  (see that module's own docstring), so an `"expired"` state is a client-side
+ *  projection of `status === "ACTIVE" && expires_at` being in the past, not a
+ *  value this field ever actually carries. */
+export interface DelegationRead {
+  id: string;
+  organization_id: string;
+  delegator_principal_id: string;
+  delegate_principal_id: string;
+  delegated_roles: string[];
+  reason: string;
+  starts_at: string;
+  expires_at: string;
+  status: string;
+  created_by: string;
+  revoked_by: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 // -------------------------------------------------------------------------
 // P1-05 / ADR-0026: parsed-lineage-edge review DTOs.
 // -------------------------------------------------------------------------
@@ -4741,4 +4907,65 @@ export interface AgentInboxRead {
   pending: AgentInboxPendingItem[];
   auto_applied: AgentInboxAutoApplied[];
   recent_tasks: AgentInboxRecentTask[];
+}
+
+// --- ADR-0027: the reviewer agent (pre-review, auto-decide, audit sampling) --
+// Mirrors `aida.agent_contract_api`'s reviewer-agent schemas field for field.
+
+export interface ReviewerAgentStateRead {
+  organization_id: string;
+  enabled: boolean;
+  suspended: boolean;
+  max_tier: string;
+  sampling_rate: number;
+  agent_principal_id: string;
+}
+
+export interface ReviewerAgentRunResult {
+  pre_reviewed: number;
+  decided: number;
+  approved: number;
+  rejected: number;
+  sampled_for_audit: number;
+}
+
+export interface DisagreementRateRead {
+  object_type: string;
+  sampled: number;
+  resolved: number;
+  agreed: number;
+  disagreed: number;
+  pending: number;
+  /** `null`, never `0`, when nothing has been resolved -- zero would claim a
+   *  measurement that was never taken. */
+  disagreement_rate: number | null;
+  sufficient_sample: boolean;
+  breaches_revisit_trigger: boolean;
+}
+
+export interface DisagreementReportRead {
+  window_days: number;
+  computed_at: string;
+  /** `false` when nothing in the window has been resolved. This is not
+   *  evidence the reviewer agent is performing well -- it is evidence that
+   *  nothing has been measured yet. */
+  measured: boolean;
+  threshold: number;
+  minimum_resolved_for_signal: number;
+  breaching_object_types: string[];
+  by_object_type: DisagreementRateRead[];
+}
+
+export interface ReviewAuditSampleRead {
+  sample_id: string;
+  governance_review_id: string;
+  agent_principal_id: string;
+  object_type: string;
+  risk_tier: string;
+  decision: string;
+  sampled_at: string;
+  human_outcome: string;
+  human_principal_id: string | null;
+  human_rationale: string | null;
+  resolved_at: string | null;
 }

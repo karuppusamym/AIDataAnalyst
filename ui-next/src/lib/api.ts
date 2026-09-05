@@ -17,6 +17,7 @@ import type {
   DataQualityIncidentTransition,
   DataQualitySummaryRead,
   DataSourceRead,
+  DisagreementReportRead,
   FleetSummaryRead,
   GovernanceDecisionRequest,
   GovernanceReviewRead,
@@ -28,7 +29,16 @@ import type {
   OrganizationRead,
   OutboxEventRead,
   Page,
+  PlaybookCreate,
+  PlaybookRead,
+  PlaybookRunResultRead,
+  PlaybookUpdate,
+  PortfolioAnalyticsSummaryRead,
+  PortfolioAnalyticsTrendsRead,
   ProjectRead,
+  ReviewAuditSampleRead,
+  ReviewerAgentRunResult,
+  ReviewerAgentStateRead,
   ReviewQueueRead,
   SemanticMetricVersionRead,
   SemanticModelVersionRead,
@@ -64,6 +74,7 @@ import {
   makeFixtureBusinessMap,
   makeFixtureCatalog,
   makeFixtureDecideReview,
+  makeFixtureDisagreementRates,
   makeFixtureEvidence,
   makeFixtureFleetSummary,
   makeFixtureIngestionBatches,
@@ -78,10 +89,21 @@ import {
   makeFixtureOrgProjects,
   makeFixtureWorkspaceSourceBindings,
   makeFixtureOutboxEvents,
+  makeFixtureCreatePlaybook,
+  makeFixtureDeletePlaybook,
+  makeFixturePlaybooks,
+  makeFixtureRunPlaybook,
+  makeFixtureUpdatePlaybook,
+  makeFixturePortfolioAnalyticsSummary,
+  makeFixturePortfolioAnalyticsTrends,
   makeFixtureQualityIncidents,
   makeFixtureQualitySummary,
   makeFixtureRefusals,
   makeFixtureRequeueOutboxEvent,
+  makeFixtureReviewerAgentPreReview,
+  makeFixtureReviewerAgentRun,
+  makeFixtureReviewerAgentSamples,
+  makeFixtureReviewerAgentState,
   makeFixtureReviewQueue,
   makeFixtureRunDecisions,
   makeFixtureSemanticMetricConsumers,
@@ -255,6 +277,51 @@ export async function putJson<T>(path: string, body: unknown, signal?: AbortSign
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as T;
+}
+
+/** Same contract as `postJson`/`putJson`, for endpoints that partially update
+ *  an existing resource with PATCH (e.g. `PlaybookUpdate` — every field
+ *  optional, send only the fields actually changing). */
+export async function patchJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    method: "PATCH",
+    signal,
+    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const errBody = (await res.json()) as { detail?: string };
+      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+/** Same contract as `get`, for the endpoints that delete a resource with no
+ *  response body (e.g. `DELETE /v1/playbooks/{id}` -> 204). */
+export async function deleteRequest(path: string, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(path, {
+    method: "DELETE",
+    signal,
+    headers: { Accept: "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = serverErrorDetail(body.detail, detail);
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
 }
 
 export interface CatalogQuery {
@@ -449,6 +516,58 @@ export async function requestMarketplaceAccess(
   return postJson<MarketplaceAccessRequestRead>(
     `/v1/marketplace/products/${versionId}/access-requests`,
     body,
+    signal,
+  );
+}
+
+export interface PortfolioAnalyticsSummaryQuery {
+  organizationId: string;
+  windowDays?: number;
+  lowQualityThreshold?: number;
+  topProductsLimit?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/summary`
+ *  (`product_marketplace_api.py::portfolio_analytics_summary`) — the org-wide
+ *  operator dashboard over the marketplace: lifecycle counts, the
+ *  access-request funnel, usage, quality and review-queue depth, plus a
+ *  ranked `top_products` list, all as of `generated_at`. */
+export async function fetchPortfolioAnalyticsSummary(
+  query: PortfolioAnalyticsSummaryQuery,
+  signal?: AbortSignal,
+): Promise<PortfolioAnalyticsSummaryRead> {
+  if (USE_FIXTURES) return makeFixturePortfolioAnalyticsSummary(query);
+  const params = new URLSearchParams();
+  params.set("window_days", String(query.windowDays ?? 30));
+  params.set("low_quality_threshold", String(query.lowQualityThreshold ?? 80));
+  params.set("top_products_limit", String(query.topProductsLimit ?? 10));
+  return get<PortfolioAnalyticsSummaryRead>(
+    `/v1/organizations/${query.organizationId}/portfolio-analytics/summary?${params}`,
+    signal,
+  );
+}
+
+export interface PortfolioAnalyticsTrendsQuery {
+  organizationId: string;
+  windowDays?: number;
+  bucketDays?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/portfolio-analytics/trends`
+ *  (`product_marketplace_api.py::portfolio_analytics_trends`) — the same
+ *  window bucketed into `bucket_days`-wide points, oldest first, for the
+ *  dashboard's trend panel. A separate call from the summary above so one
+ *  failing does not blank the other. */
+export async function fetchPortfolioAnalyticsTrends(
+  query: PortfolioAnalyticsTrendsQuery,
+  signal?: AbortSignal,
+): Promise<PortfolioAnalyticsTrendsRead> {
+  if (USE_FIXTURES) return makeFixturePortfolioAnalyticsTrends(query);
+  const params = new URLSearchParams();
+  params.set("window_days", String(query.windowDays ?? 30));
+  params.set("bucket_days", String(query.bucketDays ?? 7));
+  return get<PortfolioAnalyticsTrendsRead>(
+    `/v1/organizations/${query.organizationId}/portfolio-analytics/trends?${params}`,
     signal,
   );
 }
@@ -1383,6 +1502,91 @@ export async function fetchAuditEvents(
 }
 
 /* ---------------------------------------------------------------------------
+   Negative knowledge (Phase E / EE.3, `negative_knowledge_api.py`) — the
+   registry of assertions a human has previously rejected, each carrying a
+   suppression flag so the platform stops re-proposing something already
+   rejected, plus a manual lift path for once something material changes.
+
+   Org-wide like the audit ledger above: none of these three routes take an
+   organization id in the path or query at all -- scope is implicit
+   server-side (`context.require_organization()`), unlike most other calls in
+   this file.
+--------------------------------------------------------------------------- */
+
+import type { LiftSuppressionRequest, NegativeAssertionRead } from "./types";
+import {
+  makeFixtureLiftSuppression,
+  makeFixtureNegativeKnowledgeSearch,
+  makeFixtureNegativeKnowledgeSubject,
+} from "./fixtures";
+
+export interface NegativeKnowledgeSearchQuery {
+  assertionType?: string;
+  suppressionActive?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/negative-knowledge/search` — filterable browse across every
+ *  negative assertion recorded for the organization. Both filters are
+ *  optional on the wire (`Query(default=None)`) and are omitted from the
+ *  query string entirely when unset, never sent as an empty string. */
+export async function searchNegativeKnowledge(
+  query: NegativeKnowledgeSearchQuery,
+  signal?: AbortSignal,
+): Promise<PageOf<NegativeAssertionRead>> {
+  if (USE_FIXTURES) return makeFixtureNegativeKnowledgeSearch(query);
+  const params = new URLSearchParams();
+  if (query.assertionType) params.set("assertion_type", query.assertionType);
+  if (query.suppressionActive !== undefined) {
+    params.set("suppression_active", String(query.suppressionActive));
+  }
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<NegativeAssertionRead>>(`/v1/negative-knowledge/search?${params}`, signal);
+}
+
+export interface NegativeKnowledgeSubjectQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/negative-knowledge/{subject_id}` — every assertion recorded
+ *  against one specific subject; a distinct lookup from the filtered
+ *  `search` above, not a special case of it. */
+export async function fetchNegativeKnowledgeForSubject(
+  subjectId: string,
+  query: NegativeKnowledgeSubjectQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<NegativeAssertionRead>> {
+  if (USE_FIXTURES) return makeFixtureNegativeKnowledgeSubject(subjectId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<NegativeAssertionRead>>(
+    `/v1/negative-knowledge/${encodeURIComponent(subjectId)}?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/negative-knowledge/{id}/lift-suppression` — manually lifts
+ *  suppression on one assertion. The endpoint requires a >=3-char `reason`
+ *  (`LiftSuppressionRequest.reason`, `Field(min_length=3)`); callers should
+ *  collect one before calling this. */
+export async function liftNegativeAssertionSuppression(
+  assertionId: string,
+  body: LiftSuppressionRequest,
+  signal?: AbortSignal,
+): Promise<NegativeAssertionRead> {
+  if (USE_FIXTURES) return makeFixtureLiftSuppression(assertionId, body);
+  return postJson<NegativeAssertionRead>(
+    `/v1/negative-knowledge/${assertionId}/lift-suppression`,
+    body,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
    AI governance (module 15 / CP-7,CP-8) — the AI registry, trust scoring and
    remediation loop. The backend (ai_registry_api.py) has carried these since
    the AI-trust slice landed; ui-next had the types but no screen. Same
@@ -2302,6 +2506,83 @@ export async function fetchWorkspaceMembers(
     `/v1/workspaces/${workspaceId}/members`,
     signal,
   );
+}
+
+/* ---------------------------------------------------------------------------
+   PG-4: delegations -- time-bounded, audited handoff of a principal's own
+   governance roles to another principal (e.g. a steward or reviewer going on
+   leave). Real, already-merged routes (`delegation_api.py`); `DelegationsScreen`
+   is the first frontend for this. `status` on the wire is only `"ACTIVE"` or
+   `"REVOKED"` -- nothing flips the column at expiry by design (the module's
+   own docstring), so the screen computes an "expired" state client-side from
+   `status === "ACTIVE"` plus `expires_at` having passed.
+--------------------------------------------------------------------------- */
+import type { DelegationCreate, DelegationRead } from "./types";
+import {
+  makeFixtureDelegations,
+  makeFixtureGrantDelegation,
+  makeFixtureRevokeDelegation,
+} from "./fixtures";
+
+export interface DelegationsQuery {
+  delegatePrincipalId?: string | null;
+  delegatorPrincipalId?: string | null;
+  /** Server-side status filter only ever sees `"ACTIVE"`/`"REVOKED"` -- the
+   *  "expired" split is computed client-side, never sent on the wire. */
+  status?: string | null;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/delegations` (`delegation_api.py::list_delegations`).
+ *  All three filters are optional and omitted from the query string when unset
+ *  (never sent as an empty string). */
+export async function fetchDelegations(
+  organizationId: string,
+  query: DelegationsQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DelegationRead>> {
+  if (USE_FIXTURES) return makeFixtureDelegations(organizationId, query);
+  const params = new URLSearchParams();
+  if (query.delegatePrincipalId) params.set("delegate_principal_id", query.delegatePrincipalId);
+  if (query.delegatorPrincipalId) params.set("delegator_principal_id", query.delegatorPrincipalId);
+  if (query.status) params.set("status", query.status);
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<DelegationRead>>(
+    `/v1/organizations/${organizationId}/delegations?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/delegations` (`delegation_api.py::grant_delegation`).
+ *  422s on self-delegation, on delegating a role the caller does not itself
+ *  hold, if `expires_at <= starts_at`, or if the window exceeds 180 days --
+ *  all surfaced as-is via `postJson`'s `ApiError`. */
+export async function grantDelegation(
+  organizationId: string,
+  body: DelegationCreate,
+  signal?: AbortSignal,
+): Promise<DelegationRead> {
+  if (USE_FIXTURES) return makeFixtureGrantDelegation(organizationId, body);
+  return postJson<DelegationRead>(
+    `/v1/organizations/${organizationId}/delegations`,
+    body,
+    signal,
+  );
+}
+
+/** `POST /v1/delegations/{delegation_id}/revoke` (`delegation_api.py::revoke_delegation`).
+ *  409s if the delegation is not currently ACTIVE, 403s if the caller is
+ *  neither the original delegator nor a platform admin. No request body --
+ *  `{}` matches this file's own convention of never sending an
+ *  optional-looking empty POST without an explicit body. */
+export async function revokeDelegation(
+  delegationId: string,
+  signal?: AbortSignal,
+): Promise<DelegationRead> {
+  if (USE_FIXTURES) return makeFixtureRevokeDelegation(delegationId);
+  return postJson<DelegationRead>(`/v1/delegations/${delegationId}/revoke`, {}, signal);
 }
 
 /** `POST /v1/source-bindings/{binding_id}/decision` (`workspace_api.py:293`,
@@ -3337,4 +3618,211 @@ export async function fetchAgentRoster(
     `/v1/organizations/${organizationId}/ai-agents/roster${suffix}`,
     signal,
   );
+}
+
+/* ---------------------------------------------------------------------------
+   ADR-0027: the reviewer agent console. Every one of these hits a real,
+   already-merged route in `agent_contract_api.py` — pre-review/auto-decide
+   are governed writes with visible, honest counts; suspend/resume/resolve
+   are safety-critical human actions that fixture mode refuses rather than
+   pretends to perform, the same rule `engageAgentKillSwitch` above follows.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/organizations/{org}/reviewer-agent` — the agent's own state:
+ *  enabled/suspended, the tier ceiling it may auto-decide up to, its
+ *  sampling rate, and the principal it acts as. */
+export async function fetchReviewerAgentState(
+  organizationId: string,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentState(organizationId);
+  return get<ReviewerAgentStateRead>(`/v1/organizations/${organizationId}/reviewer-agent`, signal);
+}
+
+/** `POST .../reviewer-agent/pre-review` — attaches tier/evidence/recommendation
+ *  to pending review items. Decides nothing, and works even while the agent
+ *  is disabled or suspended, so fixture mode returns real-looking counts
+ *  rather than refusing. */
+export async function runReviewerAgentPreReview(
+  organizationId: string,
+  limit = 200,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentRunResult> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentPreReview();
+  return postJson<ReviewerAgentRunResult>(
+    `/v1/organizations/${organizationId}/reviewer-agent/pre-review?limit=${limit}`,
+    {},
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/run` — actually auto-decides T0/T1 items. 409s
+ *  (via `ApiError`) when the agent is disabled or suspended; the caller
+ *  should read `err.message` for the reason. */
+export async function runReviewerAgent(
+  organizationId: string,
+  limit = 100,
+  signal?: AbortSignal,
+): Promise<ReviewerAgentRunResult> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentRun();
+  return postJson<ReviewerAgentRunResult>(
+    `/v1/organizations/${organizationId}/reviewer-agent/run?limit=${limit}`,
+    {},
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/suspend` — ADR-0027 condition (c): one human
+ *  action, effective immediately. Fixture mode refuses rather than
+ *  pretending, same rationale as `engageAgentKillSwitch`. */
+export async function suspendReviewerAgent(
+  organizationId: string,
+  reason: string,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Suspend is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewerAgentStateRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/suspend`,
+    { reason },
+  );
+}
+
+/** `POST .../reviewer-agent/resume` — same rule as `suspendReviewerAgent`. */
+export async function resumeReviewerAgent(
+  organizationId: string,
+  reason: string,
+): Promise<ReviewerAgentStateRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Resume is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewerAgentStateRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/resume`,
+    { reason },
+  );
+}
+
+/** `GET .../reviewer-agent/disagreement-rates` — ADR-0027's 5% revisit
+ *  trigger, as a number per object type rather than a sentence. */
+export async function fetchDisagreementRates(
+  organizationId: string,
+  windowDays: number,
+  signal?: AbortSignal,
+): Promise<DisagreementReportRead> {
+  if (USE_FIXTURES) return makeFixtureDisagreementRates(windowDays);
+  return get<DisagreementReportRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/disagreement-rates?window_days=${windowDays}`,
+    signal,
+  );
+}
+
+export interface ReviewerAgentSamplesQuery {
+  outcome?: "PENDING" | "AGREED" | "DISAGREED" | "ALL";
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET .../reviewer-agent/samples` — the sampled-decision audit queue, one
+ *  outcome filter at a time (`outcome=PENDING` is the endpoint's own default). */
+export async function fetchReviewerAgentSamples(
+  organizationId: string,
+  query: ReviewerAgentSamplesQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ReviewAuditSampleRead>> {
+  if (USE_FIXTURES) return makeFixtureReviewerAgentSamples(query);
+  const params = new URLSearchParams();
+  params.set("outcome", query.outcome ?? "PENDING");
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ReviewAuditSampleRead>>(
+    `/v1/organizations/${organizationId}/reviewer-agent/samples?${params}`,
+    signal,
+  );
+}
+
+/** `POST .../reviewer-agent/samples/{id}/resolve` — a human's verdict on one
+ *  of the agent's sampled auto-decisions. `rationale` is mandatory. Fixture
+ *  mode refuses rather than pretending, same rule as the actions above: the
+ *  fixture list is recomputed fresh on every fetch, so a fake "resolved"
+ *  here could never actually move the item out of the pending queue. */
+export async function resolveAuditSample(
+  organizationId: string,
+  sampleId: string,
+  body: { human_outcome: "AGREED" | "DISAGREED"; rationale: string },
+): Promise<ReviewAuditSampleRead> {
+  if (USE_FIXTURES) {
+    throw new Error("Resolving a sample is unavailable in fixture mode — run against the API.");
+  }
+  return postJson<ReviewAuditSampleRead>(
+    `/v1/organizations/${organizationId}/reviewer-agent/samples/${sampleId}/resolve`,
+    body,
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   AT-1: Playbooks — saved, scheduled bulk-metadata automation rules
+   (`playbooks_api.py`, prefix `/v1`). Every route here is real and
+   already-merged; `USE_FIXTURES` gates each the same way as every call
+   above, so `npm run dev`/`npm run test` need no backend.
+--------------------------------------------------------------------------- */
+
+export interface PlaybooksQuery {
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/playbooks`. */
+export async function fetchPlaybooks(
+  organizationId: string,
+  query: PlaybooksQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<PlaybookRead>> {
+  if (USE_FIXTURES) return makeFixturePlaybooks(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<PlaybookRead>>(
+    `/v1/organizations/${organizationId}/playbooks?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/playbooks` — 409 if a playbook
+ *  with this name already exists in the org. */
+export async function createPlaybook(
+  organizationId: string,
+  body: PlaybookCreate,
+  signal?: AbortSignal,
+): Promise<PlaybookRead> {
+  if (USE_FIXTURES) return makeFixtureCreatePlaybook(organizationId, body);
+  return postJson<PlaybookRead>(`/v1/organizations/${organizationId}/playbooks`, body, signal);
+}
+
+/** `PATCH /v1/playbooks/{playbook_id}` — every field optional; send only
+ *  what changed (e.g. `{ enabled: !current }` to toggle). */
+export async function updatePlaybook(
+  playbookId: string,
+  body: PlaybookUpdate,
+  signal?: AbortSignal,
+): Promise<PlaybookRead> {
+  if (USE_FIXTURES) return makeFixtureUpdatePlaybook(playbookId, body);
+  return patchJson<PlaybookRead>(`/v1/playbooks/${playbookId}`, body, signal);
+}
+
+/** `DELETE /v1/playbooks/{playbook_id}` — 204, no response body. */
+export async function deletePlaybook(playbookId: string, signal?: AbortSignal): Promise<void> {
+  if (USE_FIXTURES) return makeFixtureDeletePlaybook(playbookId);
+  return deleteRequest(`/v1/playbooks/${playbookId}`, signal);
+}
+
+/** `POST /v1/playbooks/{playbook_id}/run` — manual out-of-cycle trigger;
+ *  409 if the playbook is disabled. Takes no meaningful body, but this file's
+ *  own convention (see `submitStudioChangeSet`) is to always send an explicit
+ *  `{}` rather than an optional-looking empty POST. */
+export async function runPlaybookNow(
+  playbookId: string,
+  signal?: AbortSignal,
+): Promise<PlaybookRunResultRead> {
+  if (USE_FIXTURES) return makeFixtureRunPlaybook(playbookId);
+  return postJson<PlaybookRunResultRead>(`/v1/playbooks/${playbookId}/run`, {}, signal);
 }

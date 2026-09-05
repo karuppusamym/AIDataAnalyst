@@ -39,6 +39,11 @@ const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then(
 const ComplianceScreen = lazy(() => import("./screens/ComplianceScreen").then((module) => ({ default: module.ComplianceScreen })));
 const ToolPlansScreen = lazy(() => import("./screens/ToolPlansScreen").then((module) => ({ default: module.ToolPlansScreen })));
 const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then((module) => ({ default: module.AgentRosterScreen })));
+const ReviewerAgentScreen = lazy(() => import("./screens/ReviewerAgentScreen").then((module) => ({ default: module.ReviewerAgentScreen })));
+const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((module) => ({ default: module.PlaybooksScreen })));
+const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
+const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
+const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
 
 /* UX-20: navigation is organised by *persona workbench*, not by feature area.
    Thirty flat items grouped by what the code does is a feature map; a person
@@ -78,8 +83,11 @@ const NAV: NavItem[] = [
   // --- Consumer: use what has been approved -------------------------------
   { id: "marketplace", label: "Marketplace", group: "Consumer", icon: "◇", keywords: "products access request" },
   { id: "context", label: "Context products", group: "Consumer", icon: "◫", keywords: "context compile mcp rest" },
+  { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
+  { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
+  { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
   { id: "description-drafts", label: "Description drafts", group: "Steward", icon: "✎", keywords: "asset description draft generate submit steward" },
   { id: "relationships", label: "Relationships", group: "Steward", icon: "⌁", keywords: "keys graph links" },
@@ -90,6 +98,7 @@ const NAV: NavItem[] = [
   { id: "governance", label: "Review queue", group: "Reviewer", icon: "✓", keywords: "approve reject proposals" },
   { id: "parsed-lineage-review", label: "Parsed lineage review", group: "Reviewer", icon: "↯", keywords: "lineage parsed view procedure dbt openlineage proposed approve reject p1-05" },
   { id: "refusals", label: "Policy refusals", group: "Reviewer", icon: "!", keywords: "lineage blocked denied" },
+  { id: "reviewer-agent", label: "Reviewer agent", group: "Reviewer", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
   // --- Operator: keep the estate and the AI running -----------------------
   { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health" },
   { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
@@ -98,6 +107,7 @@ const NAV: NavItem[] = [
   { id: "agent-roster", label: "Agent roster", group: "Operator", icon: "▥", keywords: "agent roster purpose method tool-first confidence auto-apply inspect" },
   { id: "access-policies", label: "Access policies", group: "Operator", icon: "⚖", keywords: "abac policy authorization simulation mask deny allow filter" },
   { id: "workspace-access", label: "Workspace access", group: "Operator", icon: "⚿", keywords: "members roles bindings approve reject bi tableau lineage connections" },
+  { id: "delegations", label: "Delegations", group: "Operator", icon: "⇌", keywords: "delegation grant revoke governance authority pg-4 time-bounded" },
   { id: "reliability", label: "Reliability", group: "Operator", icon: "⏱", keywords: "slo error budget notification escalation archive worm audit archive data contract sla violations" },
   { id: "administration", label: "Administration", group: "Operator", icon: "⚙", keywords: "organization project datasource setup" },
   // --- Auditor: see everything, change nothing ----------------------------
@@ -147,6 +157,7 @@ function Screen({
     case "description-drafts": return <DescriptionDraftsScreen />;
     case "marketplace": return <MarketplaceScreen />;
     case "refusals": return <LineageRefusalScreen />;
+    case "reviewer-agent": return <ReviewerAgentScreen />;
     case "studio": return <StudioChangeSetsScreen />;
     case "lineage": return <NarratedLineageScreen />;
     case "analyst": return <AskScreen />;
@@ -160,16 +171,20 @@ function Screen({
     case "sources": return <SourcesScreen />;
     case "operations": return <OperationsScreen />;
     case "context": return <ContextProductsScreen />;
+    case "portfolio-analytics": return <PortfolioAnalyticsScreen />;
     case "tools": return <ToolRegistryScreen />;
     case "unified-lineage": return <UnifiedLineageScreen />;
     case "transformations": return <TransformationsScreen />;
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
     case "stewardship": return <StewardshipScreen />;
+    case "playbooks": return <PlaybooksScreen />;
+    case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;
     case "compliance": return <ComplianceScreen />;
     case "tool-plans": return <ToolPlansScreen />;
     case "workspace-access": return <WorkspaceAccessScreen />;
+    case "delegations": return <DelegationsScreen />;
     case "reliability": return <ReliabilityScreen />;
     case "inbox":
       return <AgentInboxScreen persona={personaKey} onNavigate={onNavigate} />;

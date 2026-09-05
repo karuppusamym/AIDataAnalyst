@@ -21,15 +21,23 @@ import type {
   GovernanceDecisionRequest,
   GovernanceReviewDiffRead,
   GovernanceReviewRead,
+  LiftSuppressionRequest,
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
   MeRead,
   MetadataBusinessAnnotationRead,
   MetadataIngestionBatchRead,
+  NegativeAssertionRead,
   ModelRouteConfigurationCreate,
   ModelRouteConfigurationRead,
   OrganizationRead,
   OutboxEventRead,
+  PlaybookCreate,
+  PlaybookRead,
+  PlaybookRunResultRead,
+  PlaybookUpdate,
+  PortfolioAnalyticsSummaryRead,
+  PortfolioAnalyticsTrendsRead,
   ProjectRead,
   ReviewQueueProposalRead,
   ReviewQueueRead,
@@ -48,6 +56,10 @@ import type {
   WorkspaceRead,
   AgentInboxRead,
   AgentRosterRead,
+  DisagreementReportRead,
+  ReviewAuditSampleRead,
+  ReviewerAgentRunResult,
+  ReviewerAgentStateRead,
 } from "./types";
 import type {
   AuditEventRead,
@@ -68,7 +80,12 @@ import type {
   IngestionBatchesQuery,
   LineageImpactQuery,
   MarketplaceQuery,
+  NegativeKnowledgeSearchQuery,
+  NegativeKnowledgeSubjectQuery,
   OutboxEventsQuery,
+  PlaybooksQuery,
+  PortfolioAnalyticsSummaryQuery,
+  PortfolioAnalyticsTrendsQuery,
   QualityIncidentsQuery,
   ReviewQueueQuery,
   SemanticPageQuery,
@@ -700,6 +717,160 @@ export async function makeFixtureMarketplaceAccessRequest(
     revoked_by: null, revoked_at: null,
     fulfillment_status: "PENDING", fulfillment_provider: null, fulfillment_reference: null, fulfillment_error: null,
     fulfilled_at: null, created_at: now, updated_at: now,
+  };
+}
+
+const PORTFOLIO_TOP_PRODUCTS_FIXTURE: PortfolioAnalyticsSummaryRead["top_products"] = [
+  {
+    data_product_version_id: "dpv_revenue", product_key: "finance-revenue-model", name: "Finance revenue model",
+    domain_name: "fin", certification_status: "CERTIFIED", quality_score: 97, lineage_coverage: 91,
+    access_request_count: 42, approved_access_count: 38, context_read_count: 5210,
+  },
+  {
+    data_product_version_id: "dpv_customer360", product_key: "retail-customer-360", name: "Retail customer 360",
+    domain_name: "retail", certification_status: "CERTIFIED", quality_score: 90, lineage_coverage: 79,
+    access_request_count: 31, approved_access_count: 27, context_read_count: 3840,
+  },
+  {
+    data_product_version_id: "dpv_risk_exposure", product_key: "risk-exposure-snapshot", name: "Risk exposure snapshot",
+    domain_name: "risk", certification_status: "CERTIFIED", quality_score: 94, lineage_coverage: 88,
+    access_request_count: 19, approved_access_count: 14, context_read_count: 1275,
+  },
+  {
+    data_product_version_id: "dpv_supply_chain", product_key: "supply-chain-events", name: "Supply chain events",
+    domain_name: "ops", certification_status: "REVIEW_REQUIRED", quality_score: 74, lineage_coverage: 61,
+    access_request_count: 16, approved_access_count: 9, context_read_count: 902,
+  },
+  {
+    data_product_version_id: "dpv_hr_headcount", product_key: "hr-headcount-summary", name: "HR headcount summary",
+    domain_name: "hr", certification_status: "UNCERTIFIED", quality_score: 68, lineage_coverage: 55,
+    access_request_count: 8, approved_access_count: 5, context_read_count: 340,
+  },
+  {
+    data_product_version_id: "dpv_marketing_attr", product_key: "marketing-attribution", name: "Marketing attribution",
+    domain_name: "marketing", certification_status: "CERTIFIED", quality_score: 88, lineage_coverage: 72,
+    access_request_count: 12, approved_access_count: 11, context_read_count: 1560,
+  },
+  {
+    data_product_version_id: "dpv_pricing_book", product_key: "pricing-rate-book", name: "Pricing rate book",
+    domain_name: "fin", certification_status: "PENDING_CERTIFICATION", quality_score: 81, lineage_coverage: 68,
+    access_request_count: 7, approved_access_count: 4, context_read_count: 415,
+  },
+];
+
+/** `GET .../portfolio-analytics/summary` (`product_marketplace_api.py`). */
+export async function makeFixturePortfolioAnalyticsSummary(
+  query: PortfolioAnalyticsSummaryQuery,
+): Promise<PortfolioAnalyticsSummaryRead> {
+  await wait(90);
+  const limit = query.topProductsLimit ?? 10;
+  return {
+    generated_at: new Date().toISOString(),
+    window_days: query.windowDays ?? 30,
+    low_quality_threshold: query.lowQualityThreshold ?? 80,
+    lifecycle: {
+      data_products_total: 58,
+      data_products_active: 41,
+      data_products_candidate: 12,
+      data_products_retired: 5,
+      data_product_versions_draft: 9,
+      data_product_versions_review_required: 6,
+      data_product_versions_published: 63,
+      data_product_versions_retired: 8,
+      data_contract_versions_draft: 7,
+      data_contract_versions_review_required: 3,
+      data_contract_versions_published: 51,
+      context_products_total: 22,
+      context_product_versions_draft: 4,
+      context_product_versions_review_required: 2,
+      context_product_versions_published: 19,
+      context_product_versions_deprecated: 3,
+    },
+    access: {
+      requests_created: 128,
+      requests_pending: 14,
+      requests_approved: 96,
+      requests_rejected: 11,
+      requests_revoked: 4,
+      requests_expired: 3,
+      active_grants: 214,
+      grants_expiring_within_30_days: 17,
+      fulfillment_pending: 6,
+      fulfillment_provisioned: 201,
+      fulfillment_failed: 2,
+      fulfillment_revoked: 5,
+    },
+    usage: {
+      unique_context_consumers: 47,
+      unique_mcp_consumers: 33,
+      unique_agent_principals: 19,
+      context_product_reads: 18420,
+      mcp_operations: 9640,
+      mcp_resource_reads: 5210,
+      mcp_prompt_reads: 1180,
+      mcp_tool_calls: 2890,
+      mcp_control_operations: 360,
+      agent_runs: 3120,
+      governed_tool_agent_runs: 2540,
+      model_gateway_agent_runs: 480,
+      development_override_agent_runs: 62,
+      policy_blocked_agent_runs: 38,
+      query_executions: 7460,
+      governed_tool_executions: 6890,
+    },
+    quality: {
+      published_products: 63,
+      scored_products: 55,
+      average_quality_score: 84.6,
+      low_quality_products: 9,
+      certified_products: 44,
+      uncertified_products: 19,
+      average_lineage_coverage: 76.2,
+    },
+    queues: {
+      review_required_data_product_versions: 6,
+      review_required_data_contract_versions: 3,
+      review_required_context_product_versions: 2,
+      pending_marketplace_access_requests: 14,
+    },
+    top_products: PORTFOLIO_TOP_PRODUCTS_FIXTURE.slice(0, limit),
+  };
+}
+
+/** `GET .../portfolio-analytics/trends` (`product_marketplace_api.py`) -- a
+ *  believable, gently upward series so the trend panel has something worth
+ *  scaling a bar list against, not five identical rows. */
+export async function makeFixturePortfolioAnalyticsTrends(
+  query: PortfolioAnalyticsTrendsQuery,
+): Promise<PortfolioAnalyticsTrendsRead> {
+  await wait(80);
+  const windowDays = query.windowDays ?? 30;
+  const bucketDays = query.bucketDays ?? 7;
+  const bucketCount = Math.max(1, Math.round(windowDays / bucketDays));
+  const now = Date.now();
+  const dayMs = 24 * 60 * 60 * 1000;
+  const points = Array.from({ length: bucketCount }, (_, i) => {
+    const rampUp = i / Math.max(1, bucketCount - 1);
+    const bucketEndMs = now - (bucketCount - 1 - i) * bucketDays * dayMs;
+    const bucketStartMs = bucketEndMs - bucketDays * dayMs;
+    return {
+      bucket_start: new Date(bucketStartMs).toISOString(),
+      bucket_end: new Date(bucketEndMs).toISOString(),
+      access_requests: Math.round(18 + rampUp * 14),
+      context_reads: Math.round(2200 + rampUp * 1800),
+      mcp_operations: Math.round(1100 + rampUp * 900),
+      mcp_tool_calls: Math.round(340 + rampUp * 260),
+      agent_runs: Math.round(380 + rampUp * 340),
+      governed_tool_runs: Math.round(310 + rampUp * 260),
+      model_gateway_runs: Math.round(60 + rampUp * 50),
+      query_executions: Math.round(880 + rampUp * 520),
+    };
+  });
+  return {
+    generated_at: new Date().toISOString(),
+    window_days: windowDays,
+    bucket_days: bucketDays,
+    points,
   };
 }
 
@@ -2752,6 +2923,152 @@ export async function makeFixtureAuditEvents(
 }
 
 /* ---------------------------------------------------------------------------
+   Negative knowledge (Phase E / EE.3, `negative_knowledge_api.py`) — the
+   registry of previously rejected assertions ("this table is NOT the
+   customer master") and their suppression state. Filtered client-side over
+   one fixed set, the same idiom `makeFixtureAuditEvents` above uses for its
+   own org-wide, filter-only endpoint. Two rows deliberately share a
+   `subject_id` (`t_customer_master`) so the per-subject lookup has more than
+   one result to prove it, and the set mixes both `suppression_active`
+   states and several distinct `assertion_type` values.
+--------------------------------------------------------------------------- */
+
+const NEGATIVE_ASSERTION_FIXTURES: NegativeAssertionRead[] = [
+  {
+    id: "na_0001", organization_id: ORG_ID,
+    assertion_type: "TABLE_NOT_ENTITY", subject_id: "t_customer_master",
+    predicate: { claimed_entity: "customer", table: "raw_sales.customer_master" },
+    evidence: { reviewer_note: "This is a staging copy, not the governed master.", confidence: 0.34 },
+    rejected_by: "priya@tenant.example", rejected_at: "2026-08-20T10:05:00Z",
+    suppression_active: true, material_change_hash: null,
+    suppression_lifted_at: null, suppression_lifted_by: null, lift_reason: null,
+    created_at: "2026-08-20T10:05:00Z", updated_at: "2026-08-20T10:05:00Z",
+  },
+  {
+    id: "na_0002", organization_id: ORG_ID,
+    assertion_type: "COLUMN_NOT_PII", subject_id: "t_customer_master.email_hash",
+    predicate: { column: "email_hash", claimed_classification: "PII" },
+    evidence: { reviewer_note: "Column is a salted, one-way hash, not reversible PII.", sample_size: 500 },
+    rejected_by: "steward@tenant.example", rejected_at: "2026-08-18T14:30:00Z",
+    suppression_active: true, material_change_hash: null,
+    suppression_lifted_at: null, suppression_lifted_by: null, lift_reason: null,
+    created_at: "2026-08-18T14:30:00Z", updated_at: "2026-08-18T14:30:00Z",
+  },
+  {
+    id: "na_0003", organization_id: ORG_ID,
+    assertion_type: "RELATIONSHIP_NOT_VALID", subject_id: "fk_orders_customer_id",
+    predicate: { from_table: "orders", to_table: "customer_master", key: "customer_id" },
+    evidence: { reason: "Overlap is coincidental, no referential intent found in dbt or FK constraints." },
+    rejected_by: "risk-lead@tenant.example", rejected_at: "2026-07-30T09:00:00Z",
+    suppression_active: false, material_change_hash: "sha256:9f2a...c771",
+    suppression_lifted_at: "2026-08-25T11:00:00Z", suppression_lifted_by: "priya@tenant.example",
+    lift_reason: "A new dbt model materialized the join explicitly; re-evaluate against current lineage.",
+    created_at: "2026-07-30T09:00:00Z", updated_at: "2026-08-25T11:00:00Z",
+  },
+  {
+    id: "na_0004", organization_id: ORG_ID,
+    assertion_type: "TABLE_NOT_ENTITY", subject_id: "t_customer_master",
+    predicate: { claimed_entity: "customer", table: "curated.customer_master_v2" },
+    evidence: { reviewer_note: "Superseded by the governed model; this candidate table was renamed away." },
+    rejected_by: "priya@tenant.example", rejected_at: "2026-08-22T08:00:00Z",
+    suppression_active: true, material_change_hash: null,
+    suppression_lifted_at: null, suppression_lifted_by: null, lift_reason: null,
+    created_at: "2026-08-22T08:00:00Z", updated_at: "2026-08-22T08:00:00Z",
+  },
+  {
+    id: "na_0005", organization_id: ORG_ID,
+    assertion_type: "METRIC_NOT_EQUIVALENT", subject_id: "metric_net_revenue_v3",
+    predicate: { candidate_metric: "net_revenue_v3", claimed_equivalent_to: "net_revenue_v2" },
+    evidence: { reviewer_note: "v3 excludes chargebacks; not the same definition.", diff_pct: 4.1 },
+    rejected_by: "finance-owner@tenant.example", rejected_at: "2026-08-05T16:20:00Z",
+    suppression_active: true, material_change_hash: null,
+    suppression_lifted_at: null, suppression_lifted_by: null, lift_reason: null,
+    created_at: "2026-08-05T16:20:00Z", updated_at: "2026-08-05T16:20:00Z",
+  },
+  {
+    id: "na_0006", organization_id: ORG_ID,
+    assertion_type: "COLUMN_NOT_PII", subject_id: "t_risk_exposure.account_ref",
+    predicate: { column: "account_ref", claimed_classification: "PII" },
+    evidence: { reviewer_note: "Internal surrogate key with no external mapping." },
+    rejected_by: "steward@tenant.example", rejected_at: "2026-07-12T12:00:00Z",
+    suppression_active: false, material_change_hash: "sha256:11de...04af",
+    suppression_lifted_at: "2026-08-01T09:30:00Z", suppression_lifted_by: "steward@tenant.example",
+    lift_reason: "A new external partner feed now maps this key to a real account number.",
+    created_at: "2026-07-12T12:00:00Z", updated_at: "2026-08-01T09:30:00Z",
+  },
+  {
+    id: "na_0007", organization_id: ORG_ID,
+    assertion_type: "DOMAIN_MISMATCH", subject_id: "t_mortgage_ledger_entry",
+    predicate: { claimed_domain: "mortgage", observed_domain: "treasury" },
+    evidence: { reviewer_note: "Table actually belongs to treasury reconciliation, not mortgage servicing." },
+    rejected_by: "treasury-ops@tenant.example", rejected_at: "2026-08-27T13:45:00Z",
+    suppression_active: true, material_change_hash: null,
+    suppression_lifted_at: null, suppression_lifted_by: null, lift_reason: null,
+    created_at: "2026-08-27T13:45:00Z", updated_at: "2026-08-27T13:45:00Z",
+  },
+];
+
+function negativeAssertionMatches(
+  a: NegativeAssertionRead,
+  q: NegativeKnowledgeSearchQuery,
+): boolean {
+  if (q.assertionType && a.assertion_type !== q.assertionType) return false;
+  if (
+    q.suppressionActive !== undefined &&
+    q.suppressionActive !== null &&
+    a.suppression_active !== q.suppressionActive
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** `GET /v1/negative-knowledge/search`. Filters client-side over the fixed
+ *  set above, the same idiom `makeFixtureAuditEvents` uses for its own
+ *  org-wide, filter-only endpoint. */
+export async function makeFixtureNegativeKnowledgeSearch(
+  query: NegativeKnowledgeSearchQuery,
+): Promise<PageOf<NegativeAssertionRead>> {
+  await wait(90);
+  const filtered = NEGATIVE_ASSERTION_FIXTURES.filter((a) => negativeAssertionMatches(a, query));
+  const limit = query.limit ?? 50;
+  const offset = query.offset ?? 0;
+  return { items: filtered.slice(offset, offset + limit), limit, offset, total: filtered.length };
+}
+
+/** `GET /v1/negative-knowledge/{subject_id}` — every assertion recorded
+ *  against one subject. */
+export async function makeFixtureNegativeKnowledgeSubject(
+  subjectId: string,
+  query: NegativeKnowledgeSubjectQuery,
+): Promise<PageOf<NegativeAssertionRead>> {
+  await wait(90);
+  const filtered = NEGATIVE_ASSERTION_FIXTURES.filter((a) => a.subject_id === subjectId);
+  const limit = query.limit ?? 50;
+  const offset = query.offset ?? 0;
+  return { items: filtered.slice(offset, offset + limit), limit, offset, total: filtered.length };
+}
+
+/** `POST /v1/negative-knowledge/{id}/lift-suppression` — mutates the same
+ *  in-memory fixture array the two reads above filter, so a lift-then-refetch
+ *  in fixture mode behaves like the real endpoint. */
+export async function makeFixtureLiftSuppression(
+  assertionId: string,
+  body: LiftSuppressionRequest,
+): Promise<NegativeAssertionRead> {
+  await wait(80);
+  const assertion = NEGATIVE_ASSERTION_FIXTURES.find((a) => a.id === assertionId);
+  if (!assertion) throw new Error(`fixture: no such negative assertion ${assertionId}`);
+  const now = new Date().toISOString();
+  assertion.suppression_active = false;
+  assertion.suppression_lifted_at = now;
+  assertion.suppression_lifted_by = "dev-fixture-user";
+  assertion.lift_reason = body.reason;
+  assertion.updated_at = now;
+  return { ...assertion };
+}
+
+/* ---------------------------------------------------------------------------
    AI governance fixtures — AI registry, trust scoring and remediation loop.
    Wire-shape identical to ai_registry_api.py, so VITE_USE_FIXTURES=0 swaps to
    the real endpoints unchanged. The remediation store is mutable so an
@@ -4556,6 +4873,197 @@ export async function makeFixtureDecideSourceBinding(
   return binding;
 }
 
+/* ---------------------------------------------------------------------------
+   PG-4: delegations. No screen has existed for this before -- see
+   `DelegationsScreen.tsx`'s own module comment for the backend contract
+   (`delegation_api.py`). Fixture roster covers every UI state the screen
+   must render: genuinely current ACTIVE, ACTIVE but past `expires_at` (the
+   client-computed "expired" state -- nothing flips the status column at
+   expiry by design), and REVOKED, across different delegator/delegate pairs
+   and role sets. */
+import type { DelegationCreate, DelegationRead } from "./types";
+
+function delegationIso(daysOffset: number): string {
+  return new Date(Date.now() + daysOffset * 86_400_000).toISOString();
+}
+
+const FIXTURE_DELEGATIONS: DelegationRead[] = [
+  {
+    id: "delegation-aaaa1111",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    delegator_principal_id: "priya.steward",
+    delegate_principal_id: "morgan.covering",
+    delegated_roles: ["DataSteward", "Reviewer"],
+    reason: "Parental leave coverage for the data steward review queue.",
+    starts_at: delegationIso(-5),
+    expires_at: delegationIso(9),
+    status: "ACTIVE",
+    created_by: "priya.steward",
+    revoked_by: null,
+    revoked_at: null,
+    created_at: delegationIso(-5),
+    updated_at: delegationIso(-5),
+  },
+  {
+    id: "delegation-bbbb2222",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    delegator_principal_id: "sam.reviewer",
+    delegate_principal_id: "jordan.backup",
+    delegated_roles: ["Reviewer"],
+    reason: "Conference travel; unavailable for governance review decisions this week.",
+    starts_at: delegationIso(-10),
+    expires_at: delegationIso(-3),
+    status: "ACTIVE",
+    created_by: "sam.reviewer",
+    revoked_by: null,
+    revoked_at: null,
+    created_at: delegationIso(-10),
+    updated_at: delegationIso(-10),
+  },
+  {
+    id: "delegation-cccc3333",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    delegator_principal_id: "alex.admin",
+    delegate_principal_id: "riley.deputy",
+    delegated_roles: ["PlatformAdmin", "MetadataAdmin", "DataAdmin"],
+    reason: "Sabbatical; full administrative coverage for the quarter.",
+    starts_at: delegationIso(-30),
+    expires_at: delegationIso(60),
+    status: "REVOKED",
+    created_by: "alex.admin",
+    revoked_by: "alex.admin",
+    revoked_at: delegationIso(-2),
+    created_at: delegationIso(-30),
+    updated_at: delegationIso(-2),
+  },
+  {
+    id: "delegation-dddd4444",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    delegator_principal_id: "priya.steward",
+    delegate_principal_id: "casey.semantic",
+    delegated_roles: ["SemanticAdmin"],
+    reason: "Short medical leave; delegating semantic layer sign-off authority.",
+    starts_at: delegationIso(-1),
+    expires_at: delegationIso(13),
+    status: "ACTIVE",
+    created_by: "priya.steward",
+    revoked_by: null,
+    revoked_at: null,
+    created_at: delegationIso(-1),
+    updated_at: delegationIso(-1),
+  },
+  {
+    id: "delegation-eeee5555",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    delegator_principal_id: "morgan.covering",
+    delegate_principal_id: "sam.reviewer",
+    delegated_roles: ["DataSteward"],
+    reason: "Cross-covering while the primary steward onboards a new datasource.",
+    starts_at: delegationIso(-60),
+    expires_at: delegationIso(-40),
+    status: "REVOKED",
+    created_by: "morgan.covering",
+    revoked_by: "alex.admin",
+    revoked_at: delegationIso(-45),
+    created_at: delegationIso(-60),
+    updated_at: delegationIso(-45),
+  },
+];
+
+/** `GET /v1/organizations/{organization_id}/delegations` (PG-4,
+ *  `delegation_api.py::list_delegations`) fixture. */
+export async function makeFixtureDelegations(
+  organizationId: string,
+  query: {
+    delegatePrincipalId?: string | null;
+    delegatorPrincipalId?: string | null;
+    status?: string | null;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<PageOf<DelegationRead>> {
+  await wait(50);
+  let items = FIXTURE_DELEGATIONS.filter((item) => item.organization_id === organizationId);
+  if (query.delegatePrincipalId) {
+    items = items.filter((item) => item.delegate_principal_id === query.delegatePrincipalId);
+  }
+  if (query.delegatorPrincipalId) {
+    items = items.filter((item) => item.delegator_principal_id === query.delegatorPrincipalId);
+  }
+  if (query.status) {
+    const wanted = query.status.toUpperCase();
+    items = items.filter((item) => item.status === wanted);
+  }
+  items = [...items].sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 50;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/organizations/{organization_id}/delegations` (PG-4,
+ *  `delegation_api.py::grant_delegation`) fixture. Mirrors the real handler's
+ *  own guards -- self-delegation forbidden, `expires_at` after `starts_at`,
+ *  window capped at 180 days -- but fixture mode has no notion of "the roles
+ *  the current principal holds", so unlike the live route this cannot also
+ *  reject delegating a role the caller does not itself hold; that guard is
+ *  exercised against the live API. */
+export async function makeFixtureGrantDelegation(
+  organizationId: string,
+  body: DelegationCreate,
+): Promise<DelegationRead> {
+  await wait(70);
+  const callerId = "local-ui-admin";
+  if (body.delegate_principal_id === callerId) {
+    throw new ApiError(422, "cannot delegate authority to yourself");
+  }
+  const now = new Date();
+  const startsAt = body.starts_at ? new Date(body.starts_at) : now;
+  const expiresAt = new Date(body.expires_at);
+  if (expiresAt.getTime() <= startsAt.getTime()) {
+    throw new ApiError(422, "expires_at must be after starts_at");
+  }
+  const maxWindowMs = 180 * 86_400_000;
+  if (expiresAt.getTime() - startsAt.getTime() > maxWindowMs) {
+    throw new ApiError(422, "delegation window exceeds the 180-day cap");
+  }
+  const nowIso = now.toISOString();
+  const delegation: DelegationRead = {
+    id: `delegation-${Math.random().toString(36).slice(2, 10)}`,
+    organization_id: organizationId,
+    delegator_principal_id: callerId,
+    delegate_principal_id: body.delegate_principal_id,
+    delegated_roles: [...new Set(body.delegated_roles)].sort(),
+    reason: body.reason,
+    starts_at: startsAt.toISOString(),
+    expires_at: expiresAt.toISOString(),
+    status: "ACTIVE",
+    created_by: callerId,
+    revoked_by: null,
+    revoked_at: null,
+    created_at: nowIso,
+    updated_at: nowIso,
+  };
+  FIXTURE_DELEGATIONS.unshift(delegation);
+  return delegation;
+}
+
+/** `POST /v1/delegations/{delegation_id}/revoke` (PG-4,
+ *  `delegation_api.py::revoke_delegation`) fixture. */
+export async function makeFixtureRevokeDelegation(delegationId: string): Promise<DelegationRead> {
+  await wait(50);
+  const delegation = FIXTURE_DELEGATIONS.find((item) => item.id === delegationId);
+  if (!delegation) throw new ApiError(404, "delegation not found");
+  if (delegation.status !== "ACTIVE") {
+    throw new ApiError(409, "delegation is not active");
+  }
+  const now = new Date().toISOString();
+  delegation.status = "REVOKED";
+  delegation.revoked_by = "local-ui-admin";
+  delegation.revoked_at = now;
+  delegation.updated_at = now;
+  return delegation;
+}
+
 const FIXTURE_BI_CONNECTIONS: BiConnectionRead[] = [
   {
     id: "bi_conn_finance_tableau",
@@ -5740,5 +6248,369 @@ export function makeFixtureAgentRoster(organizationId: string, windowDays = 30):
       },
     ],
     total_agents: 2,
+  };
+}
+
+/** ADR-0027: the reviewer agent's own state. Mirrors
+ *  `aida.agent_contract_api.ReviewerAgentStateRead` field for field. */
+export function makeFixtureReviewerAgentState(organizationId: string): ReviewerAgentStateRead {
+  return {
+    organization_id: organizationId,
+    enabled: true,
+    suspended: false,
+    max_tier: "T1",
+    sampling_rate: 0.1,
+    agent_principal_id: "agent:reviewer",
+  };
+}
+
+/** `POST .../reviewer-agent/pre-review` fixture -- annotates the pending
+ *  queue with tier/evidence/recommendation but decides nothing. */
+export function makeFixtureReviewerAgentPreReview(): ReviewerAgentRunResult {
+  return { pre_reviewed: 14, decided: 0, approved: 0, rejected: 0, sampled_for_audit: 0 };
+}
+
+/** `POST .../reviewer-agent/run` fixture -- auto-decides T0/T1 items. */
+export function makeFixtureReviewerAgentRun(): ReviewerAgentRunResult {
+  return { pre_reviewed: 0, decided: 8, approved: 5, rejected: 3, sampled_for_audit: 2 };
+}
+
+/** `GET .../reviewer-agent/disagreement-rates` fixture. One breaching object
+ *  type (GLOSSARY_LINK_PROPOSAL) so the "breaches revisit trigger" pill has
+ *  something to render in fixture mode, and one object type below the
+ *  minimum-resolved threshold so `sufficient_sample: false` also has a row. */
+export function makeFixtureDisagreementRates(windowDays: number): DisagreementReportRead {
+  return {
+    window_days: windowDays,
+    computed_at: new Date().toISOString(),
+    measured: true,
+    threshold: 0.05,
+    minimum_resolved_for_signal: 20,
+    breaching_object_types: ["GLOSSARY_LINK_PROPOSAL"],
+    by_object_type: [
+      {
+        object_type: "ASSET_DESCRIPTION_DRAFT",
+        sampled: 40,
+        resolved: 38,
+        agreed: 36,
+        disagreed: 2,
+        pending: 2,
+        disagreement_rate: 0.0526,
+        sufficient_sample: true,
+        breaches_revisit_trigger: true,
+      },
+      {
+        object_type: "GLOSSARY_LINK_PROPOSAL",
+        sampled: 24,
+        resolved: 24,
+        agreed: 20,
+        disagreed: 4,
+        pending: 0,
+        disagreement_rate: 0.1667,
+        sufficient_sample: true,
+        breaches_revisit_trigger: true,
+      },
+      {
+        object_type: "VIEW_LINEAGE_EDGE",
+        sampled: 9,
+        resolved: 3,
+        agreed: 3,
+        disagreed: 0,
+        pending: 6,
+        disagreement_rate: 0.0,
+        sufficient_sample: false,
+        breaches_revisit_trigger: false,
+      },
+    ],
+  };
+}
+
+export interface ReviewerAgentSamplesQuery {
+  outcome?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET .../reviewer-agent/samples` fixture. Filters by `outcome` the same
+ *  way the real route does, so the screen's outcome picker has something
+ *  visible to switch between. */
+export function makeFixtureReviewerAgentSamples(
+  query: ReviewerAgentSamplesQuery,
+): PageOf<ReviewAuditSampleRead> {
+  const now = new Date();
+  const iso = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3_600_000).toISOString();
+  const all: ReviewAuditSampleRead[] = [
+    {
+      sample_id: "ffffffff-1111-1111-1111-111111111111",
+      governance_review_id: "bbbbbbbb-1111-1111-1111-111111111111",
+      agent_principal_id: "agent:steward",
+      object_type: "ASSET_DESCRIPTION_DRAFT",
+      risk_tier: "T0",
+      decision: "APPROVED",
+      sampled_at: iso(2),
+      human_outcome: "PENDING",
+      human_principal_id: null,
+      human_rationale: null,
+      resolved_at: null,
+    },
+    {
+      sample_id: "ffffffff-2222-2222-2222-222222222222",
+      governance_review_id: "bbbbbbbb-4444-4444-4444-444444444444",
+      agent_principal_id: "agent:steward",
+      object_type: "GLOSSARY_LINK_PROPOSAL",
+      risk_tier: "T1",
+      decision: "APPROVED",
+      sampled_at: iso(6),
+      human_outcome: "PENDING",
+      human_principal_id: null,
+      human_rationale: null,
+      resolved_at: null,
+    },
+    {
+      sample_id: "ffffffff-3333-3333-3333-333333333333",
+      governance_review_id: "bbbbbbbb-5555-5555-5555-555555555555",
+      agent_principal_id: "agent:steward",
+      object_type: "ASSET_DESCRIPTION_DRAFT",
+      risk_tier: "T0",
+      decision: "APPROVED",
+      sampled_at: iso(30),
+      human_outcome: "AGREED",
+      human_principal_id: "priya.steward",
+      human_rationale: "Matches the source column comments.",
+      resolved_at: iso(28),
+    },
+    {
+      sample_id: "ffffffff-4444-4444-4444-444444444444",
+      governance_review_id: "bbbbbbbb-6666-6666-6666-666666666666",
+      agent_principal_id: "agent:steward",
+      object_type: "GLOSSARY_LINK_PROPOSAL",
+      risk_tier: "T1",
+      decision: "REJECTED",
+      sampled_at: iso(50),
+      human_outcome: "DISAGREED",
+      human_principal_id: "priya.steward",
+      human_rationale: "The term does map to this column; the agent's rejection was too strict.",
+      resolved_at: iso(48),
+    },
+  ];
+  const outcome = query.outcome ?? "PENDING";
+  const items = outcome === "ALL" ? all : all.filter((sample) => sample.human_outcome === outcome);
+  const limit = query.limit ?? 50;
+  const offset = query.offset ?? 0;
+  return {
+    items: items.slice(offset, offset + limit),
+    limit,
+    offset,
+    total: items.length,
+  };
+}
+
+/* ---------------------------------------------------------------------------
+   AT-1: Playbooks -- saved, scheduled bulk-metadata automation rules
+   (`playbooks_api.py`). A module-level, in-memory store keyed by org so
+   create/toggle/delete/run are real round trips within one fixture session,
+   mirroring the pattern `FIXTURE_DBT_PROJECTS` above uses for the same
+   reason.
+--------------------------------------------------------------------------- */
+
+const FIXTURE_PLAYBOOKS: Record<string, PlaybookRead[]> = {};
+
+function seedFixturePlaybooks(organizationId: string): PlaybookRead[] {
+  if (FIXTURE_PLAYBOOKS[organizationId]) return FIXTURE_PLAYBOOKS[organizationId]!;
+  const now = new Date();
+  const iso = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const seeded: PlaybookRead[] = [
+    {
+      id: "77777777-0001-0001-0001-000000000001",
+      organization_id: organizationId,
+      name: "Tag PII-shaped staging tables",
+      action: "TAG",
+      datasource_id: "10000000-0000-0000-0000-000000000001",
+      match_field: "TABLE_NAME",
+      match_pattern: "stg_%",
+      column_name_pattern: null,
+      action_parameters: { tag_key: "needs-review" },
+      schedule_interval_minutes: 60,
+      auto_apply_max_items: 50,
+      enabled: true,
+      created_by: "priya.steward",
+      last_run_at: iso(0.2),
+      created_at: iso(30),
+      updated_at: iso(0.2),
+    },
+    {
+      id: "77777777-0002-0002-0002-000000000002",
+      organization_id: organizationId,
+      name: "Classify email columns as PII",
+      action: "CLASSIFY",
+      datasource_id: "10000000-0000-0000-0000-000000000001",
+      match_field: "SCHEMA_NAME",
+      match_pattern: "public",
+      column_name_pattern: "%email%",
+      action_parameters: { classification: "PII" },
+      schedule_interval_minutes: 1440,
+      auto_apply_max_items: 0,
+      enabled: true,
+      created_by: "priya.steward",
+      last_run_at: iso(1),
+      created_at: iso(60),
+      updated_at: iso(1),
+    },
+    {
+      id: "77777777-0003-0003-0003-000000000003",
+      organization_id: organizationId,
+      name: "Assign finance ownership",
+      action: "OWN",
+      datasource_id: "10000000-0000-0000-0000-000000000002",
+      match_field: "QUALIFIED_NAME",
+      match_pattern: "finance.%",
+      column_name_pattern: null,
+      action_parameters: { owner_type: "GROUP", owner_principal: "finance-data-team" },
+      schedule_interval_minutes: 720,
+      auto_apply_max_items: 10,
+      enabled: false,
+      created_by: "raj.admin",
+      last_run_at: null,
+      created_at: iso(14),
+      updated_at: iso(7),
+    },
+    {
+      id: "77777777-0004-0004-0004-000000000004",
+      organization_id: organizationId,
+      name: "Certify gold-layer reporting tables",
+      action: "CERTIFY",
+      datasource_id: "10000000-0000-0000-0000-000000000002",
+      match_field: "TABLE_NAME",
+      match_pattern: "gold_%",
+      column_name_pattern: null,
+      action_parameters: { rationale: "Automated quarterly gold-layer recertification", expires_after_days: 90 },
+      schedule_interval_minutes: 10_080,
+      auto_apply_max_items: 0,
+      enabled: true,
+      created_by: "priya.steward",
+      last_run_at: iso(3),
+      created_at: iso(90),
+      updated_at: iso(3),
+    },
+    {
+      id: "77777777-0005-0005-0005-000000000005",
+      organization_id: organizationId,
+      name: "Tag legacy archive tables",
+      action: "TAG",
+      datasource_id: "10000000-0000-0000-0000-000000000001",
+      match_field: "TABLE_NAME",
+      match_pattern: "%_archive",
+      column_name_pattern: null,
+      action_parameters: { tag_key: "legacy", tag_value: "true" },
+      schedule_interval_minutes: 10_080,
+      auto_apply_max_items: 0,
+      enabled: false,
+      created_by: "raj.admin",
+      last_run_at: null,
+      created_at: iso(5),
+      updated_at: iso(5),
+    },
+  ];
+  FIXTURE_PLAYBOOKS[organizationId] = seeded;
+  return seeded;
+}
+
+/** `GET /v1/organizations/{organization_id}/playbooks`. */
+export async function makeFixturePlaybooks(
+  organizationId: string,
+  query: PlaybooksQuery = {},
+): Promise<PageOf<PlaybookRead>> {
+  await wait(80);
+  const all = seedFixturePlaybooks(organizationId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: all.slice(offset, offset + limit), limit, offset, total: all.length };
+}
+
+/** `POST /v1/organizations/{organization_id}/playbooks` -- 409 on a
+ *  duplicate name within the org, mirroring the real routes own unique
+ *  constraint. */
+export async function makeFixtureCreatePlaybook(
+  organizationId: string,
+  body: PlaybookCreate,
+): Promise<PlaybookRead> {
+  await wait(120);
+  const items = seedFixturePlaybooks(organizationId);
+  if (items.some((p) => p.name === body.name)) {
+    throw new ApiError(409, "a playbook with this name already exists");
+  }
+  const now = new Date().toISOString();
+  const playbook: PlaybookRead = {
+    id: `77777777-${Math.random().toString(16).slice(2, 6)}-0000-0000-${Date.now().toString(16).padStart(12, "0")}`,
+    organization_id: organizationId,
+    name: body.name,
+    action: body.action,
+    datasource_id: body.datasource_id,
+    match_field: body.match_field ?? "TABLE_NAME",
+    match_pattern: body.match_pattern,
+    column_name_pattern: body.column_name_pattern ?? null,
+    action_parameters: body.action_parameters,
+    schedule_interval_minutes: body.schedule_interval_minutes,
+    auto_apply_max_items: body.auto_apply_max_items ?? 0,
+    enabled: body.enabled ?? true,
+    created_by: "local-ui-admin",
+    last_run_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+  items.unshift(playbook);
+  return playbook;
+}
+
+function findFixturePlaybook(playbookId: string): PlaybookRead | undefined {
+  return Object.values(FIXTURE_PLAYBOOKS).flat().find((p) => p.id === playbookId);
+}
+
+/** `PATCH /v1/playbooks/{playbook_id}` -- every field optional; only the
+ *  fields present in `body` are applied, mirroring the real routes
+ *  `exclude_unset` semantics. */
+export async function makeFixtureUpdatePlaybook(
+  playbookId: string,
+  body: PlaybookUpdate,
+): Promise<PlaybookRead> {
+  await wait(90);
+  const playbook = findFixturePlaybook(playbookId);
+  if (!playbook) throw new ApiError(404, "playbook not found");
+  Object.assign(playbook, body, { updated_at: new Date().toISOString() });
+  return playbook;
+}
+
+/** `DELETE /v1/playbooks/{playbook_id}` -- 204, no response body. */
+export async function makeFixtureDeletePlaybook(playbookId: string): Promise<void> {
+  await wait(90);
+  for (const items of Object.values(FIXTURE_PLAYBOOKS)) {
+    const index = items.findIndex((p) => p.id === playbookId);
+    if (index !== -1) {
+      items.splice(index, 1);
+      return;
+    }
+  }
+  throw new ApiError(404, "playbook not found");
+}
+
+/** `POST /v1/playbooks/{playbook_id}/run` -- 409 if the playbook is
+ *  disabled, mirroring the real routes own check. */
+export async function makeFixtureRunPlaybook(playbookId: string): Promise<PlaybookRunResultRead> {
+  await wait(150);
+  const playbook = findFixturePlaybook(playbookId);
+  if (!playbook) throw new ApiError(404, "playbook not found");
+  if (!playbook.enabled) throw new ApiError(409, "playbook is disabled");
+  playbook.last_run_at = new Date().toISOString();
+  const matchedCount = 3;
+  const outcome = playbook.auto_apply_max_items > 0 && matchedCount <= playbook.auto_apply_max_items
+    ? "AUTO_APPLIED"
+    : "GOVERNANCE_REVIEW_QUEUED";
+  return {
+    playbook_id: playbookId,
+    matched_count: matchedCount,
+    outcome,
+    bulk_action_run_id: outcome === "AUTO_APPLIED" ? `88888888-0000-0000-0000-${Date.now().toString(16).padStart(12, "0")}` : null,
+    bulk_stewardship_operation_id: null,
+    governance_review_id: outcome === "GOVERNANCE_REVIEW_QUEUED" ? `99999999-0000-0000-0000-${Date.now().toString(16).padStart(12, "0")}` : null,
   };
 }

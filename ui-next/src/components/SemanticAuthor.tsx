@@ -96,20 +96,42 @@ export function SemanticAuthor({ org, projectId, models, onSaved }: {
 }
 
 type BusinessProposal = { id: string; status: string; table_name: string; governance_review_id: string; promoted_tool_version_id: string | null; payload: { business_description?: string; tool_blueprint?: { recommended: boolean } } };
-export function BusinessGeneration({ org, datasourceId }: { org: string; datasourceId?: string | null }) {
+export function BusinessGeneration({
+  org,
+  datasourceId,
+  externallyScoped,
+}: {
+  org: string;
+  datasourceId?: string | null;
+  /** True when the caller already has its own datasource picker whose choice
+   *  this component should follow (`BusinessMeaningScreen`'s top-level
+   *  "Datasource" filter). Suppresses this component's own picker entirely
+   *  instead of showing a second, differently-labelled datasource dropdown
+   *  side by side with the caller's — two independent pickers on one screen
+   *  read as unlinked and confused every "pick a datasource" test that
+   *  assumed there was exactly one. When false (`SemanticsScreen`, which has
+   *  no datasource scope of its own), this component's own picker is the
+   *  only one and stays. */
+  externallyScoped?: boolean;
+}) {
   const [sources, setSources] = useState<DataSourceRead[]>([]);
   const [selected, setSelected] = useState(datasourceId ?? "");
   const source = datasourceId || selected;
+  const showOwnPicker = !externallyScoped;
   const [model, setModel] = useState(false);
   const [proposals, setProposals] = useState<BusinessProposal[]>([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const run = async (action: () => Promise<void>) => { setBusy(true); setMessage(""); try { await action(); } catch (e) { setMessage((e as Error).message); } finally { setBusy(false); } };
   const load = async () => { setProposals((await get<{ items: BusinessProposal[] }>(`/v1/datasources/${source}/metadata-enrichment-proposals?limit=100`)).items); };
-  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open && !datasourceId) void run(async () => setSources((await fetchOrgDatasources(org)).items)); }}>
+  return <details className="workflow-author" onToggle={e => { if (e.currentTarget.open && showOwnPicker) void run(async () => setSources((await fetchOrgDatasources(org)).items)); }}>
     <summary>Generate business meaning and reusable tool blueprints</summary>
     <p>Completed scans automatically propose business meaning. Generate again on demand, review the evidence, then promote an approved blueprint into a draft tool. Publication needs a separate tool review.</p>
-    {!datasourceId ? <Field label="Inference datasource"><select value={selected} onChange={e => { setSelected(e.target.value); setProposals([]); }}><option value="">Select datasource</option>{sources.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field> : null}
+    {showOwnPicker ? (
+      <Field label="Inference datasource"><select value={selected} onChange={e => { setSelected(e.target.value); setProposals([]); }}><option value="">Select datasource</option>{sources.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></Field>
+    ) : !source ? (
+      <p className="workflow-author__hint">Pick a datasource above to generate business meaning for it.</p>
+    ) : null}
     <label><input type="checkbox" checked={model} onChange={e => setModel(e.target.checked)} />Use approved model assistance (requires configured model route)</label>
     <Button disabled={busy || !source} onClick={() => void run(async () => {
       const result = await postJson<{ proposal_count: number; engine_mode: string }>(`/v1/datasources/${source}/semantic-inference-runs`, { use_model: model, max_tables: 100 });

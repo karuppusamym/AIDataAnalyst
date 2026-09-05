@@ -905,7 +905,7 @@ export function BusinessMeaningScreen() {
         </Field>
       </div>
 
-      <BusinessGeneration key={dsId ?? ORG} org={ORG} datasourceId={dsId} />
+      <BusinessGeneration key={dsId ?? ORG} org={ORG} datasourceId={dsId} externallyScoped />
       <div className="bm__tabs" role="tablist">
         <button
           role="tab"
