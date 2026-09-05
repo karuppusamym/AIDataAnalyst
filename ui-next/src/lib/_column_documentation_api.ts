@@ -223,3 +223,138 @@ export async function downloadDatasourceModelWorkbook(
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/* ---------------------------------------------------------------------------
+   Workbook re-import: upload -> preview -> submit.
+
+   Three calls because it is three steps, and the middle one is the point: an
+   upload parses and diffs but publishes nothing, so a steward who uploaded the
+   wrong file sees a nonsense diff and abandons it rather than putting hundreds
+   of spurious changes in front of a reviewer. See
+   `src/aida/model_import_api.py`.
+--------------------------------------------------------------------------- */
+
+/** `src/aida/model_import_api.py::ModelImportBatchRead`. */
+export interface ModelImportBatchRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  filename: string;
+  content_sha256: string;
+  status: "DRAFT" | "PENDING_REVIEW" | "APPLIED" | "REJECTED";
+  governance_review_id: string | null;
+  change_count: number;
+  applied_count: number;
+  skipped_count: number;
+  rejected_row_count: number;
+  uploaded_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+
+/** `src/aida/model_import_api.py::ModelImportChangeRead`. */
+export interface ModelImportChangeRead {
+  id: string;
+  batch_id: string;
+  sheet_name: string;
+  row_number: number;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string;
+  subject_label: string;
+  field: string;
+  old_value: string | null;
+  new_value: string;
+  expected_version: number | null;
+  status:
+    | "PENDING"
+    | "APPLIED"
+    | "SKIPPED_STALE"
+    | "SKIPPED_MISSING"
+    | "REJECTED";
+  skip_reason: string | null;
+}
+
+const FIXTURE_NOTICE =
+  "Uploads are parsed by the server. Run against a live API (VITE_USE_FIXTURES=0) to import a workbook.";
+
+/** Upload an edited workbook. Parses and diffs; publishes nothing.
+ *
+ *  The file is sent as the raw request body rather than as multipart form
+ *  data: the server takes it that way (`python-multipart` is not a pinned
+ *  dependency there), and it lets the browser stream the `File` straight
+ *  through instead of base64-encoding it into a JSON field. */
+export async function uploadModelWorkbook(
+  datasourceId: string,
+  file: File,
+  signal?: AbortSignal,
+): Promise<ModelImportBatchRead> {
+  if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
+  const path =
+    `/v1/datasources/${encodeURIComponent(datasourceId)}/model/import` +
+    `?filename=${encodeURIComponent(file.name)}`;
+  const res = await fetch(path, {
+    method: "POST",
+    signal,
+    body: file,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/octet-stream",
+      ...identityHeaders(),
+    },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as ModelImportBatchRead;
+}
+
+/** Every change a batch would make, or made -- rejected rows included.
+ *
+ *  Not filtered to the changes that worked: an upload that hid the rows it
+ *  could not understand would look cleaner than it was, and those rows are
+ *  exactly what a steward needs to see. */
+export async function fetchModelImportChanges(
+  batchId: string,
+  signal?: AbortSignal,
+): Promise<ModelImportChangeRead[]> {
+  if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
+  const page = await readJson<PageOf<ModelImportChangeRead>>(
+    `/v1/model-imports/${encodeURIComponent(batchId)}/changes?limit=1000`,
+    signal,
+  );
+  return page.items ?? [];
+}
+
+/** Submit a parsed batch into the shared review queue. Still publishes
+ *  nothing -- someone other than the submitter has to approve it. */
+export async function submitModelImport(
+  batchId: string,
+  signal?: AbortSignal,
+): Promise<ModelImportBatchRead> {
+  if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
+  const res = await fetch(`/v1/model-imports/${encodeURIComponent(batchId)}/submit`, {
+    method: "POST",
+    signal,
+    headers: { Accept: "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as ModelImportBatchRead;
+}

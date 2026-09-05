@@ -11466,3 +11466,196 @@ Two separate gaps hid behind one symptom ("I don't see the column-level descript
   an `AssetDescriptionDraft` now both publish into `AssetDocumentationVersion`, but only the latter
   carries evidence scores. Both still pass through the same review; the claim route simply has no
   score to sort a reviewer's queue by.
+
+---
+
+## 2026-09-05 — Workbook re-import: the round trip closes
+
+The previous entry shipped the export and named the missing half: "Download and
+edit work; re-import does not exist yet." This is that half.
+
+### The shape
+
+    POST /v1/datasources/{id}/model/import   parse + diff, writes a DRAFT batch
+    GET  /v1/model-imports/{id}/changes      what it would change, row by row
+    POST /v1/model-imports/{id}/submit       enters the shared review queue
+                                             -> APPROVE publishes
+
+Upload is deliberately not submit. A steward who uploads the wrong file sees a
+nonsense diff and abandons it, rather than having already put hundreds of
+spurious changes in front of a reviewer.
+
+**One review per batch, not per change.** `DocumentClaim` takes a review per
+claim because deciding one means reading its own source paragraph. A workbook's
+changes share one provenance, and 400 queue entries for one edit would make the
+queue useless — which is why this path exists alongside the claim path rather
+than reusing it. Approval publishes through the same `publish_column_description`
+/ `publish_asset_documentation_version` / `write_annotation_version` helpers a
+single-asset approval uses; there is no bulk write that bypasses them.
+
+### The two things most likely to go wrong, and what stops them
+
+**Lost updates.** Every editable field exports beside a read-only `*_version`
+column (`description_version`, `readme_version`, and `annotation_version`, added
+to the Tables sheet in this pass). That records the version the editor was
+looking at. At apply time it is compared against the current version; a change
+whose expectation no longer holds is `SKIPPED_STALE` and the other person's
+work stands. Without it, a workbook exported Monday and uploaded Friday would
+silently discard everything published in between —
+`tests/test_model_import.py::test_an_edit_superseded_since_export_is_skipped_not_applied`.
+
+**A reader that only understands its own writer's output.** Excel rewrites a
+workbook wholesale on save: strings move into `xl/sharedStrings.xml`, empty
+cells vanish entirely, sheet parts stop matching sheet order, and formatted
+strings split into runs. `aida.xlsx_reader` handles all four, and
+`tests/test_xlsx_reader.py` builds Excel-shaped packages deliberately —
+a reader tested only against `aida.xlsx`'s inline-string output would have
+passed every test and failed on the first real upload.
+
+### Deliberate refusals
+
+- **A blank cell is not a deletion.** Blanking a cell by accident is the easiest
+  mistake in a spreadsheet, and an empty cell is indistinguishable from one
+  nobody filled in. Blank means "no edit".
+- **A spreadsheet cannot create a business annotation.** Editing
+  `business_name` / `business_description` / `grain_statement` re-publishes an
+  existing one; creating one needs a domain and entity classification that no
+  cell can supply. Rows attempting it are REJECTED *with the reason*, not
+  ignored.
+- **Rows that could not be matched are reported, never dropped.** An edited id,
+  a column from another datasource, a missing `column_id` header — each becomes
+  a REJECTED change row carrying its own sheet name and row number, and the
+  preview UI sorts those to the top. An import that hid what it could not
+  understand would look cleaner than it was.
+- **Several annotation fields edited on one table publish one new version**, not
+  three: the version chain should record what the steward did, not how many
+  cells they touched. Fields the workbook does not expose (`table_role`,
+  `synonyms`, `tags`, `confidence`) are carried forward verbatim.
+
+### Verification
+
+- `tests/test_model_import.py` (21) — every test starts from a real
+  `compose_model_workbook` export and edits the file, rather than hand-building
+  an upload, so an export/import disagreement about a header or version column
+  cannot pass. `tests/test_xlsx_reader.py` (15). `ui-next`
+  `WorkbookImport.test.tsx` (7). Full suites green; `mypy` clean on 323 files,
+  `ruff` clean, `lint-imports` 8/8, one Alembic head (`c7f2a4b81e50`).
+- OpenAPI baseline regenerated: five added paths, no path removed, and no
+  existing path's definition changed (verified by set comparison, not just by
+  the diff tool's own report).
+- `test_the_readme_promises_exactly_the_fields_the_import_reads_back` asserts
+  `model_export.EDITABLE_COLUMNS` (what the README sheet tells a steward) equals
+  `model_import.COLUMN_FIELDS`/`TABLE_FIELDS` (what the code actually reads), so
+  the file's own instructions cannot drift from its behaviour.
+
+### Known limitations
+
+- **No `python-multipart`**, so the workbook is sent as the raw request body
+  with the filename as a query parameter rather than as a form upload. This
+  follows the repo's standing no-new-dependency constraint and lets a browser
+  stream the `File` through without base64, but it is a slightly unusual API
+  shape that a client has to be told about.
+- **`MAX_CHANGES_PER_BATCH = 5_000`.** Past that a single decision stops being
+  a review, so the upload is refused with a message telling the uploader to
+  split it — not truncated into something that looks complete.
+- **Relationships are exported but not importable.** Approving or rejecting a
+  relationship candidate is a decision with its own evidence and its own review
+  path; making it a spreadsheet cell would be the wrong affordance.
+- **No partial approval.** A reviewer approves or rejects the whole batch. Per-
+  change decisions would reintroduce exactly the per-row review load this design
+  exists to avoid, but it does mean one bad row means rejecting the file and
+  re-uploading a corrected one.
+- **Deleting a description still has no path anywhere** — not through the
+  workbook (by design, above), and not through the UI either. It remains a gap.
+
+---
+
+## 2026-09-05 — Cross-source reaches the UI: domain-scoped lineage, grants, and identity resolution
+
+The previous entries closed the workbook round trip and noted a separate gap
+found while answering a question about it: the platform's cross-source
+capabilities have been on the server the whole time and `ui-next` reached none
+of them. Every lineage and relationship screen was scoped to one datasource, so
+the two questions a single source cannot answer — *does this column point into
+another system?* and *are these two tables the same object?* — had no surface at
+all. `UnifiedLineageScreen` documented the omission; `DomainLineageGraphRead`
+had sat in `types.ts` unused since it was generated.
+
+### What was already there, and what was not
+
+Server-side, addressed by **data domain** rather than datasource:
+`/v1/data-domains/{id}/unified-lineage/graph`,
+`.../relationship-candidates/discover-cross-source`,
+`.../cross-source-object-resolution-candidates/discover`,
+`/v1/datasources/{id}/cross-source-object-resolution-candidates`,
+`/v1/cross-source-object-resolution-candidates/{id}/decision`, and the grant
+pair in `atlas.modules.identity_tenancy.router`. No backend change was needed
+in this pass; every line of it is UI.
+
+### What shipped
+
+- **Domain scope on Unified lineage.** A `Scope` select switches between one
+  datasource and every datasource in one domain — the only view in which a
+  relationship spanning two systems renders as an edge at all. Both scopes live
+  in the URL (`?scope=domain&dom=…`), so a domain graph is as shareable as a
+  single-source one.
+- **Withheld domains are named, never dropped.** ADR-0017 SS4 / INV-5 make
+  cross-domain visibility deny-by-default and never inherited, and the server
+  reports `withheld_cross_boundary_domain_ids` for domains with candidates
+  reaching in that no ACTIVE grant covers. Those render as a banner naming each
+  one, with the grant request pre-filled for the specific domain that was
+  withheld — an incomplete graph cannot pass for a complete one.
+- **`CrossBoundaryGrants`.** Lists grants in both directions and states the
+  direction *in words* ("Retail may see into Finance"), because two domain names
+  alone leave a steward guessing which side they are on. It can request and it
+  deliberately cannot approve: a grant goes ACTIVE only when a different
+  principal decides its `CROSS_BOUNDARY_GRANT` review on the Review queue.
+- **`CrossSourceScreen`** (nav `cross-source`, Steward group) — domain-scoped
+  discovery for both relationship candidates and object-resolution candidates,
+  plus the review queue for the latter with approve/reject. A cross-boundary
+  scan refused with 403 is turned into the grant request rather than a dead end.
+- **Impact still resolves per datasource.** The impact endpoint is
+  datasource-scoped; a domain-graph node id carries its owning datasource as a
+  `{datasource_id}:` prefix (added by the merge step so two sources' same-named
+  synthetic nodes cannot false-merge), so selecting a node splits that prefix
+  back off and asks the right datasource — rather than disabling impact in the
+  one view where cross-source questions actually arise.
+
+### A bug the unit tests did not catch, and the browser did
+
+The graph body was gated on `!ds`, so domain scope — which has no `ds` — rendered
+"Pick a datasource" *underneath a header already reporting the domain graph's
+node and edge counts*. Both of the domain tests written first asserted on things
+that render outside that guard (the counts, the withheld banner), so both passed
+against a screen that showed an empty state. Found by loading the page and
+querying the DOM. Fixed, and a new case in `UnifiedLineageScreen.test.tsx`
+("renders the graph body in domain scope, not an empty 'pick a datasource'
+state") now asserts on the tabs *inside* that guard so it cannot regress.
+
+### Verification
+
+- `ui-next`: 340 tests (up from 319) across 53 files — `CrossSourceScreen.test.tsx`
+  (9), `CrossBoundaryGrants.test.tsx` (7), and 5 added to
+  `UnifiedLineageScreen.test.tsx`. `tsc --noEmit` clean, production build clean.
+- Browser-verified against fixtures: domain graph renders 4 nodes / 3 edges with
+  the cross-datasource edge present, the withheld banner names Retail, the grants
+  panel shows direction and pending state, and the cross-source screen lists two
+  candidates with evidence and decision controls. No console errors from this code.
+
+### Known limitations
+
+- **Discovery reports a count, not a run.** Both discover actions are synchronous
+  `202`-style calls that return the candidates they proposed; there is no progress
+  view for a long scan over many datasource pairs, and the server's own
+  `max_datasource_pairs` cap is not exposed as a control yet.
+- **Object-resolution candidates are fetched per datasource and merged client-side**
+  because no domain-scoped list endpoint exists. Bounded by the domain's source
+  count, and a source the caller cannot read contributes nothing rather than
+  failing the view — but it is N requests, not one.
+- **Relationship candidates discovered cross-source are still reviewed on the
+  existing per-datasource Relationships screen.** Only object-resolution
+  candidates get a queue here; unifying the two review surfaces is separate work.
+- **No approve control for grants**, by design — the Review queue owns that
+  decision. A steward requesting a grant has to go there to see it decided.
+- **The domain picker walks organization → lines of business → domains**, since
+  there is no org-wide domain endpoint. Bounded, but it is a fan-out.

@@ -8,6 +8,7 @@ import {
   fetchOrgDatasources,
 } from "../lib/api";
 import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
+import { WorkbookImport } from "../components/WorkbookImport";
 import { useScopeSelection } from "../lib/scope";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
@@ -241,6 +242,13 @@ function HealthPane({
             </ol>
           </>
         )}
+      </div>
+
+      {/* The other half of the workbook round trip the footer's export button
+          opens. Placed on the same pane as the export, because the two are one
+          workflow: download here, edit offline, come back here. */}
+      <div className="evp__links">
+        <WorkbookImport datasourceId={source.id} />
       </div>
 
       <div className="evp__links">

@@ -17,6 +17,7 @@ const MarketplaceScreen = lazy(() => import("./screens/MarketplaceScreen").then(
 const LineageRefusalScreen = lazy(() => import("./screens/LineageRefusalScreen").then((module) => ({ default: module.LineageRefusalScreen })));
 const StudioChangeSetsScreen = lazy(() => import("./screens/StudioChangeSetsScreen").then((module) => ({ default: module.StudioChangeSetsScreen })));
 const NarratedLineageScreen = lazy(() => import("./screens/NarratedLineageScreen").then((module) => ({ default: module.NarratedLineageScreen })));
+const CrossSourceScreen = lazy(() => import("./screens/CrossSourceScreen").then((module) => ({ default: module.CrossSourceScreen })));
 const AskScreen = lazy(() => import("./screens/AskScreen").then((module) => ({ default: module.AskScreen })));
 const RelationshipsScreen = lazy(() => import("./screens/RelationshipsScreen").then((module) => ({ default: module.RelationshipsScreen })));
 const SemanticsScreen = lazy(() => import("./screens/SemanticsScreen").then((module) => ({ default: module.SemanticsScreen })));
@@ -102,6 +103,7 @@ const NAV: NavItem[] = [
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
   { id: "description-drafts", label: "Description drafts", group: "Steward", icon: "✎", keywords: "asset description draft generate submit steward" },
   { id: "relationships", label: "Relationships", group: "Steward", icon: "⌁", keywords: "keys graph links" },
+  { id: "cross-source", label: "Cross-source", group: "Steward", icon: "⧉", keywords: "cross source domain federate identity resolution same object grant boundary discover" },
   { id: "transformations", label: "Transformations", group: "Steward", icon: "▤", keywords: "dbt models sql transforms manifest" },
   { id: "quality", label: "Data quality", group: "Steward", icon: "◎", keywords: "incidents score checks" },
   { id: "studio", label: "Studio", group: "Steward", icon: "△", keywords: "change sets author" },
@@ -174,6 +176,7 @@ function Screen({
     case "lineage": return <NarratedLineageScreen />;
     case "analyst": return <AskScreen />;
     case "relationships": return <RelationshipsScreen />;
+    case "cross-source": return <CrossSourceScreen />;
     case "semantics": return <SemanticsScreen />;
     case "meaning": return <BusinessMeaningScreen />;
     case "quality": return <QualityScreen />;

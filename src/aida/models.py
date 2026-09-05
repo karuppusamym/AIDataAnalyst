@@ -2161,6 +2161,164 @@ class ColumnDocumentationVersion(Base, TimestampMixin):
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class DescriptionWithdrawal(Base, TimestampMixin):
+    """A request to retire an approved description, routed through review.
+
+    Publishing a description was governed from the first commit; un-publishing
+    one was not possible at all -- a steward who approved a wrong column
+    description had no way to take it back, and the workbook path deliberately
+    refuses to read a blank cell as a deletion (an empty cell is
+    indistinguishable from one nobody filled in). That left the only remedy as
+    "publish a correction", which does not work when the right answer is that
+    the platform should say nothing at all.
+
+    Withdrawal is not a delete. The `ColumnDocumentationVersion` /
+    `AssetDocumentationVersion` row keeps its content and moves to `WITHDRAWN`,
+    so an `AgentRun` grounded on it stays replayable against exactly the text
+    it saw -- the same append-only guarantee every other status transition on
+    those tables preserves. What changes is that the current-version resolvers
+    (which filter `status == "APPROVED"`) stop returning it, and the asset
+    reads as undescribed again.
+
+    Routed through `GovernanceReview` like every other governed change, with
+    the same maker-checker rule: removing a description an agent may be
+    grounding on is not a smaller decision than adding one.
+    """
+
+    __tablename__ = "description_withdrawal"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        CheckConstraint(
+            "subject_type IN ('TABLE', 'COLUMN')", name="withdrawal_subject_type_is_supported"
+        ),
+        Index("ix_description_withdrawal_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: The column or table whose description is being withdrawn.
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
+    #: The exact version row this request was raised against. Re-checked at
+    #: approval time: if a newer version has been published in between, the
+    #: withdrawal no longer refers to the text anyone reviewed, and is refused
+    #: rather than applied to content nobody looked at.
+    version_id: Mapped[UUID] = mapped_column(nullable=False)
+    withdrawn_text: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str] = mapped_column(String(2000), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModelImportBatch(Base, TimestampMixin):
+    """One uploaded model workbook, awaiting or having had a review decision.
+
+    The write half of the download/edit/re-upload round trip
+    (`aida.model_export` is the read half). An upload never applies anything:
+    it parses, diffs against current state, and records the differences as
+    `ModelImportChange` rows for a steward to look at. Only an APPROVE
+    decision on this batch's single `GovernanceReview` publishes them.
+
+    One review per *batch*, not per change -- unlike `DocumentClaim`, which
+    takes one review per claim because deciding a claim means reading its own
+    source paragraph. A workbook's changes share one provenance (this file,
+    this uploader) and are reviewed as one edit; at bulk scale, per-row
+    reviews would be unusable, which is the whole reason this path exists
+    alongside the document-claim one.
+
+    `content_sha256` is over the uploaded bytes. It makes a re-upload of the
+    identical file detectable, and ties an applied batch to exactly the file
+    that was reviewed.
+    """
+
+    __tablename__ = "model_import_batch"
+    __table_args__ = (
+        UniqueConstraint("governance_review_id"),
+        Index("ix_model_import_batch_org_status", "organization_id", "status"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    datasource_id: Mapped[UUID] = mapped_column(
+        ForeignKey("datasource.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # DRAFT once parsed, PENDING_REVIEW once submitted, then APPLIED/REJECTED.
+    status: Mapped[str] = mapped_column(String(30), default="DRAFT", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    change_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    applied_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Rows the diff could not turn into a change at all -- an unresolvable id,
+    #: an edit to a read-only column, a sheet that is not in the workbook.
+    #: Counted rather than dropped so an upload can never look cleaner than it
+    #: was.
+    rejected_row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    uploaded_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ModelImportChange(Base, TimestampMixin):
+    """One field on one object that an uploaded workbook would change.
+
+    `expected_version` is the version number the workbook itself carried in
+    its read-only `*_version` column at export time -- the version the person
+    editing it was looking at. At apply time it is compared against the
+    current version, and a change whose expectation no longer holds is
+    SKIPPED_STALE rather than applied: someone else published in the window
+    between export and upload, and silently overwriting them is the lost
+    update this column exists to prevent.
+
+    `old_value` is what the field held when the diff ran, kept so a reviewer
+    can see what is being replaced without re-querying, and so an applied
+    batch remains readable after the fact.
+    """
+
+    __tablename__ = "model_import_change"
+    __table_args__ = (
+        Index("ix_model_import_change_batch_status", "batch_id", "status"),
+        CheckConstraint(
+            "subject_type IN ('TABLE', 'COLUMN')", name="import_subject_type_is_supported"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    batch_id: Mapped[UUID] = mapped_column(
+        ForeignKey("model_import_batch.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sheet_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: 1-based row number in the uploaded sheet, so a reported problem can be
+    #: found in the file the person is still looking at.
+    row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
+    field: Mapped[str] = mapped_column(String(50), nullable=False)
+    old_value: Mapped[str | None] = mapped_column(Text)
+    new_value: Mapped[str] = mapped_column(Text, nullable=False)
+    expected_version: Mapped[int | None] = mapped_column(Integer)
+    # PENDING -> APPLIED, or SKIPPED_STALE / SKIPPED_MISSING / REJECTED.
+    status: Mapped[str] = mapped_column(String(30), default="PENDING", nullable=False)
+    skip_reason: Mapped[str | None] = mapped_column(String(500))
+
+
 class AssetTermLink(Base, TimestampMixin):
     __tablename__ = "asset_term_link"
     __table_args__ = (UniqueConstraint("table_id", "term_id"),)

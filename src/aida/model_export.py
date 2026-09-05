@@ -80,6 +80,7 @@ _TABLE_HEADERS = [
     "grain_statement",
     "synonyms",
     "tags",
+    "annotation_version",
     "readme",
     "readme_version",
 ]
@@ -195,6 +196,12 @@ async def _table_rows(
                 annotation.grain_statement if annotation else None,
                 _joined(annotation.synonyms) if annotation else None,
                 _joined(annotation.tags) if annotation else None,
+                # The `*_version` columns are what a re-import checks its edits
+                # against: they record the version the editor was looking at, so
+                # a change someone else has since superseded is skipped rather
+                # than silently overwriting them. Read-only, like the id
+                # columns, and for the same reason.
+                annotation.version if annotation else None,
                 document.readme if document else None,
                 document.version if document else None,
             ]
@@ -380,6 +387,26 @@ def _readme_sheet(
             [
                 "business_description",
                 "Reviewed, authored content. This is the editable column.",
+            ],
+            [
+                "Tables: two descriptions",
+                "A table carries two authored fields, not one. "
+                "business_description (with business_name and grain_statement) "
+                "is its business annotation -- what the table means in domain "
+                "terms. readme is its longer documentation. Both are editable; "
+                "they are separate records, and editing one does not change "
+                "the other. Annotation fields can only be edited on a table "
+                "that already has an approved annotation, because creating one "
+                "requires a domain and entity classification that cannot be "
+                "inferred from a spreadsheet cell.",
+            ],
+            [
+                "Version columns",
+                "annotation_version, readme_version and description_version "
+                "record what you were looking at when this file was exported. "
+                "Do not edit them: on re-upload they are how the platform "
+                "detects that someone else has published a newer value in the "
+                "meantime, and skips your edit instead of overwriting them.",
             ],
             [
                 "Editable columns",

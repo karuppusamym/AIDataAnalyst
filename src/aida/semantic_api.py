@@ -27,6 +27,10 @@ from aida.config import Settings, get_settings
 from aida.consumer_footer import ConsumerFooterRead, compose_consumer_footer
 from aida.context import get_correlation_id
 from aida.db import get_session
+from aida.description_withdrawal import (
+    apply_description_withdrawal,
+    reject_description_withdrawal,
+)
 from aida.document_ingestion import apply_document_claim, reject_document_claim
 from aida.events import record_audit, record_outbox
 from aida.governance_notifications import notify_safely
@@ -35,6 +39,7 @@ from aida.metric_suggestion_service import (
     apply_metric_suggestion_proposal,
     reject_metric_suggestion_proposal,
 )
+from aida.model_import import apply_model_import_batch, reject_model_import_batch
 from aida.models import (
     AiAsset,
     AiAssetVersion,
@@ -48,6 +53,7 @@ from aida.models import (
     DataProductAccessRequest,
     DataProductVersion,
     DataSource,
+    DescriptionWithdrawal,
     DocumentClaim,
     GlossaryConflict,
     GlossaryLinkProposal,
@@ -58,6 +64,7 @@ from aida.models import (
     MetadataColumn,
     MetadataEnrichmentProposal,
     MetadataTable,
+    ModelImportBatch,
     ModelRouteConfiguration,
     Project,
     SemanticMetric,
@@ -2146,6 +2153,63 @@ async def _apply_governance_review_decision(
             "subject_type": claim.subject_type,
             "subject_id": claim.subject_id,
             "published_version_id": str(claim_version_id) if claim_version_id else None,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "DESCRIPTION_WITHDRAWAL":
+        withdrawal = await session.get(DescriptionWithdrawal, UUID(review.object_id))
+        if withdrawal is None or withdrawal.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # The version keeps its text and moves to WITHDRAWN -- a run
+            # grounded on it stays replayable. `retired` is False when someone
+            # published a newer version between the request and this decision,
+            # in which case nothing is touched: the reviewer read one
+            # description and would otherwise be removing another.
+            event_type, retired = await apply_description_withdrawal(
+                session, withdrawal, reviewer=context.principal_id, now=now
+            )
+        else:
+            event_type = await reject_description_withdrawal(
+                withdrawal, reviewer=context.principal_id, now=now
+            )
+            retired = False
+        aggregate_type = "description_withdrawal"
+        aggregate_id = str(withdrawal.id)
+        payload = {
+            "withdrawal_id": str(withdrawal.id),
+            "subject_type": withdrawal.subject_type,
+            "subject_id": withdrawal.subject_id,
+            "version_id": str(withdrawal.version_id),
+            "retired": retired,
+            "review_id": str(review.id),
+        }
+    elif review.object_type == "MODEL_IMPORT_BATCH":
+        batch = await session.get(ModelImportBatch, UUID(review.object_id))
+        if batch is None or batch.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if decision == "APPROVE":
+            # Publishes through the same `publish_*` helpers a single-asset
+            # approval uses -- a bulk edit gets no shortcut past them. A change
+            # superseded since the workbook was exported is skipped rather than
+            # applied, so `applied` can be lower than the batch proposed.
+            event_type, applied = await apply_model_import_batch(
+                session, batch, reviewer=context.principal_id, now=now
+            )
+        else:
+            event_type = await reject_model_import_batch(
+                session, batch, reviewer=context.principal_id, now=now
+            )
+            applied = 0
+        aggregate_type = "model_import_batch"
+        aggregate_id = str(batch.id)
+        payload = {
+            "batch_id": str(batch.id),
+            "datasource_id": str(batch.datasource_id),
+            "filename": batch.filename,
+            "content_sha256": batch.content_sha256,
+            "change_count": batch.change_count,
+            "applied_count": applied,
+            "skipped_count": batch.skipped_count,
             "review_id": str(review.id),
         }
     elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":

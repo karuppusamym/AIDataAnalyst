@@ -31,6 +31,7 @@ from aida.authorization_gate import gate_read
 from aida.column_documentation import current_descriptions_for_table
 from aida.config import Settings, get_settings
 from aida.db import get_session
+from aida.description_withdrawal import withdrawn_column_versions
 from aida.models import MetadataColumn, MetadataTable
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -70,6 +71,12 @@ class ColumnDocumentationRead(ApiModel):
     description_approved_by: str | None = None
     description_approved_at: datetime | None = None
     source_claim_id: UUID | None = None
+    #: Set when this column *had* an approved description that was retired
+    #: through review. Without it a withdrawal is indistinguishable from a
+    #: column nobody has ever reached, which is a materially different fact:
+    #: one says "we looked and decided to say nothing", the other says
+    #: "nobody has looked".
+    withdrawn_description: str | None = None
 
 
 @router.get("/tables/{table_id}/column-documentation", response_model=Page)
@@ -119,10 +126,16 @@ async def list_column_documentation(
     # One lookup for the whole table rather than per page: a table's column
     # count is bounded, and the pane's next page hits a warm result either way.
     descriptions = await current_descriptions_for_table(session, table.id)
+    # Only asked for the columns that have no current description: a column
+    # that is described now does not need its retired history on this surface.
+    withdrawn = await withdrawn_column_versions(
+        session, [column.id for column in columns if column.id not in descriptions]
+    )
 
     items = []
     for column in columns:
         documented = descriptions.get(column.id)
+        retired = withdrawn.get(column.id) if documented is None else None
         items.append(
             ColumnDocumentationRead(
                 column_id=column.id,
@@ -139,6 +152,7 @@ async def list_column_documentation(
                 description_approved_by=documented.approved_by if documented else None,
                 description_approved_at=documented.approved_at if documented else None,
                 source_claim_id=documented.source_claim_id if documented else None,
+                withdrawn_description=retired.description if retired else None,
             )
         )
     return Page(items=items, limit=limit, offset=offset, total=total or 0)

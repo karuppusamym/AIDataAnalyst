@@ -7,7 +7,14 @@ import type {
   UnifiedLineageImpactRead,
   UnifiedLineageNodeRead,
 } from "../lib/types";
-import { ApiError, fetchLineageImpact, fetchUnifiedLineageGraph } from "../lib/api";
+import { ApiError, fetchLineageImpact, fetchOrgDatasources, fetchUnifiedLineageGraph } from "../lib/api";
+import {
+  domainsWithDatasources,
+  fetchDomainLineageGraph,
+  fetchOrgDataDomains,
+} from "../lib/_cross_source_api";
+import { CrossBoundaryGrants } from "../components/CrossBoundaryGrants";
+import type { DataDomainRead } from "../lib/types";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { useOrgId } from "../lib/org";
@@ -64,15 +71,31 @@ import "./UnifiedLineageScreen.css";
        tabs (`VirtualList`, same windowed-DOM component `RelationshipsScreen`
        uses) so nothing the API actually returned is ever hidden, only the
        *diagram* is capped.
-     - Domain scope. Legacy's screen really does have a second mode (the
-       `#unified-lineage-scope` select's "Domain (all sources)" option,
-       hitting `GET /v1/data-domains/{id}/unified-lineage/graph` and, when a
-       related domain is withheld, a whole cross-boundary-grant-request
-       dialog, ADR-0017 SS4). Nothing in `ui-next` today -- no domain list
-       fetch, no grant-request flow -- exists to build on for that; adding it
-       here would mean building an entire second un-ported subsystem inside
-       one screen's port. `DomainLineageGraphRead` (`lib/types.ts`) is
-       present but unused for the same reason. Single-datasource scope only.
+     - Domain scope. SHIPPED (2026-09-05), no longer deferred. The
+       `Scope` select switches between one datasource
+       (`GET /v1/datasources/{id}/unified-lineage/graph`) and every datasource
+       in one data domain (`GET /v1/data-domains/{id}/unified-lineage/graph`),
+       which is the only view in which a relationship spanning two systems
+       renders as an edge at all. `DomainLineageGraphRead` is finally the type
+       it was generated to be.
+
+       The part that is not just a different URL: ADR-0017 SS4 / INV-5 make
+       cross-domain visibility deny-by-default and never inherited, so the
+       domain graph reports `withheld_cross_boundary_domain_ids` -- domains
+       with candidates reaching in here that no ACTIVE grant covers. Those
+       render as a banner naming each withheld domain, with the grant request
+       one click away (`CrossBoundaryGrants`), rather than as a silently
+       incomplete graph. Requesting is all this screen does; a grant goes
+       ACTIVE only when a different principal approves its
+       `CROSS_BOUNDARY_GRANT` review on the Review queue.
+
+       Impact still resolves per datasource, because the impact endpoint is
+       datasource-scoped. In domain scope a node id carries its owning
+       datasource as a `{datasource_id}:` prefix (the merge step adds it to
+       avoid false-merging two sources' same-named synthetic nodes), so
+       selecting a node splits that prefix back off and asks the right
+       datasource -- rather than disabling impact in the one view where
+       cross-source questions actually arise.
      - Legacy's free-text canvas search (`matchNode`, dims every non-matching
        node) is a capability of the retired canvas engine, not a separate
        feature to reproduce; the "Nodes" tab's `VirtualList` is browsable in
@@ -190,6 +213,10 @@ export function UnifiedLineageScreen() {
   const [neighborhood, setNeighborhood] = useState(true);
   const [params, setParams] = useUrlState();
   const ds = params.get("ds");
+  // Scope lives in the URL alongside `ds`/`dom` so a domain-wide graph is as
+  // shareable as a single-source one.
+  const scopeKind = params.get("scope") === "domain" ? "domain" : "source";
+  const dom = params.get("dom");
   const selectedNodeId = params.get("node");
   const tab = params.get("tab") === "nodes" || params.get("tab") === "edges" ? params.get("tab")! : "topology";
 
@@ -206,6 +233,14 @@ export function UnifiedLineageScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Domains that actually contain datasources. Listing every domain in the
+  // organization would mostly offer empty graphs.
+  const [domains, setDomains] = useState<DataDomainRead[]>([]);
+  // Reported by the domain graph, never inferred here: domains with
+  // candidates reaching into this one that no ACTIVE grant covers.
+  const [withheldDomainIds, setWithheldDomainIds] = useState<string[]>([]);
+  const [grantTargetDomainId, setGrantTargetDomainId] = useState<string | null>(null);
+
   const [impact, setImpact] = useState<UnifiedLineageImpactRead | null>(null);
   const [impactLoading, setImpactLoading] = useState(false);
   const [impactError, setImpactError] = useState<string | null>(null);
@@ -215,11 +250,37 @@ export function UnifiedLineageScreen() {
   const impactInflight = useRef<AbortController | null>(null);
   const impactSeq = useRef(0);
 
+  useEffect(() => {
+    const ac = new AbortController();
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [allDomains, sources] = await Promise.all([
+          fetchOrgDataDomains(ORG, ac.signal),
+          fetchOrgDatasources(ORG, ac.signal),
+        ]);
+        if (cancelled) return;
+        setDomains(domainsWithDatasources(allDomains, sources.items ?? []));
+      } catch {
+        // Degrades to an empty domain list: single-source scope keeps working
+        // and only the domain option list is affected, matching how
+        // `useDatasourcePicker` handles the same failure.
+        if (!cancelled) setDomains([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
+  }, [ORG]);
+
   const loadGraph = useCallback(async () => {
     graphInflight.current?.abort();
-    if (!ds) {
+    const scopeId = scopeKind === "domain" ? dom : ds;
+    if (!scopeId) {
       setGraph(null);
       setError(null);
+      setWithheldDomainIds([]);
       setLoading(false);
       return;
     }
@@ -229,13 +290,25 @@ export function UnifiedLineageScreen() {
     setLoading(true);
     setError(null);
     try {
-      const result = await fetchUnifiedLineageGraph(
-        ds,
-        { nodeLimit: Number(nodeLimit) || 300, edgeLimit: Number(edgeLimit) || 1500, suggestionStatus },
-        ac.signal,
-      );
+      const options = {
+        nodeLimit: Number(nodeLimit) || 300,
+        edgeLimit: Number(edgeLimit) || 1500,
+        suggestionStatus,
+      };
+      if (scopeKind === "domain") {
+        const result = await fetchDomainLineageGraph(scopeId, options, ac.signal);
+        if (seq !== graphSeq.current) return;
+        // The two responses differ only in their scope key
+        // (`data_domain_id` vs `datasource_id`); nodes, edges and counts are
+        // the same shape, so everything downstream is untouched.
+        setGraph({ ...result, datasource_id: "" } as unknown as UnifiedLineageGraphRead);
+        setWithheldDomainIds(result.withheld_cross_boundary_domain_ids ?? []);
+        return;
+      }
+      const result = await fetchUnifiedLineageGraph(scopeId, options, ac.signal);
       if (seq !== graphSeq.current) return;
       setGraph(result);
+      setWithheldDomainIds([]);
     } catch (e) {
       if ((e as Error)?.name === "AbortError") return;
       if (seq !== graphSeq.current) return;
@@ -247,7 +320,7 @@ export function UnifiedLineageScreen() {
     // inputs does not itself refetch, matching legacy's own
     // `Number($("#unified-lineage-node-limit")?.value ...)` read-at-click-time
     // behaviour for the same two controls.
-  }, [ds, nodeLimit, edgeLimit, suggestionStatus]);
+  }, [ds, dom, scopeKind, nodeLimit, edgeLimit, suggestionStatus]);
 
   // Auto-load once a datasource is selected (or already present in the URL
   // on mount) and whenever suggestion_status changes -- a cheap toggle, safe
@@ -260,11 +333,25 @@ export function UnifiedLineageScreen() {
   useEffect(() => {
     void loadGraph();
     return () => graphInflight.current?.abort();
-  }, [ds, suggestionStatus]);
+  }, [ds, dom, scopeKind, suggestionStatus]);
 
   const loadImpact = useCallback(async () => {
     impactInflight.current?.abort();
-    if (!ds || !selectedNodeId) {
+    // The impact endpoint is datasource-scoped. In domain scope a node id
+    // carries its owning datasource as a `{datasource_id}:` prefix (added by
+    // the merge step so two sources' same-named synthetic nodes cannot false-
+    // merge), so split it back off rather than disabling impact in the one
+    // view where cross-source questions actually arise.
+    const separator = selectedNodeId?.indexOf(":") ?? -1;
+    const impactDatasourceId =
+      scopeKind === "domain" && selectedNodeId && separator > 0
+        ? selectedNodeId.slice(0, separator)
+        : ds;
+    const impactNodeId =
+      scopeKind === "domain" && selectedNodeId && separator > 0
+        ? selectedNodeId.slice(separator + 1)
+        : selectedNodeId;
+    if (!impactDatasourceId || !impactNodeId) {
       setImpact(null);
       setImpactError(null);
       setImpactLoading(false);
@@ -276,7 +363,7 @@ export function UnifiedLineageScreen() {
     setImpactLoading(true);
     setImpactError(null);
     try {
-      const result = await fetchLineageImpact(ds, selectedNodeId, { depth: 5, nodeLimit: 200 }, ac.signal);
+      const result = await fetchLineageImpact(impactDatasourceId, impactNodeId, { depth: 5, nodeLimit: 200 }, ac.signal);
       if (seq !== impactSeq.current) return;
       setImpact(result);
     } catch (e) {
@@ -286,7 +373,7 @@ export function UnifiedLineageScreen() {
     } finally {
       if (seq === impactSeq.current) setImpactLoading(false);
     }
-  }, [ds, selectedNodeId]);
+  }, [ds, scopeKind, selectedNodeId]);
 
   useEffect(() => {
     void loadImpact();
@@ -337,16 +424,43 @@ export function UnifiedLineageScreen() {
       </header>
 
       <div className="ult__controls">
-        <Field label="Data source">
-          <select value={ds ?? ""} onChange={(e) => setParams({ ds: e.target.value || null, node: null })}>
-            <option value="">Select a datasource…</option>
-            {datasources.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
+        <Field label="Scope">
+          <select
+            value={scopeKind}
+            aria-label="Scope"
+            onChange={(e) => setParams({ scope: e.target.value === "domain" ? "domain" : null, node: null })}
+          >
+            <option value="source">One data source</option>
+            <option value="domain">Domain (all sources)</option>
           </select>
         </Field>
+        {scopeKind === "domain" ? (
+          <Field label="Data domain">
+            <select
+              value={dom ?? ""}
+              aria-label="Data domain"
+              onChange={(e) => setParams({ dom: e.target.value || null, node: null })}
+            >
+              <option value="">Select a domain…</option>
+              {domains.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : (
+          <Field label="Data source">
+            <select value={ds ?? ""} onChange={(e) => setParams({ ds: e.target.value || null, node: null })}>
+              <option value="">Select a datasource…</option>
+              {datasources.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Nodes">
           <input
             type="number"
@@ -376,15 +490,56 @@ export function UnifiedLineageScreen() {
             <option value="REJECTED">Rejected</option>
           </select>
         </Field>
-        <Button variant="primary" disabled={!ds || loading} onClick={() => void loadGraph()}>
+        <Button
+          variant="primary"
+          disabled={(scopeKind === "domain" ? !dom : !ds) || loading}
+          onClick={() => void loadGraph()}
+        >
           {loading ? "Loading…" : "Load graph"}
         </Button>
       </div>
 
       <p className="ult__note">
-        Single-datasource scope only — legacy's federated "Domain (all sources)" mode, with its cross-boundary grant
-        request flow (ADR-0017 §4), is deferred; see this file's header comment.
+        {scopeKind === "domain"
+          ? "Every data source in one domain, merged — the only scope in which a relationship spanning two systems renders as an edge. Selecting a node still resolves impact against the source that owns it."
+          : "One data source. Switch scope to Domain to see relationships that cross between sources."}
       </p>
+
+      {/* Reported by the server, never inferred here. A domain with candidates
+          reaching in but no ACTIVE grant is named rather than dropped, so an
+          incomplete graph cannot pass for a complete one (ADR-0017 §4). */}
+      {scopeKind === "domain" && withheldDomainIds.length > 0 ? (
+        <div className="ult__withheld" role="status">
+          <strong>Some edges are withheld.</strong>{" "}
+          {withheldDomainIds.length === 1 ? "One domain has" : `${withheldDomainIds.length} domains have`}{" "}
+          relationships reaching into this one that no active grant lets you see:{" "}
+          {withheldDomainIds
+            .map((id) => domains.find((d) => d.id === id)?.name ?? id)
+            .join(", ")}
+          .{" "}
+          {/* Names the domain rather than saying "Request access": the panel
+              below has its own general request control, and two identically
+              labelled buttons would leave a steward guessing which one is
+              about the problem they are looking at. */}
+          <button
+            className="ult__withheldlink"
+            onClick={() => setGrantTargetDomainId(withheldDomainIds[0] ?? null)}
+          >
+            {`Request access to ${
+              domains.find((d) => d.id === withheldDomainIds[0])?.name ?? withheldDomainIds[0]
+            }`}
+          </button>
+        </div>
+      ) : null}
+
+      {scopeKind === "domain" && dom ? (
+        <CrossBoundaryGrants
+          domainId={dom}
+          domains={domains}
+          suggestedSourceDomainId={grantTargetDomainId}
+          onGranted={() => void loadGraph()}
+        />
+      ) : null}
 
       {datasourcesError ? (
         <p className="ult__dserr" role="alert">
@@ -421,8 +576,19 @@ export function UnifiedLineageScreen() {
             ))}
           </div>
 
-          {!ds ? (
-            <Empty title="Pick a datasource" hint="The unified-lineage endpoints are scoped per datasource." />
+          {/* Scope-aware: in domain scope there is no `ds`, and gating the graph
+              body on it alone left this pane showing "Pick a datasource" under
+              a header already reporting the domain graph's node and edge
+              counts. */}
+          {!(scopeKind === "domain" ? dom : ds) ? (
+            <Empty
+              title={scopeKind === "domain" ? "Pick a data domain" : "Pick a datasource"}
+              hint={
+                scopeKind === "domain"
+                  ? "A domain graph federates every data source inside one governance boundary."
+                  : "The unified-lineage endpoints are scoped per datasource."
+              }
+            />
           ) : error ? (
             <ErrorState title="Unified lineage graph could not be loaded" detail={error} onRetry={() => void loadGraph()} />
           ) : loading || !graph ? (
