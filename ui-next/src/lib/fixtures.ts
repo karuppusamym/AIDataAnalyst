@@ -47,6 +47,7 @@ import type {
   WorkspaceCreate,
   WorkspaceRead,
   AgentInboxRead,
+  AgentRosterRead,
 } from "./types";
 import type {
   AuditEventRead,
@@ -5612,5 +5613,132 @@ export function makeFixtureAgentInbox(organizationId: string, persona: string): 
         finished_at: iso(55),
       },
     ],
+  };
+}
+
+/** UX-19: `GET /v1/organizations/{org}/ai-agents/roster` fixture. Mirrors
+ *  `aida.agent_roster.compose_agent_roster` — every registered `AGENT`-kind
+ *  asset alongside the *same* organization-wide method summary and recent
+ *  results window (the honesty note the real endpoint's docstring makes:
+ *  `AgentRun` carries no per-agent identity today). */
+export function makeFixtureAgentRoster(organizationId: string, windowDays = 30): AgentRosterRead {
+  const now = new Date();
+  const iso = (hoursAgo: number) => new Date(now.getTime() - hoursAgo * 3_600_000).toISOString();
+
+  const method = {
+    scope: "ORGANIZATION_WIDE" as const,
+    note:
+      "AgentRun carries no per-registered-agent identity today -- this summarizes this " +
+      "organization's actual governed-agent run activity as a whole, not this specific " +
+      "registered entity's own isolated execution history.",
+    window_days: windowDays,
+    sampled_runs: 214,
+    by_strategy: {
+      GOVERNED_TOOL: 132,
+      MODEL_GENERATION: 61,
+      DEVELOPMENT_SQL: 14,
+      CLARIFICATION: 7,
+    },
+    average_confidence: 0.83,
+    tool_first: {
+      tool_first_executions: 132,
+      freeform_executions: 61,
+      total_executions: 193,
+      rate: 0.684,
+      by_source: {
+        GOVERNED_TOOL: 132,
+        MODEL_GATEWAY: 47,
+        QUERY_MEMORY_ADAPTATION: 14,
+      },
+      target_rate: 0.6,
+      meets_target: true,
+    },
+  };
+
+  const recentResults = [
+    {
+      run_id: "eeeeeeee-1111-1111-1111-111111111111",
+      status: "COMPLETED",
+      strategy: "GOVERNED_TOOL",
+      confidence: 0.94,
+      generation_source: "GOVERNED_TOOL",
+      created_at: iso(1),
+      failure_reason: null,
+    },
+    {
+      run_id: "eeeeeeee-2222-2222-2222-222222222222",
+      status: "COMPLETED",
+      strategy: "MODEL_GENERATION",
+      confidence: 0.71,
+      generation_source: "MODEL_GATEWAY",
+      created_at: iso(3),
+      failure_reason: null,
+    },
+    {
+      run_id: "eeeeeeee-3333-3333-3333-333333333333",
+      status: "REJECTED",
+      strategy: "MODEL_GENERATION",
+      confidence: 0.38,
+      generation_source: "MODEL_GATEWAY",
+      created_at: iso(6),
+      failure_reason: "AMBIGUOUS_DEFINITION",
+    },
+  ];
+
+  const autoApply = {
+    has_auto_apply_branch: false,
+    threshold: null,
+    threshold_source: null,
+    evidence:
+      "No agent plan in this codebase reaches a branch that applies an AI-authored action " +
+      "without a human decision. Every proposal-shaped output routes through the shared " +
+      "GovernanceReview maker-checker queue.",
+  };
+
+  return {
+    organization_id: organizationId,
+    generated_at: now.toISOString(),
+    window_days: windowDays,
+    agents: [
+      {
+        purpose: {
+          asset_id: "11111111-1111-1111-1111-111111111111",
+          asset_key: "steward-agent",
+          version: 4,
+          status: "APPROVED",
+          name: "Steward agent",
+          description: "Drafts business-glossary links and asset descriptions for steward review.",
+          intended_use: "Propose, never publish: metadata stewardship drafts for the catalog.",
+          owner_principal: "priya.steward",
+          provider_type: "PLATFORM_NATIVE",
+          risk_tier: "LOW",
+          documentation_url: null,
+        },
+        method,
+        recent_results: recentResults,
+        recent_results_total: 214,
+        auto_apply: autoApply,
+      },
+      {
+        purpose: {
+          asset_id: "22222222-2222-2222-2222-222222222222",
+          asset_key: "lineage-agent",
+          version: 2,
+          status: "APPROVED",
+          name: "Lineage agent",
+          description: "Answers lineage and impact questions from the unified lineage graph.",
+          intended_use: "Read-only impact analysis for analysts and reviewers.",
+          owner_principal: "priya.steward",
+          provider_type: "PLATFORM_NATIVE",
+          risk_tier: "MEDIUM",
+          documentation_url: null,
+        },
+        method,
+        recent_results: recentResults,
+        recent_results_total: 214,
+        auto_apply: autoApply,
+      },
+    ],
+    total_agents: 2,
   };
 }

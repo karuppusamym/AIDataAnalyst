@@ -38,6 +38,7 @@ const AccessPolicyScreen = lazy(() => import("./screens/AccessPolicyScreen").the
 const ReliabilityScreen = lazy(() => import("./screens/ReliabilityScreen").then((module) => ({ default: module.ReliabilityScreen })));
 const ComplianceScreen = lazy(() => import("./screens/ComplianceScreen").then((module) => ({ default: module.ComplianceScreen })));
 const ToolPlansScreen = lazy(() => import("./screens/ToolPlansScreen").then((module) => ({ default: module.ToolPlansScreen })));
+const AgentRosterScreen = lazy(() => import("./screens/AgentRosterScreen").then((module) => ({ default: module.AgentRosterScreen })));
 
 /* UX-20: navigation is organised by *persona workbench*, not by feature area.
    Thirty flat items grouped by what the code does is a feature map; a person
@@ -94,6 +95,7 @@ const NAV: NavItem[] = [
   { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
   { id: "agents", label: "AI governance", group: "Operator", icon: "⌬", keywords: "model routes agents evaluations runtime" },
   { id: "ai", label: "AI registry", group: "Operator", icon: "◆", keywords: "agents models tools" },
+  { id: "agent-roster", label: "Agent roster", group: "Operator", icon: "▥", keywords: "agent roster purpose method tool-first confidence auto-apply inspect" },
   { id: "access-policies", label: "Access policies", group: "Operator", icon: "⚖", keywords: "abac policy authorization simulation mask deny allow filter" },
   { id: "workspace-access", label: "Workspace access", group: "Operator", icon: "⚿", keywords: "members roles bindings approve reject bi tableau lineage connections" },
   { id: "reliability", label: "Reliability", group: "Operator", icon: "⏱", keywords: "slo error budget notification escalation archive worm audit archive data contract sla violations" },
@@ -153,6 +155,7 @@ function Screen({
     case "meaning": return <BusinessMeaningScreen />;
     case "quality": return <QualityScreen />;
     case "ai": return <AiRegistryScreen />;
+    case "agent-roster": return <AgentRosterScreen />;
     case "audit": return <AuditLedgerScreen />;
     case "sources": return <SourcesScreen />;
     case "operations": return <OperationsScreen />;

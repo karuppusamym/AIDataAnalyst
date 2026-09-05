@@ -32,5 +32,5 @@
 .cat__rowaction{display:flex;align-items:center;gap:8px;margin-left:auto}
 .cat__banner{display:flex;align-items:center;gap:12px;padding:8px 12px;border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);font-size:13px}
 .cat__banner span{flex:1}
-.cat__banner--ok{border-color:var(--ok,#16a34a)}
-.cat__banner--err{border-color:var(--bad,#dc2626);color:var(--bad-fg,#991b1b)}
+.cat__banner--ok{border-color:var(--ok)}
+.cat__banner--err{border-color:var(--bad);color:var(--bad)}

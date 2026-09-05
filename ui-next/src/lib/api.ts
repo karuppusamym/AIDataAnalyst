@@ -2,6 +2,7 @@ import type {
   AgentInboxRead,
   AgentAnalysisRequest,
   AgentAnalysisResponse,
+  AgentRosterRead,
   AgentRunGroundingReceiptsRead,
   AgentRunRead,
   AiDecisionRead,
@@ -53,6 +54,7 @@ import type {
 import {
   makeFixtureAgentAnalysis,
   makeFixtureAgentInbox,
+  makeFixtureAgentRoster,
   makeFixtureAgentRun,
   makeFixtureAgentRunGroundingReceipts,
   makeFixtureAgentRuns,
@@ -3311,5 +3313,28 @@ export async function engageAgentKillSwitch(
   await postJson<unknown>(
     `/v1/organizations/${organizationId}/agents/${versionId}/contract/kill`,
     { reason },
+  );
+}
+
+/**
+ * `GET /v1/organizations/{org}/ai-agents/roster` (`get_agent_roster`,
+ * `agent_roster_api.py`) — UX-19: every registered `AGENT`-kind AI asset's
+ * published purpose, an aggregated method summary (recent
+ * `AgentRun.plan_evidence`/`generation_source`), a bounded window of recent
+ * live results, and an honest auto-apply determination.
+ */
+export async function fetchAgentRoster(
+  organizationId: string,
+  query: { windowDays?: number; recentResultsLimit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AgentRosterRead> {
+  if (USE_FIXTURES) return makeFixtureAgentRoster(organizationId, query.windowDays ?? 30);
+  const params = new URLSearchParams();
+  if (query.windowDays) params.set("window_days", String(query.windowDays));
+  if (query.recentResultsLimit) params.set("recent_results_limit", String(query.recentResultsLimit));
+  const suffix = params.toString() ? `?${params}` : "";
+  return get<AgentRosterRead>(
+    `/v1/organizations/${organizationId}/ai-agents/roster${suffix}`,
+    signal,
   );
 }

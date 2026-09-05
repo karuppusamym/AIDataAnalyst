@@ -1,0 +1,78 @@
+/* Agent roster (UX-19). One card per registered agent: published purpose,
+   actual recent method, and an honest auto-apply determination. Built on
+   the shared design tokens (tokens.css) so it themes correctly. */
+
+.roster { display: flex; flex-direction: column; gap: 16px; max-width: 900px; margin: 0 auto; padding-bottom: 32px; }
+
+.roster__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.roster__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.roster__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 62ch; }
+
+.roster__scope {
+  margin: 0; display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 13px; border: 1px solid var(--info); border-left-width: 3px; border-radius: var(--radius);
+  background: var(--info-soft); color: var(--info); font-size: 12px; line-height: 1.5;
+}
+
+.roster__loading { margin: 0; padding: 24px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.roster__grid { display: flex; flex-direction: column; gap: 16px; }
+
+.roster__card {
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface);
+  box-shadow: var(--shadow-1); padding: 18px 20px; display: flex; flex-direction: column; gap: 14px;
+}
+
+.roster__cardhead { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.roster__title { display: flex; flex-direction: column; gap: 2px; }
+.roster__title h2 { margin: 0; font-size: 16px; letter-spacing: -0.01em; }
+.roster__key { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.roster__badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+
+.roster__description { margin: 0; color: var(--ink-2); font-size: 13px; line-height: 1.55; }
+
+.roster__facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 20px; }
+.roster__facts div { display: flex; flex-direction: column; gap: 2px; }
+.roster__facts dt { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-3); }
+.roster__facts dd { margin: 0; font-size: 12.5px; color: var(--ink); word-break: break-word; }
+.roster__facts a { color: var(--accent); }
+
+.roster__section { border-top: 1px solid var(--line-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.roster__section h3 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
+
+.roster__strategies { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.roster__strategy { display: grid; grid-template-columns: 8.5rem 1fr auto; align-items: center; gap: 10px; }
+.roster__strategylabel { font-size: 11.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.roster__strategytrack { display: block; height: 6px; border-radius: 999px; background: var(--sunk); overflow: hidden; }
+.roster__strategyfill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover)); border-radius: inherit; }
+.roster__strategyvalue { font-family: var(--mono); font-size: 11px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.roster__stats { display: flex; gap: 20px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); align-items: center; }
+.roster__stats b { font-variant-numeric: tabular-nums; }
+.roster__stats > span { display: inline-flex; align-items: center; gap: 8px; }
+
+.roster__autoapply { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.roster__evidence { margin: 0; font-size: 11.5px; color: var(--ink-3); line-height: 1.5; }
+
+.roster__sectiontoggle {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit; color: inherit; text-align: left;
+}
+.roster__count {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  background: var(--sunk); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px;
+}
+
+.roster__runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.roster__run {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-sm); padding: 8px 11px; font-size: 11.5px;
+}
+.roster__runmeta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--ink-2); align-items: center; }
+.roster__negative { color: var(--bad); font-weight: 600; }
+.roster__muted { color: var(--ink-3); }
+
+@media (max-width: 620px) {
+  .roster__strategy { grid-template-columns: 6rem 1fr auto; }
+  .roster__head { flex-direction: column; align-items: flex-start; }
+}
