@@ -87,6 +87,7 @@ const ROW: CatalogRowRead = {
   id: "t1",
   name: "orders_raw",
   schema_name: "public",
+  datasource_id: "ds_snowflake_prod",
   datasource_name: "snowflake_prod",
   object_type: "TABLE",
   status: "ACTIVE",

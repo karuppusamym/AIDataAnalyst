@@ -930,19 +930,43 @@ async def prepare_analysis_tool(
         parameters.append(
             ToolParameterDefinition(name=name, parameter_type="STRING", required=True)
         )
+    definition = GovernedToolVersionCreate(
+        slug=f"analysis_{run.id.hex[:12]}",
+        name="Reusable analysis",
+        description=(
+            f"Draft from completed analysis {run.id}. Parameter types require author review."
+        ),
+        datasource_id=datasource.id,
+        sql_template=statement.sql(dialect=datasource.dialect),
+        parameters=parameters,
+        allowed_roles=["Analyst", "ToolConsumer"],
+    )
+    # INV-7: this route persists nothing, but it is not a read either -- it
+    # renders another principal's stored analysis SQL into a proposed tool
+    # definition and hands it back. "Who turned which analysis into a tool
+    # draft, and when" is exactly the kind of question the ledger exists to
+    # answer, and without this the endpoint was the one mutation-method route
+    # in the application that reached no `record_audit` at all.
+    record_audit(
+        session,
+        context,
+        action="tool_blueprint.prepared_from_analysis",
+        resource_type="agent_run",
+        resource_id=str(run.id),
+        outcome="SUCCESS",
+        correlation_id=get_correlation_id(),
+        details={
+            "datasource_id": str(datasource.id),
+            "project_id": str(datasource.project_id),
+            "slug": definition.slug,
+            "parameter_count": len(parameters),
+            "parameter_review_required": bool(parameters),
+        },
+    )
+    await session.commit()
     return AnalysisToolBlueprintRead(
         project_id=datasource.project_id,
-        definition=GovernedToolVersionCreate(
-            slug=f"analysis_{run.id.hex[:12]}",
-            name="Reusable analysis",
-            description=(
-                f"Draft from completed analysis {run.id}. Parameter types require author review."
-            ),
-            datasource_id=datasource.id,
-            sql_template=statement.sql(dialect=datasource.dialect),
-            parameters=parameters,
-            allowed_roles=["Analyst", "ToolConsumer"],
-        ),
+        definition=definition,
         parameter_review_required=bool(parameters),
     )
 

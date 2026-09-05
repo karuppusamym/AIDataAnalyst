@@ -27,6 +27,7 @@ const SourcesScreen = lazy(() => import("./screens/SourcesScreen").then((module)
 const OperationsScreen = lazy(() => import("./screens/OperationsScreen").then((module) => ({ default: module.OperationsScreen })));
 const AiRegistryScreen = lazy(() => import("./screens/AiRegistryScreen").then((module) => ({ default: module.AiRegistryScreen })));
 const ContextProductsScreen = lazy(() => import("./screens/ContextProductsScreen").then((module) => ({ default: module.ContextProductsScreen })));
+const AgentGatewayScreen = lazy(() => import("./screens/AgentGatewayScreen").then((module) => ({ default: module.AgentGatewayScreen })));
 const AdministrationScreen = lazy(() => import("./screens/AdministrationScreen").then((module) => ({ default: module.AdministrationScreen })));
 const ToolRegistryScreen = lazy(() => import("./screens/ToolRegistryScreen").then((module) => ({ default: module.ToolRegistryScreen })));
 const UnifiedLineageScreen = lazy(() => import("./screens/UnifiedLineageScreen").then((module) => ({ default: module.UnifiedLineageScreen })));
@@ -55,6 +56,7 @@ type Workbench =
   | "Inbox"
   | "Analyst"
   | "Consumer"
+  | "Developer"
   | "Steward"
   | "Reviewer"
   | "Operator"
@@ -82,7 +84,16 @@ const NAV: NavItem[] = [
   { id: "unified-lineage", label: "Unified lineage", group: "Analyst", icon: "⇄", keywords: "graph impact upstream downstream unified" },
   // --- Consumer: use what has been approved -------------------------------
   { id: "marketplace", label: "Marketplace", group: "Consumer", icon: "◇", keywords: "products access request" },
-  { id: "context", label: "Context products", group: "Consumer", icon: "◫", keywords: "context compile mcp rest" },
+  // --- Developer: the audience that consumes context rather than reads it --
+  //
+  //   Context products moved out of Consumer deliberately. A Consumer browses
+  //   the marketplace and requests access to a product; a Developer *packages*
+  //   context and points an agent at it. Those are different jobs done by
+  //   different people, and keeping them in one group is why the gateway had
+  //   nowhere obvious to live. Screen ids are unchanged, so every existing
+  //   `#/context` deep link still resolves.
+  { id: "context", label: "Context products", group: "Developer", icon: "◫", keywords: "context compile mcp rest yaml osi odcs snowflake databricks bindings rollout" },
+  { id: "developer", label: "Agent gateway", group: "Developer", icon: "⇄", keywords: "mcp agent external client claude cursor endpoint token tools prompts resources consumption connect" },
   { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
@@ -119,6 +130,7 @@ const GROUPS: Workbench[] = [
   "Inbox",
   "Analyst",
   "Consumer",
+  "Developer",
   "Steward",
   "Reviewer",
   "Operator",
@@ -171,6 +183,7 @@ function Screen({
     case "sources": return <SourcesScreen />;
     case "operations": return <OperationsScreen />;
     case "context": return <ContextProductsScreen />;
+    case "developer": return <AgentGatewayScreen />;
     case "portfolio-analytics": return <PortfolioAnalyticsScreen />;
     case "tools": return <ToolRegistryScreen />;
     case "unified-lineage": return <UnifiedLineageScreen />;

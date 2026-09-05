@@ -1,0 +1,71 @@
+/* ReferencePicker — see ReferencePicker.tsx. Every colour comes from
+   tokens.css; nothing here introduces a hue of its own. */
+
+.refpicker { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+
+.refpicker__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.refpicker__label {
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink-3);
+}
+.refpicker__count { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+
+.refpicker__chips { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; }
+.refpicker__chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; line-height: 1.5; padding: 2px 4px 2px 8px;
+  border-radius: 3px; background: var(--accent-soft); color: var(--accent);
+  max-width: 100%;
+}
+.refpicker__chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.refpicker__chip button {
+  font: inherit; font-size: 13px; line-height: 1; cursor: pointer;
+  border: 0; background: none; color: inherit; padding: 0 3px; border-radius: 2px;
+}
+.refpicker__chip button:hover { background: var(--accent); color: var(--accent-ink); }
+
+.refpicker__search {
+  font: inherit; font-size: 12.5px; padding: 5px 8px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--ink); min-width: 0;
+}
+.refpicker__search::placeholder { color: var(--ink-3); }
+
+.refpicker__list {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); overflow-y: auto; overscroll-behavior: contain;
+}
+
+.refpicker__note { margin: 0; padding: 10px 10px; font-size: 12.5px; color: var(--ink-3); }
+.refpicker__note--bad { color: var(--bad); }
+
+.refpicker__row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 9px; cursor: pointer; min-height: 2.4rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+.refpicker__row:last-child { border-bottom: 0; }
+.refpicker__row:hover { background: var(--sunk); }
+/* Screens that embed a picker inside their own form grid often set a blanket
+   `input { width: 100% }` on that grid (ContextProductsScreen's `.cpform__grid`
+   does). That rule would stretch the row checkbox to the full row width and
+   push the option label out of view, so the picker states its own geometry at
+   a specificity those grid rules cannot lose to. */
+.refpicker .refpicker__row input[type="checkbox"] {
+  flex: none; accent-color: var(--accent);
+  width: auto; min-width: 0; margin: 0;
+}
+.refpicker input.refpicker__search { width: 100%; box-sizing: border-box; }
+
+.refpicker__rowmain { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.refpicker__rowlabel { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.refpicker__rowhint {
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.refpicker__badge {
+  flex: none; font-family: var(--mono); font-size: 9.5px; letter-spacing: .04em;
+  padding: 1px 5px; border-radius: 3px; color: var(--ink-3);
+  background: var(--sunk); border: 1px solid var(--line);
+}

@@ -11,6 +11,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.routing import APIRoute
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,7 +24,20 @@ from aida.db import get_session
 from aida.schemas import ApiModel
 from aida.security import SecurityContext, enforce_organization, get_security_context
 
-router = APIRouter(prefix="/api/v1", tags=["consumption-lineage"])
+# `/v1` is the canonical prefix: every other router in this application uses
+# it, so a client that discovers one Atlas route can guess the rest. These
+# three shipped under `/api/v1` alone, which made them the only routes in the
+# API a caller had to know about specially -- and is why no portal ever called
+# them.
+#
+# The prefix is written into each path below rather than set on the router so
+# the deprecated `/api/v1` aliases can be registered on this same flat router
+# (see the mounting block at the bottom). A nested `include_router` would do
+# the same job on the wire but leaves a lazy placeholder that
+# `tests.support.app_surface.iter_api_routes` resolves to the *unprefixed*
+# routes -- which would silently drop these endpoints out of every "we checked
+# every route" invariant test in the suite.
+router = APIRouter(tags=["consumption-lineage"])
 
 
 # --------------------------------------------------------------------------- #
@@ -59,7 +73,7 @@ class ConsumptionRecordPage(ApiModel):
 
 
 @router.get(
-    "/organizations/{organization_id}/consumption-lineage/by-resource",
+    "/v1/organizations/{organization_id}/consumption-lineage/by-resource",
     response_model=ConsumptionRecordPage,
     summary="Consumption edges for a resource",
 )
@@ -90,7 +104,7 @@ async def list_consumption_for_resource(
 
 
 @router.get(
-    "/organizations/{organization_id}/consumption-lineage/by-consumer",
+    "/v1/organizations/{organization_id}/consumption-lineage/by-consumer",
     response_model=ConsumptionRecordPage,
     summary="Consumption edges for a consumer",
 )
@@ -119,7 +133,7 @@ async def list_consumption_by_consumer(
 
 
 @router.get(
-    "/organizations/{organization_id}/consumption-lineage/graph",
+    "/v1/organizations/{organization_id}/consumption-lineage/graph",
     response_model=ConsumptionRecordPage,
     summary="Full consumption graph for an organization",
 )
@@ -142,4 +156,29 @@ async def list_consumption_graph(
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Deprecated `/api/v1` aliases
+# --------------------------------------------------------------------------- #
+#
+# Every route above is re-registered under its original `/api/v1` path so no
+# pre-existing consumer breaks. They are marked deprecated in the OpenAPI
+# document, which is what tells a generated client (and a reviewer reading the
+# spec) that `/v1` is the path to move to.
+
+for _canonical in list(router.routes):
+    # `APIRouter.routes` is typed as `list[BaseRoute]`; everything registered
+    # above is an `APIRoute`, and narrowing here keeps that a checked fact
+    # rather than five `attr-defined` suppressions.
+    assert isinstance(_canonical, APIRoute)
+    router.add_api_route(
+        f"/api{_canonical.path}",
+        _canonical.endpoint,
+        methods=sorted(_canonical.methods or ()),
+        response_model=_canonical.response_model,
+        summary=f"{_canonical.summary} (deprecated /api/v1 alias)",
+        tags=["consumption-lineage"],
+        deprecated=True,
     )

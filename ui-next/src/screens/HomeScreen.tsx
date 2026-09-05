@@ -29,7 +29,16 @@ function relativeDate(value: string): string {
   return `${days}d ago`;
 }
 
-export function HomeScreen({ persona, onNavigate }: { persona: Persona | null; onNavigate: (navId: string) => void }) {
+export function HomeScreen({
+  persona,
+  onNavigate,
+}: {
+  persona: Persona | null;
+  /** The shell's own `navigate`. `params` ride alongside the hash route so a
+   *  row opened from here lands on the target screen already focused -- the
+   *  same `useUrlState` convention every migrated screen reads. */
+  onNavigate: (navId: string, params?: Record<string, string>) => void;
+}) {
   const organizationId = useOrgId();
   const [data, setData] = useState<OverviewData>(EMPTY_DATA);
   const [loading, setLoading] = useState(true);
@@ -89,6 +98,7 @@ export function HomeScreen({ persona, onNavigate }: { persona: Persona | null; o
           <div className="homehero__actions">
             <Button variant="primary" onClick={() => onNavigate("catalog")}>Explore catalog</Button>
             <Button onClick={() => onNavigate("analyst")}>Ask Atlas</Button>
+            <Button onClick={() => onNavigate("developer")}>Connect an agent</Button>
           </div>
         </div>
         <div className="homehero__visual" aria-hidden="true">
@@ -137,7 +147,7 @@ export function HomeScreen({ persona, onNavigate }: { persona: Persona | null; o
               <span role="columnheader">Asset</span><span role="columnheader">Source</span><span role="columnheader">Owner</span><span role="columnheader">Trust</span><span role="columnheader">Updated</span>
             </div>
             {loading ? <div className="hometable__empty">Loading recent assets…</div> : data.assets.length === 0 ? <div className="hometable__empty">No assets are available yet.</div> : data.assets.slice(0, 6).map((asset) => (
-              <button key={asset.id} className="hometable__row" role="row" onClick={() => onNavigate("catalog")}>
+              <button key={asset.id} className="hometable__row" role="row" onClick={() => onNavigate("catalog", { asset: asset.id })}>
                 <span className="hometable__asset" role="cell"><b>{asset.name}</b><small>{asset.schema_name} · {asset.object_type.toLowerCase().replace(/_/g, " ")}</small></span>
                 <span className="hometable__source" role="cell">{asset.datasource_name}</span>
                 <span className={asset.owner ? "" : "hometable__muted"} role="cell">{asset.owner ?? "Needs owner"}</span>

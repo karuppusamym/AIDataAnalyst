@@ -2946,6 +2946,13 @@ class CatalogRowRead(ApiModel):
     id: UUID
     name: str
     schema_name: str
+    # The datasource this table belongs to. `datasource_name` alone is a
+    # display string; every screen a catalog row links out to (lineage,
+    # quality, relationships, business meaning) is datasource-scoped and
+    # needs the id to resolve the target without making the user re-pick the
+    # source they just came from. Read straight off `MetadataTable`, so it
+    # costs no extra query.
+    datasource_id: UUID
     datasource_name: str
     object_type: str
     status: str

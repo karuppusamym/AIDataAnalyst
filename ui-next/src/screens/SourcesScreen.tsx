@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DataSourceRead, ConnectorHealthScoreRead } from "../lib/types";
-import { ApiError, fetchDatasourceHealth, fetchOrgDatasources } from "../lib/api";
+import { ApiError, downloadDatasourceContextSnapshot, fetchDatasourceHealth, fetchOrgDatasources } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -110,6 +111,28 @@ function HealthPane({
   const [health, setHealth] = useState<ConnectorHealthScoreRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [copied, setCopied] = useState(false);
+  const [generating, setGenerating] = useState<"markdown" | "json" | null>(null);
+  const [generateNotice, setGenerateNotice] = useState<string | null>(null);
+
+  const generateSnapshot = useCallback(
+    async (format: "markdown" | "json") => {
+      setGenerating(format);
+      setGenerateNotice(null);
+      try {
+        const snapshot = await downloadDatasourceContextSnapshot(source, format);
+        setGenerateNotice(
+          snapshot.warnings.length > 0
+            ? `Downloaded with ${snapshot.warnings.length} section(s) unavailable — see the file for details.`
+            : `Downloaded: ${snapshot.documented_count} documented / ${snapshot.undocumented_count} undocumented tables.`,
+        );
+      } catch (e) {
+        setGenerateNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+      } finally {
+        setGenerating(null);
+      }
+    },
+    [source],
+  );
 
   useEffect(() => {
     const ac = new AbortController();
@@ -196,6 +219,20 @@ function HealthPane({
         )}
       </div>
 
+      <div className="evp__links">
+        {/* Everything downstream of a source is scoped by its id. Sources was
+            a leaf screen; these are the four places an operator goes next. */}
+        <CrossLinks
+          label="This source in"
+          links={[
+            { screen: "operations", label: "Operations", params: { ds: source.id, batch_ds: source.id }, title: "Analysis runs and ingestion batches for this source" },
+            { screen: "quality", label: "Quality", params: { ds: source.id }, title: "Open incidents for this source" },
+            { screen: "relationships", label: "Relationships", params: { ds: source.id }, title: "Key and relationship candidates" },
+            { screen: "lineage", label: "Lineage", params: { ds: source.id }, title: "Narrated lineage for this source" },
+          ]}
+        />
+      </div>
+
       <footer className="evp__foot">
         <Button
           onClick={() => {
@@ -205,8 +242,27 @@ function HealthPane({
         >
           {copied ? "Link copied" : "Copy source link"}
         </Button>
+        <Button
+          disabled={generating !== null}
+          onClick={() => void generateSnapshot("markdown")}
+          title="Generate a Markdown context document for this datasource — table inventory, business meaning, quality and health, on demand"
+        >
+          {generating === "markdown" ? "Generating…" : "Generate context (.md)"}
+        </Button>
+        <Button
+          disabled={generating !== null}
+          onClick={() => void generateSnapshot("json")}
+          title="Same snapshot as JSON, for programmatic use"
+        >
+          {generating === "json" ? "Generating…" : "Generate context (.json)"}
+        </Button>
         <span className="evp__hint">Per-source · not fanned out to every row</span>
       </footer>
+      {generateNotice && (
+        <p className="evp__notice" role="status">
+          {generateNotice}
+        </p>
+      )}
     </aside>
   );
 }

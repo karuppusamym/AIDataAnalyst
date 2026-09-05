@@ -227,6 +227,7 @@ async def compose_catalog_rows(
                 id=table.id,
                 name=table.name,
                 schema_name=schema_name,
+                datasource_id=table.datasource_id,
                 datasource_name=datasource_name,
                 object_type=table.object_type,
                 status=table.status,

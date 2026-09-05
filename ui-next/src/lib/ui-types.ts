@@ -58,6 +58,9 @@ export interface CatalogRowRead {
   id: string;
   name: string;
   schema_name: string;
+  /** The owning datasource. Every screen a catalog row links out to is
+   *  datasource-scoped, so a cross-link needs the id, not just the name. */
+  datasource_id: string;
   datasource_name: string;
   object_type: string;
   status: string;

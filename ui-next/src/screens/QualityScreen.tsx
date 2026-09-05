@@ -9,6 +9,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
@@ -100,6 +101,16 @@ function IncidentRow({
         </button>
       </header>
       <p className="qinc__summary">{incident.summary}</p>
+      {/* An incident is about a table. Before this, reading one and then
+          looking at that table meant re-finding it by name in the Catalog. */}
+      <CrossLinks
+        label="Open the affected asset in"
+        links={[
+          { screen: "catalog", label: "Catalog", params: { asset: incident.table_id }, title: `Evidence for ${incident.table_name}` },
+          { screen: "lineage", label: "Lineage", params: { ds: incident.datasource_id, node: incident.table_id }, title: "What feeds this table, and what it feeds" },
+          { screen: "meaning", label: "Business meaning", params: { ds: incident.datasource_id, asset: incident.table_id } },
+        ]}
+      />
       <div className="qinc__meta">
         <span>{nf.format(incident.occurrence_count)} occurrence{incident.occurrence_count === 1 ? "" : "s"}</span>
         <span>last observed {relTime(incident.last_observed_at)}</span>

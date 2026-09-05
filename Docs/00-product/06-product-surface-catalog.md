@@ -96,7 +96,26 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Compliance pack generator | Workspace | 20 | U4 |
 | Runtime posture attestation | Inspector | 17, 20 | U2 |
 
-### 2.7 Programmatic surfaces
+### 2.7 Developer workbench
+
+The audience that *consumes* governed context rather than reading it: agent and
+integration engineers. Recorded as its own workbench by `ADR-0028` — the
+programmatic surfaces in 2.8 all existed with no human surface at all, which is
+why the MCP server shipped complete and undiscoverable.
+
+| Surface | Kind | Module | Jobs |
+|---|---|---|---|
+| Context product registry + compiler | Workbench | 19 Context products | S1, P5 |
+| Staged rollout (consumer version bindings) | Workspace | 19 | P5 |
+| Agent gateway — connection + client configuration | Inspector | 19, 14 | P5 |
+| Agent gateway — exposure (`tools/list`, `prompts/list` as an agent sees them) | Inspector | 14, 19 | P5 |
+| Agent gateway — consumption edges, allowed and refused | Inspector | 20 Observability & audit | P5, U2 |
+
+> The gateway is read-only by construction. It never executes a tool or reads a
+> resource on a caller's behalf; it shows what the caller is already entitled
+> to see, so it cannot become a second path to data.
+
+### 2.8 Programmatic surfaces
 
 | Surface | Kind | Module |
 |---|---|---|
@@ -115,6 +134,7 @@ Atlas ships four kinds of surface. Confusing them is how products become bloated
 | Analyst | 2 | 4 | 3 | 0 |
 | Business consumer | 0 (uses Analyst, restricted) | 1 | 1 | 0 |
 | Steward | 2 | 7 | 2 | 0 |
+| Developer | 1 | 1 | 3 | 0 |
 | Reviewer | 1 | 2 | 2 | 0 |
 | Operator | 0 | 2 | 0 | 11 |
 | Auditor | 1 | 1 | 3 | 0 |

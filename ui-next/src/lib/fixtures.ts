@@ -161,12 +161,17 @@ function rowAt(i: number): CatalogRowRead {
   const entity = pick(ENTITIES, i, 3);
   const domain = pick(DOMAINS, i, 5);
   const termCount = h(i, 23) % 3;
+  // `ds_<name>` matches `FIXTURE_DATASOURCES`' own id convention, so a row's
+  // cross-links resolve to a datasource the fixture API actually knows about
+  // rather than to an id nothing else recognises.
+  const sourceName = pick(SOURCES, i, 37);
 
   return {
     id: `t_${i.toString(36).padStart(6, "0")}`,
     name: `${domain}_${entity}${pick(SUFFIX, i, 29)}`,
     schema_name: pick(SCHEMAS, i, 31),
-    datasource_name: pick(SOURCES, i, 37),
+    datasource_id: `ds_${sourceName}`,
+    datasource_name: sourceName,
     object_type: h(i, 41) % 100 < 78 ? "TABLE" : h(i, 43) % 2 ? "VIEW" : "MATERIALIZED_VIEW",
     status: "ACTIVE",
     description: hasDesc
@@ -1037,6 +1042,32 @@ const FIXTURE_DATASOURCES: DataSourceRead[] = [
     network_zone: "default", credential_reference: "vault://ds/snowflake_prod", max_concurrency: 8,
     status: "ACTIVE", capabilities: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
   },
+  /* The catalog fixture spreads its million rows across four sources
+     (`SOURCES` in `rowAt`), so listing only one here made every row from the
+     other three link to a datasource this fixture API does not know. The
+     three below exist so a cross-link from a catalog row resolves to a real
+     picker entry, exactly as it does against a live backend. */
+  {
+    id: "ds_oracle_core", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_fin", data_domain_id: "dom_fin", project_id: "proj_core",
+    name: "oracle_core", connector_type: "ORACLE", dialect: "oracle", environment: "PRODUCTION",
+    network_zone: "restricted", credential_reference: "vault://ds/oracle_core", max_concurrency: 4,
+    status: "ACTIVE", capabilities: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
+  },
+  {
+    id: "ds_postgres_ops", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_fin", data_domain_id: "dom_fin", project_id: "proj_core",
+    name: "postgres_ops", connector_type: "POSTGRESQL", dialect: "postgresql", environment: "PRODUCTION",
+    network_zone: "default", credential_reference: "vault://ds/postgres_ops", max_concurrency: 6,
+    status: "ACTIVE", capabilities: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
+  },
+  {
+    id: "ds_bigquery_mi", organization_id: "00000000-0000-0000-0000-000000000001",
+    line_of_business_id: "lob_retail", data_domain_id: "dom_retail", project_id: "proj_retail",
+    name: "bigquery_mi", connector_type: "BIGQUERY", dialect: "bigquery", environment: "PRODUCTION",
+    network_zone: "default", credential_reference: "vault://ds/bigquery_mi", max_concurrency: 8,
+    status: "ACTIVE", capabilities: {}, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-08-01T00:00:00Z",
+  },
 ];
 
 const FIXTURE_WORKSPACES: WorkspaceRead[] = [
@@ -1073,6 +1104,31 @@ const FIXTURE_SOURCE_BINDINGS: SourceBindingRead[] = [
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
   },
+  /* The other three sources the catalog fixture draws rows from. Without an
+     ACTIVE binding each one, `scope.tsx` correctly filters them out of every
+     datasource picker -- which is the governance model working, but left the
+     fixture estate self-contradictory: the catalog listed a million rows from
+     four sources while the workspace could reach one. Binding them makes the
+     demo estate coherent; the filtering behaviour itself is unchanged and
+     still exercised by `binding_pending_bigquery` below. */
+  ...(["ds_oracle_core", "ds_postgres_ops", "ds_bigquery_mi"] as const).map((datasourceId) => ({
+    id: `binding_governed_${datasourceId}`,
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    workspace_id: "ws_governed_analytics",
+    datasource_id: datasourceId,
+    schema_scope: [],
+    permitted_classifications: [],
+    masking_profile: "DEFAULT",
+    purpose: "Governed analytics",
+    max_query_cost: null,
+    status: "ACTIVE",
+    requested_by: "fixture-admin",
+    approved_by: "fixture-reviewer",
+    approved_at: "2026-01-01T00:00:00Z",
+    expires_at: null,
+    created_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-01T00:00:00Z",
+  })),
 ];
 
 /** `GET /v1/organizations/{id}/datasources`. */
@@ -6613,4 +6669,470 @@ export async function makeFixtureRunPlaybook(playbookId: string): Promise<Playbo
     bulk_stewardship_operation_id: null,
     governance_review_id: outcome === "GOVERNANCE_REVIEW_QUEUED" ? `99999999-0000-0000-0000-${Date.now().toString(16).padStart(12, "0")}` : null,
   };
+}
+
+/* ---------------------------------------------------------------------------
+   Context product staged rollout + agent consumption (P3-01).
+
+   The three shapes the Agent gateway and the Context Products screen need
+   that had no fixture: the version history behind `latest_version`, the
+   AT-7(b) consumer-binding registry, and the CX-4 consumption edges the MCP
+   server and the Context Product REST API record on every allowed read.
+--------------------------------------------------------------------------- */
+
+import type {
+  ConsumptionRecordPage,
+  ConsumptionRecordRead,
+  ContextProductConsumerBindingRead,
+  ContextProductVersionRead,
+} from "./types";
+
+/** The organization every fixture in this file belongs to (`org.tsx`'s
+ *  `DEFAULT_ORG_ID`, spelled out here rather than imported so fixtures stay
+ *  free of a runtime dependency on the React-facing module). */
+const CX_ORG_ID = "00000000-0000-0000-0000-000000000001";
+
+const FIXTURE_CONTEXT_PRODUCT_BINDINGS: Record<string, ContextProductConsumerBindingRead[]> = {
+  cp_consumer_risk: [
+    {
+      id: "cpb_risk_copilot",
+      organization_id: CX_ORG_ID,
+      product_id: "cp_consumer_risk",
+      consumer_principal_id: "risk-copilot@agents.tenant.example",
+      bound_version_id: "cpv_consumer_risk_1",
+      bound_version_number: 1,
+      created_by: "risk-data-stewards@tenant.example",
+      created_at: "2026-08-12T00:00:00Z",
+      updated_at: "2026-08-12T00:00:00Z",
+    },
+  ],
+};
+
+/** The version history behind each product's `latest_version`. Only products
+ *  whose fixture has more than one version need an entry; everything else
+ *  falls back to "the latest version is the only version". */
+const FIXTURE_CONTEXT_PRODUCT_VERSION_HISTORY: Record<string, ContextProductVersionRead[]> = {};
+
+function contextProductById(productId: string): ContextProductRead | undefined {
+  for (const items of Object.values(FIXTURE_CONTEXT_PRODUCTS)) {
+    const found = items.find((p) => p.id === productId);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/** Every version of one product, newest first. Synthesises the superseded
+ *  version a `based_on_version_id` implies so the binding picker has more
+ *  than one row to choose between — the whole point of a staged rollout. */
+export async function makeFixtureContextProductVersions(
+  productId: string,
+): Promise<PageOf<ContextProductVersionRead>> {
+  await wait(70);
+  const product = contextProductById(productId);
+  if (!product) throw new ApiError(404, "context product not found");
+  const explicit = FIXTURE_CONTEXT_PRODUCT_VERSION_HISTORY[productId];
+  const latest = product.latest_version;
+  const items =
+    explicit ??
+    (latest.based_on_version_id
+      ? [
+          latest,
+          {
+            ...latest,
+            id: latest.based_on_version_id,
+            version: latest.version - 1,
+            status: "SUPPORTED",
+            based_on_version_id: null,
+            superseded_by_version_id: latest.id,
+            superseded_at: latest.published_at,
+            fingerprint: fakeHex(latest.based_on_version_id),
+          },
+        ]
+      : [latest]);
+  return { items, limit: items.length, offset: 0, total: items.length };
+}
+
+export async function makeFixtureContextProductBindings(
+  productId: string,
+): Promise<PageOf<ContextProductConsumerBindingRead>> {
+  await wait(70);
+  const items = FIXTURE_CONTEXT_PRODUCT_BINDINGS[productId] ?? [];
+  return { items: [...items], limit: 100, offset: 0, total: items.length };
+}
+
+export async function makeFixtureSetContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+  boundVersionId: string,
+): Promise<ContextProductConsumerBindingRead> {
+  await wait(90);
+  const product = contextProductById(productId);
+  if (!product) throw new ApiError(404, "context product not found");
+  const versions = await makeFixtureContextProductVersions(productId);
+  const bound = versions.items.find((v) => v.id === boundVersionId);
+  if (!bound) throw new ApiError(422, "bound_version_id is not a version of this context product");
+  const list = (FIXTURE_CONTEXT_PRODUCT_BINDINGS[productId] ??= []);
+  const now = new Date().toISOString();
+  const existing = list.find((b) => b.consumer_principal_id === consumerPrincipalId);
+  if (existing) {
+    existing.bound_version_id = bound.id;
+    existing.bound_version_number = bound.version;
+    existing.updated_at = now;
+    return { ...existing };
+  }
+  const created: ContextProductConsumerBindingRead = {
+    id: `cpb_${consumerPrincipalId.replace(/[^a-z0-9]+/gi, "_")}`,
+    organization_id: product.organization_id,
+    product_id: productId,
+    consumer_principal_id: consumerPrincipalId,
+    bound_version_id: bound.id,
+    bound_version_number: bound.version,
+    created_by: "local-ui-admin",
+    created_at: now,
+    updated_at: now,
+  };
+  list.push(created);
+  return { ...created };
+}
+
+export async function makeFixtureRemoveContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+): Promise<void> {
+  await wait(70);
+  const list = FIXTURE_CONTEXT_PRODUCT_BINDINGS[productId];
+  if (!list) return;
+  const index = list.findIndex((b) => b.consumer_principal_id === consumerPrincipalId);
+  if (index >= 0) list.splice(index, 1);
+}
+
+const FIXTURE_CONSUMPTION: ConsumptionRecordRead[] = [
+  {
+    id: "cx_1", organization_id: CX_ORG_ID,
+    consumer_id: "risk-copilot@agents.tenant.example", consumer_type: "AGENT",
+    resource_type: "CONTEXT_PRODUCT", resource_id: "consumer-risk-context",
+    channel: "MCP", correlation_id: "corr-4411", policy_decision: "ALLOW",
+    business_purpose: "Monthly risk committee packet",
+    details: { method: "prompts/get", version: 2 },
+    consumed_at: "2026-09-04T09:14:00Z",
+  },
+  {
+    id: "cx_2", organization_id: CX_ORG_ID,
+    consumer_id: "risk-copilot@agents.tenant.example", consumer_type: "AGENT",
+    resource_type: "GOVERNED_TOOL", resource_id: "delinquency-by-segment",
+    channel: "MCP", correlation_id: "corr-4412", policy_decision: "ALLOW",
+    business_purpose: "Monthly risk committee packet",
+    details: { method: "tools/call", masked_columns: 2 },
+    consumed_at: "2026-09-04T09:14:22Z",
+  },
+  {
+    id: "cx_3", organization_id: CX_ORG_ID,
+    consumer_id: "notebook-svc@tenant.example", consumer_type: "SERVICE",
+    resource_type: "CATALOG_TABLE", resource_id: "analytics.core.orders_raw",
+    channel: "REST", correlation_id: "corr-4498", policy_decision: "ALLOW",
+    business_purpose: null,
+    details: { method: "resources/read" },
+    consumed_at: "2026-09-03T16:02:10Z",
+  },
+  {
+    id: "cx_4", organization_id: CX_ORG_ID,
+    consumer_id: "unbound-agent@agents.tenant.example", consumer_type: "AGENT",
+    resource_type: "CONTEXT_PRODUCT", resource_id: "consumer-risk-context",
+    channel: "MCP", correlation_id: "corr-4501", policy_decision: "DENY",
+    business_purpose: null,
+    details: { method: "prompts/get", reason: "quality gate: minimum_score" },
+    consumed_at: "2026-09-03T11:47:03Z",
+  },
+];
+
+export async function makeFixtureConsumptionRecords(
+  filter: { consumerId?: string; resourceType?: string; resourceId?: string },
+  query: { limit?: number; offset?: number },
+): Promise<ConsumptionRecordPage> {
+  await wait(90);
+  let items = FIXTURE_CONSUMPTION;
+  if (filter.consumerId) items = items.filter((r) => r.consumer_id === filter.consumerId);
+  if (filter.resourceType) items = items.filter((r) => r.resource_type === filter.resourceType);
+  if (filter.resourceId) items = items.filter((r) => r.resource_id === filter.resourceId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/* ---------------------------------------------------------------------------
+   Ownership assignments (P2-07).
+
+   The three ownership wrappers were among the handful in `api.ts` with no
+   fixture branch, which did not matter while the expiry banner was mounted
+   nowhere. It is mounted on Stewardship now, so in fixture mode the screen
+   would open with "Could not load ownerships: 401" — an error about the
+   absence of a backend, rendered as though the estate had a problem.
+
+   Two rows are deliberately shaped to exercise both sides of the banner's own
+   client-side filter: one inside the 14-day window (shown) and one well
+   outside it (loaded, ignored). The principal matches `identityHeaders()`'
+   default so the banner's `owner_principal === CURRENT_PRINCIPAL_ID` check
+   passes without the fixture having to know how that value is derived.
+--------------------------------------------------------------------------- */
+
+import type {
+  OwnershipAssignmentBulkReaffirmResult,
+  OwnershipAssignmentRead,
+} from "./api";
+
+const OWNERSHIP_PRINCIPAL = "local-ui-admin";
+
+/** Days from now, as an ISO instant — the banner compares against `Date.now()`,
+ *  so a fixed date would silently stop being "expiring soon". */
+const inDays = (days: number): string =>
+  new Date(Date.now() + days * 86_400_000).toISOString();
+
+const FIXTURE_OWNERSHIP_ASSIGNMENTS: OwnershipAssignmentRead[] = [
+  {
+    id: "own_orders_raw", organization_id: CX_ORG_ID,
+    subject_type: "TABLE", subject_id: "t_000000",
+    owner_type: "INDIVIDUAL", owner_principal: OWNERSHIP_PRINCIPAL,
+    assignment_kind: "MANUAL", source_rule_id: null, status: "ACTIVE",
+    assigned_by: "fixture-admin", expires_at: inDays(6),
+    expiry_warning_emitted_at: null, reaffirmed_at: null, reaffirmed_by: null,
+    created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z",
+  },
+  {
+    id: "own_customer_dim", organization_id: CX_ORG_ID,
+    subject_type: "TABLE", subject_id: "t_000001",
+    owner_type: "INDIVIDUAL", owner_principal: OWNERSHIP_PRINCIPAL,
+    assignment_kind: "RULE", source_rule_id: "rule_retail_tables", status: "ACTIVE",
+    assigned_by: "fixture-admin", expires_at: inDays(11),
+    expiry_warning_emitted_at: null, reaffirmed_at: null, reaffirmed_by: null,
+    created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z",
+  },
+  {
+    // Outside the warning window: loaded, and correctly not warned about.
+    id: "own_treasury_snapshot", organization_id: CX_ORG_ID,
+    subject_type: "TABLE", subject_id: "t_000002",
+    owner_type: "GROUP", owner_principal: OWNERSHIP_PRINCIPAL,
+    assignment_kind: "MANUAL", source_rule_id: null, status: "ACTIVE",
+    assigned_by: "fixture-admin", expires_at: inDays(120),
+    expiry_warning_emitted_at: null, reaffirmed_at: null, reaffirmed_by: null,
+    created_at: "2026-03-01T00:00:00Z", updated_at: "2026-03-01T00:00:00Z",
+  },
+];
+
+export async function makeFixtureOwnershipAssignments(
+  query: { limit?: number; offset?: number },
+): Promise<PageOf<OwnershipAssignmentRead>> {
+  await wait(70);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  const items = FIXTURE_OWNERSHIP_ASSIGNMENTS.slice(offset, offset + limit);
+  return { items, limit, offset, total: FIXTURE_OWNERSHIP_ASSIGNMENTS.length };
+}
+
+/** Extends `expires_at` the way the server does (`ownership_reaffirm_days`,
+ *  default 180) so the banner's post-action refresh genuinely drops the row
+ *  rather than re-rendering it unchanged. */
+export async function makeFixtureReaffirmOwnershipAssignment(
+  assignmentId: string,
+): Promise<OwnershipAssignmentRead> {
+  await wait(80);
+  const row = FIXTURE_OWNERSHIP_ASSIGNMENTS.find((item) => item.id === assignmentId);
+  if (!row) throw new ApiError(404, "ownership assignment not found");
+  row.expires_at = inDays(180);
+  row.reaffirmed_at = new Date().toISOString();
+  row.reaffirmed_by = OWNERSHIP_PRINCIPAL;
+  return { ...row };
+}
+
+export async function makeFixtureBulkReaffirmOwnershipAssignments(
+  assignmentIds: string[],
+): Promise<OwnershipAssignmentBulkReaffirmResult> {
+  await wait(110);
+  const items = assignmentIds.map((assignment_id) => {
+    const row = FIXTURE_OWNERSHIP_ASSIGNMENTS.find((item) => item.id === assignment_id);
+    if (!row) {
+      return { assignment_id, outcome: "NOT_FOUND" as const, detail: "no such assignment" };
+    }
+    row.expires_at = inDays(180);
+    row.reaffirmed_at = new Date().toISOString();
+    row.reaffirmed_by = OWNERSHIP_PRINCIPAL;
+    return { assignment_id, outcome: "REAFFIRMED" as const, detail: null };
+  });
+  const reaffirmed = items.filter((item) => item.outcome === "REAFFIRMED").length;
+  return { reaffirmed, skipped: items.length - reaffirmed, items };
+}
+
+/* ---------------------------------------------------------------------------
+   Glossary terms and asset-term links (P1-03).
+
+   `_api_append.ts` declared `USE_FIXTURES` and then used it only to decide
+   whether to send identity headers, so every glossary call went to the live
+   API even in fixture mode — where it 401s. That was invisible while the only
+   caller was Business meaning's optional side panel. The Context Products
+   picker reads approved terms too, so the gap now shows as a failed picker on
+   a screen whose whole point is composing approved references.
+
+   Kept in this file rather than in `_api_append.ts` so all fixture state for
+   the app lives in one place, matching every other slice.
+--------------------------------------------------------------------------- */
+
+import type { AssetTermLinkRead, GlossaryTermVersionRead } from "./types";
+
+const FIXTURE_GLOSSARY_TERMS: GlossaryTermVersionRead[] = [
+  {
+    id: "gtv_delinquency_2", organization_id: CX_ORG_ID, term_id: "gt_delinquency",
+    term_key: "delinquency", category_id: "cat_risk", lifecycle_status: "ACTIVE",
+    version: 2, status: "APPROVED",
+    display_name: "Delinquency",
+    definition: "An account is delinquent once a contractual payment is 30 or more days past due.",
+    synonyms: ["past due", "arrears"], owner_principal: "risk-data-stewards",
+    created_by: "risk-data-stewards@tenant.example", approved_by: "steward@tenant.example",
+    approved_at: "2026-06-01T00:00:00Z",
+    created_at: "2026-05-01T00:00:00Z", updated_at: "2026-06-01T00:00:00Z",
+  },
+  {
+    id: "gtv_exposure_at_default_1", organization_id: CX_ORG_ID, term_id: "gt_ead",
+    term_key: "exposure_at_default", category_id: "cat_risk", lifecycle_status: "ACTIVE",
+    version: 1, status: "APPROVED",
+    display_name: "Exposure at Default",
+    definition: "The gross amount expected to be outstanding at the time a counterparty defaults.",
+    synonyms: ["EAD"], owner_principal: "risk-data-stewards",
+    created_by: "risk-data-stewards@tenant.example", approved_by: "steward@tenant.example",
+    approved_at: "2026-04-11T00:00:00Z",
+    created_at: "2026-04-01T00:00:00Z", updated_at: "2026-04-11T00:00:00Z",
+  },
+  {
+    id: "gtv_net_revenue_1", organization_id: CX_ORG_ID, term_id: "gt_net_revenue",
+    term_key: "net_revenue", category_id: "cat_finance", lifecycle_status: "ACTIVE",
+    version: 1, status: "APPROVED",
+    display_name: "Net Revenue",
+    definition: "Gross revenue less returns, allowances and interchange paid.",
+    synonyms: [], owner_principal: "finance-data",
+    created_by: "finance-data@tenant.example", approved_by: "steward@tenant.example",
+    approved_at: "2026-02-20T00:00:00Z",
+    created_at: "2026-02-01T00:00:00Z", updated_at: "2026-02-20T00:00:00Z",
+  },
+  {
+    // A draft, so a caller filtering on `status` gets a genuinely different
+    // answer from a caller that does not.
+    id: "gtv_settlement_date_1", organization_id: CX_ORG_ID, term_id: "gt_settlement_date",
+    term_key: "settlement_date", category_id: "cat_finance", lifecycle_status: "ACTIVE",
+    version: 1, status: "DRAFT",
+    display_name: "Settlement Date",
+    definition: "The date on which a trade's cash and securities legs are exchanged.",
+    synonyms: [], owner_principal: "treasury-ops",
+    created_by: "treasury-ops@tenant.example", approved_by: null, approved_at: null,
+    created_at: "2026-08-20T00:00:00Z", updated_at: "2026-08-20T00:00:00Z",
+  },
+];
+
+const FIXTURE_ASSET_TERM_LINKS: AssetTermLinkRead[] = [
+  {
+    id: "atl_1", organization_id: CX_ORG_ID, table_id: "t_000000",
+    term_id: "gt_ead", term_key: "exposure_at_default", display_name: "Exposure at Default",
+    definition: "The gross amount expected to be outstanding at the time a counterparty defaults.",
+    linked_by: "risk-data-stewards@tenant.example", link_type: "MANUAL",
+    confidence: 1, source_annotation_id: null, created_at: "2026-06-02T00:00:00Z",
+  },
+];
+
+export async function makeFixtureGlossaryTerms(query: {
+  status?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ items: GlossaryTermVersionRead[]; limit: number; offset: number; total: number }> {
+  await wait(70);
+  let items = FIXTURE_GLOSSARY_TERMS;
+  if (query.status) items = items.filter((t) => t.status === query.status);
+  if (query.q) {
+    const needle = query.q.toLowerCase();
+    items = items.filter(
+      (t) =>
+        t.term_key.toLowerCase().includes(needle) ||
+        t.display_name.toLowerCase().includes(needle),
+    );
+  }
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+export async function makeFixtureCreateGlossaryTerm(
+  body: { term_key: string; display_name: string; definition: string; category_id?: string | null; synonyms?: string[]; owner_principal?: string | null },
+): Promise<GlossaryTermVersionRead> {
+  await wait(90);
+  if (FIXTURE_GLOSSARY_TERMS.some((t) => t.term_key === body.term_key)) {
+    throw new ApiError(409, `glossary term '${body.term_key}' already exists`);
+  }
+  const now = new Date().toISOString();
+  const created: GlossaryTermVersionRead = {
+    id: `gtv_${body.term_key}_1`, organization_id: CX_ORG_ID,
+    term_id: `gt_${body.term_key}`, term_key: body.term_key,
+    category_id: body.category_id ?? null, lifecycle_status: "ACTIVE",
+    version: 1, status: "DRAFT",
+    display_name: body.display_name, definition: body.definition,
+    synonyms: body.synonyms ?? [], owner_principal: body.owner_principal ?? null,
+    created_by: "local-ui-admin", approved_by: null, approved_at: null,
+    created_at: now, updated_at: now,
+  };
+  FIXTURE_GLOSSARY_TERMS.push(created);
+  return { ...created };
+}
+
+export async function makeFixtureSubmitGlossaryTermVersion(
+  versionId: string,
+): Promise<GovernanceReviewRead> {
+  await wait(80);
+  const version = FIXTURE_GLOSSARY_TERMS.find((t) => t.id === versionId);
+  if (!version) throw new ApiError(404, "glossary term version not found");
+  if (version.status !== "DRAFT") {
+    throw new ApiError(409, "only a draft glossary term version can be submitted");
+  }
+  version.status = "REVIEW_REQUIRED";
+  const now = new Date().toISOString();
+  return {
+    id: `rev_${versionId}`, organization_id: CX_ORG_ID,
+    object_type: "GLOSSARY_TERM_VERSION", object_id: versionId,
+    requested_action: "PUBLISH", status: "PENDING",
+    requested_by: "local-ui-admin", decided_by: null, decision_reason: null,
+    decided_at: null, created_at: now, updated_at: now,
+  };
+}
+
+export async function makeFixtureLinkTermToTable(
+  tableId: string,
+  termId: string,
+): Promise<AssetTermLinkRead> {
+  await wait(80);
+  const term = FIXTURE_GLOSSARY_TERMS.find((t) => t.term_id === termId);
+  if (!term) throw new ApiError(404, "glossary term not found");
+  if (term.status !== "APPROVED") {
+    throw new ApiError(409, "only approved glossary terms can be linked to an asset");
+  }
+  const created: AssetTermLinkRead = {
+    id: `atl_${tableId}_${termId}`, organization_id: CX_ORG_ID,
+    table_id: tableId, term_id: term.term_id, term_key: term.term_key,
+    display_name: term.display_name, definition: term.definition,
+    linked_by: "local-ui-admin", link_type: "MANUAL",
+    confidence: 1, source_annotation_id: null, created_at: new Date().toISOString(),
+  };
+  FIXTURE_ASSET_TERM_LINKS.push(created);
+  return { ...created };
+}
+
+export async function makeFixtureUnlinkTermFromTable(linkId: string): Promise<void> {
+  await wait(60);
+  const index = FIXTURE_ASSET_TERM_LINKS.findIndex((l) => l.id === linkId);
+  if (index >= 0) FIXTURE_ASSET_TERM_LINKS.splice(index, 1);
+}
+
+export async function makeFixtureAssetTermLinks(
+  tableId: string,
+  query: { limit?: number; offset?: number },
+): Promise<{ items: AssetTermLinkRead[]; limit: number; offset: number; total: number }> {
+  await wait(60);
+  const matching = FIXTURE_ASSET_TERM_LINKS.filter((l) => l.table_id === tableId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return { items: matching.slice(offset, offset + limit), limit, offset, total: matching.length };
 }

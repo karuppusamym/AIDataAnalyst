@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ConnectorHealthScoreRead, DataSourceRead } from "../lib/types";
 import type { PageOf } from "../lib/ui-types";
-import { ApiError } from "../lib/api";
+import { ApiError, type DatasourceContextSnapshot } from "../lib/api";
 
 /* ---------------------------------------------------------------------------
    Sources — nav id `sources`, against the real
@@ -20,6 +20,9 @@ const fetchOrgDatasources = vi.fn<
 const fetchDatasourceHealth = vi.fn<
   (datasourceId: string, signal?: AbortSignal) => Promise<ConnectorHealthScoreRead>
 >();
+const downloadDatasourceContextSnapshot = vi.fn<
+  (datasource: DataSourceRead, format: "markdown" | "json") => Promise<DatasourceContextSnapshot>
+>();
 
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
@@ -29,6 +32,8 @@ vi.mock("../lib/api", async (importOriginal) => {
       fetchOrgDatasources(organizationId, signal),
     fetchDatasourceHealth: (datasourceId: string, signal?: AbortSignal) =>
       fetchDatasourceHealth(datasourceId, signal),
+    downloadDatasourceContextSnapshot: (datasource: DataSourceRead, format: "markdown" | "json") =>
+      downloadDatasourceContextSnapshot(datasource, format),
   };
 });
 
@@ -71,6 +76,7 @@ async function loadScreen() {
 beforeEach(() => {
   fetchOrgDatasources.mockReset();
   fetchDatasourceHealth.mockReset();
+  downloadDatasourceContextSnapshot.mockReset();
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
@@ -169,5 +175,77 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     await waitFor(() => expect(screen.queryByText("snowflake_prod")).not.toBeInTheDocument());
     expect(screen.getByText("oracle_core")).toBeInTheDocument();
     expect(fetchOrgDatasources).toHaveBeenCalledTimes(1); // filtering never re-fetches the fleet
+  });
+
+  it("generates and downloads a Markdown context snapshot for the selected source", async () => {
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    downloadDatasourceContextSnapshot.mockResolvedValue({
+      generated_at: "2026-09-05T00:00:00Z",
+      datasource: {
+        id: "ds_snowflake_prod", name: "snowflake_prod", connector_type: "SNOWFLAKE",
+        dialect: "snowflake", environment: "PRODUCTION", network_zone: "default",
+        status: "ACTIVE", project_id: "proj1", organization_id: "org1",
+      },
+      health: { score: 91, status: "HEALTHY", computed_at: "2026-09-02T00:00:00Z" },
+      quality: null,
+      open_incidents: [],
+      documented_tables: [],
+      undocumented_tables: [],
+      documented_count: 4,
+      undocumented_count: 2,
+      truncated: false,
+      warnings: [],
+    });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    await screen.findByLabelText("Health for snowflake_prod");
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate context (.md)" }));
+
+    await waitFor(() =>
+      expect(downloadDatasourceContextSnapshot).toHaveBeenCalledWith(SNOWFLAKE, "markdown"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/4 documented \/ 2 undocumented tables/)).toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces a warning count instead of hiding a partially-failed snapshot", async () => {
+    fetchOrgDatasources.mockResolvedValue({ items: [SNOWFLAKE], limit: 500, offset: 0, total: 1 });
+    fetchDatasourceHealth.mockResolvedValue(HEALTH);
+    downloadDatasourceContextSnapshot.mockResolvedValue({
+      generated_at: "2026-09-05T00:00:00Z",
+      datasource: {
+        id: "ds_snowflake_prod", name: "snowflake_prod", connector_type: "SNOWFLAKE",
+        dialect: "snowflake", environment: "PRODUCTION", network_zone: "default",
+        status: "ACTIVE", project_id: "proj1", organization_id: "org1",
+      },
+      health: { score: 91, status: "HEALTHY", computed_at: "2026-09-02T00:00:00Z" },
+      quality: null,
+      open_incidents: [],
+      documented_tables: [],
+      undocumented_tables: [],
+      documented_count: 0,
+      undocumented_count: 0,
+      truncated: false,
+      warnings: ["Quality summary could not be loaded: 403 policy_denied"],
+    });
+    const SourcesScreen = await loadScreen();
+    render(<SourcesScreen />);
+    await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
+    await screen.findByLabelText("Health for snowflake_prod");
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate context (.json)" }));
+
+    await waitFor(() =>
+      expect(downloadDatasourceContextSnapshot).toHaveBeenCalledWith(SNOWFLAKE, "json"),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/1 section\(s\) unavailable/)).toBeInTheDocument(),
+    );
   });
 });

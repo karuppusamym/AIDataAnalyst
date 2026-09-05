@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import type { AssetEvidenceRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
 import { ApiError, exportAssetEvidence, fetchAssetEvidence } from "../lib/api";
+import { CrossLinks } from "./CrossLinks";
+import type { CrossLink } from "./CrossLinks";
 import { Button, Empty, Pill } from "./primitives";
 import "./EvidencePane.css";
 
@@ -87,6 +89,22 @@ export function EvidencePane({
   const permalink = `${location.origin}${location.pathname}?asset=${tableId}`;
   const displayName = row?.name ?? evidence?.table_name ?? tableId;
 
+  /* The joins. Evidence answers "can I trust this table"; the next question is
+     always "where does it come from", "what is wrong with it", or "what does
+     it mean" -- each of which lives on a different, datasource-scoped screen.
+     Without `row` we only know the table id, so the two links that need a
+     datasource are withheld rather than sent somewhere that would land on an
+     empty picker. */
+  const links: CrossLink[] = row
+    ? [
+        { screen: "lineage", label: "Lineage", params: { ds: row.datasource_id, node: tableId }, title: "Narrated upstream and downstream for this table" },
+        { screen: "unified-lineage", label: "Impact", params: { ds: row.datasource_id, node: tableId }, title: "Cross-source impact graph" },
+        { screen: "quality", label: "Quality", params: { ds: row.datasource_id }, title: "Incidents and profile comparisons for this source" },
+        { screen: "meaning", label: "Business meaning", params: { ds: row.datasource_id, asset: tableId }, title: "Domain, entity, grain and glossary terms" },
+        { screen: "relationships", label: "Relationships", params: { ds: row.datasource_id }, title: "Key and relationship candidates for this source" },
+      ]
+    : [];
+
   return (
     <aside className="evp" aria-label={`Evidence for ${displayName}`}>
       <header className="evp__head">
@@ -127,6 +145,12 @@ export function EvidencePane({
             ))}
           </ol>
         )}
+
+        {links.length > 0 ? (
+          <div className="evp__links">
+            <CrossLinks links={links} label="Open this asset in" />
+          </div>
+        ) : null}
 
         {row && row.glossary_terms.length > 0 ? (
           <div className="evp__terms">

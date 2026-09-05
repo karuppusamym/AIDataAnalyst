@@ -75,3 +75,25 @@
   .cpscreen__rail{flex:none;position:static;width:100%}
   .cpregistry .vlist{height:56vh;flex:none}
 }
+
+/* Rollout (AT-7(b) consumer bindings) — see RolloutPanel in the .tsx. */
+.cprow--selected{border-color:var(--accent);box-shadow:inset 3px 0 0 var(--accent)}
+
+.cprollout{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:12px}
+.cprollout__head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+.cprollout__headactions{display:flex;gap:6px}
+.cprollout__eyebrow{margin:0;font-size:10.5px;font-weight:600;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.cprollout__h2{margin:2px 0 0;font-size:15px;letter-spacing:-.01em;font-family:var(--mono)}
+.cprollout__lede{margin:4px 0 0;color:var(--ink-2);font-size:12px;max-width:60ch;line-height:1.5}
+.cprollout__form{display:grid;grid-template-columns:2fr 1fr auto;gap:10px;align-items:end}
+.cprollout__form input,.cprollout__form select{width:100%;box-sizing:border-box;font:inherit;font-size:13px;padding:6px 8px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--paper);color:var(--ink)}
+.cprollout__table{width:100%;border-collapse:collapse;font-size:12.5px}
+.cprollout__caption{text-align:left;font-family:var(--mono);font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);padding-bottom:6px}
+.cprollout__table th{text-align:left;font-weight:500;color:var(--ink-3);font-size:11px;padding:4px 8px 4px 0;border-bottom:1px solid var(--line)}
+.cprollout__table td{padding:7px 8px 7px 0;border-bottom:1px solid var(--line-soft);color:var(--ink-2);vertical-align:middle}
+.cprollout__table code{font-family:var(--mono);font-size:11.5px;color:var(--ink);overflow-wrap:anywhere}
+.cprollout__rowaction{text-align:right;white-space:nowrap}
+
+@media (max-width:760px){
+  .cprollout__form{grid-template-columns:1fr}
+}

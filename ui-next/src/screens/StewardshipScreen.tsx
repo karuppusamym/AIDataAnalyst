@@ -21,6 +21,7 @@ import {
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
+import { OwnershipExpiryBannerScreen } from "./OwnershipExpiryBannerScreen";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./StewardshipScreen.css";
@@ -335,6 +336,13 @@ export function StewardshipScreen() {
           </p>
         </div>
       </header>
+
+      {/* P2-07's banner. It was built as a standalone component for a shell to
+          embed and then never embedded anywhere, so an owner was never warned
+          before an ownership lapsed. Stewardship is where ownership is worked
+          on, so it belongs at the top of this screen; it renders nothing at
+          all when the current principal has nothing expiring. */}
+      <OwnershipExpiryBannerScreen />
 
       <div className="stew__grid">
         <section className="stew__panel" aria-label="Catalog bulk action">

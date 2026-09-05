@@ -20,6 +20,7 @@ import {
 import { useUrlState } from "../lib/useUrlState";
 import { useOrgId } from "../lib/org";
 import { VirtualList } from "../components/VirtualList";
+import { CrossLinks } from "../components/CrossLinks";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./ToolRegistryScreen.css";
@@ -384,6 +385,19 @@ function ToolDetail({
         <div><span>Fingerprint</span><strong>{tool.fingerprint.slice(0, 16)}</strong></div>
       </div>
       <pre className="trdetail__sql">{tool.sql_template}</pre>
+      {/* A published tool is simultaneously a step in a plan and a callable an
+          external agent sees as `atlas__<slug>`. Neither was reachable from
+          here, so the registry read as a dead end. */}
+      {tool.status === "PUBLISHED" ? (
+        <CrossLinks
+          label="Use this tool in"
+          links={[
+            { screen: "tool-plans", label: "Tool plans", title: "Compose this tool into a multi-step, budgeted plan" },
+            { screen: "developer", label: "Agent gateway", params: { project: tool.project_id }, title: `External agents see this as atlas__${tool.slug}` },
+            { screen: "lineage", label: "Lineage", params: { ds: tool.datasource_id }, title: "What this tool reads from" },
+          ]}
+        />
+      ) : null}
       <div className="trdetail__actions">
         {tool.status === "DRAFT" ? (
           <Button disabled={busy} onClick={onSubmitReview}>{busy ? "Submitting…" : "Submit for review"}</Button>

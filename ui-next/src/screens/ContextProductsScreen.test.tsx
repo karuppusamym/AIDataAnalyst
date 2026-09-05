@@ -24,10 +24,37 @@ const requestContextProductDeprecation =
 const compileContextProductVersion =
   vi.fn<(versionId: string, target: string, signal?: AbortSignal) => Promise<ContextCompilationRead>>();
 
+/* The four governed-reference pickers replaced four "paste a UUID" boxes, so
+   the screen now reads the same lists Catalog / Semantics / Tools / Business
+   meaning read. Mocked here for the same reason the write endpoints are: the
+   test is about this screen's behaviour, not about those read models. */
+const fetchCatalogRows = vi.fn();
+const fetchSemanticModelVersions = vi.fn();
+const fetchTools = vi.fn();
+const listGlossaryTerms = vi.fn();
+
+/* Staged rollout (AT-7(b) consumer bindings). */
+const fetchContextProductVersions = vi.fn();
+const fetchContextProductBindings = vi.fn();
+const setContextProductBinding = vi.fn();
+const removeContextProductBinding = vi.fn();
+
+vi.mock("../lib/_api_append", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/_api_append")>();
+  return { ...actual, listGlossaryTerms: (...args: unknown[]) => listGlossaryTerms(...args) };
+});
+
 vi.mock("../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/api")>();
   return {
     ...actual,
+    fetchCatalogRows: (...args: unknown[]) => fetchCatalogRows(...args),
+    fetchSemanticModelVersions: (...args: unknown[]) => fetchSemanticModelVersions(...args),
+    fetchTools: (...args: unknown[]) => fetchTools(...args),
+    fetchContextProductVersions: (...args: unknown[]) => fetchContextProductVersions(...args),
+    fetchContextProductBindings: (...args: unknown[]) => fetchContextProductBindings(...args),
+    setContextProductBinding: (...args: unknown[]) => setContextProductBinding(...args),
+    removeContextProductBinding: (...args: unknown[]) => removeContextProductBinding(...args),
     fetchOrgProjects: (organizationId: string, signal?: AbortSignal) => fetchOrgProjects(organizationId, signal),
     fetchContextProducts: (projectId: string, query: unknown, signal?: AbortSignal) =>
       fetchContextProducts(projectId, query, signal),
@@ -82,10 +109,45 @@ beforeEach(() => {
   submitContextProductVersion.mockReset();
   requestContextProductDeprecation.mockReset();
   compileContextProductVersion.mockReset();
+  for (const fn of [
+    fetchCatalogRows, fetchSemanticModelVersions, fetchTools, listGlossaryTerms,
+    fetchContextProductVersions, fetchContextProductBindings,
+    setContextProductBinding, removeContextProductBinding,
+  ]) fn.mockReset();
+
   fetchOrgProjects.mockResolvedValue({ items: [PROJECT], limit: 500, offset: 0, total: 1 });
+  fetchCatalogRows.mockResolvedValue({ items: CATALOG_ROWS, limit: 200, offset: 0, total: CATALOG_ROWS.length });
+  fetchSemanticModelVersions.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  fetchTools.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  listGlossaryTerms.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+  fetchContextProductVersions.mockResolvedValue({ items: [DRAFT_PRODUCT.latest_version], limit: 200, offset: 0, total: 1 });
+  fetchContextProductBindings.mockResolvedValue({ items: [], limit: 200, offset: 0, total: 0 });
+
   vi.resetModules();
   history.replaceState(null, "", "/");
 });
+
+/* Two catalog rows, shaped exactly as `GET .../catalog/rows` returns them, so
+   the picker is exercised against the real read model rather than a
+   convenient stub. `datasource_id` is the field the cross-links need. */
+const CATALOG_ROWS = [
+  {
+    id: "t1", name: "orders_raw", schema_name: "core",
+    datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
+    object_type: "TABLE", status: "ACTIVE", description: null, description_is_proposed: false,
+    owner: "Risk Analytics", certification: "CERTIFIED" as const, certification_expires_at: null,
+    certification_evidence_summary: null, quality: "PASSING" as const, glossary_terms: [],
+    row_count_estimate: 10, updated_at: "2026-09-01T00:00:00Z",
+  },
+  {
+    id: "t2", name: "customer_dim", schema_name: "core",
+    datasource_id: "ds_snowflake_prod", datasource_name: "snowflake_prod",
+    object_type: "TABLE", status: "ACTIVE", description: null, description_is_proposed: false,
+    owner: null, certification: "NONE" as const, certification_expires_at: null,
+    certification_evidence_summary: null, quality: "UNKNOWN" as const, glossary_terms: [],
+    row_count_estimate: 20, updated_at: "2026-09-01T00:00:00Z",
+  },
+];
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -191,7 +253,11 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     fireEvent.change(screen.getByLabelText("Approved purpose"), {
       target: { value: "Explain drivers of consumer delinquency for the monthly risk packet." },
     });
-    fireEvent.change(screen.getByLabelText("Table UUIDs"), { target: { value: " t1 , t2 " } });
+    /* The whole point of the change: a steward picks tables by name. The ids
+       that reach the request body are the ones the catalog itself returned,
+       so a typo can no longer produce a 422. */
+    fireEvent.click(await screen.findByRole("checkbox", { name: /core\.orders_raw/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /core\.customer_dim/ }));
 
     fireEvent.click(screen.getByRole("button", { name: "Create governed draft" }));
 
@@ -220,5 +286,76 @@ describe("ContextProductsScreen against the real context_product_api.py / contex
     // created..." one on the same shared message target (see the submit
     // test above for the identical, legacy-faithful race).
     await waitFor(() => expect(fetchContextProducts).toHaveBeenCalledTimes(2));
+  });
+  /* ---- Staged rollout (AT-7(b) consumer bindings) --------------------- */
+
+  it("pins a named consumer to a specific version through the real binding endpoint", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [DRAFT_PRODUCT], limit: 200, offset: 0, total: 1 });
+    setContextProductBinding.mockResolvedValue({
+      id: "cpb_1", organization_id: "org1", product_id: "cp_1",
+      consumer_principal_id: "risk-copilot@agents.tenant.example",
+      bound_version_id: "cpv_1", bound_version_number: 1,
+      created_by: "local-ui-admin",
+      created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-01T00:00:00Z",
+    });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Rollout" }));
+
+    // Both reads are issued for the product, not the version -- the endpoints
+    // are product-scoped and a version-scoped call would 404.
+    await waitFor(() => expect(fetchContextProductVersions).toHaveBeenCalledWith("cp_1", { limit: 200 }, expect.anything()));
+    expect(fetchContextProductBindings).toHaveBeenCalledWith("cp_1", { limit: 200 }, expect.anything());
+
+    fireEvent.change(await screen.findByLabelText("Consumer principal"), {
+      target: { value: "  risk-copilot@agents.tenant.example  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pin consumer" }));
+
+    // The principal is trimmed: a trailing space would otherwise create a
+    // second, permanently-unmatchable binding for the same agent.
+    await waitFor(() =>
+      expect(setContextProductBinding).toHaveBeenCalledWith(
+        "cp_1",
+        "risk-copilot@agents.tenant.example",
+        "cpv_1",
+      ),
+    );
+  });
+
+  it("says plainly that unpinned consumers resolve to the published version", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [DRAFT_PRODUCT], limit: 200, offset: 0, total: 1 });
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Rollout" }));
+
+    expect(await screen.findByText("No pinned consumers")).toBeInTheDocument();
+  });
+
+  it("surfaces the server's own 422 when a version belongs to another product", async () => {
+    fetchContextProducts.mockResolvedValue({ items: [DRAFT_PRODUCT], limit: 200, offset: 0, total: 1 });
+    setContextProductBinding.mockRejectedValue(
+      new ApiError(422, "bound_version_id is not a version of this context product"),
+    );
+    const ContextProductsScreen = await loadScreen();
+    render(<ContextProductsScreen />);
+    fireEvent.change(await screen.findByLabelText("Project"), { target: { value: "proj_core" } });
+    await waitFor(() => expect(screen.getByText("Consumer risk analysis")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Rollout" }));
+    fireEvent.change(await screen.findByLabelText("Consumer principal"), {
+      target: { value: "risk-copilot@agents.tenant.example" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pin consumer" }));
+
+    expect(
+      await screen.findByText("bound_version_id is not a version of this context product"),
+    ).toBeInTheDocument();
   });
 });

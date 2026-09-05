@@ -1315,6 +1315,312 @@ export async function fetchDatasourceHealth(
 }
 
 /* ---------------------------------------------------------------------------
+   Context snapshot — an on-demand, downloadable "what do we know about this
+   datasource" document. Not a new backend endpoint: it composes five reads
+   this file already exposes (health, quality summary, open incidents,
+   approved business annotations, table inventory) into one client-side
+   object, the same "assemble from what's already governed" idiom
+   `agent_roster.py`'s own module docstring insists on server-side. No
+   curation step, unlike Context Products — every table the datasource
+   actually has is included, documented or not, so the gap itself is visible
+   rather than only ever showing what someone already wrote up.
+
+   Each of the five reads is fetched independently and can fail on its own
+   (a role without quality-incident access, say) without blanking the rest
+   of the snapshot — failures are recorded in `warnings`, never silently
+   dropped, matching this file's own honesty convention elsewhere (see
+   `PortfolioAnalyticsScreen`'s independent summary/trends error states).
+--------------------------------------------------------------------------- */
+
+//: Table inventory is capped, not silently truncated -- `truncated` on the
+//: snapshot tells the caller when a datasource has more tables than this.
+const CONTEXT_SNAPSHOT_TABLE_CAP = 500;
+
+export interface ContextSnapshotDatasource {
+  id: string;
+  name: string;
+  connector_type: string;
+  dialect: string;
+  environment: string;
+  network_zone: string | null;
+  status: string;
+  project_id: string;
+  organization_id: string;
+}
+
+export interface ContextSnapshotDocumentedTable {
+  table_id: string;
+  schema_name: string;
+  table_name: string;
+  domain_name: string;
+  entity_name: string;
+  business_name: string;
+  business_description: string;
+  table_role: string;
+  grain_statement: string;
+  synonyms: string[];
+  suggested_questions: string[];
+}
+
+export interface ContextSnapshotUndocumentedTable {
+  name: string;
+  object_type: string;
+  status: string;
+}
+
+export interface ContextSnapshotIncident {
+  table_name: string;
+  anomaly_type: string;
+  severity: string;
+  status: string;
+  summary: string;
+  first_observed_at: string;
+}
+
+export interface DatasourceContextSnapshot {
+  generated_at: string;
+  datasource: ContextSnapshotDatasource;
+  health: { score: number; status: string; computed_at: string } | null;
+  quality: {
+    table_count: number;
+    observed_table_count: number;
+    open_incident_count: number;
+    critical_incident_count: number;
+    average_quality_score: number | null;
+    metadata_scan_status: string;
+  } | null;
+  open_incidents: ContextSnapshotIncident[];
+  documented_tables: ContextSnapshotDocumentedTable[];
+  undocumented_tables: ContextSnapshotUndocumentedTable[];
+  documented_count: number;
+  undocumented_count: number;
+  truncated: boolean;
+  warnings: string[];
+}
+
+async function settleOrWarn<T>(
+  label: string,
+  warnings: string[],
+  action: () => Promise<T>,
+): Promise<T | null> {
+  try {
+    return await action();
+  } catch (e) {
+    if ((e as Error)?.name === "AbortError") throw e;
+    warnings.push(`${label} could not be loaded: ${e instanceof ApiError ? e.detail : (e as Error).message}`);
+    return null;
+  }
+}
+
+/** Assembles a `DatasourceContextSnapshot` from five independent, already-real
+ *  reads. Never throws for a single section failing — see the module comment
+ *  above — only for the caller's own `AbortSignal` firing. */
+export async function buildDatasourceContextSnapshot(
+  datasource: DataSourceRead,
+  signal?: AbortSignal,
+): Promise<DatasourceContextSnapshot> {
+  const warnings: string[] = [];
+
+  const [health, annotations, quality, incidents, tables] = await Promise.all([
+    settleOrWarn("Health", warnings, () => fetchDatasourceHealth(datasource.id, signal)),
+    settleOrWarn("Business annotations", warnings, () =>
+      fetchBusinessAnnotations(
+        { datasourceId: datasource.id, limit: CONTEXT_SNAPSHOT_TABLE_CAP },
+        signal,
+      ),
+    ),
+    settleOrWarn("Quality summary", warnings, () => fetchQualitySummary(datasource.id, signal)),
+    settleOrWarn("Open incidents", warnings, () =>
+      fetchQualityIncidents(datasource.id, { status: "OPEN", limit: 100 }, signal),
+    ),
+    settleOrWarn("Table inventory", warnings, () =>
+      fetchTablesLegacy(datasource.id, { limit: CONTEXT_SNAPSHOT_TABLE_CAP }, signal),
+    ),
+  ]);
+
+  const documentedTableIds = new Set((annotations?.items ?? []).map((a) => a.table_id));
+  const documentedTables: ContextSnapshotDocumentedTable[] = (annotations?.items ?? []).map((a) => ({
+    table_id: a.table_id,
+    schema_name: a.schema_name,
+    table_name: a.table_name,
+    domain_name: a.domain_name,
+    entity_name: a.entity_name,
+    business_name: a.business_name,
+    business_description: a.business_description,
+    table_role: a.table_role,
+    grain_statement: a.grain_statement,
+    synonyms: a.synonyms,
+    suggested_questions: a.suggested_questions,
+  }));
+  const undocumentedTables: ContextSnapshotUndocumentedTable[] = (tables?.items ?? [])
+    .filter((t) => !documentedTableIds.has(t.id))
+    .map((t) => ({ name: t.name, object_type: t.object_type, status: t.status }));
+
+  const truncated =
+    (annotations !== null && annotations.total > annotations.items.length) ||
+    (tables !== null && tables.items.length >= CONTEXT_SNAPSHOT_TABLE_CAP);
+
+  return {
+    generated_at: new Date().toISOString(),
+    datasource: {
+      id: datasource.id,
+      name: datasource.name,
+      connector_type: datasource.connector_type,
+      dialect: datasource.dialect,
+      environment: datasource.environment,
+      network_zone: datasource.network_zone ?? null,
+      status: datasource.status,
+      project_id: datasource.project_id,
+      organization_id: datasource.organization_id,
+    },
+    health: health ? { score: health.score, status: health.status, computed_at: health.computed_at } : null,
+    quality: quality
+      ? {
+          table_count: quality.table_count,
+          observed_table_count: quality.observed_table_count,
+          open_incident_count: quality.open_incident_count,
+          critical_incident_count: quality.critical_incident_count,
+          average_quality_score: quality.average_quality_score,
+          metadata_scan_status: quality.metadata_scan_status,
+        }
+      : null,
+    open_incidents: (incidents?.items ?? []).map((i) => ({
+      table_name: i.table_name,
+      anomaly_type: i.anomaly_type,
+      severity: i.severity,
+      status: i.status,
+      summary: i.summary,
+      first_observed_at: i.first_observed_at,
+    })),
+    documented_tables: documentedTables,
+    undocumented_tables: undocumentedTables,
+    documented_count: documentedTables.length,
+    undocumented_count: undocumentedTables.length,
+    truncated,
+    warnings,
+  };
+}
+
+/** Renders a snapshot as a readable Markdown document — the "wiki page" a
+ *  steward or an incoming analyst can actually read, not a JSON dump. */
+export function renderContextSnapshotMarkdown(snapshot: DatasourceContextSnapshot): string {
+  const lines: string[] = [];
+  const ds = snapshot.datasource;
+  lines.push(`# ${ds.name}`);
+  lines.push("");
+  lines.push(
+    `${ds.connector_type} · ${ds.dialect} · ${ds.environment}${ds.network_zone ? ` · ${ds.network_zone}` : ""} · ${ds.status.toLowerCase()}`,
+  );
+  lines.push("");
+  lines.push(`_Generated ${snapshot.generated_at}_`);
+  lines.push("");
+
+  if (snapshot.warnings.length > 0) {
+    lines.push("> **Some sections could not be loaded:**");
+    for (const w of snapshot.warnings) lines.push(`> - ${w}`);
+    lines.push("");
+  }
+
+  if (snapshot.health) {
+    lines.push("## Health");
+    lines.push(
+      `Score **${snapshot.health.score}** (${snapshot.health.status.toLowerCase()}), computed ${snapshot.health.computed_at}.`,
+    );
+    lines.push("");
+  }
+
+  if (snapshot.quality) {
+    const q = snapshot.quality;
+    lines.push("## Quality");
+    lines.push(
+      `${q.observed_table_count}/${q.table_count} tables observed · ` +
+        `${q.open_incident_count} open incidents (${q.critical_incident_count} critical) · ` +
+        `average score ${q.average_quality_score === null ? "—" : q.average_quality_score} · ` +
+        `metadata scan ${q.metadata_scan_status.toLowerCase()}.`,
+    );
+    lines.push("");
+  }
+
+  if (snapshot.open_incidents.length > 0) {
+    lines.push("## Open incidents");
+    for (const inc of snapshot.open_incidents) {
+      lines.push(`- **${inc.table_name}** — ${inc.anomaly_type} (${inc.severity.toLowerCase()}): ${inc.summary}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`## Documented tables (${snapshot.documented_count})`);
+  lines.push("");
+  if (snapshot.documented_tables.length === 0) {
+    lines.push("_No table in this datasource has an approved business annotation yet._");
+    lines.push("");
+  }
+  for (const t of snapshot.documented_tables) {
+    lines.push(`### ${t.schema_name}.${t.table_name}`);
+    if (t.business_name) lines.push(`**${t.business_name}**`);
+    lines.push("");
+    if (t.business_description) lines.push(t.business_description);
+    lines.push("");
+    const facts: string[] = [];
+    if (t.domain_name) facts.push(`domain: ${t.domain_name}`);
+    if (t.entity_name) facts.push(`entity: ${t.entity_name}`);
+    if (t.table_role) facts.push(`role: ${t.table_role}`);
+    if (t.grain_statement) facts.push(`grain: ${t.grain_statement}`);
+    if (facts.length > 0) lines.push(facts.join(" · "));
+    if (t.synonyms.length > 0) lines.push(`Synonyms: ${t.synonyms.join(", ")}`);
+    if (t.suggested_questions.length > 0) {
+      lines.push("");
+      lines.push("Questions this table answers:");
+      for (const q of t.suggested_questions) lines.push(`- ${q}`);
+    }
+    lines.push("");
+  }
+
+  lines.push(`## Undocumented tables (${snapshot.undocumented_count})`);
+  lines.push("");
+  if (snapshot.undocumented_tables.length === 0) {
+    lines.push("_Every table this snapshot saw has an approved business annotation._");
+  } else {
+    for (const t of snapshot.undocumented_tables) {
+      lines.push(`- ${t.name} (${t.object_type.toLowerCase()}, ${t.status.toLowerCase()})`);
+    }
+  }
+  lines.push("");
+
+  if (snapshot.truncated) {
+    lines.push(
+      `> This snapshot is capped at ${CONTEXT_SNAPSHOT_TABLE_CAP} tables/annotations; this datasource has more than fit.`,
+    );
+  }
+
+  return lines.join("\n");
+}
+
+/** Builds the snapshot and triggers a same-origin blob download, the same
+ *  idiom `exportAssetEvidence` above uses (a bare `<a download href>` can't
+ *  carry this app's identity headers). */
+export async function downloadDatasourceContextSnapshot(
+  datasource: DataSourceRead,
+  format: "markdown" | "json",
+  signal?: AbortSignal,
+): Promise<DatasourceContextSnapshot> {
+  const snapshot = await buildDatasourceContextSnapshot(datasource, signal);
+  const slug = datasource.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const isMarkdown = format === "markdown";
+  const content = isMarkdown ? renderContextSnapshotMarkdown(snapshot) : JSON.stringify(snapshot, null, 2);
+  const blob = new Blob([content], { type: isMarkdown ? "text/markdown" : "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `context-${slug}.${isMarkdown ? "md" : "json"}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return snapshot;
+}
+
+/* ---------------------------------------------------------------------------
    UX-16: Relationships — the review queue for N4's impact-ordered,
    diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
    plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
@@ -3511,6 +3817,7 @@ export async function reaffirmOwnershipAssignment(
   assignmentId: string,
   signal?: AbortSignal,
 ): Promise<OwnershipAssignmentRead> {
+  if (USE_FIXTURES) return makeFixtureReaffirmOwnershipAssignment(assignmentId);
   return postJson<OwnershipAssignmentRead>(
     `/v1/ownership-assignments/${assignmentId}/reaffirm`,
     {},
@@ -3524,6 +3831,7 @@ export async function bulkReaffirmOwnershipAssignments(
   assignmentIds: string[],
   signal?: AbortSignal,
 ): Promise<OwnershipAssignmentBulkReaffirmResult> {
+  if (USE_FIXTURES) return makeFixtureBulkReaffirmOwnershipAssignments(assignmentIds);
   return postJson<OwnershipAssignmentBulkReaffirmResult>(
     `/v1/ownership-assignments/bulk-reaffirm`,
     { assignment_ids: assignmentIds },
@@ -3547,6 +3855,7 @@ export async function fetchOwnershipAssignments(
   query: OwnershipAssignmentListQuery = {},
   signal?: AbortSignal,
 ): Promise<PageOf<OwnershipAssignmentRead>> {
+  if (USE_FIXTURES) return makeFixtureOwnershipAssignments(query);
   const params = new URLSearchParams();
   if (query.subject_type) params.set("subject_type", query.subject_type);
   if (query.subject_id) params.set("subject_id", query.subject_id);
@@ -3826,3 +4135,231 @@ export async function runPlaybookNow(
   if (USE_FIXTURES) return makeFixtureRunPlaybook(playbookId);
   return postJson<PlaybookRunResultRead>(`/v1/playbooks/${playbookId}/run`, {}, signal);
 }
+
+/* ---------------------------------------------------------------------------
+   Context product staged rollout, scope, and agent consumption (P3-01).
+
+   These are the routes that made a Context Product publishable but not
+   *operable* from the UI: a steward could create, submit and compile a
+   version, then had no way to say which consumer gets which version, no way
+   to see the domain scope the package actually spans, no way to hand an
+   agent the compiled artifact as a file, and no way to see what any agent
+   had consumed. The endpoints all shipped; only the client did not.
+
+     - GET    /v1/context-products/{id}/versions                       list_context_product_versions
+     - GET    /v1/context-products/{id}/bindings                       list_context_product_consumer_bindings
+     - PUT    /v1/context-products/{id}/bindings/{consumer}            set_context_product_consumer_binding
+     - DELETE /v1/context-products/{id}/bindings/{consumer}            delete_context_product_consumer_binding
+     - GET    /v1/context-product-versions/{id}/scope                  get_context_product_scope
+     - GET    /v1/context-product-versions/{id}/compile/download       download_compiled_context_product
+     - GET    /v1/organizations/{org}/consumption-lineage/by-consumer  list_consumption_by_consumer
+     - GET    /v1/organizations/{org}/consumption-lineage/graph        list_consumption_graph
+     - GET    /v1/organizations/{org}/consumption-lineage/by-resource  list_consumption_for_resource
+
+   The three consumption-lineage routes are read against `/v1`. They were
+   mounted only under `/api/v1` until `consumption_lineage_api.py` made `/v1`
+   canonical; the old prefix still answers as a deprecated alias, but new
+   callers should not learn it.
+--------------------------------------------------------------------------- */
+
+import type {
+  ConsumptionRecordPage,
+  ContextProductConsumerBindingRead,
+  ContextProductScopeRead,
+  ContextProductVersionRead,
+} from "./types";
+import {
+  makeFixtureConsumptionRecords,
+  makeFixtureContextProductBindings,
+  makeFixtureContextProductVersions,
+  makeFixtureRemoveContextProductBinding,
+  makeFixtureSetContextProductBinding,
+} from "./fixtures";
+
+/** `GET /v1/context-products/{product_id}/versions` — the full version
+ *  history behind `ContextProductRead.latest_version`. A staged rollout needs
+ *  this: you cannot pin a consumer to v1 while v2 publishes if the only
+ *  version the client can name is the latest one. */
+export async function fetchContextProductVersions(
+  productId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ContextProductVersionRead>> {
+  if (USE_FIXTURES) return makeFixtureContextProductVersions(productId);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ContextProductVersionRead>>(
+    `/v1/context-products/${productId}/versions?${params}`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-products/{product_id}/bindings` — who is pinned to which
+ *  version. A consumer with no binding resolves to the product's published
+ *  version, so an empty list is the normal state, not an error. */
+export async function fetchContextProductBindings(
+  productId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<ContextProductConsumerBindingRead>> {
+  if (USE_FIXTURES) return makeFixtureContextProductBindings(productId);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<ContextProductConsumerBindingRead>>(
+    `/v1/context-products/${productId}/bindings?${params}`,
+    signal,
+  );
+}
+
+/** `PUT /v1/context-products/{product_id}/bindings/{consumer_principal_id}`
+ *  — pin or move one named consumer onto one version. Idempotent by
+ *  (product, consumer): calling it again moves the existing binding rather
+ *  than creating a second one. 422 if the version belongs to another product. */
+export async function setContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+  boundVersionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductConsumerBindingRead> {
+  if (USE_FIXTURES)
+    return makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId);
+  return putJson<ContextProductConsumerBindingRead>(
+    `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
+    { bound_version_id: boundVersionId },
+    signal,
+  );
+}
+
+/** `DELETE /v1/context-products/{product_id}/bindings/{consumer_principal_id}`
+ *  — 204. Unpinning returns the consumer to the published version; it does
+ *  not revoke their access, which is governed by `allowed_consumer_roles`. */
+export async function removeContextProductBinding(
+  productId: string,
+  consumerPrincipalId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (USE_FIXTURES) return makeFixtureRemoveContextProductBinding(productId, consumerPrincipalId);
+  return deleteRequest(
+    `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-product-versions/{version_id}/scope` — both ADR-0017 SS9
+ *  tenancy axes for one version: which data domains it spans, which of those
+ *  it has no cross-boundary grant for, and which table ids did not resolve.
+ *  This is the honest answer to "is this package safe to publish". */
+export async function fetchContextProductScope(
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<ContextProductScopeRead> {
+  return get<ContextProductScopeRead>(
+    `/v1/context-product-versions/${versionId}/scope`,
+    signal,
+  );
+}
+
+/** `GET /v1/context-product-versions/{version_id}/compile/download` — the
+ *  same deterministic artifact `compileContextProductVersion` returns, served
+ *  with a `Content-Disposition` filename so an agent developer can commit it
+ *  next to their client config. Saved through a same-origin blob URL because
+ *  the download needs this app's identity headers, which a bare
+ *  `<a download href>` cannot send. */
+export async function downloadCompiledContextProduct(
+  versionId: string,
+  target: string,
+): Promise<void> {
+  let blob: Blob;
+  let filename = `context-product-${versionId}-${target.toLowerCase()}.json`;
+  if (USE_FIXTURES) {
+    const artifact = await compileContextProductVersion(versionId, target);
+    blob = new Blob([artifact.content], { type: artifact.content_type });
+    if (artifact.content_type.includes("yaml")) filename = filename.replace(/\.json$/, ".yaml");
+  } else {
+    const res = await fetch(
+      `/v1/context-product-versions/${versionId}/compile/download?target=${encodeURIComponent(target)}`,
+      { headers: { Accept: "*/*", ...identityHeaders() }, credentials: "same-origin" },
+    );
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const body = (await res.json()) as { detail?: string };
+        if (body.detail) detail = serverErrorDetail(body.detail, detail);
+      } catch {
+        /* non-JSON error body; the status line is what we have */
+      }
+      throw new ApiError(res.status, detail);
+    }
+    blob = await res.blob();
+    const disposition = res.headers.get("Content-Disposition") || "";
+    filename = disposition.match(/filename="([^"]+)"/)?.[1] || filename;
+  }
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export interface ConsumptionQuery {
+  /** Filter to one consumer principal (`by-consumer`). */
+  consumerId?: string;
+  /** Filter to one resource (`by-resource`); both fields are required
+   *  together by the server, so pass neither or both. */
+  resourceType?: string;
+  resourceId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** The CX-4 consumption edges: one row per allowed *or refused* read that the
+ *  MCP server or the Context Product REST API recorded. This is the only
+ *  place the platform answers "what has this agent actually seen".
+ *
+ *  Routes to `by-consumer`, `by-resource` or `graph` depending on which
+ *  filter the caller supplied — three endpoints with one shape, so screens
+ *  do not have to pick. */
+export async function fetchConsumptionRecords(
+  organizationId: string,
+  query: ConsumptionQuery = {},
+  signal?: AbortSignal,
+): Promise<ConsumptionRecordPage> {
+  if (USE_FIXTURES)
+    return makeFixtureConsumptionRecords(
+      { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
+      query,
+    );
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  if (query.consumerId) {
+    params.set("consumer_id", query.consumerId);
+    return get<ConsumptionRecordPage>(
+      `/v1/organizations/${organizationId}/consumption-lineage/by-consumer?${params}`,
+      signal,
+    );
+  }
+  if (query.resourceType && query.resourceId) {
+    params.set("resource_type", query.resourceType);
+    params.set("resource_id", query.resourceId);
+    return get<ConsumptionRecordPage>(
+      `/v1/organizations/${organizationId}/consumption-lineage/by-resource?${params}`,
+      signal,
+    );
+  }
+  return get<ConsumptionRecordPage>(
+    `/v1/organizations/${organizationId}/consumption-lineage/graph?${params}`,
+    signal,
+  );
+}
+
+import {
+  makeFixtureBulkReaffirmOwnershipAssignments,
+  makeFixtureOwnershipAssignments,
+  makeFixtureReaffirmOwnershipAssignment,
+} from "./fixtures";

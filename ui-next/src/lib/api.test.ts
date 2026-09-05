@@ -155,7 +155,22 @@ describe("classifyDescriptionDraftError", () => {
    P1-03: glossary api wrappers from `_api_append.ts`. Same pattern as
    above -- mock global fetch, assert URL/method/headers/body/error
    classification the wrappers promise.
+
+   These wrappers now short-circuit to fixtures under the default
+   `VITE_USE_FIXTURES` (they previously ignored the flag and always hit the
+   network, which 401d in fixture mode). Since the whole point of this block
+   is the wire contract, it pins the flag off. `vi.resetModules()` in the
+   shared `beforeEach` runs after this hook, so each dynamic `import("./…")`
+   below re-evaluates the module against the stubbed value.
 --------------------------------------------------------------------------- */
+
+beforeEach(() => {
+  vi.stubEnv("VITE_USE_FIXTURES", "0");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("listGlossaryTerms", () => {
   it("GETs the org-scoped list route and forwards status/limit query params", async () => {
