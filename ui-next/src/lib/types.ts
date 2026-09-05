@@ -102,6 +102,34 @@ export interface AgentContractRead {
   updated_at: string;
 }
 
+export interface AgentContractRequestCreate {
+  agent_principal_id: string;
+  capability_envelope?: CapabilityEnvelopeModel;
+  autonomy_tier?: "T0" | "T1" | "T2" | "T3";
+  supervisor_persona: "ANALYST" | "CONSUMER" | "STEWARD" | "REVIEWER" | "OPERATOR" | "AUDITOR";
+  kill_scope?: "AGENT" | "TIER" | "ALL";
+  sampling_rate?: number;
+  daily_token_cap?: number | null;
+  per_run_token_cap?: number | null;
+  wall_clock_seconds_cap?: number | null;
+  eval_gate_threshold?: number | null;
+  ai_asset_version_id: string;
+}
+
+export interface AgentContractRequestRead {
+  id: string;
+  organization_id: string;
+  ai_asset_version_id: string;
+  requested_by: string;
+  definition: Record<string, unknown>;
+  status: string;
+  governance_review_id: string | null;
+  eval_gate_verdict: string | null;
+  activated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface AgentContractWrite {
   agent_principal_id: string;
   capability_envelope?: CapabilityEnvelopeModel;
@@ -113,26 +141,6 @@ export interface AgentContractWrite {
   per_run_token_cap?: number | null;
   wall_clock_seconds_cap?: number | null;
   eval_gate_threshold?: number | null;
-}
-
-/** `POST .../agent-contract-requests` body -- the reviewed, eval-gated path
- *  alongside the direct-write `AgentContractWrite`/`PUT .../contract`. */
-export interface AgentContractRequestCreate extends AgentContractWrite {
-  ai_asset_version_id: string;
-}
-
-export interface AgentContractRequestRead {
-  id: string;
-  organization_id: string;
-  ai_asset_version_id: string;
-  requested_by: string;
-  definition: Record<string, unknown>;
-  status: "PENDING" | "ACTIVATED" | "REJECTED" | "EVAL_BLOCKED";
-  governance_review_id: string | null;
-  eval_gate_verdict: string | null;
-  activated_at: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
 /** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
@@ -1688,11 +1696,6 @@ export interface DataQualityIncidentTransition {
   reason: string;
 }
 
-/** `quality_api.py::get_quality_incident_triage` -- a deterministic
- *  root-cause hint (`dq_triage_agent.suggest_triage`), computed fresh on
- *  every call, never persisted. `basis` names which evidence field(s) each
- *  hint traces to, so it can be checked against the incident's own
- *  `evidence` blob rather than trusted blindly. */
 export interface DataQualityIncidentTriageRead {
   incident_id: string;
   anomaly_type: string;
@@ -1935,6 +1938,30 @@ export interface DelegationRead {
 export interface DescriptionDraftEdit {
   drafted_text: string;
   expected_text: string;
+}
+
+export interface DescriptionWithdrawalCreate {
+  subject_type: string;
+  subject_id: string;
+  request_type?: string;
+  reason: string;
+}
+
+export interface DescriptionWithdrawalRead {
+  id: string;
+  organization_id: string;
+  request_type: string;
+  subject_type: string;
+  subject_id: string;
+  subject_label: string;
+  version_id: string;
+  withdrawn_text: string;
+  reason: string;
+  status: string;
+  governance_review_id?: string | null;
+  requested_by: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
 }
 
 export interface DetokenizeRead {
@@ -2943,6 +2970,28 @@ export interface MetricDraftEdit {
 
 export interface MetricSuggestionProposalGenerate {
   limit?: number;
+}
+
+export interface ModelImportBatchRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  filename: string;
+  content_sha256: string;
+  status: string;
+  governance_review_id?: string | null;
+  change_count: number;
+  applied_count: number;
+  skipped_count: number;
+  rejected_row_count: number;
+  uploaded_by: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+}
+
+export interface ModelImportExclusionRequest {
+  change_ids: string[];
+  excluded?: boolean;
 }
 
 export interface ModelRouteConfigurationCreate {
@@ -4238,31 +4287,6 @@ export interface StewardshipCoverageRead {
   computed_at: string;
 }
 
-/** AT-5 / SW-1: `stewardship_api.list_documentation_worklist`'s ranked
- *  backlog. `usage x impact x deficit` -- see `stewardship_worklist.py`'s
- *  own module docstring: a zero on any factor is a zero overall, so a table
- *  nobody queries never reaches the top however undocumented it is, and a
- *  fully documented table needs no work at all however busy it is. */
-export interface DocumentationWorklistEntryRead {
-  table_id: string;
-  table_name: string;
-  schema_name: string;
-  datasource_name: string;
-  rank: number;
-  query_execution_count: number;
-  consumption_read_count: number;
-  query_volume: number;
-  last_queried_at: string | null;
-  last_consumed_at: string | null;
-  description_is_proposed: boolean;
-  score: number;
-  usage: number;
-  impact: number;
-  deficit: number;
-  downstream_count: number;
-  missing: string[];
-}
-
 export interface StudioChangeItemCreate {
   object_type: "METRIC" | "TOOL" | "TERM" | "CONTEXT_PRODUCT";
   object_id: string;
@@ -4413,6 +4437,18 @@ export interface StudioTestResultRead {
   evidence: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+/** One table's authored documentation, in the same shape the column pane */
+export interface TableDescriptionRead {
+  table_id: string;
+  name: string;
+  source_description?: string | null;
+  readme?: string | null;
+  readme_version?: number | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  withdrawn_readme?: string | null;
 }
 
 export interface TableFamilyCandidateDecision {

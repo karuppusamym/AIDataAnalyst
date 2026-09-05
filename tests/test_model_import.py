@@ -770,7 +770,8 @@ async def _two_column_workbook(session, datasource, table):
         if name != COLUMN_SHEET:
             return
         for row in rows:
-            row[headers.index("business_description")] = f"Description for {row[headers.index('column')]}."
+            col_name = row[headers.index("column")]
+            row[headers.index("business_description")] = f"Description for {col_name}."
 
     return _rewrite(await _export(session, datasource), mutate), second
 

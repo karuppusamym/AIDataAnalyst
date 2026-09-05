@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from aida.agent_contract_api import AgentContractWrite, CapabilityEnvelopeModel
+from aida.agent_contract_api import CapabilityEnvelopeModel
 from aida.agent_contract_request_api import (
     AgentContractRequestCreate,
     AgentContractRequestRead,
@@ -99,7 +99,9 @@ async def _seed_agent_version(
     return version
 
 
-def _body(ai_asset_version_id: UUID, *, agent_principal_id: str = "agent:external-triage") -> AgentContractRequestCreate:
+def _body(
+    ai_asset_version_id: UUID, *, agent_principal_id: str = "agent:external-triage"
+) -> AgentContractRequestCreate:
     return AgentContractRequestCreate(
         ai_asset_version_id=ai_asset_version_id,
         agent_principal_id=agent_principal_id,
@@ -122,7 +124,9 @@ async def test_submit_opens_a_request_and_a_matching_governance_review(db: Async
     org = await _seed_org(db)
     version = await _seed_agent_version(db, org.id)
     context = security_context(
-        organization_id=org.id, principal_id="dev@vendor.example", roles=frozenset({"AgentDeveloper"})
+        organization_id=org.id,
+        principal_id="dev@vendor.example",
+        roles=frozenset({"AgentDeveloper"}),
     )
 
     result = await submit_agent_contract_request(org.id, _body(version.id), context, db)
@@ -146,7 +150,9 @@ async def test_submit_refuses_self_authorization_exactly_like_the_direct_write_p
     org = await _seed_org(db)
     version = await _seed_agent_version(db, org.id)
     context = security_context(
-        organization_id=org.id, principal_id="dev@vendor.example", roles=frozenset({"AgentDeveloper"})
+        organization_id=org.id,
+        principal_id="dev@vendor.example",
+        roles=frozenset({"AgentDeveloper"}),
     )
     body = _body(version.id, agent_principal_id="dev@vendor.example")  # names the submitter itself
 
@@ -161,7 +167,9 @@ async def test_submit_404s_for_a_version_that_is_not_an_agent_kind_asset_in_this
 ) -> None:
     org = await _seed_org(db)
     context = security_context(
-        organization_id=org.id, principal_id="dev@vendor.example", roles=frozenset({"AgentDeveloper"})
+        organization_id=org.id,
+        principal_id="dev@vendor.example",
+        roles=frozenset({"AgentDeveloper"}),
     )
 
     with pytest.raises(HTTPException) as excinfo:
@@ -174,12 +182,20 @@ async def test_list_and_get_round_trip_a_submitted_request(db: AsyncSession) -> 
     org = await _seed_org(db)
     version = await _seed_agent_version(db, org.id)
     context = security_context(
-        organization_id=org.id, principal_id="dev@vendor.example", roles=frozenset({"AgentDeveloper"})
+        organization_id=org.id,
+        principal_id="dev@vendor.example",
+        roles=frozenset({"AgentDeveloper"}),
     )
     submitted = await submit_agent_contract_request(org.id, _body(version.id), context, db)
 
     page = await list_agent_contract_requests(
-        org.id, status_filter=None, ai_asset_version_id=None, limit=50, offset=0, context=context, session=db
+        org.id,
+        status_filter=None,
+        ai_asset_version_id=None,
+        limit=50,
+        offset=0,
+        context=context,
+        session=db,
     )
     assert page.total == 1
     assert page.items[0]["id"] == str(submitted.id)
@@ -203,7 +219,9 @@ async def test_approval_is_blocked_with_no_confirmed_exemplars_and_nothing_is_wr
     db: AsyncSession,
 ) -> None:
     scenario = await build_scenario(db)
-    version = await _seed_agent_version(db, scenario.organization.id, created_by="maker@vendor.example")
+    version = await _seed_agent_version(
+        db, scenario.organization.id, created_by="maker@vendor.example"
+    )
     maker = security_context(
         organization_id=scenario.organization.id,
         principal_id="maker@vendor.example",
@@ -213,7 +231,9 @@ async def test_approval_is_blocked_with_no_confirmed_exemplars_and_nothing_is_wr
         scenario.organization.id, _body(version.id), maker, db
     )
     checker = security_context(
-        organization_id=scenario.organization.id, principal_id="checker", roles=frozenset({"Reviewer"})
+        organization_id=scenario.organization.id,
+        principal_id="checker",
+        roles=frozenset({"Reviewer"}),
     )
 
     with pytest.raises(HTTPException) as excinfo:
@@ -237,7 +257,9 @@ async def test_approval_with_a_passing_confirmed_corpus_activates_and_writes_the
 ) -> None:
     scenario = await build_scenario(db)
     await _seed_confirmed_run(db, scenario)
-    version = await _seed_agent_version(db, scenario.organization.id, created_by="maker@vendor.example")
+    version = await _seed_agent_version(
+        db, scenario.organization.id, created_by="maker@vendor.example"
+    )
     maker = security_context(
         organization_id=scenario.organization.id,
         principal_id="maker@vendor.example",
@@ -247,7 +269,9 @@ async def test_approval_with_a_passing_confirmed_corpus_activates_and_writes_the
         scenario.organization.id, _body(version.id), maker, db
     )
     checker = security_context(
-        organization_id=scenario.organization.id, principal_id="checker", roles=frozenset({"Reviewer"})
+        organization_id=scenario.organization.id,
+        principal_id="checker",
+        roles=frozenset({"Reviewer"}),
     )
 
     decided = await decide_governance_review(
@@ -272,7 +296,9 @@ async def test_approval_with_a_passing_confirmed_corpus_activates_and_writes_the
 
 async def test_rejection_never_touches_agent_contract(db: AsyncSession) -> None:
     scenario = await build_scenario(db)
-    version = await _seed_agent_version(db, scenario.organization.id, created_by="maker@vendor.example")
+    version = await _seed_agent_version(
+        db, scenario.organization.id, created_by="maker@vendor.example"
+    )
     maker = security_context(
         organization_id=scenario.organization.id,
         principal_id="maker@vendor.example",
@@ -282,7 +308,9 @@ async def test_rejection_never_touches_agent_contract(db: AsyncSession) -> None:
         scenario.organization.id, _body(version.id), maker, db
     )
     checker = security_context(
-        organization_id=scenario.organization.id, principal_id="checker", roles=frozenset({"Reviewer"})
+        organization_id=scenario.organization.id,
+        principal_id="checker",
+        roles=frozenset({"Reviewer"}),
     )
 
     decided = await decide_governance_review(
@@ -307,7 +335,9 @@ async def test_maker_cannot_check_their_own_agent_contract_request(db: AsyncSess
     org = await _seed_org(db)
     version = await _seed_agent_version(db, org.id, created_by="dev@vendor.example")
     maker = security_context(
-        organization_id=org.id, principal_id="dev@vendor.example", roles=frozenset({"AgentDeveloper"})
+        organization_id=org.id,
+        principal_id="dev@vendor.example",
+        roles=frozenset({"AgentDeveloper"}),
     )
     submitted = await submit_agent_contract_request(org.id, _body(version.id), maker, db)
 
