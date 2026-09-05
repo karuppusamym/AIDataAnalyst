@@ -173,6 +173,35 @@ export interface AuditEventRead {
   occurred_at: string;
 }
 
+/** AT-5 / SW-1: `stewardship_api.list_documentation_worklist`'s ranked
+ *  backlog. `usage x impact x deficit` -- see `stewardship_worklist.py`'s
+ *  own module docstring: a zero on any factor is a zero overall, so a table
+ *  nobody queries never reaches the top however undocumented it is, and a
+ *  fully documented table needs no work at all however busy it is. Not
+ *  reachable from the live OpenAPI document: the route declares
+ *  `response_model=Page` un-parameterized (see `PageOf` above), the same
+ *  reachability gap this file's banner documents for `CatalogRowRead`/
+ *  `MetadataTableRead`. Hand-written here for the same reason. */
+export interface DocumentationWorklistEntryRead {
+  table_id: string;
+  table_name: string;
+  schema_name: string;
+  datasource_name: string;
+  rank: number;
+  query_execution_count: number;
+  consumption_read_count: number;
+  query_volume: number;
+  last_queried_at: string | null;
+  last_consumed_at: string | null;
+  description_is_proposed: boolean;
+  score: number;
+  usage: number;
+  impact: number;
+  deficit: number;
+  downstream_count: number;
+  missing: string[];
+}
+
 /** `MarketplaceProductRead` -- `platform_schemas.py:170`. Extends
  *  `DataProductVersionRead` (./types.ts, reachable) with the three CX-9
  *  ranking/access fields `search_marketplace` (`product_marketplace_api.py`)

@@ -5317,11 +5317,11 @@ import type {
   CatalogBulkOwnRequest,
   CatalogBulkSelectionFilter,
   CatalogBulkTagRequest,
-  DocumentationWorklistEntryRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
 } from "./types";
+import type { DocumentationWorklistEntryRead } from "./ui-types";
 import type { DocumentationWorklistQuery, UnownedAssetBacklogQuery } from "./api";
 
 function fixtureBulkMatchedSubjectIds(
