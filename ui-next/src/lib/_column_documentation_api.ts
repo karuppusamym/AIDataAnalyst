@@ -1,0 +1,225 @@
+/* ---------------------------------------------------------------------------
+   Column-level descriptions, and the model workbook export.
+
+   Two endpoints that had no client here:
+
+   * `GET /v1/tables/{table_id}/column-documentation`
+     (`src/aida/column_documentation_api.py`) -- a table's columns with the
+     source-system comment and the authored business description as separate
+     fields. The app already called `/v1/tables/{id}/columns`, but only ever
+     read `{id, name}` out of it for metric-builder dropdowns, so a column
+     description had no way to reach a screen even when one existed.
+
+   * `GET /v1/datasources/{datasource_id}/model/export.xlsx`
+     (`src/aida/model_export_api.py`) -- the whole model as a workbook.
+
+   Kept in a dedicated append file rather than mixed into the ~4.5k-line
+   `api.ts`, following `_api_append.ts`'s precedent, so this slice reads as one
+   contiguous change. Same reason that file gives for re-deriving the request
+   helpers instead of importing them: `get` is module-private in `api.ts`.
+--------------------------------------------------------------------------- */
+
+import { ApiError } from "./api";
+import { getCurrentOrgId } from "./org";
+import type { PageOf } from "./ui-types";
+
+const USE_FIXTURES = import.meta.env.VITE_USE_FIXTURES !== "0";
+const DEV_PRINCIPAL_ID = import.meta.env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin";
+const DEV_ROLES =
+  import.meta.env.VITE_DEV_ROLES ||
+  "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin,SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer";
+
+function identityHeaders(): Record<string, string> {
+  if (USE_FIXTURES) return {};
+  return {
+    "X-Principal-Id": DEV_PRINCIPAL_ID,
+    "X-Roles": DEV_ROLES,
+    "X-Organization-Id": getCurrentOrgId(),
+  };
+}
+
+/** `src/aida/column_documentation_api.py::ColumnDocumentationRead`.
+ *
+ *  `source_description` and `business_description` are deliberately separate:
+ *  the first is the source system's own comment, overwritten by the next
+ *  rediscovery pass; the second is reviewed, authored content that rediscovery
+ *  never touches. A UI that merged them would show a steward two kinds of
+ *  claim with different durability as if they were one. */
+export interface ColumnDocumentationRead {
+  column_id: string;
+  table_id: string;
+  name: string;
+  ordinal_position: number;
+  physical_type: string;
+  nullable: boolean;
+  classification: string;
+  classification_source: string;
+  source_description: string | null;
+  business_description: string | null;
+  description_version: number | null;
+  description_approved_by: string | null;
+  description_approved_at: string | null;
+  source_claim_id: string | null;
+}
+
+async function readJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(path, {
+    signal,
+    headers: { Accept: "application/json", ...identityHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+/** Fixture columns for a table, so the pane renders something recognisable
+ *  under the default `VITE_USE_FIXTURES=1`.
+ *
+ *  Deliberately mixed: some columns carry only a source comment, some carry
+ *  an authored description, some carry neither -- because "most columns have
+ *  no authored description yet" is the true state of a real catalog, and a
+ *  fixture where every row is fully documented would hide exactly the empty
+ *  state the pane most needs to render well. */
+function makeFixtureColumnDocumentation(tableId: string): ColumnDocumentationRead[] {
+  const base = {
+    table_id: tableId,
+    classification_source: "RULE",
+    description_version: null,
+    description_approved_by: null,
+    description_approved_at: null,
+    source_claim_id: null,
+  };
+  return [
+    {
+      ...base,
+      column_id: `${tableId}-c1`,
+      name: "customer_id",
+      ordinal_position: 0,
+      physical_type: "uuid",
+      nullable: false,
+      classification: "INTERNAL",
+      source_description: "pk",
+      business_description:
+        "The customer's unique identifier across every retail system. Stable for the life of the relationship; not reused after closure.",
+      description_version: 2,
+      description_approved_by: "checker@example.com",
+      description_approved_at: "2026-08-30T09:14:00Z",
+    },
+    {
+      ...base,
+      column_id: `${tableId}-c2`,
+      name: "national_id",
+      ordinal_position: 1,
+      physical_type: "varchar(32)",
+      nullable: true,
+      classification: "RESTRICTED",
+      source_description: "govt id number",
+      business_description: null,
+    },
+    {
+      ...base,
+      column_id: `${tableId}-c3`,
+      name: "opened_at",
+      ordinal_position: 2,
+      physical_type: "timestamptz",
+      nullable: false,
+      classification: "INTERNAL",
+      source_description: null,
+      business_description: null,
+    },
+    {
+      ...base,
+      column_id: `${tableId}-c4`,
+      name: "segment_code",
+      ordinal_position: 3,
+      physical_type: "varchar(8)",
+      nullable: true,
+      classification: "INTERNAL",
+      source_description: null,
+      business_description:
+        "Marketing segment assigned by the nightly segmentation job. Not authoritative for regulatory reporting.",
+      description_version: 1,
+      description_approved_by: "checker@example.com",
+      description_approved_at: "2026-08-12T16:02:00Z",
+    },
+  ];
+}
+
+/** One table's columns with both descriptions resolved. */
+export async function fetchColumnDocumentation(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<ColumnDocumentationRead[]> {
+  if (USE_FIXTURES) return makeFixtureColumnDocumentation(tableId);
+  const page = await readJson<PageOf<ColumnDocumentationRead>>(
+    `/v1/tables/${encodeURIComponent(tableId)}/column-documentation?limit=1000`,
+    signal,
+  );
+  return page.items ?? [];
+}
+
+function filenameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  const match = /filename="?([^";]+)"?/i.exec(header);
+  return match?.[1] ?? fallback;
+}
+
+/** Download the datasource's model workbook.
+ *
+ *  Fetched rather than linked: a bare `<a download href>` cannot carry this
+ *  app's identity headers, so the same object-URL idiom `exportAssetEvidence`
+ *  uses applies here. The response is binary, so the body is read as a blob --
+ *  never parsed as JSON, which would corrupt it.
+ *
+ *  Under fixtures there is no workbook to produce (the writer is server-side),
+ *  so this reports that plainly instead of downloading a fake file a steward
+ *  might then try to edit and re-upload. */
+export async function downloadDatasourceModelWorkbook(
+  datasourceId: string,
+  datasourceName: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (USE_FIXTURES) {
+    throw new Error(
+      "The workbook is composed by the server. Run against a live API (VITE_USE_FIXTURES=0) to export.",
+    );
+  }
+  const path = `/v1/datasources/${encodeURIComponent(datasourceId)}/model/export.xlsx`;
+  const res = await fetch(path, {
+    signal,
+    headers: { ...identityHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* the error body may itself be non-JSON */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  const slug = datasourceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const filename = filenameFromDisposition(
+    res.headers.get("Content-Disposition"),
+    `${slug || "datasource"}-model.xlsx`,
+  );
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

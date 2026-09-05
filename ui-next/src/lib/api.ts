@@ -7,8 +7,6 @@ import type {
   AgentRunRead,
   AiDecisionRead,
   AnalysisRunRead,
-  AssetDescriptionDraftGenerateResponse,
-  AssetDescriptionDraftListResponse,
   AssetDescriptionDraftRead,
   AssetEvidenceRead,
   BusinessMapRead,
@@ -54,6 +52,8 @@ import type {
   WorkspaceRead,
 } from "./types";
 import type {
+  AssetDescriptionDraftGenerateResponse,
+  AssetDescriptionDraftListResponse,
   AuditEventRead,
   CatalogRowRead,
   CursorPage,
@@ -3826,7 +3826,7 @@ export async function revokeAssetCertification(
  *  the five non-governed parser-produced lineage edge tables, filtered to
  *  review_status="PROPOSED". */
 export interface ParsedLineageReviewQueueQuery {
-  edgeType?: import("./types").ParsedLineageEdgeType | null;
+  edgeType?: import("./ui-types").ParsedLineageEdgeType | null;
   minConfidence?: number | null;
   limit?: number;
   offset?: number;

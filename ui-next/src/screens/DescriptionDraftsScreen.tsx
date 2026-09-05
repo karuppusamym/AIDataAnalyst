@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DescriptionEditor } from "../components/DescriptionEditor";
-import type { AssetDescriptionDraftRead, AssetDescriptionDraftStatus } from "../lib/types";
+import type { AssetDescriptionDraftRead } from "../lib/types";
+import type { AssetDescriptionDraftStatus } from "../lib/ui-types";
 import {
   ApiError,
   classifyDescriptionDraftError,

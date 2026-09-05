@@ -7,6 +7,7 @@ import {
   fetchDatasourceHealth,
   fetchOrgDatasources,
 } from "../lib/api";
+import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
 import { useScopeSelection } from "../lib/scope";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
@@ -120,6 +121,22 @@ function HealthPane({
   const [copied, setCopied] = useState(false);
   const [generating, setGenerating] = useState<"markdown" | "json" | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
+  const [exportingWorkbook, setExportingWorkbook] = useState(false);
+
+  const exportWorkbook = useCallback(async () => {
+    setExportingWorkbook(true);
+    setGenerateNotice(null);
+    try {
+      await downloadDatasourceModelWorkbook(source.id, source.name);
+      setGenerateNotice(
+        "Workbook downloaded. Edit the business_description columns only — the README sheet says which cells apply on re-upload.",
+      );
+    } catch (e) {
+      setGenerateNotice(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setExportingWorkbook(false);
+    }
+  }, [source]);
 
   const generateSnapshot = useCallback(
     async (format: "markdown" | "json") => {
@@ -262,6 +279,17 @@ function HealthPane({
           title="Same snapshot as JSON, for programmatic use"
         >
           {generating === "json" ? "Generating…" : "Generate context (.json)"}
+        </Button>
+        {/* The workbook is the bulk-review surface, not another rendering of
+            the context snapshot above: it carries every table, column and
+            relationship with stable ids, so a steward can work through the
+            whole model offline. */}
+        <Button
+          disabled={exportingWorkbook}
+          onClick={() => void exportWorkbook()}
+          title="Download every table, column and relationship for this source as an Excel workbook, for offline bulk review"
+        >
+          {exportingWorkbook ? "Exporting…" : "Export model (.xlsx)"}
         </Button>
         <span className="evp__hint">Per-source · not fanned out to every row</span>
       </footer>

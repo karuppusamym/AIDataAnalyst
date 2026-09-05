@@ -314,7 +314,7 @@ async def recommend_tool_plan(
         raise HTTPException(
             status_code=422, detail="Split this request into plans of at most 20 steps"
         )
-    steps = []
+    steps: list[PlanStepCreate] = []
     for clause in clauses:
         terms = set(re.findall(r"[a-z0-9]+", clause.lower())) - {
             "the",

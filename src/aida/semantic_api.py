@@ -2126,9 +2126,18 @@ async def _apply_governance_review_decision(
         if claim is None or claim.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if decision == "APPROVE":
-            event_type = await apply_document_claim(claim, reviewer=context.principal_id, now=now)
+            # Publishes into the description store for the claim's subject --
+            # `ColumnDocumentationVersion` for a COLUMN claim,
+            # `AssetDocumentationVersion` for a TABLE one. Reached only after
+            # this endpoint's shared maker-checker guard above, which is the
+            # sole reason a direct-write authoring endpoint for column
+            # descriptions deliberately does not exist.
+            event_type, claim_version_id = await apply_document_claim(
+                session, claim, reviewer=context.principal_id, now=now
+            )
         else:
             event_type = await reject_document_claim(claim, reviewer=context.principal_id, now=now)
+            claim_version_id = None
         aggregate_type = "document_claim"
         aggregate_id = str(claim.id)
         payload = {
@@ -2136,6 +2145,7 @@ async def _apply_governance_review_decision(
             "document_section_id": str(claim.document_section_id),
             "subject_type": claim.subject_type,
             "subject_id": claim.subject_id,
+            "published_version_id": str(claim_version_id) if claim_version_id else None,
             "review_id": str(review.id),
         }
     elif review.object_type == "SEMANTIC_METRIC_PROPOSAL":

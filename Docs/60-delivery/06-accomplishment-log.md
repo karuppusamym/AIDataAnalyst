@@ -11386,3 +11386,83 @@ do not prove the feature is well-designed, complete, or that its test actually e
 claims to cover. This entry also did not audit the UI packages (`ui/`, `ui-next/`), infra, or migration
 history -- scope was `src/`, `tests/`, and `Docs/` citations only. Worth turning into a real CI job
 (module 02's own `CN-3` neighbours this territory) rather than repeating by hand next time.
+
+---
+
+## 2026-09-05 — Column-level descriptions: the store that was missing, and the model workbook export
+
+### What was actually broken
+
+Two separate gaps hid behind one symptom ("I don't see the column-level description"):
+
+1. **The source-side description existed and was never rendered.**
+   `MetadataColumn.source_description` has been populated by ingestion and returned by
+   `GET /v1/tables/{table_id}/columns` (`MetadataColumnRead`) all along. The only caller
+   in `ui-next` was `SemanticAuthor.tsx`, which destructured `{id, name}` for metric-builder
+   dropdowns and dropped the rest. The data reached the browser and was thrown away.
+2. **The authored column description had nowhere to live at all.** Table-level had two stores
+   (`MetadataBusinessAnnotationVersion.business_description`, `AssetDocumentationVersion.readme`);
+   column-level had none. This was known and documented rather than accidental —
+   `DocumentClaim`'s docstring and tracker row N8 both recorded that an APPROVED column
+   `DESCRIBES` claim's terminal state was the claim row, because no surface consumed it.
+   A steward could approve a column description and no reader anywhere could resolve it.
+
+### What was built
+
+- **`ColumnDocumentation` / `ColumnDocumentationVersion`** (migration `b4e1c7a90d33`) — the
+  column-level counterpart to `AssetDocumentation`/`AssetDocumentationVersion`, same
+  parent-identity / append-only-version split. `aida.column_documentation` is the single write
+  path; the prior `APPROVED` row moves to `SUPERSEDED` in the same transaction, never edited for
+  content, so a run grounded on a description stays replayable against exactly that text.
+  `source_claim_id` traces a published version back through the claim to the uploaded source text.
+- **Approval now publishes.** `document_ingestion.apply_document_claim` takes a session and writes:
+  COLUMN claims into `ColumnDocumentationVersion`, TABLE claims into `AssetDocumentationVersion`
+  through `asset_description_service.publish_asset_documentation_version` — extracted from
+  `apply_asset_description_draft` so the two approval routes cannot grow divergent
+  append-and-supersede implementations. `created_by` carries the uploader, not the reviewer, so
+  maker and checker stay distinguishable on the published version.
+- **Deliberately no direct-write endpoint.** Authored column content reaches an APPROVED version
+  only through `decide_governance_review`'s maker-checker guard. A POST here would be a way around
+  the one gate that makes the content trustworthy.
+- **`GET /v1/tables/{table_id}/column-documentation`** (`column_documentation_api.py`) — columns
+  with both descriptions as *separate fields*. Kept off `list_columns` on purpose: that is one of
+  the five CT-2 keyset endpoints, and joining a window function onto the hot catalog list path for
+  a pane that reads one table at a time is the wrong trade.
+- **`ColumnPanel`** in the catalog evidence pane — the first place in either UI a column
+  description has ever been rendered. Source comment and authored description render as separately
+  labelled claims; absence renders as absence rather than falling back to the source comment under
+  a "business description" heading, which would assert a review that never happened.
+- **`GET /v1/datasources/{datasource_id}/model/export.xlsx`** — README, Tables, Columns and
+  Relationships sheets, with stable ids on every row so a re-import can match after a rename.
+  Written by `aida.xlsx`, a ~250-line stdlib OOXML writer: `pyproject.toml` pins no spreadsheet
+  library and this follows `asset_evidence_api`'s stated constraint of not adding a dependency
+  when a dependency-free format is honest. `defusedxml` is already pinned for the parsing half.
+
+### Verification
+
+- `tests/test_column_documentation.py` (11), `tests/test_xlsx.py` (18), `tests/test_model_export.py`
+  (15); `ui-next` `ColumnPanel.test.tsx` (7). Full suites green: backend, 312 `ui-next` tests,
+  `mypy` clean, `ruff` clean, `lint-imports` 8/8 kept, one Alembic head (`b4e1c7a90d33`).
+- OpenAPI baseline regenerated; `scripts/openapi_diff.py` reports two added paths and no breaking
+  changes.
+- The workbook was rendered from seeded data and its package structure asserted part-by-part
+  (every relationship resolves to a present part, every part parses as XML) rather than only
+  "returned bytes" — a malformed workbook otherwise fails first at the point a steward opens it.
+
+### Known limitations
+
+- **The round trip is half built.** Download and edit work; re-import does not exist yet. The
+  workbook's README sheet names the editable columns and warns against editing id columns, which is
+  groundwork for that pass, not a substitute for it.
+- **Cross-source relationships are omitted from the export.** Rendering a cross-domain edge needs
+  `domain_service.check_cross_boundary_grant` per read (ADR-0017 SS4/SS8) and this export does not
+  perform it. The README sheet says so, so absence is not read as "there are none".
+- **Composition is in memory, not streamed.** `EXPORT_MAX_ROWS_PER_SHEET = 50_000` per sheet;
+  truncation is reported in the README sheet and in `X-Export-Truncated`, never silently.
+- **The export hash is not stable across downloads.** The README sheet records when the snapshot
+  was taken, so `X-Artifact-SHA256` varies per download by design. What `aida.xlsx`'s determinism
+  buys is that the hash varies with *content* alone — no zip timestamps or part ordering leak in.
+- **Table descriptions published from a claim bypass GL-9's scoring.** A TABLE `DocumentClaim` and
+  an `AssetDescriptionDraft` now both publish into `AssetDocumentationVersion`, but only the latter
+  carries evidence scores. Both still pass through the same review; the claim route simply has no
+  score to sort a reviewer's queue by.

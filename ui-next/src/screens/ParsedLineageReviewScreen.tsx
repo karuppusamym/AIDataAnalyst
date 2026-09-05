@@ -4,11 +4,11 @@ import {
   decideParsedLineageEdge,
   listParsedLineageReviewQueue,
 } from "../lib/api";
+import type { ParsedLineageEdgeReviewQueueItemRead } from "../lib/types";
 import type {
   ParsedLineageEdgeDecision,
-  ParsedLineageEdgeReviewQueueItemRead,
   ParsedLineageEdgeType,
-} from "../lib/types";
+} from "../lib/ui-types";
 import {
   Button,
   Empty,

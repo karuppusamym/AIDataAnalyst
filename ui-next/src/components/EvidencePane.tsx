@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AssetEvidenceRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
 import { ApiError, exportAssetEvidence, fetchAssetEvidence } from "../lib/api";
+import { ColumnPanel } from "./ColumnPanel";
 import { CrossLinks } from "./CrossLinks";
 import type { CrossLink } from "./CrossLinks";
 import { Button, Empty, Pill } from "./primitives";
@@ -145,6 +146,13 @@ export function EvidencePane({
             ))}
           </ol>
         )}
+
+        {/* Columns, with their descriptions -- the pane's evidence items are
+            table-level claims, and a steward asking "what does this column
+            mean?" previously had nowhere in this app to look. Rendered after
+            the evidence list and before the cross-links so the table-level
+            answer still leads. */}
+        <ColumnPanel tableId={tableId} />
 
         {links.length > 0 ? (
           <div className="evp__links">

@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+/* The generated names are `InboxAgent`/`InboxPendingItem` (the server's own
+   `InboxAgent`/`InboxPendingItem` schemas, reached through `AgentInboxRead`).
+   They were hand-renamed inside the generated `types.ts`, which is why the
+   `ui-types-diff` gate failed; aliasing at the import keeps this file's own
+   reading unchanged without editing a generated file. */
 import type {
-  AgentInboxAgent,
-  AgentInboxPendingItem,
+  InboxAgent as AgentInboxAgent,
+  InboxPendingItem as AgentInboxPendingItem,
   AgentInboxRead,
 } from "../lib/types";
 import { ApiError, engageAgentKillSwitch, fetchAgentInbox } from "../lib/api";

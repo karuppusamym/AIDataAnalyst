@@ -2077,6 +2077,90 @@ class AssetDocumentationVersion(Base, TimestampMixin):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ColumnDocumentation(Base, TimestampMixin):
+    """Identity/pointer row for one column's business description of record.
+
+    The column-level counterpart to `AssetDocumentation` above, and the store
+    `DocumentClaim`'s docstring named as missing: before this, an APPROVED
+    column `DESCRIBES` claim's terminal state was the claim row itself, so a
+    steward could approve a column description and no reader anywhere could
+    then resolve it. `MetadataColumn.source_description` is a *different*
+    thing and stays where it is -- that is the source system's own comment,
+    overwritten by rediscovery; this is authored, reviewed content that
+    rediscovery must never touch.
+
+    Content lives on the append-only `ColumnDocumentationVersion` below, not
+    here, following the same parent-identity / versioned-content split as
+    `AssetDocumentation`/`AssetDocumentationVersion` and
+    `MetadataBusinessAnnotation`/`MetadataBusinessAnnotationVersion`: an
+    `AgentRun` grounded on a column description has to be replayable against
+    exactly the content it saw, which in-place mutation would destroy.
+
+    `table_id` is denormalized from `MetadataColumn.table_id` so the
+    table-scoped and datasource-scoped reads (the column pane, the workbook
+    export) can filter without a second join through `metadata_column`;
+    `column_id` remains the unique key.
+    """
+
+    __tablename__ = "column_documentation"
+    __table_args__ = (UniqueConstraint("column_id", name="uq_column_documentation_column_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    table_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_table.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    column_id: Mapped[UUID] = mapped_column(
+        ForeignKey("metadata_column.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+class ColumnDocumentationVersion(Base, TimestampMixin):
+    """Append-only content history for a `ColumnDocumentation`.
+
+    One row per approved description. The previously `APPROVED` row (if any)
+    is flipped to `SUPERSEDED` in the same transaction that inserts the new
+    `APPROVED` row -- see `column_documentation.publish_column_description` --
+    never mutated for content.
+
+    `source_claim_id` records which `DocumentClaim` a version was published
+    from, so the description a reader resolves can always be traced back
+    through the claim to the exact uploaded source text (`DocumentSection`)
+    that asserted it. It is nullable because later authoring routes (a
+    workbook re-import, a direct steward edit) will publish versions that did
+    not come from a document claim.
+    """
+
+    __tablename__ = "column_documentation_version"
+    __table_args__ = (
+        UniqueConstraint("documentation_id", "version"),
+        Index(
+            "ix_column_documentation_version_org_status",
+            "organization_id",
+            "status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    documentation_id: Mapped[UUID] = mapped_column(
+        ForeignKey("column_documentation.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="APPROVED", nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    source_claim_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("document_claim.id", ondelete="SET NULL"), index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AssetTermLink(Base, TimestampMixin):
     __tablename__ = "asset_term_link"
     __table_args__ = (UniqueConstraint("table_id", "term_id"),)
@@ -5091,16 +5175,19 @@ class DocumentClaim(Base, TimestampMixin):
     per claim, since a steward deciding a claim needs to read its specific
     source section text, not a batch of unrelated ones.
 
-    An `APPROVED` claim's terminal state *is* this row: no existing
-    column-level description surface in this codebase yet consumes it (the
-    table-level equivalent, `AssetDocumentationVersion`, is GL-9's target and
-    does not fit a single column claim; a genuine column-level "business
-    description of record" store, or N10's knowledge-compilation wiki, is
-    later, larger work this row does not attempt). What this row delivers is
-    a working, fully-cited ingest -> parse -> map -> claim -> review
-    pipeline with durable provenance back to the exact source text -- not
-    that an approved claim propagates everywhere "description" might later
-    be read from.
+    An `APPROVED` claim used to terminate at this row: when N8 landed there
+    was no column-level "business description of record" store to publish
+    into, so approval moved a status and nothing could read the result.
+    `ColumnDocumentation`/`ColumnDocumentationVersion` is now that store, and
+    `document_ingestion.apply_document_claim` publishes on approval -- a
+    COLUMN claim into `ColumnDocumentationVersion`, a TABLE claim into the
+    `AssetDocumentationVersion` GL-9 also writes to. `source_claim_id` on the
+    published version points back here, so a resolved description traces to
+    the exact `DocumentSection` text that asserted it.
+
+    Still not claimed: that an approved claim propagates everywhere
+    "description" might be read from. It reaches the two description stores
+    named above; N10's knowledge-compilation wiki remains later, larger work.
     """
 
     __tablename__ = "document_claim"

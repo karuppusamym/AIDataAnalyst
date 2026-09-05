@@ -32,7 +32,7 @@
  *  by hand until CatalogRowRead/MetadataTableRead are reachable from the
  *  OpenAPI document (see the file banner above). */
 export type { CursorPage } from "./types";
-import type { DataProductVersionRead } from "./types";
+import type { AssetDescriptionDraftRead, DataProductVersionRead } from "./types";
 
 export type CertificationStatus = "CERTIFIED" | "EXPIRED" | "NONE" | "REVOKED";
 export type QualityState = "PASSING" | "INCIDENT_OPEN" | "STALE" | "UNKNOWN";
@@ -206,3 +206,68 @@ export interface ViolationRead {
   created_at: string;
   updated_at: string;
 }
+
+/* ---------------------------------------------------------------------------
+   Client-side shapes that were living in the generated `types.ts`.
+
+   `types.ts` says AUTO-GENERATED -- DO NOT EDIT, and the `ui-types-diff` CI
+   job re-runs `scripts/generate_ui_types.py` to prove it. Five names below
+   had been hand-added to that file anyway, which made the job fail on every
+   commit: the generator does not produce them, so regenerating deleted them
+   and broke the build. They are moved here, the file this repository already
+   designates for types the live OpenAPI document cannot supply.
+
+   None of them is a server schema. Two narrow a server `str` to the literal
+   union that column actually stores (the same convenience `CatalogRowRead`'s
+   `certification` field takes above); two are client envelopes over the
+   server's `Page`; one is an alias of a union the generator already emits
+   inline, named so call sites can refer to it.
+--------------------------------------------------------------------------- */
+
+/** `AssetDescriptionDraft.status` -- the server types this as `str`. Fresh
+ *  drafts are DRAFT, submit moves them to PENDING_APPROVAL, and the
+ *  governance-review decision resolves them to APPROVED or REJECTED. */
+export type AssetDescriptionDraftStatus =
+  | "DRAFT"
+  | "PENDING_APPROVAL"
+  | "APPROVED"
+  | "REJECTED";
+
+/** Response envelope for the batch-generate endpoint. The server returns
+ *  `Page` with `items: AssetDescriptionDraftRead[]`; wrapped here so callers
+ *  do not have to narrow `unknown[]`. `total` reflects only the drafts
+ *  actually created -- the server skips tables that already have an open
+ *  draft or a REJECTED duplicate. */
+export interface AssetDescriptionDraftGenerateResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** Response envelope for the list endpoint. The server's `Page` shape has no
+ *  cursor; pagination is `limit`/`offset`. */
+export interface AssetDescriptionDraftListResponse {
+  drafts: AssetDescriptionDraftRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+/** The five parser-produced lineage edge tables `GET
+ *  /v1/lineage/parsed-edges/review-queue` spans. The generator emits this
+ *  union inline on every field that carries it
+ *  (`ParsedLineageEdgeReviewQueueItemRead.edge_type`,
+ *  `ParsedLineageEdgeDecisionRequest.edge_type`) but never names it, so a
+ *  call site that wants to hold one in a variable needs this alias. Keep the
+ *  members identical to what the generated file emits inline. */
+export type ParsedLineageEdgeType =
+  | "VIEW"
+  | "PROCEDURE"
+  | "DBT"
+  | "OPENLINEAGE_TABLE"
+  | "OPENLINEAGE_COLUMN";
+
+/** Same reasoning as `ParsedLineageEdgeType`, for
+ *  `ParsedLineageEdgeDecisionRequest.decision`. */
+export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";

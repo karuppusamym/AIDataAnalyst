@@ -82,6 +82,39 @@ export interface AgentAutoApplyRead {
   evidence: string;
 }
 
+export interface AgentContractRead {
+  id: string;
+  organization_id: string;
+  ai_asset_version_id: string;
+  agent_principal_id: string;
+  capability_envelope: Record<string, unknown>;
+  autonomy_tier: string;
+  supervisor_persona: string;
+  kill_scope: string;
+  kill_engaged: boolean;
+  sampling_rate: number;
+  daily_token_cap: number | null;
+  per_run_token_cap: number | null;
+  wall_clock_seconds_cap: number | null;
+  eval_gate_threshold: number | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentContractWrite {
+  agent_principal_id: string;
+  capability_envelope?: CapabilityEnvelopeModel;
+  autonomy_tier?: "T0" | "T1" | "T2" | "T3";
+  supervisor_persona: "ANALYST" | "CONSUMER" | "STEWARD" | "REVIEWER" | "OPERATOR" | "AUDITOR";
+  kill_scope?: "AGENT" | "TIER" | "ALL";
+  sampling_rate?: number;
+  daily_token_cap?: number | null;
+  per_run_token_cap?: number | null;
+  wall_clock_seconds_cap?: number | null;
+  eval_gate_threshold?: number | null;
+}
+
 /** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
 export interface AgentEvalGateEvaluateRequest {
   steward_authored_verdicts?: AgentEvalGateVerdictInput[];
@@ -130,6 +163,17 @@ export interface AgentEvaluationRunRead {
   findings: Record<string, unknown>[];
   created_at: string;
   updated_at: string;
+}
+
+export interface AgentInboxRead {
+  organization_id: string;
+  persona: string;
+  generated_at: string;
+  summary: InboxSummary;
+  agents: InboxAgent[];
+  pending: InboxPendingItem[];
+  auto_applied: InboxAutoApplied[];
+  recent_tasks: InboxRecentTask[];
 }
 
 /** The "task plan" half of this row's exit condition: not a static, */
@@ -464,6 +508,12 @@ export interface AnalysisTaskRead {
   updated_at: string;
 }
 
+export interface AnalysisToolBlueprintRead {
+  project_id: string;
+  definition: GovernedToolVersionCreate;
+  parameter_review_required: boolean;
+}
+
 export interface ArchiveStatusRead {
   total_archives: number;
   total_events_archived: number;
@@ -484,59 +534,16 @@ export interface AssetCertificationRead {
   certified_by: string;
   expires_at: string;
   is_active: boolean;
-  /** P2-08: revoke fields; populated only when `status === "REVOKED"`. */
   revoked_at?: string | null;
   revoked_by?: string | null;
   revocation_reason?: string | null;
+  evidence?: CertificationEvidence | null;
   created_at: string;
   updated_at: string;
 }
 
-/** P2-08: request body for
- *  `POST /v1/tables/{table_id}/certification/revoke`.
- *  `column_id` absent revokes the table-level cert; present revokes that
- *  column's ACTIVE cert. `reason` is server-required (>=10 chars). */
-export interface CertificationRevokeRequest {
-  reason: string;
-  column_id?: string | null;
-}
-
 export interface AssetDescriptionDraftGenerate {
   table_ids: string[];
-}
-
-/** Server-side lifecycle union for a description draft. The server does not
- *  export this as a schema (`status: str` on `AssetDescriptionDraftRead`), so
- *  it is transcribed from `AssetDescriptionDraft.status` in models.py and the
- *  branches in `asset_description_api.py::submit_asset_description_draft` +
- *  the sample-review decision path. The API only surfaces these four values;
- *  fresh drafts are DRAFT, submit moves them to PENDING_APPROVAL, and the
- *  governance-review decision resolves them to APPROVED or REJECTED. */
-export type AssetDescriptionDraftStatus =
-  | "DRAFT"
-  | "PENDING_APPROVAL"
-  | "APPROVED"
-  | "REJECTED";
-
-/** Response envelope for the batch-generate endpoint. Server returns
- *  `Page` (schemas.py) with `items: AssetDescriptionDraftRead[]`; wrap it
- *  here so callers do not have to narrow `unknown[]`. `total` reflects only
- *  the drafts actually created — the server skips tables that already have
- *  an open draft or a REJECTED duplicate. */
-export interface AssetDescriptionDraftGenerateResponse {
-  drafts: AssetDescriptionDraftRead[];
-  limit: number;
-  offset: number;
-  total: number;
-}
-
-/** Response envelope for the list endpoint. The server's `Page` shape has no
- *  cursor; pagination is `limit`/`offset`. */
-export interface AssetDescriptionDraftListResponse {
-  drafts: AssetDescriptionDraftRead[];
-  limit: number;
-  offset: number;
-  total: number;
 }
 
 export interface AssetDescriptionDraftRead {
@@ -936,6 +943,12 @@ export interface CanonicalTableOverrideRequest {
   rationale: string;
 }
 
+export interface CapabilityEnvelopeModel {
+  tool_slugs?: string[];
+  context_product_ids?: string[];
+  write_lanes?: string[];
+}
+
 export interface CatalogBulkActionItemRead {
   subject_id: string;
   status: "SUCCEEDED" | "FAILED";
@@ -997,6 +1010,26 @@ export interface CertificationDecisionRequest {
   column_id?: string | null;
   rationale: string;
   expires_at: string;
+}
+
+/** P3-09: structured, machine-consumable snapshot of what a certifier */
+export interface CertificationEvidence {
+  schema_version?: string;
+  captured_at?: string | null;
+  description_version_id?: string | null;
+  ownership_assignment_ids?: string[];
+  quality_snapshot?: Record<string, unknown>;
+  glossary_term_ids?: string[];
+  supporting_dq_check_ids?: string[];
+  certifier_notes?: string | null;
+  backfilled?: boolean;
+  backfilled_at?: string | null;
+}
+
+/** P2-08: request body for */
+export interface CertificationRevokeRequest {
+  reason: string;
+  column_id?: string | null;
 }
 
 export interface ClassificationDecisionRead {
@@ -1866,6 +1899,11 @@ export interface DelegationRead {
   updated_at: string;
 }
 
+export interface DescriptionDraftEdit {
+  drafted_text: string;
+  expected_text: string;
+}
+
 export interface DetokenizeRead {
   value: string;
   detokenized_at: string;
@@ -1875,6 +1913,28 @@ export interface DetokenizeRequest {
   token: string;
   purpose: string;
   datasource_id?: string | null;
+}
+
+export interface DisagreementRateRead {
+  object_type: string;
+  sampled: number;
+  resolved: number;
+  agreed: number;
+  disagreed: number;
+  pending: number;
+  disagreement_rate: number | null;
+  sufficient_sample: boolean;
+  breaches_revisit_trigger: boolean;
+}
+
+export interface DisagreementReportRead {
+  window_days: number;
+  computed_at: string;
+  measured: boolean;
+  threshold: number;
+  minimum_resolved_for_signal: number;
+  breaching_object_types: string[];
+  by_object_type: DisagreementRateRead[];
 }
 
 export interface DocumentCreate {
@@ -2416,6 +2476,68 @@ export interface ImpactAnalysisRead {
   downstream_object_count: number;
 }
 
+export interface InboxAgent {
+  ai_asset_id: string;
+  version_id: string | null;
+  name: string;
+  risk_tier: string | null;
+  autonomy_tier: string;
+  runs_recent: number;
+  success_rate: number | null;
+  budget: InboxBudget;
+  kill_scope: string;
+  kill_engaged: boolean;
+  supervisor_persona: string | null;
+}
+
+export interface InboxAutoApplied {
+  task_id: string;
+  agent_name: string;
+  action: string;
+  object_type: string;
+  object_id: string | null;
+  applied_at: string;
+  sampled_for_audit: boolean;
+  audit_outcome: string | null;
+}
+
+export interface InboxBudget {
+  daily_token_cap: number | null;
+  daily_tokens_estimated: number | null;
+}
+
+export interface InboxPendingItem {
+  review_id: string;
+  object_type: string;
+  object_id: string | null;
+  title: string;
+  proposed_by: string;
+  proposed_by_kind: "HUMAN" | "AGENT";
+  risk_tier: string;
+  confidence: number | null;
+  blast_radius: number | null;
+  negative_knowledge_hits: number;
+  recommendation: "APPROVE" | "REJECT" | "NONE";
+  created_at: string;
+}
+
+export interface InboxRecentTask {
+  task_id: string;
+  agent_name: string;
+  intent: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface InboxSummary {
+  pending_decisions: number;
+  auto_applied_since: number;
+  sampled_for_audit: number;
+  agents_active: number;
+  kill_switch_engaged: boolean;
+}
+
 export interface KillSwitchEngageRequest {
   reason: string;
   route_key?: string | null;
@@ -2424,6 +2546,10 @@ export interface KillSwitchEngageRequest {
 export interface KillSwitchReleaseRequest {
   reason: string;
   route_key?: string | null;
+}
+
+export interface KillSwitchRequest {
+  reason: string;
 }
 
 export interface KillSwitchStateRead {
@@ -2540,140 +2666,6 @@ export interface MarketplaceAccessRequestRead {
   fulfilled_at: string | null;
   created_at: string;
   updated_at: string;
-}
-
-/** `product_marketplace_api.py::portfolio_analytics_summary` -- org-wide
- *  lifecycle counts for data products/versions, data contract versions and
- *  context products/versions. Every field is a plain count, not a rate, so
- *  the screen can render it as a stat grid with no derived math. */
-export interface PortfolioLifecycleRead {
-  data_products_total: number;
-  data_products_active: number;
-  data_products_candidate: number;
-  data_products_retired: number;
-  data_product_versions_draft: number;
-  data_product_versions_review_required: number;
-  data_product_versions_published: number;
-  data_product_versions_retired: number;
-  data_contract_versions_draft: number;
-  data_contract_versions_review_required: number;
-  data_contract_versions_published: number;
-  context_products_total: number;
-  context_product_versions_draft: number;
-  context_product_versions_review_required: number;
-  context_product_versions_published: number;
-  context_product_versions_deprecated: number;
-}
-
-/** Access-request funnel plus grant/fulfillment counts, windowed by
- *  `window_days` on the summary endpoint (created_at >= now - window_days). */
-export interface PortfolioAccessRead {
-  requests_created: number;
-  requests_pending: number;
-  requests_approved: number;
-  requests_rejected: number;
-  requests_revoked: number;
-  requests_expired: number;
-  active_grants: number;
-  grants_expiring_within_30_days: number;
-  fulfillment_pending: number;
-  fulfillment_provisioned: number;
-  fulfillment_failed: number;
-  fulfillment_revoked: number;
-}
-
-/** Consumption counters for the same window: context-product reads, MCP
- *  operations broken out by kind, agent runs broken out by generation path,
- *  and governed-tool/query execution counts. */
-export interface PortfolioUsageRead {
-  unique_context_consumers: number;
-  unique_mcp_consumers: number;
-  unique_agent_principals: number;
-  context_product_reads: number;
-  mcp_operations: number;
-  mcp_resource_reads: number;
-  mcp_prompt_reads: number;
-  mcp_tool_calls: number;
-  mcp_control_operations: number;
-  agent_runs: number;
-  governed_tool_agent_runs: number;
-  model_gateway_agent_runs: number;
-  development_override_agent_runs: number;
-  policy_blocked_agent_runs: number;
-  query_executions: number;
-  governed_tool_executions: number;
-}
-
-/** `average_quality_score`/`average_lineage_coverage` are `null` when no
- *  published product has been scored yet -- never coerced to 0 client-side. */
-export interface PortfolioQualityRead {
-  published_products: number;
-  scored_products: number;
-  average_quality_score: number | null;
-  low_quality_products: number;
-  certified_products: number;
-  uncertified_products: number;
-  average_lineage_coverage: number | null;
-}
-
-export interface PortfolioQueueRead {
-  review_required_data_product_versions: number;
-  review_required_data_contract_versions: number;
-  review_required_context_product_versions: number;
-  pending_marketplace_access_requests: number;
-}
-
-/** One row of the summary's `top_products` ranking. `quality_score` and
- *  `lineage_coverage` are already 0-100 integers on the wire (unlike
- *  `MarketplaceProductRead`'s 0-1 floats) -- render directly with a `%` sign,
- *  never multiplied by 100. */
-export interface PortfolioTopProductRead {
-  data_product_version_id: string;
-  product_key: string;
-  name: string;
-  domain_name: string;
-  certification_status: string;
-  quality_score: number | null;
-  lineage_coverage: number;
-  access_request_count: number;
-  approved_access_count: number;
-  context_read_count: number;
-}
-
-/** `GET /v1/organizations/{organization_id}/portfolio-analytics/summary`. */
-export interface PortfolioAnalyticsSummaryRead {
-  generated_at: string;
-  window_days: number;
-  low_quality_threshold: number;
-  lifecycle: PortfolioLifecycleRead;
-  access: PortfolioAccessRead;
-  usage: PortfolioUsageRead;
-  quality: PortfolioQualityRead;
-  queues: PortfolioQueueRead;
-  top_products: PortfolioTopProductRead[];
-}
-
-/** One time bucket of the trends endpoint -- `bucket_days`-wide windows
- *  covering the trailing `window_days`, oldest first. */
-export interface PortfolioTrendPointRead {
-  bucket_start: string;
-  bucket_end: string;
-  access_requests: number;
-  context_reads: number;
-  mcp_operations: number;
-  mcp_tool_calls: number;
-  agent_runs: number;
-  governed_tool_runs: number;
-  model_gateway_runs: number;
-  query_executions: number;
-}
-
-/** `GET /v1/organizations/{organization_id}/portfolio-analytics/trends`. */
-export interface PortfolioAnalyticsTrendsRead {
-  generated_at: string;
-  window_days: number;
-  bucket_days: number;
-  points: PortfolioTrendPointRead[];
 }
 
 /** HTTP-facing wrapper around ``ConversationalMarketplaceResult``: the same */
@@ -2911,6 +2903,11 @@ export interface MetadataViewDefinitionEnvelope {
   unavailable_reason?: string | null;
 }
 
+export interface MetricDraftEdit {
+  definition: SemanticMetricCreate;
+  expected_fingerprint: string;
+}
+
 export interface MetricSuggestionProposalGenerate {
   limit?: number;
 }
@@ -3066,6 +3063,12 @@ export interface NotificationRuleUpdate {
   enabled?: boolean | null;
 }
 
+export interface NotificationTestResult {
+  organization_id: string;
+  enabled: boolean;
+  outcomes: Record<string, string>;
+}
+
 export interface OpenLineageColumnEdgeRead {
   id: string;
   input_dataset_namespace: string;
@@ -3178,6 +3181,42 @@ export interface OutboxEventRead {
   published_at: string | null;
 }
 
+export interface OwnershipAssignmentBulkReaffirmItemResult {
+  assignment_id: string;
+  outcome: string;
+  detail?: string | null;
+}
+
+/** P2-07: body for `POST /v1/ownership-assignments/bulk-reaffirm`. */
+export interface OwnershipAssignmentBulkReaffirmRequest {
+  assignment_ids: string[];
+}
+
+export interface OwnershipAssignmentBulkReaffirmResult {
+  reaffirmed: number;
+  skipped: number;
+  items: OwnershipAssignmentBulkReaffirmItemResult[];
+}
+
+export interface OwnershipAssignmentRead {
+  id: string;
+  organization_id: string;
+  subject_type: string;
+  subject_id: string;
+  owner_type: string;
+  owner_principal: string;
+  assignment_kind: string;
+  source_rule_id: string | null;
+  status: string;
+  assigned_by: string;
+  expires_at?: string | null;
+  expiry_warning_emitted_at?: string | null;
+  reaffirmed_at?: string | null;
+  reaffirmed_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface OwnershipRuleCreate {
   rule_key: string;
   display_name: string;
@@ -3209,11 +3248,79 @@ export interface Page {
   total: number;
 }
 
+export interface ParsedLineageEdgeBulkDecisionItem {
+  edge_id: string;
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+}
+
+export interface ParsedLineageEdgeBulkDecisionItemRead {
+  edge_id: string;
+  edge_type: string;
+  status: "SUCCEEDED" | "FAILED";
+  reason?: string | null;
+}
+
+export interface ParsedLineageEdgeBulkDecisionRequest {
+  items: ParsedLineageEdgeBulkDecisionItem[];
+  decision: "APPROVED" | "REJECTED";
+  reason: string;
+}
+
+export interface ParsedLineageEdgeBulkDecisionResultRead {
+  decision: "APPROVED" | "REJECTED";
+  requested_count: number;
+  succeeded_count: number;
+  failed_count: number;
+  results: ParsedLineageEdgeBulkDecisionItemRead[];
+}
+
+export interface ParsedLineageEdgeDecisionRead {
+  edge_id: string;
+  edge_type: string;
+  review_status: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+  review_reason: string | null;
+}
+
+/** Decision on one PROPOSED parsed-lineage edge. */
+export interface ParsedLineageEdgeDecisionRequest {
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  decision: "APPROVED" | "REJECTED";
+  reason: string;
+}
+
+/** One PROPOSED parsed-lineage edge as it appears in the review queue. */
+export interface ParsedLineageEdgeReviewQueueItemRead {
+  edge_id: string;
+  edge_type: "VIEW" | "PROCEDURE" | "DBT" | "OPENLINEAGE_TABLE" | "OPENLINEAGE_COLUMN";
+  organization_id: string;
+  created_at: string;
+  created_by: string | null;
+  confidence: string | number | null;
+  source_label: string;
+  target_label: string;
+  transformation_type: string | null;
+  source_sql_reference: Record<string, string>;
+}
+
+export interface ParsedLineageEdgeReviewQueueRead {
+  items: ParsedLineageEdgeReviewQueueItemRead[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
 export interface PlanBudgetCreate {
   max_steps?: number;
   max_time_seconds?: number;
   max_tokens?: number;
   max_cost_units?: number;
+}
+
+export interface PlanRecommendationRequest {
+  project_id: string;
+  prompt: string;
 }
 
 export interface PlanStepCreate {
@@ -3753,6 +3860,25 @@ export interface RenameCandidateRead {
   updated_at: string;
 }
 
+export interface ResolveSampleRequest {
+  human_outcome: "AGREED" | "DISAGREED";
+  rationale: string;
+}
+
+export interface ReviewAuditSampleRead {
+  sample_id: string;
+  governance_review_id: string;
+  agent_principal_id: string;
+  object_type: string;
+  risk_tier: string;
+  decision: string;
+  sampled_at: string;
+  human_outcome: string;
+  human_principal_id: string | null;
+  human_rationale: string | null;
+  resolved_at: string | null;
+}
+
 /** One governance-review-queue proposal: its own review/decision fields */
 export interface ReviewQueueProposalRead {
   review_id: string;
@@ -3783,6 +3909,23 @@ export interface ReviewQueueRead {
   by_status: Record<string, number>;
   by_object_type: Record<string, number>;
   diffable_count: number;
+}
+
+export interface ReviewerAgentRunResult {
+  pre_reviewed?: number;
+  decided?: number;
+  approved?: number;
+  rejected?: number;
+  sampled_for_audit?: number;
+}
+
+export interface ReviewerAgentStateRead {
+  organization_id: string;
+  enabled: boolean;
+  suspended: boolean;
+  max_tier: string;
+  sampling_rate: number;
+  agent_principal_id: string;
 }
 
 export interface ScanPolicyRead {
@@ -4624,6 +4767,27 @@ export interface ValidationResponse {
   issues: ValidationIssueRead[];
 }
 
+export interface VectorIndexRebuildRead {
+  organization_id: string;
+  signature: string;
+  backend: string;
+  considered: number;
+  embedded: number;
+  skipped_unchanged: number;
+}
+
+export interface VectorIndexStatusRead {
+  organization_id: string;
+  usable: boolean;
+  reason: string;
+  entries: number;
+  signature: string;
+  built_at: string | null;
+  age_minutes: number | null;
+  backend: string;
+  max_age_minutes: number;
+}
+
 export interface ViewLineageEdgeRead {
   id: string;
   organization_id: string;
@@ -4718,254 +4882,4 @@ export interface WorkspaceRead {
   monthly_cost_ceiling: number | null;
   created_at: string;
   updated_at: string;
-}
-
-/** PG-4: time-bounded, audited handoff of a principal's own governance
- *  roles to another principal. Mirrors `aida.delegation_api.DelegationCreate`. */
-export interface DelegationCreate {
-  delegate_principal_id: string;
-  delegated_roles: string[];
-  reason: string;
-  starts_at?: string | null;
-  expires_at: string;
-}
-
-/** Mirrors `aida.delegation_api.DelegationRead`. `status` is `"ACTIVE"` or
- *  `"REVOKED"` on the wire -- nothing flips the column at expiry by design
- *  (see that module's own docstring), so an `"expired"` state is a client-side
- *  projection of `status === "ACTIVE" && expires_at` being in the past, not a
- *  value this field ever actually carries. */
-export interface DelegationRead {
-  id: string;
-  organization_id: string;
-  delegator_principal_id: string;
-  delegate_principal_id: string;
-  delegated_roles: string[];
-  reason: string;
-  starts_at: string;
-  expires_at: string;
-  status: string;
-  created_by: string;
-  revoked_by: string | null;
-  revoked_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-// -------------------------------------------------------------------------
-// P1-05 / ADR-0026: parsed-lineage-edge review DTOs.
-// -------------------------------------------------------------------------
-
-export type ParsedLineageEdgeType =
-  | "VIEW"
-  | "PROCEDURE"
-  | "DBT"
-  | "OPENLINEAGE_TABLE"
-  | "OPENLINEAGE_COLUMN";
-
-export type ParsedLineageEdgeDecision = "APPROVED" | "REJECTED";
-
-export interface ParsedLineageEdgeReviewQueueItemRead {
-  edge_id: string;
-  edge_type: ParsedLineageEdgeType;
-  organization_id: string;
-  created_at: string;
-  created_by: string | null;
-  // Backend allows string enum (FULL/PARTIAL/LOW) or float; unify to
-  // whichever the source table stores. OpenLineage carries no confidence.
-  confidence: string | number | null;
-  source_label: string;
-  target_label: string;
-  transformation_type: string | null;
-  source_sql_reference: Record<string, string>;
-}
-
-export interface ParsedLineageEdgeReviewQueueRead {
-  items: ParsedLineageEdgeReviewQueueItemRead[];
-  limit: number;
-  offset: number;
-  total: number;
-}
-
-export interface ParsedLineageEdgeDecisionRequest {
-  edge_type: ParsedLineageEdgeType;
-  decision: ParsedLineageEdgeDecision;
-  reason: string;
-}
-
-export interface ParsedLineageEdgeDecisionRead {
-  edge_id: string;
-  edge_type: string;
-  review_status: string;
-  reviewed_by: string | null;
-  reviewed_at: string | null;
-  review_reason: string | null;
-}
-
-export interface ParsedLineageEdgeBulkDecisionItem {
-  edge_id: string;
-  edge_type: ParsedLineageEdgeType;
-}
-
-export interface ParsedLineageEdgeBulkDecisionRequest {
-  items: ParsedLineageEdgeBulkDecisionItem[];
-  decision: ParsedLineageEdgeDecision;
-  reason: string;
-}
-
-export interface ParsedLineageEdgeBulkDecisionItemRead {
-  edge_id: string;
-  edge_type: string;
-  status: "SUCCEEDED" | "FAILED";
-  reason: string | null;
-}
-
-export interface ParsedLineageEdgeBulkDecisionResultRead {
-  decision: ParsedLineageEdgeDecision;
-  requested_count: number;
-  succeeded_count: number;
-  failed_count: number;
-  results: ParsedLineageEdgeBulkDecisionItemRead[];
-}
-
-// --- AG-10 / ADR-0027: the agent inbox ------------------------------------
-// Mirrors `aida.agent_contract_api.AgentInboxRead` field for field.
-
-export type AutonomyTier = "T0" | "T1" | "T2" | "T3";
-export type ProposedByKind = "HUMAN" | "AGENT";
-export type PreReviewRecommendation = "APPROVE" | "REJECT" | "NONE";
-export type SampleOutcome = "PENDING" | "AGREED" | "DISAGREED";
-
-export interface AgentInboxSummary {
-  pending_decisions: number;
-  auto_applied_since: number;
-  sampled_for_audit: number;
-  agents_active: number;
-  kill_switch_engaged: boolean;
-}
-
-export interface AgentInboxBudget {
-  daily_token_cap: number | null;
-  daily_tokens_estimated: number | null;
-}
-
-export interface AgentInboxAgent {
-  ai_asset_id: string;
-  version_id: string | null;
-  name: string;
-  risk_tier: string | null;
-  autonomy_tier: AutonomyTier;
-  runs_recent: number;
-  success_rate: number | null;
-  budget: AgentInboxBudget;
-  kill_scope: "AGENT" | "TIER" | "ALL";
-  kill_engaged: boolean;
-  supervisor_persona: string | null;
-}
-
-export interface AgentInboxPendingItem {
-  review_id: string;
-  object_type: string;
-  object_id: string | null;
-  title: string;
-  proposed_by: string;
-  proposed_by_kind: ProposedByKind;
-  risk_tier: AutonomyTier;
-  confidence: number | null;
-  blast_radius: number | null;
-  negative_knowledge_hits: number;
-  recommendation: PreReviewRecommendation;
-  created_at: string;
-}
-
-export interface AgentInboxAutoApplied {
-  task_id: string;
-  agent_name: string;
-  action: string;
-  object_type: string;
-  object_id: string | null;
-  applied_at: string;
-  sampled_for_audit: boolean;
-  audit_outcome: SampleOutcome | null;
-}
-
-export interface AgentInboxRecentTask {
-  task_id: string;
-  agent_name: string;
-  intent: string;
-  status: string;
-  started_at: string;
-  finished_at: string | null;
-}
-
-export interface AgentInboxRead {
-  organization_id: string;
-  persona: string;
-  generated_at: string;
-  summary: AgentInboxSummary;
-  agents: AgentInboxAgent[];
-  pending: AgentInboxPendingItem[];
-  auto_applied: AgentInboxAutoApplied[];
-  recent_tasks: AgentInboxRecentTask[];
-}
-
-// --- ADR-0027: the reviewer agent (pre-review, auto-decide, audit sampling) --
-// Mirrors `aida.agent_contract_api`'s reviewer-agent schemas field for field.
-
-export interface ReviewerAgentStateRead {
-  organization_id: string;
-  enabled: boolean;
-  suspended: boolean;
-  max_tier: string;
-  sampling_rate: number;
-  agent_principal_id: string;
-}
-
-export interface ReviewerAgentRunResult {
-  pre_reviewed: number;
-  decided: number;
-  approved: number;
-  rejected: number;
-  sampled_for_audit: number;
-}
-
-export interface DisagreementRateRead {
-  object_type: string;
-  sampled: number;
-  resolved: number;
-  agreed: number;
-  disagreed: number;
-  pending: number;
-  /** `null`, never `0`, when nothing has been resolved -- zero would claim a
-   *  measurement that was never taken. */
-  disagreement_rate: number | null;
-  sufficient_sample: boolean;
-  breaches_revisit_trigger: boolean;
-}
-
-export interface DisagreementReportRead {
-  window_days: number;
-  computed_at: string;
-  /** `false` when nothing in the window has been resolved. This is not
-   *  evidence the reviewer agent is performing well -- it is evidence that
-   *  nothing has been measured yet. */
-  measured: boolean;
-  threshold: number;
-  minimum_resolved_for_signal: number;
-  breaching_object_types: string[];
-  by_object_type: DisagreementRateRead[];
-}
-
-export interface ReviewAuditSampleRead {
-  sample_id: string;
-  governance_review_id: string;
-  agent_principal_id: string;
-  object_type: string;
-  risk_tier: string;
-  decision: string;
-  sampled_at: string;
-  human_outcome: string;
-  human_principal_id: string | null;
-  human_rationale: string | null;
-  resolved_at: string | null;
 }

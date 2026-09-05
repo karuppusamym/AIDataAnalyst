@@ -23,6 +23,7 @@ from aida.api import router
 from aida.asset_description_api import router as asset_description_router
 from aida.asset_evidence_api import router as asset_evidence_router
 from aida.bi_api import router as bi_router
+from aida.column_documentation_api import router as column_documentation_router
 from aida.compliance_api import router as compliance_router
 from aida.composite_key_api import router as composite_key_router
 from aida.config import Settings, get_settings
@@ -44,6 +45,7 @@ from aida.logging import configure_logging
 from aida.marketplace_discovery import router as marketplace_discovery_router
 from aida.mcp_server import router as mcp_router
 from aida.metric_suggestion_api import router as metric_suggestion_router
+from aida.model_export_api import router as model_export_router
 from aida.models import Organization
 from aida.negative_knowledge_api import router as negative_knowledge_router
 from aida.notification_api import router as notification_router
@@ -312,6 +314,8 @@ app.include_router(retrieval_ops_router)
 app.include_router(ai_registry_router)
 app.include_router(agent_roster_router)
 app.include_router(dbt_router)
+app.include_router(column_documentation_router)
+app.include_router(model_export_router)
 app.include_router(composite_key_router)
 app.include_router(graph_perspectives_router)
 app.include_router(openlineage_router)
