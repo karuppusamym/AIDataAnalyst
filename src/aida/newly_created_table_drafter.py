@@ -77,8 +77,12 @@ from aida.models import (
     AssetDocumentation,
     AssetDocumentationVersion,
     DataSource,
+    MetadataEnrichmentProposal,
     MetadataTable,
+    SemanticInferenceRun,
 )
+from aida.schemas import SemanticInferenceRequest
+from aida.semantic_inference_service import generate_semantic_inference
 from aida.security import SecurityContext
 
 logger = structlog.get_logger(__name__)
@@ -409,15 +413,42 @@ async def handle_newly_created_table(
             "description_draft_enqueued": draft is not None,
             "description_draft_id": str(draft.id) if draft is not None else None,
             "analysis_run_id": str(analysis_run_id),
-            # The semantic-inference *proposal* generation itself is
-            # left to the operator-triggered
-            # `create_semantic_inference_run` (which runs across every
-            # active table of the datasource in one batch, per its own
-            # contract); this row records that the gate is now open on
-            # this table so the next inference run will include it.
             "semantic_inference_ready": True,
         },
     )
+    await enqueue_semantics_for_source(session, datasource_id, [table_id])
+
+
+async def enqueue_semantics_for_source(
+    session: Any, datasource_id: UUID, table_ids: list[UUID] | None = None,
+) -> None:
+    """Generate actual proposals, once per table and completed scan, in bounded batches."""
+    datasource = await session.scalar(select(DataSource).where(
+        DataSource.id == datasource_id,
+    ).with_for_update())
+    if datasource is None or not get_settings().auto_enqueue_on_ingest:
+        return
+    run_id = await _completed_analysis_run_id(session, datasource_id)
+    if run_id is None:
+        return
+    proposed = select(MetadataEnrichmentProposal.table_id).join(
+        SemanticInferenceRun, SemanticInferenceRun.id == MetadataEnrichmentProposal.inference_run_id,
+    ).where(SemanticInferenceRun.analysis_run_id == run_id)
+    while True:
+        filters = [MetadataTable.datasource_id == datasource_id,
+                   MetadataTable.status == "ACTIVE", MetadataTable.id.not_in(proposed)]
+        if table_ids is not None:
+            filters.append(MetadataTable.id.in_(table_ids))
+        pending = list(await session.scalars(select(MetadataTable.id).where(*filters).order_by(
+            MetadataTable.id,
+        ).limit(100)))
+        if not pending:
+            return
+        await generate_semantic_inference(
+            datasource_id, SemanticInferenceRequest(use_model=False, max_tables=100),
+            _worker_context(datasource.organization_id), session, get_settings(), table_ids=pending,
+        )
+        await session.flush()
 
 
 def _decode_event(raw: bytes) -> dict[str, Any]:
@@ -461,13 +492,18 @@ async def run_newly_created_table_drafter_consumer() -> None:
     try:
         async for message in consumer:
             envelope = _decode_event(message.value)
-            if envelope.get("event_type") != NEWLY_CREATED_TABLE_EVENT_TYPE:
+            if envelope.get("event_type") not in (
+                NEWLY_CREATED_TABLE_EVENT_TYPE, "metadata.analysis.completed.v1",
+            ):
                 await consumer.commit()
                 if state.stopping:
                     break
                 continue
             async with session_factory() as session, session.begin():
-                await handle_newly_created_table(session, envelope["payload"])
+                if envelope["event_type"] == NEWLY_CREATED_TABLE_EVENT_TYPE:
+                    await handle_newly_created_table(session, envelope["payload"])
+                else:
+                    await enqueue_semantics_for_source(session, UUID(envelope["payload"]["datasource_id"]))
             await consumer.commit()
             logger.info(
                 "newly_created_table_drafter_processed",

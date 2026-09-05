@@ -888,6 +888,19 @@ async def execute_tool(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> ToolExecutionResponse:
+    return await execute_tool_version(version_id, body, context, session, settings)
+
+
+async def execute_tool_version(
+    version_id: UUID,
+    body: ToolExecutionRequest,
+    context: SecurityContext,
+    session: AsyncSession,
+    settings: Settings,
+) -> ToolExecutionResponse:
+    """Shared governed execution path for HTTP callers and persisted tool plans."""
+    if context.roles.isdisjoint({"PlatformAdmin", "Analyst", "AgentDeveloper", "ToolConsumer"}):
+        raise HTTPException(status_code=403, detail="tool execution role is required")
     version = await session.get(GovernedToolVersion, version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="tool version not found")

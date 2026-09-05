@@ -10,12 +10,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import Field
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings, get_settings
 from aida.context import get_correlation_id
-from aida.db import get_session
+from aida.db import get_session, session_factory
 from aida.edition_entitlements import evaluate_entitlement
 from aida.events import record_audit, record_outbox
 from aida.models import (
@@ -23,11 +23,14 @@ from aida.models import (
     ToolPlanRecord,
     ToolPlanStepRecord,
 )
-from aida.schemas import ApiModel, Page
+from aida.schemas import ApiModel, Page, ToolExecutionRequest
+from aida.tool_api import execute_tool_version
+from aida.tool_plan_runtime import resolve_plan_tools
 from aida.security import SecurityContext, enforce_organization, require_roles
 from aida.tool_plans import (
     PlanBudget,
     PlanStep,
+    StepResult,
     ToolPlan,
     execute_plan,
     persist_execution,
@@ -213,6 +216,9 @@ async def create_tool_plan(
         ),
     )
 
+    validation = validate_plan(plan)
+    if not validation.valid:
+        raise HTTPException(status_code=422, detail="; ".join(i.issue for i in validation.issues))
     record = await persist_plan(session, org_id, plan, context.principal_id)
 
     record_audit(
@@ -319,7 +325,9 @@ async def validate_tool_plan(
         budget=PlanBudget(**plan_record.budget) if plan_record.budget else PlanBudget(),
     )
 
-    result = validate_plan(plan)
+    if plan_record.status not in ("DRAFT", "VALIDATED"):
+        raise HTTPException(status_code=409, detail="Only draft or validated plans can be validated")
+    result, _versions = await resolve_plan_tools(session, plan, context)
 
     if result.valid:
         plan_record.status = "VALIDATED"
@@ -410,14 +418,45 @@ async def execute_tool_plan(
         budget=PlanBudget(**plan_record.budget) if plan_record.budget else PlanBudget(),
     )
 
-    plan_record.status = "EXECUTING"
-    await session.flush()
+    validation, versions = await resolve_plan_tools(session, plan, context)
+    if not validation.valid:
+        raise HTTPException(status_code=422, detail="; ".join(i.issue for i in validation.issues))
+    claimed = await session.execute(update(ToolPlanRecord).where(
+        ToolPlanRecord.id == plan_id,
+        ToolPlanRecord.status.in_(("DRAFT", "VALIDATED")),
+    ).values(status="EXECUTING"))
+    if claimed.rowcount != 1:
+        raise HTTPException(status_code=409, detail="Plan has already been started or cancelled")
+    await session.commit()
+
+    async def run_step(step: PlanStep, _runtime_context: dict[str, str]) -> StepResult:
+        async with session_factory() as step_session:
+            current = await step_session.get(ToolPlanRecord, plan_id)
+            if current is None or current.status == "CANCELLED":
+                return StepResult(step.sequence, "CANCELLED")
+            try:
+                result = await execute_tool_version(
+                    versions[step.sequence], ToolExecutionRequest(parameters=step.parameters),
+                    context, step_session, settings,
+                )
+            except HTTPException as exc:
+                return StepResult(step.sequence, "FAILED", error_message=f"Tool refused execution (HTTP {exc.status_code})")
+            return StepResult(step.sequence, "COMPLETED", evidence={
+                "tool_execution_id": str(result.tool_execution_id),
+                "query_execution_id": str(result.execution.execution_id),
+                "tool_version_id": str(result.tool_version_id),
+                "row_count": result.execution.row_count,
+                "tokens_used": 0,
+            })
 
     plan_result = await execute_plan(
-        plan, org_id, session, context.principal_id
+        plan, org_id, session, context.principal_id, step_executor=run_step
     )
 
     # Update plan status
+    await session.refresh(plan_record)
+    if plan_record.status == "CANCELLED":
+        plan_result.status = "CANCELLED"
     plan_record.status = plan_result.status
 
     # Update step records
@@ -441,7 +480,7 @@ async def execute_tool_plan(
         action="tool_plan.execute",
         resource_type="ToolPlan",
         resource_id=str(plan_id),
-        outcome="success",
+        outcome=plan_result.status,
         correlation_id=get_correlation_id(),
         details={
             "status": plan_result.status,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DescriptionEditor } from "../components/DescriptionEditor";
 import type { AssetDescriptionDraftRead, AssetDescriptionDraftStatus } from "../lib/types";
 import {
   ApiError,
@@ -99,6 +100,7 @@ interface DraftRowProps {
   onToggleExpand: () => void;
   onSubmit: () => void;
   onOpenReview: () => void;
+  onSaved: () => void;
 }
 
 function DraftRow({
@@ -109,6 +111,7 @@ function DraftRow({
   onToggleExpand,
   onSubmit,
   onOpenReview,
+  onSaved,
 }: DraftRowProps) {
   const belowGate = draft.overall_score < MINIMUM_EVIDENCE_FOR_REVIEW;
   const scoreTitle =
@@ -176,6 +179,7 @@ function DraftRow({
           <div className="draftrow__full" aria-label="Full draft text">
             {draft.drafted_text}
           </div>
+          {draft.status === "DRAFT" ? <DescriptionEditor key={draft.updated_at} tableId={draft.table_id} draft={draft} onSaved={onSaved} /> : null}
           {submitError ? (
             <div className="draftrow__err" role="alert">
               {submitError}
@@ -335,7 +339,7 @@ export function DescriptionDraftsScreen() {
         <div>
           <h1 className="drafts__h1">Description drafts</h1>
           <p className="drafts__lede">
-            Model-drafted asset descriptions. Submit a draft for governance review
+            Metadata-drafted asset descriptions. Submit a draft for governance review
             once it clears the evidence bar; drafts below the bar stay parked
             here until more evidence lands.
           </p>
@@ -419,6 +423,7 @@ export function DescriptionDraftsScreen() {
                 submitError={rowErrors[d.id] ?? null}
                 onToggleExpand={() => toggleExpand(d.id)}
                 onSubmit={() => void submit(d)}
+                onSaved={() => void load()}
                 onOpenReview={() => openReview(d)}
               />
             ))}

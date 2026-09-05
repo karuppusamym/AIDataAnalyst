@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DescriptionEditor } from "../components/DescriptionEditor";
 import type { CatalogRowRead } from "../lib/ui-types";
 import {
   ApiError,
@@ -244,7 +245,7 @@ export function CatalogScreen() {
               title={
                 checked.size > 100
                   ? "Select at most 100 rows to generate drafts in one batch."
-                  : "Generate a model-drafted description for each selected asset."
+                  : "Generate a metadata-drafted description for each selected asset."
               }
             >
               {draftBusy ? "Generating…" : "Generate description drafts"}
@@ -260,10 +261,11 @@ export function CatalogScreen() {
         ) : null}
         {selected ? (
           <div className="cat__rowaction" role="status">
+            <DescriptionEditor key={selected.id} tableId={selected.id} currentText={selected.description ?? ""} />
             <Button
               onClick={() => void generateDrafts([selected.id])}
               disabled={draftBusy}
-              title="Generate a model-drafted description for this asset. Submit it for review from the Description drafts screen."
+              title="Generate a metadata-drafted description for this asset. Submit it for review from the Description drafts screen."
             >
               {draftBusy ? "Generating…" : "Generate description draft"}
             </Button>

@@ -350,6 +350,39 @@ async def list_asset_description_drafts(
     )
 
 
+class DescriptionDraftEdit(BaseModel):
+    drafted_text: str = Field(min_length=10, max_length=50_000)
+    expected_text: str = Field(max_length=50_000)
+
+
+@router.put("/asset-description-drafts/{draft_id}", response_model=AssetDescriptionDraftRead)
+async def edit_asset_description_draft(
+    draft_id: UUID, body: DescriptionDraftEdit,
+    context: SecurityContext = Depends(require_roles(*WRITE_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> AssetDescriptionDraftRead:
+    draft = await session.scalar(select(AssetDescriptionDraft).where(
+        AssetDescriptionDraft.id == draft_id,
+    ).with_for_update())
+    if draft is None:
+        raise HTTPException(status_code=404, detail="asset description draft not found")
+    enforce_organization(context, draft.organization_id)
+    if draft.status != "DRAFT" or draft.drafted_text != body.expected_text:
+        raise HTTPException(status_code=409, detail="Draft changed or is already in review; reload before editing")
+    draft.evidence = {**draft.evidence, "origin": "METADATA_WITH_HUMAN_EDITS",
+                      "original_fingerprint": draft.evidence.get("original_fingerprint", draft.text_fingerprint),
+                      "edited_by": context.principal_id}
+    draft.drafted_text = body.drafted_text
+    draft.text_fingerprint = text_fingerprint(body.drafted_text)
+    record_audit(session, context, action="asset_description.draft.edit",
+                 resource_type="asset_description_draft", resource_id=str(draft.id),
+                 outcome="SUCCESS", correlation_id=get_correlation_id(),
+                 details={"fingerprint": draft.text_fingerprint})
+    table = await session.get(MetadataTable, draft.table_id)
+    await session.commit()
+    return _draft_read(draft, table.name if table else str(draft.table_id))
+
+
 @router.post(
     "/asset-description-drafts/{draft_id}/submit",
     response_model=GovernanceReviewRead,

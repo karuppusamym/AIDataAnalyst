@@ -160,7 +160,7 @@ function identityHeaders(): Record<string, string> {
   return { "X-Principal-Id": DEV_PRINCIPAL_ID, "X-Roles": DEV_ROLES, "X-Organization-Id": getCurrentOrgId() };
 }
 
-async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
+export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     signal,
     headers: { Accept: "application/json", ...identityHeaders() },
@@ -179,12 +179,27 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** Downloads use the same identity and authorization boundary as screen reads. */
+export async function exportAssetEvidence(tableId: string): Promise<void> {
+  const data = USE_FIXTURES
+    ? await fetchAssetEvidence(tableId)
+    : await get<AssetEvidenceRead>(`/v1/metadata/tables/${encodeURIComponent(tableId)}/evidence/export`);
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `table-${tableId}-evidence.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** Same contract as `get`, for the write endpoints UX-15's screens call
  *  (governance decisions, marketplace access requests, Studio submit). No
  *  request body is optional here on purpose: every write this app makes
  *  carries one, even if it is `{}` -- an empty POST invites a caller to
  *  forget the body a route actually requires. */
-async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+export async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: "POST",
     signal,
@@ -207,7 +222,7 @@ async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): P
 
 /** Same contract as `postJson`, for the few endpoints that mutate an existing
  *  resource with PUT (e.g. advancing an AI remediation's status). */
-async function putJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
+export async function putJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: "PUT",
     signal,

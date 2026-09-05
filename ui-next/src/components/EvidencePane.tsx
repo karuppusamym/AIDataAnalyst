@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AssetEvidenceRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
-import { ApiError, fetchAssetEvidence } from "../lib/api";
+import { ApiError, exportAssetEvidence, fetchAssetEvidence } from "../lib/api";
 import { Button, Empty, Pill } from "./primitives";
 import "./EvidencePane.css";
 
@@ -47,6 +47,8 @@ export function EvidencePane({
   const [evidence, setEvidence] = useState<AssetEvidenceRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!tableId) {
@@ -83,7 +85,6 @@ export function EvidencePane({
   }
 
   const permalink = `${location.origin}${location.pathname}?asset=${tableId}`;
-  const exportHref = `/v1/metadata/tables/${tableId}/evidence/export`;
   const displayName = row?.name ?? evidence?.table_name ?? tableId;
 
   return (
@@ -148,9 +149,12 @@ export function EvidencePane({
         >
           {copied ? "Link copied" : "Copy evidence link"}
         </Button>
-        <a className="evp__export" href={exportHref} target="_blank" rel="noreferrer">
-          Export JSON
-        </a>
+        <Button disabled={exporting} onClick={() => {
+          setExporting(true);
+          setExportError(null);
+          void exportAssetEvidence(tableId).catch((e: Error) => setExportError(e.message)).finally(() => setExporting(false));
+        }}>{exporting ? "Exporting…" : "Export JSON"}</Button>
+        {exportError ? <span role="alert">{exportError}</span> : null}
         <span className="evp__hint">Permission-aware · UX-7</span>
       </footer>
     </aside>
