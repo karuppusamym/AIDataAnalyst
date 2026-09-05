@@ -188,6 +188,11 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `stewardship.unowned_asset_escalated_tier2.v1` | Backlog entry still unaddressed after tier-1 escalation; opened as an ITSM ticket unconditionally (GL-6) | table_id |
 | `stewardship.unowned_asset_resolved.v1` | Backlog entry resolved (ownership since assigned) | table_id |
 | `asset_description.approved.v1` / `.rejected.v1` | Governed description-draft decision | draft_id, table_id, overall_score, published_version_id, review_id |
+| `model_import.submitted.v1` | An uploaded model workbook entered the review queue as one batch | batch_id, datasource_id, review_id, change_count |
+| `model_import.applied.v1` / `.rejected.v1` | Governed decision on one workbook import batch. `applied_count` can be lower than `change_count`: a change superseded between export and approval is skipped, not applied | batch_id, datasource_id, filename, content_sha256, change_count, applied_count, skipped_count, review_id |
+| `description.withdrawal.requested.v1` | A steward asked for an approved table or column description to be retired. Nothing is un-published yet | withdrawal_id, subject_type, subject_id, review_id |
+| `description.withdrawal.approved.v1` / `.rejected.v1` | Governed decision on a withdrawal. Approval moves the version to `WITHDRAWN`, preserving its text | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
+| `description.withdrawal.superseded.v1` | The withdrawal was approved, but a newer version had been published since it was raised, so nothing was retired | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 

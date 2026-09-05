@@ -60,6 +60,11 @@ export interface ColumnDocumentationRead {
   description_approved_by: string | null;
   description_approved_at: string | null;
   source_claim_id: string | null;
+  /** Set when this column *had* an approved description that was retired
+   *  through review. Distinct from `business_description === null` with no
+   *  withdrawal, which means nobody has described it yet -- "we looked and
+   *  decided to say nothing" and "nobody has looked" are different facts. */
+  withdrawn_description: string | null;
 }
 
 async function readJson<T>(path: string, signal?: AbortSignal): Promise<T> {
@@ -97,6 +102,7 @@ function makeFixtureColumnDocumentation(tableId: string): ColumnDocumentationRea
     description_approved_by: null,
     description_approved_at: null,
     source_claim_id: null,
+    withdrawn_description: null,
   };
   return [
     {
@@ -108,6 +114,7 @@ function makeFixtureColumnDocumentation(tableId: string): ColumnDocumentationRea
       nullable: false,
       classification: "INTERNAL",
       source_description: "pk",
+      withdrawn_description: null,
       business_description:
         "The customer's unique identifier across every retail system. Stable for the life of the relationship; not reused after closure.",
       description_version: 2,
@@ -135,6 +142,9 @@ function makeFixtureColumnDocumentation(tableId: string): ColumnDocumentationRea
       classification: "INTERNAL",
       source_description: null,
       business_description: null,
+      // A column that was described and had it retired -- the state a reader
+      // must be able to tell apart from "never described".
+      withdrawn_description: "Superseded by the account-opening data contract.",
     },
     {
       ...base,
@@ -270,7 +280,11 @@ export interface ModelImportChangeRead {
     | "APPLIED"
     | "SKIPPED_STALE"
     | "SKIPPED_MISSING"
-    | "REJECTED";
+    | "REJECTED"
+    /** Dropped by the uploader before the batch was submitted. Never applied,
+     *  and never counted as skipped -- it was withdrawn before anyone was
+     *  asked to look at it. */
+    | "EXCLUDED";
   skip_reason: string | null;
 }
 
@@ -346,6 +360,106 @@ export async function submitModelImport(
     headers: { Accept: "application/json", ...identityHeaders() },
     credentials: "same-origin",
   });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as ModelImportBatchRead;
+}
+
+/* ---------------------------------------------------------------------------
+   Retiring a description, and trimming a workbook batch before it is reviewed.
+--------------------------------------------------------------------------- */
+
+/** `src/aida/description_withdrawal_api.py::DescriptionWithdrawalRead`. */
+export interface DescriptionWithdrawalRead {
+  id: string;
+  organization_id: string;
+  subject_type: "TABLE" | "COLUMN";
+  subject_id: string;
+  subject_label: string;
+  version_id: string;
+  withdrawn_text: string;
+  reason: string;
+  status: string;
+  governance_review_id: string | null;
+  requested_by: string;
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+
+/** Ask for an approved description to be retired.
+ *
+ *  Publishes nothing: the description stays live and stays what every reader
+ *  resolves until a *different* principal approves the review this creates, on
+ *  the Review queue. There is deliberately no approve call here. */
+export async function requestDescriptionWithdrawal(
+  subjectType: "TABLE" | "COLUMN",
+  subjectId: string,
+  reason: string,
+  signal?: AbortSignal,
+): Promise<DescriptionWithdrawalRead> {
+  if (USE_FIXTURES) {
+    throw new Error(
+      "Withdrawal is reviewed on the server. Run against a live API (VITE_USE_FIXTURES=0) to request one.",
+    );
+  }
+  const res = await fetch("/v1/descriptions/withdrawals", {
+    method: "POST",
+    signal,
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      ...identityHeaders(),
+    },
+    credentials: "same-origin",
+    body: JSON.stringify({ subject_type: subjectType, subject_id: subjectId, reason }),
+  });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      const body = (await res.json()) as { detail?: string };
+      if (body.detail) detail = body.detail;
+    } catch {
+      /* non-JSON error body */
+    }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as DescriptionWithdrawalRead;
+}
+
+/** Drop rows from a parsed batch, or put them back.
+ *
+ *  Only works while the batch is DRAFT. That is the point: what a reviewer is
+ *  asked to decide has to be fixed the moment it is submitted, so this is an
+ *  uploader-side edit rather than a partial approval. */
+export async function setModelImportExclusion(
+  batchId: string,
+  changeIds: string[],
+  excluded: boolean,
+  signal?: AbortSignal,
+): Promise<ModelImportBatchRead> {
+  if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
+  const res = await fetch(
+    `/v1/model-imports/${encodeURIComponent(batchId)}/changes/exclusion`,
+    {
+      method: "POST",
+      signal,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        ...identityHeaders(),
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({ change_ids: changeIds, excluded }),
+    },
+  );
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
     try {

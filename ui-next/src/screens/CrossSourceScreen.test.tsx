@@ -7,6 +7,8 @@ const fetchCandidates = vi.fn();
 const discoverRelationships = vi.fn();
 const discoverResolutions = vi.fn();
 const decide = vi.fn();
+const fetchRelationships = vi.fn();
+const decideRelationship = vi.fn();
 const fetchDatasources = vi.fn();
 
 vi.mock("../lib/_cross_source_api", async () => {
@@ -18,6 +20,8 @@ vi.mock("../lib/_cross_source_api", async () => {
     discoverCrossSourceRelationships: (...a: unknown[]) => discoverRelationships(...a),
     discoverCrossSourceObjectResolutions: (...a: unknown[]) => discoverResolutions(...a),
     decideCrossSourceResolutionCandidate: (...a: unknown[]) => decide(...a),
+    fetchCrossSourceRelationshipCandidates: (...a: unknown[]) => fetchRelationships(...a),
+    decideRelationshipCandidate: (...a: unknown[]) => decideRelationship(...a),
     fetchCrossBoundaryGrants: async () => [],
   };
 });
@@ -75,6 +79,8 @@ beforeEach(() => {
   discoverRelationships.mockReset();
   discoverResolutions.mockReset();
   decide.mockReset();
+  fetchRelationships.mockReset().mockResolvedValue([]);
+  decideRelationship.mockReset();
 });
 
 async function selectDomain(value = "dom_fin") {
@@ -209,4 +215,92 @@ it("reports a scan that found nothing as a real answer", async () => {
   await waitFor(() =>
     expect(screen.getByText(/No new object resolution candidates/)).toBeInTheDocument(),
   );
+});
+
+
+/* ---------------------------------------------------------------------------
+   Cross-source relationship review (2026-09-05). Discovery lived here from the
+   start; the results were reviewed on the per-datasource Relationships screen
+   -- the one scope that cannot express "this column points into another
+   system", so the rows a steward most needed were the ones its filter hid.
+--------------------------------------------------------------------------- */
+
+function relationship(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "xrc_1",
+    organization_id: "o1",
+    datasource_id: "ds_b",
+    target_datasource_id: "ds_a",
+    source_table_id: "party_master",
+    source_column_id: "party_id",
+    target_table_id: "customer_dim",
+    target_column_id: "customer_id",
+    detection_rule: "NAME_AND_TYPE_AND_INCLUSION",
+    confidence: 0.91,
+    evidence: { inclusion_ratio: 0.97 },
+    status: "PENDING",
+    created_by: "discovery",
+    reviewed_by: null,
+    review_reason: null,
+    reviewed_at: null,
+    created_at: "",
+    updated_at: "",
+    ...overrides,
+  };
+}
+
+it("reviews cross-source relationships on the screen that discovers them", async () => {
+  fetchRelationships.mockResolvedValue([relationship()]);
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  await waitFor(() => expect(screen.getByText("party_id")).toBeInTheDocument());
+  expect(screen.getByText("customer_id")).toBeInTheDocument();
+  expect(screen.getByText("0.91")).toBeInTheDocument();
+  expect(screen.getByText(/inclusion ratio: 0.97/)).toBeInTheDocument();
+});
+
+it("renders a relationship directionally, unlike a same-object pair", async () => {
+  // A foreign-key-like relationship points one way; rendering it as `≡` would
+  // misstate which side is the reference.
+  fetchRelationships.mockResolvedValue([relationship()]);
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  await waitFor(() => expect(screen.getByLabelText("references")).toBeInTheDocument());
+});
+
+it("decides a relationship through its own endpoint, not the resolution one", async () => {
+  fetchRelationships.mockResolvedValue([relationship()]);
+  decideRelationship.mockResolvedValue(relationship({ status: "APPROVED" }));
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  await waitFor(() => expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+  await waitFor(() => expect(decideRelationship).toHaveBeenCalledWith("xrc_1", "APPROVE", null));
+  expect(decide).not.toHaveBeenCalled();
+});
+
+it("counts pending work across both queues, not just one", async () => {
+  fetchRelationships.mockResolvedValue([relationship()]);
+  fetchCandidates.mockResolvedValue([candidate()]);
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  await waitFor(() => expect(screen.getByText("2")).toBeInTheDocument());
+});
+
+it("points same-source candidates at the screen that owns them", async () => {
+  fetchRelationships.mockResolvedValue([]);
+  render(<CrossSourceScreen />);
+  await selectDomain();
+
+  await waitFor(() =>
+    expect(screen.getByText("No cross-source relationships")).toBeInTheDocument(),
+  );
+  expect(
+    screen.getByText(/Same-source candidates are reviewed on the Relationships screen/),
+  ).toBeInTheDocument();
 });

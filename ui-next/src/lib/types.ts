@@ -115,6 +115,26 @@ export interface AgentContractWrite {
   eval_gate_threshold?: number | null;
 }
 
+/** `POST .../agent-contract-requests` body -- the reviewed, eval-gated path
+ *  alongside the direct-write `AgentContractWrite`/`PUT .../contract`. */
+export interface AgentContractRequestCreate extends AgentContractWrite {
+  ai_asset_version_id: string;
+}
+
+export interface AgentContractRequestRead {
+  id: string;
+  organization_id: string;
+  ai_asset_version_id: string;
+  requested_by: string;
+  definition: Record<string, unknown>;
+  status: "PENDING" | "ACTIVATED" | "REJECTED" | "EVAL_BLOCKED";
+  governance_review_id: string | null;
+  eval_gate_verdict: string | null;
+  activated_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** Body of `POST .../eval-gate/evaluate`. `steward_authored_verdicts` */
 export interface AgentEvalGateEvaluateRequest {
   steward_authored_verdicts?: AgentEvalGateVerdictInput[];
@@ -1666,6 +1686,19 @@ export interface DataQualityIncidentRead {
 export interface DataQualityIncidentTransition {
   status: "ACKNOWLEDGED" | "RESOLVED";
   reason: string;
+}
+
+/** `quality_api.py::get_quality_incident_triage` -- a deterministic
+ *  root-cause hint (`dq_triage_agent.suggest_triage`), computed fresh on
+ *  every call, never persisted. `basis` names which evidence field(s) each
+ *  hint traces to, so it can be checked against the incident's own
+ *  `evidence` blob rather than trusted blindly. */
+export interface DataQualityIncidentTriageRead {
+  incident_id: string;
+  anomaly_type: string;
+  likely_causes: string[];
+  recommended_next_steps: string[];
+  basis: string[];
 }
 
 export interface DataQualityPolicyRead {
@@ -4203,6 +4236,31 @@ export interface StewardshipCoverageRead {
   dimensions: Record<string, CoverageDimensionRead>;
   unowned_table_ids: string[];
   computed_at: string;
+}
+
+/** AT-5 / SW-1: `stewardship_api.list_documentation_worklist`'s ranked
+ *  backlog. `usage x impact x deficit` -- see `stewardship_worklist.py`'s
+ *  own module docstring: a zero on any factor is a zero overall, so a table
+ *  nobody queries never reaches the top however undocumented it is, and a
+ *  fully documented table needs no work at all however busy it is. */
+export interface DocumentationWorklistEntryRead {
+  table_id: string;
+  table_name: string;
+  schema_name: string;
+  datasource_name: string;
+  rank: number;
+  query_execution_count: number;
+  consumption_read_count: number;
+  query_volume: number;
+  last_queried_at: string | null;
+  last_consumed_at: string | null;
+  description_is_proposed: boolean;
+  score: number;
+  usage: number;
+  impact: number;
+  deficit: number;
+  downstream_count: number;
+  missing: string[];
 }
 
 export interface StudioChangeItemCreate {

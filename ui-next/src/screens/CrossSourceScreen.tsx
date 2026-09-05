@@ -2,12 +2,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiError, fetchOrgDatasources } from "../lib/api";
 import {
   decideCrossSourceResolutionCandidate,
+  decideRelationshipCandidate,
   discoverCrossSourceObjectResolutions,
   discoverCrossSourceRelationships,
   domainsWithDatasources,
+  fetchCrossSourceRelationshipCandidates,
   fetchCrossSourceResolutionCandidates,
   fetchOrgDataDomains,
   type CrossSourceResolutionCandidateRead,
+  type RelationshipCandidateRead,
 } from "../lib/_cross_source_api";
 import { CrossBoundaryGrants } from "../components/CrossBoundaryGrants";
 import type { DataDomainRead, DataSourceRead } from "../lib/types";
@@ -46,6 +49,14 @@ import "./CrossSourceScreen.css";
    3. **Confidence is shown, never used as a threshold.** Nothing here
       auto-approves above a score. The number orders the queue so the strongest
       evidence is read first; a human still decides every row.
+   4. **Both kinds are reviewed here, not just proposed here.** Cross-source
+      relationship candidates were originally discovered on this screen and
+      reviewed on the per-datasource Relationships screen -- the one scope that
+      cannot express "this column points into another system", so the rows a
+      steward most needed were the ones its filter hid. Both queues live here.
+      Same-source candidates deliberately do not: those already have a home,
+      and duplicating them would make this a second, differently-filtered copy
+      of that screen.
 --------------------------------------------------------------------------- */
 
 const STATUS_TONE: Record<string, Tone> = {
@@ -136,6 +147,81 @@ function CandidateRow({
   );
 }
 
+function RelationshipRow({
+  candidate,
+  datasources,
+  onDecide,
+  busy,
+}: {
+  candidate: RelationshipCandidateRead;
+  datasources: readonly DataSourceRead[];
+  onDecide: (id: string, decision: "APPROVE" | "REJECT") => void;
+  busy: boolean;
+}) {
+  const evidence = Object.entries(candidate.evidence ?? {});
+  return (
+    <li className="xs__row">
+      <div className="xs__rowhead">
+        <span className="xs__pair">
+          <span className="xs__side">
+            <span>{sourceName(datasources, candidate.datasource_id)}</span>
+            <span className="xs__table">{candidate.source_column_id}</span>
+          </span>
+          {/* Directional, unlike an object-resolution pair: a foreign-key-like
+              relationship points one way, and rendering it symmetrically would
+              misstate which side is the reference. */}
+          <span className="xs__equals" aria-label="references">
+            →
+          </span>
+          <span className="xs__side">
+            <span>{sourceName(datasources, candidate.target_datasource_id)}</span>
+            <span className="xs__table">{candidate.target_column_id}</span>
+          </span>
+        </span>
+        <span className="xs__spacer" />
+        <Pill tone={confidenceTone(candidate.confidence)}>
+          {candidate.confidence.toFixed(2)}
+        </Pill>
+        <Pill tone={STATUS_TONE[candidate.status] ?? "mute"}>
+          {candidate.status.toLowerCase()}
+        </Pill>
+      </div>
+
+      <div className="xs__rule">{candidate.detection_rule.replace(/_/g, " ").toLowerCase()}</div>
+
+      {evidence.length > 0 ? (
+        <div className="xs__evidence">
+          {evidence.map(([key, value]) => (
+            <span key={key}>
+              {key.replace(/_/g, " ")}: {String(value)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {candidate.status === "PENDING" ? (
+        <div className="xs__actions">
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => onDecide(candidate.id, "APPROVE")}
+          >
+            Approve
+          </Button>
+          <Button disabled={busy} onClick={() => onDecide(candidate.id, "REJECT")}>
+            Reject
+          </Button>
+        </div>
+      ) : (
+        <div className="xs__decided">
+          {candidate.status.toLowerCase()} by {candidate.reviewed_by ?? "—"}
+          {candidate.review_reason ? ` · ${candidate.review_reason}` : ""}
+        </div>
+      )}
+    </li>
+  );
+}
+
 export function CrossSourceScreen() {
   const ORG = useOrgId();
   const [params, setParams] = useUrlState();
@@ -145,6 +231,7 @@ export function CrossSourceScreen() {
   const [domains, setDomains] = useState<DataDomainRead[]>([]);
   const [datasources, setDatasources] = useState<DataSourceRead[]>([]);
   const [candidates, setCandidates] = useState<CrossSourceResolutionCandidateRead[] | null>(null);
+  const [relationships, setRelationships] = useState<RelationshipCandidateRead[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState<"relationships" | "resolutions" | "decision" | null>(null);
@@ -182,20 +269,25 @@ export function CrossSourceScreen() {
     async (signal?: AbortSignal) => {
       if (domainDatasourceIds.length === 0) {
         setCandidates(dom ? [] : null);
+        setRelationships(dom ? [] : null);
         return;
       }
       setError(null);
+      const status = statusFilter === "ALL" ? null : statusFilter;
       try {
-        setCandidates(
-          await fetchCrossSourceResolutionCandidates(
-            domainDatasourceIds,
-            statusFilter === "ALL" ? null : statusFilter,
-            signal,
-          ),
-        );
+        // Both queues in one pass: they share a domain, a status filter and a
+        // reviewer, and loading them separately would let the screen show one
+        // half of the answer.
+        const [resolutions, relationshipRows] = await Promise.all([
+          fetchCrossSourceResolutionCandidates(domainDatasourceIds, status, signal),
+          fetchCrossSourceRelationshipCandidates(domainDatasourceIds, status, signal),
+        ]);
+        setCandidates(resolutions);
+        setRelationships(relationshipRows);
       } catch (e) {
         if ((e as Error)?.name === "AbortError") return;
         setCandidates([]);
+        setRelationships([]);
         setError(e instanceof ApiError ? e.detail : (e as Error).message);
       }
     },
@@ -205,6 +297,7 @@ export function CrossSourceScreen() {
   useEffect(() => {
     const ac = new AbortController();
     setCandidates(null);
+    setRelationships(null);
     void loadCandidates(ac.signal);
     return () => ac.abort();
   }, [loadCandidates]);
@@ -227,7 +320,8 @@ export function CrossSourceScreen() {
             ? `No new ${what} candidates. Nothing this scan could see is unaccounted for.`
             : `${count} ${what} candidate${count === 1 ? "" : "s"} proposed — each still needs a decision.`,
         );
-        if (kind === "resolutions") void loadCandidates();
+        // Either scan can add rows to the queues below.
+        void loadCandidates();
       } catch (e) {
         // A cross-boundary scan without a grant answers 403 by design. Turn
         // that into the request rather than a dead end.
@@ -247,14 +341,23 @@ export function CrossSourceScreen() {
   );
 
   const decide = useCallback(
-    async (candidateId: string, decision: "APPROVE" | "REJECT") => {
+    async (
+      candidateId: string,
+      decision: "APPROVE" | "REJECT",
+      kind: "resolution" | "relationship",
+    ) => {
       setBusy("decision");
       setError(null);
       setNotice(null);
       try {
+        // The server requires a reason on rejection for both kinds.
         const reason =
           decision === "REJECT" ? "Rejected from the cross-source review queue." : null;
-        await decideCrossSourceResolutionCandidate(candidateId, decision, reason);
+        if (kind === "resolution") {
+          await decideCrossSourceResolutionCandidate(candidateId, decision, reason);
+        } else {
+          await decideRelationshipCandidate(candidateId, decision, reason);
+        }
         setNotice(`Candidate ${decision === "APPROVE" ? "approved" : "rejected"}.`);
         void loadCandidates();
       } catch (e) {
@@ -267,7 +370,9 @@ export function CrossSourceScreen() {
   );
 
   const otherDomains = domains.filter((d) => d.id !== dom);
-  const pendingCount = (candidates ?? []).filter((c) => c.status === "PENDING").length;
+  const pendingCount =
+    (candidates ?? []).filter((c) => c.status === "PENDING").length +
+    (relationships ?? []).filter((c) => c.status === "PENDING").length;
 
   return (
     <div className="xs">
@@ -375,6 +480,32 @@ export function CrossSourceScreen() {
       ) : null}
 
       <section className="xs__results">
+        <div className="xs__sub">Cross-source relationships</div>
+        {!dom ? null : relationships === null ? (
+          <div className="xs__load" role="status">
+            Loading relationships…
+          </div>
+        ) : relationships.length === 0 ? (
+          <Empty
+            title="No cross-source relationships"
+            hint="Run a scan above. Same-source candidates are reviewed on the Relationships screen."
+          />
+        ) : (
+          <ol className="xs__list">
+            {relationships.map((candidate) => (
+              <RelationshipRow
+                key={candidate.id}
+                candidate={candidate}
+                datasources={datasources}
+                onDecide={(id, decision) => void decide(id, decision, "relationship")}
+                busy={busy !== null}
+              />
+            ))}
+          </ol>
+        )}
+      </section>
+
+      <section className="xs__results">
         <div className="xs__sub">Same-object candidates</div>
         {!dom ? (
           <Empty
@@ -397,7 +528,7 @@ export function CrossSourceScreen() {
                 key={candidate.id}
                 candidate={candidate}
                 datasources={datasources}
-                onDecide={(id, decision) => void decide(id, decision)}
+                onDecide={(id, decision) => void decide(id, decision, "resolution")}
                 busy={busy !== null}
               />
             ))}

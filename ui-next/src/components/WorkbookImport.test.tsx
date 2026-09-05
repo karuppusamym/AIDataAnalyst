@@ -8,6 +8,7 @@ import type {
 const upload = vi.fn();
 const fetchChanges = vi.fn();
 const submit = vi.fn();
+const setExclusion = vi.fn();
 
 vi.mock("../lib/_column_documentation_api", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
@@ -18,6 +19,7 @@ vi.mock("../lib/_column_documentation_api", async () => {
     uploadModelWorkbook: (...args: unknown[]) => upload(...args),
     fetchModelImportChanges: (...args: unknown[]) => fetchChanges(...args),
     submitModelImport: (...args: unknown[]) => submit(...args),
+    setModelImportExclusion: (...args: unknown[]) => setExclusion(...args),
   };
 });
 
@@ -27,6 +29,7 @@ beforeEach(() => {
   upload.mockReset();
   fetchChanges.mockReset();
   submit.mockReset();
+  setExclusion.mockReset();
 });
 
 function batch(overrides: Partial<ModelImportBatchRead> = {}): ModelImportBatchRead {
@@ -197,4 +200,92 @@ it("labels a superseded change as superseded, not as an error", async () => {
 
   await waitFor(() => expect(screen.getByText("superseded")).toBeInTheDocument());
   expect(screen.getByText("1 skipped")).toBeInTheDocument();
+});
+
+
+/* ---------------------------------------------------------------------------
+   Excluding rows (2026-09-05). One wrong row used to force rejecting the whole
+   file and re-uploading a corrected one.
+--------------------------------------------------------------------------- */
+
+it("drops a row from the batch without rejecting the file", async () => {
+  upload.mockResolvedValue(batch({ change_count: 2 }));
+  fetchChanges.mockResolvedValue([
+    change({ id: "keep", subject_label: "customers.customer_id" }),
+    change({ id: "drop", row_number: 3, subject_label: "customers.segment_code" }),
+  ]);
+  setExclusion.mockResolvedValue(batch({ change_count: 1 }));
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  await waitFor(() => expect(screen.getByText("customers.segment_code")).toBeInTheDocument());
+
+  fireEvent.click(
+    screen.getByLabelText("Include customers.segment_code business_description"),
+  );
+
+  await waitFor(() => expect(setExclusion).toHaveBeenCalledWith("b1", ["drop"], true));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Submit 1 change for review" })).toBeInTheDocument(),
+  );
+});
+
+it("keeps an excluded row visible, marked, rather than hiding the decision", async () => {
+  upload.mockResolvedValue(batch({ change_count: 1 }));
+  fetchChanges.mockResolvedValue([
+    change({ id: "keep" }),
+    change({ id: "drop", row_number: 3, subject_label: "customers.segment_code", status: "EXCLUDED" }),
+  ]);
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+
+  await waitFor(() => expect(screen.getByText("customers.segment_code")).toBeInTheDocument());
+  expect(screen.getByText("excluded")).toBeInTheDocument();
+  expect(screen.getByText("1 excluded")).toBeInTheDocument();
+});
+
+it("puts an excluded row back when it is re-checked", async () => {
+  upload.mockResolvedValue(batch({ change_count: 0 }));
+  fetchChanges.mockResolvedValue([change({ id: "drop", status: "EXCLUDED" })]);
+  setExclusion.mockResolvedValue(batch({ change_count: 1 }));
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+  await waitFor(() => expect(screen.getByText("excluded")).toBeInTheDocument());
+
+  fireEvent.click(screen.getByLabelText("Include customers.customer_id business_description"));
+
+  await waitFor(() => expect(setExclusion).toHaveBeenCalledWith("b1", ["drop"], false));
+});
+
+it("stops offering exclusion once the batch is submitted", async () => {
+  // What a reviewer is asked to decide has to be fixed the moment it is
+  // submitted, or "approve this batch" would not name a stable thing.
+  upload.mockResolvedValue(batch({ status: "PENDING_REVIEW", governance_review_id: "r1" }));
+  fetchChanges.mockResolvedValue([change()]);
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+
+  await waitFor(() => expect(screen.getByText("customers.customer_id")).toBeInTheDocument());
+  expect(
+    screen.queryByLabelText("Include customers.customer_id business_description"),
+  ).not.toBeInTheDocument();
+});
+
+it("offers no exclusion control on a row the diff already rejected", async () => {
+  // Those were never going to apply; a checkbox would imply they could.
+  upload.mockResolvedValue(batch({ change_count: 0, rejected_row_count: 1 }));
+  fetchChanges.mockResolvedValue([
+    change({ id: "bad", status: "REJECTED", skip_reason: "no active column with this id" }),
+  ]);
+
+  render(<WorkbookImport datasourceId="d1" />);
+  selectFile();
+
+  await waitFor(() => expect(screen.getByText("not applied")).toBeInTheDocument());
+  expect(
+    screen.queryByLabelText("Include customers.customer_id business_description"),
+  ).not.toBeInTheDocument();
 });

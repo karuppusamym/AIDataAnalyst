@@ -11659,3 +11659,104 @@ state") now asserts on the tabs *inside* that guard so it cannot regress.
   decision. A steward requesting a grant has to go there to see it decided.
 - **The domain picker walks organization → lines of business → domains**, since
   there is no org-wide domain endpoint. Bounded, but it is a fan-out.
+
+---
+
+## 2026-09-05 — Three open gaps closed: retiring a description, trimming a batch, reviewing cross-source relationships
+
+Each of these was named as a known limitation in one of the three entries above.
+None needed a new idea; all three needed the work actually doing.
+
+### 1. A description can now be retired
+
+The gap flagged twice: **publishing** a description was governed from the first
+commit, **un-publishing** one was not possible at all. The workbook path
+deliberately refuses to read a blank cell as a deletion (an empty cell is
+indistinguishable from one nobody filled in), and `publish_column_description`
+only ever adds — so the only remedy was to publish a correction, which does not
+work when the right answer is that the platform should say nothing.
+
+`DescriptionWithdrawal` (migration `d9a3f61c2b07`) + `aida.description_withdrawal`,
+routed through `GovernanceReview` as `DESCRIPTION_WITHDRAWAL`. Three properties
+carry the design:
+
+- **It is not a delete.** The version row keeps its text and moves to
+  `WITHDRAWN`, so an `AgentRun` grounded on it stays replayable against exactly
+  the words it saw. The current-version resolvers filter `status == "APPROVED"`,
+  so the asset simply reads as undescribed again.
+- **`WITHDRAWN` is deliberately distinct from `SUPERSEDED`.** One means "a newer
+  approved version replaced this", the other "this was retracted". An audit has
+  to be able to tell them apart.
+- **It re-checks the version it names.** The request records the exact
+  `version_id` it was raised against; if someone publishes in the window before
+  approval, nothing is retired — the reviewer read one description and would
+  otherwise be removing another. Same lost-update reasoning as the workbook
+  import's `expected_version`.
+
+The read side matters as much: `ColumnDocumentationRead.withdrawn_description`
+lets a reader distinguish *"we looked and decided to say nothing"* from
+*"nobody has looked"*. Reverting a withdrawn column to looking untouched would
+lose a real editorial decision.
+
+There is deliberately **no approve endpoint** — approving is
+`POST /v1/governance/reviews/{id}/decision` like every other governed object.
+
+### 2. One wrong row no longer forces rejecting a whole workbook
+
+Previously a reviewer approved or rejected a batch whole, so a typo in a 400-row
+workbook meant rejecting the file and re-uploading. `set_change_exclusion` +
+`POST /v1/model-imports/{id}/changes/exclusion` add the release valve, and it
+sits on the **uploader's** side of the review boundary: only a `DRAFT` batch can
+be trimmed, so what a reviewer is asked to decide is fixed the moment it is
+submitted. Excluding is not deciding — an `EXCLUDED` row is never applied and
+never counted as skipped; it was withdrawn before anyone was asked to look at it.
+`REJECTED` diff findings cannot be toggled into changes.
+
+The UI keeps excluded rows visible and dimmed rather than hiding them: hiding
+one would make the decision invisible the moment it was made.
+
+### 3. Cross-source relationships are reviewed where they are discovered
+
+Discovery already lived on `CrossSourceScreen`; the results were reviewed on the
+per-datasource Relationships screen — the one scope that *cannot* express "this
+column points into another system", so the rows a steward most needed were the
+ones its filter hid. Both queues now live on the cross-source screen, sharing a
+domain, a status filter and a pending count. Same-source candidates deliberately
+stay on Relationships; duplicating them would make this a second,
+differently-filtered copy of that screen. Relationships render **directionally**
+(`→`), unlike the symmetric `≡` of a same-object pair — a foreign-key-like
+relationship points one way, and rendering it symmetrically would misstate which
+side is the reference.
+
+### Verification
+
+- Backend: `tests/test_description_withdrawal.py` (15) and 6 added to
+  `tests/test_model_import.py` (27 total). `mypy` clean on the touched modules,
+  one Alembic head.
+- `ui-next`: **358 tests** across 54 files, up from 343 — 5 added to
+  `ColumnPanel.test.tsx`, 5 to `WorkbookImport.test.tsx`, 5 to
+  `CrossSourceScreen.test.tsx`. `tsc --noEmit` clean, production build clean.
+- Browser-verified against fixtures: the column pane renders all four states
+  (described + Withdraw, source-comment-only with no Withdraw offered, retired,
+  and undescribed), and the cross-source screen renders both queues with the
+  directional/symmetric distinction and a combined pending count. No console
+  errors.
+
+### Known limitations
+
+- **The withdraw reason is collected with `window.prompt`.** Functional and
+  honest, but not the right affordance for a governed action; it wants a proper
+  dialog with the text being retired shown alongside.
+- **A withdrawn description cannot be reinstated** except by publishing it again
+  as a new version, which is a different provenance. There is no "undo the
+  withdrawal".
+- **Table-level withdrawal has no UI** — the API and service handle `TABLE`
+  subjects, and `test_a_table_readme_can_be_withdrawn_too` covers it, but only
+  columns have a button.
+- **Workbook exclusion is not browser-verified**, because uploading requires a
+  live API and the fixture path refuses by design. Covered by 5 component tests
+  against mocked calls.
+- **The full `ui-next` suite showed 4 timeout flakes under load in one run**
+  (`App.test.tsx`, `LineageRefusalScreen.test.tsx` — neither touched by this
+  work) and passed clean on re-run. The 5s default timeout is tight for those
+  two files; worth raising rather than re-running.

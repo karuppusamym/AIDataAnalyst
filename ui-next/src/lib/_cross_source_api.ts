@@ -489,3 +489,120 @@ export async function decideCrossSourceResolutionCandidate(
     signal,
   );
 }
+
+/* ---------------------------------------------------------------------------
+   Cross-source relationship candidates.
+
+   Discovery for these already lives on the cross-source screen, but their
+   review did not: the results landed on the per-datasource Relationships
+   screen, which is precisely the scope that cannot express "this column points
+   into another system". That left a loop open -- propose here, decide
+   somewhere else, under a filter that hides the interesting rows. These close
+   it.
+--------------------------------------------------------------------------- */
+
+/** `src/aida/schemas.py::RelationshipCandidateRead`. */
+export interface RelationshipCandidateRead {
+  id: string;
+  organization_id: string;
+  datasource_id: string;
+  target_datasource_id: string;
+  source_table_id: string;
+  source_column_id: string;
+  target_table_id: string;
+  target_column_id: string;
+  detection_rule: string;
+  confidence: number;
+  evidence: Record<string, unknown>;
+  status: string;
+  created_by: string;
+  reviewed_by: string | null;
+  review_reason: string | null;
+  reviewed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const FIXTURE_RELATIONSHIP_CANDIDATES: RelationshipCandidateRead[] = [
+  {
+    id: "xrc_1",
+    organization_id: "00000000-0000-0000-0000-000000000001",
+    datasource_id: "ds_oracle_core",
+    target_datasource_id: "ds_snowflake_prod",
+    source_table_id: "t_party",
+    source_column_id: "party_id",
+    target_table_id: "t_customer",
+    target_column_id: "customer_id",
+    detection_rule: "NAME_AND_TYPE_AND_INCLUSION",
+    confidence: 0.91,
+    evidence: { inclusion_ratio: 0.97, distinct_overlap: 41822 },
+    status: "PENDING",
+    created_by: "discovery",
+    reviewed_by: null,
+    review_reason: null,
+    reviewed_at: null,
+    created_at: "2026-09-02T08:00:00Z",
+    updated_at: "2026-09-02T08:00:00Z",
+  },
+];
+
+/** Cross-source relationship candidates across a domain's datasources.
+ *
+ *  Filtered to genuinely cross-source rows (`datasource_id !==
+ *  target_datasource_id`) client-side: the list endpoint is per datasource and
+ *  returns same-source candidates too, and those already have a home on the
+ *  Relationships screen. Showing them here as well would make this screen a
+ *  second, differently-filtered copy of that one. */
+export async function fetchCrossSourceRelationshipCandidates(
+  datasourceIds: readonly string[],
+  candidateStatus: string | null,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateRead[]> {
+  if (USE_FIXTURES) {
+    return FIXTURE_RELATIONSHIP_CANDIDATES.filter(
+      (c) =>
+        datasourceIds.includes(c.datasource_id) &&
+        (!candidateStatus || c.status === candidateStatus),
+    );
+  }
+  const pages = await Promise.all(
+    datasourceIds.map((id) => {
+      const params = new URLSearchParams({ limit: "200" });
+      if (candidateStatus) params.set("candidate_status", candidateStatus);
+      return request<PageOf<RelationshipCandidateRead>>(
+        `/v1/datasources/${encodeURIComponent(id)}/relationship-candidates?${params}`,
+        {},
+        signal,
+      ).catch(() => emptyPage<RelationshipCandidateRead>());
+    }),
+  );
+  const seen = new Set<string>();
+  const candidates: RelationshipCandidateRead[] = [];
+  for (const page of pages) {
+    for (const candidate of page.items ?? []) {
+      if (candidate.datasource_id === candidate.target_datasource_id) continue;
+      if (seen.has(candidate.id)) continue;
+      seen.add(candidate.id);
+      candidates.push(candidate);
+    }
+  }
+  return candidates.sort((a, b) => b.confidence - a.confidence);
+}
+
+/** Approve or reject one relationship candidate.
+ *
+ *  Same endpoint the Relationships screen uses, and the same maker-checker
+ *  rule: the server refuses a principal deciding a candidate they created. */
+export async function decideRelationshipCandidate(
+  candidateId: string,
+  decision: "APPROVE" | "REJECT",
+  reason: string | null,
+  signal?: AbortSignal,
+): Promise<RelationshipCandidateRead> {
+  if (USE_FIXTURES) throw new Error(WRITE_NOTICE);
+  return request<RelationshipCandidateRead>(
+    `/v1/relationship-candidates/${encodeURIComponent(candidateId)}/decision`,
+    { method: "POST", body: JSON.stringify({ decision, reason }) },
+    signal,
+  );
+}

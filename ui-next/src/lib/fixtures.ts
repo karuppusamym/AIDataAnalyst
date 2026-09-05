@@ -14,6 +14,7 @@ import type {
   ConsumerFooterRead,
   DataQualityIncidentRead,
   DataQualityIncidentTransition,
+  DataQualityIncidentTriageRead,
   DataQualitySummaryRead,
   DataSourceRead,
   EvidenceItemRead,
@@ -1959,6 +1960,66 @@ export async function makeFixtureTransitionQualityIncident(
   }
   incident.updated_at = now;
   return { ...incident };
+}
+
+/** `GET .../quality-incidents/{id}/triage` -- a lightweight client-side
+ *  mirror of `dq_triage_agent.suggest_triage`'s branching (not a port of
+ *  its full logic; fixture mode only needs a plausible, varied hint per
+ *  anomaly type/source, not byte-identical text). */
+export async function makeFixtureQualityIncidentTriage(
+  incidentId: string,
+): Promise<DataQualityIncidentTriageRead> {
+  await wait(70);
+  const incident = QUALITY_FIXTURE_INCIDENTS.find((i) => i.id === incidentId);
+  if (!incident) throw new Error(`fixture: no such quality incident ${incidentId}`);
+  if (incident.source === "EXTERNAL") {
+    return {
+      incident_id: incidentId,
+      anomaly_type: incident.anomaly_type,
+      likely_causes: [
+        "This incident was reconciled from a third-party detector, not computed by Atlas.",
+      ],
+      recommended_next_steps: ["Open this incident in the originating vendor's console."],
+      basis: [],
+    };
+  }
+  const byType: Record<string, { causes: string[]; steps: string[]; basis: string[] }> = {
+    VOLUME_CHANGE: {
+      causes: ["Row count changed materially versus the rolling baseline for this table."],
+      steps: ["Check the most recent ingestion batch or analysis run for a failure or re-run."],
+      basis: ["volume_change_percent"],
+    },
+    NULL_RATE_SHIFT: {
+      causes: ["At least one column's null rate shifted versus its baseline."],
+      steps: ["Check whether the source added a new optional field or an upstream join started dropping matches."],
+      basis: ["max_null_rate_change_percent", "affected_column_ids"],
+    },
+    SCHEMA_CHANGE: {
+      causes: ["The table's column set, types, or ordering changed versus the last scan."],
+      steps: ["Coordinate with the source system owner before this table is queried again."],
+      basis: ["schema_fingerprint_changed"],
+    },
+  };
+  const match = byType[incident.anomaly_type] ?? {
+    causes: [`No structured triage rule is registered for anomaly type "${incident.anomaly_type}".`],
+    steps: ["Review the incident's own evidence and summary directly."],
+    basis: [],
+  };
+  const causes = [...match.causes];
+  const basis = [...match.basis];
+  if (incident.occurrence_count > 1) {
+    causes.push(
+      `This is a recurring incident -- it has fired ${incident.occurrence_count} times.`,
+    );
+    basis.push("occurrence_count");
+  }
+  return {
+    incident_id: incidentId,
+    anomaly_type: incident.anomaly_type,
+    likely_causes: causes,
+    recommended_next_steps: match.steps,
+    basis,
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -5256,11 +5317,12 @@ import type {
   CatalogBulkOwnRequest,
   CatalogBulkSelectionFilter,
   CatalogBulkTagRequest,
+  DocumentationWorklistEntryRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
 } from "./types";
-import type { UnownedAssetBacklogQuery } from "./api";
+import type { DocumentationWorklistQuery, UnownedAssetBacklogQuery } from "./api";
 
 function fixtureBulkMatchedSubjectIds(
   filter: CatalogBulkSelectionFilter | null | undefined,
@@ -5521,6 +5583,69 @@ export async function makeFixtureRouteUnownedAssetBacklog(
     escalated,
     escalated_tier2: escalatedTier2,
     resolved_count: resolvedCount,
+  };
+}
+
+/** `GET .../stewardship/documentation-worklist` (AT-5/SW-1) -- ranked by
+ *  `score = usage x impact x deficit`, descending, matching
+ *  `stewardship_worklist.compute_worklist`'s own deterministic tie-break
+ *  (score desc, then id) so the fixture ordering matches what a real
+ *  organization would actually see. */
+export async function makeFixtureDocumentationWorklist(
+  organizationId: string,
+  query: DocumentationWorklistQuery,
+): Promise<PageOf<DocumentationWorklistEntryRead>> {
+  await wait(110);
+  void organizationId;
+  const all: DocumentationWorklistEntryRead[] = [
+    {
+      table_id: "wl_1", table_name: "customer_master", schema_name: "raw_sales", datasource_name: "snowflake_prod",
+      rank: 1, query_execution_count: 812, consumption_read_count: 340, query_volume: 1152,
+      last_queried_at: new Date(Date.now() - 2 * 3_600_000).toISOString(), last_consumed_at: new Date(Date.now() - 5 * 3_600_000).toISOString(),
+      description_is_proposed: false, score: 0.612, usage: 1.0, impact: 0.85, deficit: 0.72,
+      downstream_count: 17, missing: ["description", "certification", "quality_policy"],
+    },
+    {
+      table_id: "wl_2", table_name: "transaction_fact", schema_name: "mart", datasource_name: "snowflake_prod",
+      rank: 2, query_execution_count: 640, consumption_read_count: 210, query_volume: 850,
+      last_queried_at: new Date(Date.now() - 1 * 3_600_000).toISOString(), last_consumed_at: null,
+      description_is_proposed: true, score: 0.401, usage: 0.74, impact: 0.6, deficit: 0.6,
+      downstream_count: 9, missing: ["owner", "certification", "quality_policy"],
+    },
+    {
+      table_id: "wl_3", table_name: "account_dim", schema_name: "raw_sales", datasource_name: "snowflake_prod",
+      rank: 3, query_execution_count: 305, consumption_read_count: 120, query_volume: 425,
+      last_queried_at: new Date(Date.now() - 8 * 3_600_000).toISOString(), last_consumed_at: new Date(Date.now() - 20 * 3_600_000).toISOString(),
+      description_is_proposed: false, score: 0.213, usage: 0.37, impact: 0.85, deficit: 0.4,
+      downstream_count: 14, missing: ["owner", "quality_policy"],
+    },
+    {
+      table_id: "wl_4", table_name: "exposure_snapshot", schema_name: "risk", datasource_name: "oracle_core",
+      rank: 4, query_execution_count: 190, consumption_read_count: 40, query_volume: 230,
+      last_queried_at: new Date(Date.now() - 30 * 3_600_000).toISOString(), last_consumed_at: null,
+      description_is_proposed: false, score: 0.132, usage: 0.2, impact: 0.55, deficit: 0.8,
+      downstream_count: 3, missing: ["description", "owner", "certification", "glossary_term"],
+    },
+    {
+      table_id: "wl_5", table_name: "orders_stg", schema_name: "raw_retail", datasource_name: "postgres_events",
+      rank: 5, query_execution_count: 42, consumption_read_count: 8, query_volume: 50,
+      last_queried_at: new Date(Date.now() - 72 * 3_600_000).toISOString(), last_consumed_at: null,
+      description_is_proposed: false, score: 0.031, usage: 0.04, impact: 0.25, deficit: 0.8,
+      downstream_count: 0, missing: ["description", "owner", "certification", "glossary_term"],
+    },
+  ];
+  const ranking = query.ranking ?? "priority";
+  const sorted = [...all].sort((a, b) =>
+    ranking === "query_volume" ? b.query_volume - a.query_volume : b.score - a.score,
+  );
+  const items = query.includeZeroVolume ? sorted : sorted.filter((item) => item.query_volume > 0);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 100;
+  return {
+    items: items.slice(offset, offset + limit).map((item, index) => ({ ...item, rank: offset + index + 1 })),
+    limit,
+    offset,
+    total: items.length,
   };
 }
 
@@ -6669,6 +6794,122 @@ export async function makeFixtureRunPlaybook(playbookId: string): Promise<Playbo
     bulk_stewardship_operation_id: null,
     governance_review_id: outcome === "GOVERNANCE_REVIEW_QUEUED" ? `99999999-0000-0000-0000-${Date.now().toString(16).padStart(12, "0")}` : null,
   };
+}
+
+/* ---------------------------------------------------------------------------
+   Agent contract requests -- the reviewed, eval-gated path alongside the
+   direct-write contract PUT. In-memory, keyed by org, mirroring
+   `FIXTURE_PLAYBOOKS` above so submit/list are real round trips within one
+   fixture session.
+--------------------------------------------------------------------------- */
+
+import type { AgentContractRequestCreate, AgentContractRequestRead } from "./types";
+
+const FIXTURE_AGENT_CONTRACT_REQUESTS: Record<string, AgentContractRequestRead[]> = {};
+
+function seedFixtureAgentContractRequests(organizationId: string): AgentContractRequestRead[] {
+  if (FIXTURE_AGENT_CONTRACT_REQUESTS[organizationId]) {
+    return FIXTURE_AGENT_CONTRACT_REQUESTS[organizationId]!;
+  }
+  const now = new Date();
+  const iso = (daysAgo: number) => new Date(now.getTime() - daysAgo * 86_400_000).toISOString();
+  const seeded: AgentContractRequestRead[] = [
+    {
+      id: "acr-0001-0000-0000-000000000001",
+      organization_id: organizationId,
+      ai_asset_version_id: "aiv_revenue_analyst",
+      requested_by: "dev@tenant.example",
+      definition: {
+        agent_principal_id: "agent-revenue-analyst",
+        capability_envelope: { tool_slugs: ["revenue-by-lob"], context_product_ids: [], write_lanes: [] },
+        autonomy_tier: "T1",
+        supervisor_persona: "ANALYST",
+        kill_scope: "AGENT",
+        sampling_rate: 0.2,
+      },
+      status: "ACTIVATED",
+      governance_review_id: "rev-0001-0000-0000-000000000001",
+      eval_gate_verdict: "PASS",
+      activated_at: iso(2),
+      created_at: iso(5),
+      updated_at: iso(2),
+    },
+    {
+      id: "acr-0002-0000-0000-000000000002",
+      organization_id: organizationId,
+      ai_asset_version_id: "aiv_fraud_model",
+      requested_by: "dev@tenant.example",
+      definition: {
+        agent_principal_id: "agent-fraud-triage",
+        capability_envelope: { tool_slugs: ["fraud-score-lookup"], context_product_ids: [], write_lanes: [] },
+        autonomy_tier: "T1",
+        supervisor_persona: "REVIEWER",
+        kill_scope: "AGENT",
+        sampling_rate: 0.3,
+      },
+      status: "PENDING",
+      governance_review_id: "rev-0002-0000-0000-000000000002",
+      eval_gate_verdict: null,
+      activated_at: null,
+      created_at: iso(0.5),
+      updated_at: iso(0.5),
+    },
+  ];
+  FIXTURE_AGENT_CONTRACT_REQUESTS[organizationId] = seeded;
+  return seeded;
+}
+
+/** `GET /v1/organizations/{organization_id}/agent-contract-requests`. */
+export async function makeFixtureAgentContractRequests(
+  organizationId: string,
+  query: { status?: string; aiAssetVersionId?: string; limit?: number; offset?: number } = {},
+): Promise<PageOf<AgentContractRequestRead>> {
+  await wait(80);
+  let all = seedFixtureAgentContractRequests(organizationId);
+  if (query.status) all = all.filter((r) => r.status === query.status);
+  if (query.aiAssetVersionId) all = all.filter((r) => r.ai_asset_version_id === query.aiAssetVersionId);
+  all = [...all].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 50;
+  return { items: all.slice(offset, offset + limit), limit, offset, total: all.length };
+}
+
+/** `POST /v1/organizations/{organization_id}/agent-contract-requests` --
+ *  always lands `PENDING`, matching the real endpoint: submission opens a
+ *  `GovernanceReview` rather than activating anything. */
+export async function makeFixtureSubmitAgentContractRequest(
+  organizationId: string,
+  body: AgentContractRequestCreate,
+): Promise<AgentContractRequestRead> {
+  await wait(150);
+  const items = seedFixtureAgentContractRequests(organizationId);
+  const now = new Date().toISOString();
+  const request: AgentContractRequestRead = {
+    id: `acr-${Date.now().toString(16).padStart(12, "0")}`,
+    organization_id: organizationId,
+    ai_asset_version_id: body.ai_asset_version_id,
+    requested_by: "local-ui-admin",
+    definition: {
+      agent_principal_id: body.agent_principal_id,
+      capability_envelope: body.capability_envelope ?? { tool_slugs: [], context_product_ids: [], write_lanes: [] },
+      autonomy_tier: body.autonomy_tier ?? "T0",
+      supervisor_persona: body.supervisor_persona,
+      kill_scope: body.kill_scope ?? "AGENT",
+      sampling_rate: body.sampling_rate ?? 0.1,
+      daily_token_cap: body.daily_token_cap ?? null,
+      per_run_token_cap: body.per_run_token_cap ?? null,
+      wall_clock_seconds_cap: body.wall_clock_seconds_cap ?? null,
+      eval_gate_threshold: body.eval_gate_threshold ?? null,
+    },
+    status: "PENDING",
+    governance_review_id: `rev-${Date.now().toString(16).padStart(12, "0")}`,
+    eval_gate_verdict: null,
+    activated_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+  items.unshift(request);
+  return request;
 }
 
 /* ---------------------------------------------------------------------------

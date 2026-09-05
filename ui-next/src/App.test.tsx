@@ -29,6 +29,21 @@ beforeEach(() => {
 });
 
 describe("App shell persona gating", () => {
+  it("keeps the sidebar compact and reveals each workbench on demand", async () => {
+    history.replaceState(null, "", "/#/catalog");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    expect(nav.getByRole("button", { name: "Analyst" })).toHaveAttribute("aria-expanded", "true");
+    expect(nav.queryByRole("button", { name: /Operations/ })).not.toBeInTheDocument();
+    fireEvent.click(nav.getByRole("button", { name: "Operator" }));
+    expect(nav.queryByRole("button", { name: /Catalog/ })).not.toBeInTheDocument();
+    fireEvent.click(nav.getByRole("button", { name: /Operations/ }));
+    expect(location.hash).toBe("#/operations");
+    expect(nav.getByRole("button", { name: "Operator" })).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("removes the persona switcher once /v1/me reports the OIDC identity provider", async () => {
     fetchMe.mockResolvedValue({
       principal_id: "bank-user-123",

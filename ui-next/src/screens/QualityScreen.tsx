@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { DataQualityIncidentRead, DataQualitySummaryRead } from "../lib/types";
+import type { DataQualityIncidentRead, DataQualityIncidentTriageRead, DataQualitySummaryRead } from "../lib/types";
 import {
   ApiError,
+  fetchQualityIncidentTriage,
   fetchQualityIncidents,
   fetchQualitySummary,
   transitionQualityIncident,
@@ -72,6 +73,59 @@ function humanize(s: string): string {
   return s.toLowerCase().replace(/_/g, " ");
 }
 
+function TriagePanel({ incidentId }: { incidentId: string }) {
+  const [triage, setTriage] = useState<DataQualityIncidentTriageRead | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const ac = new AbortController();
+    setLoading(true);
+    setError(null);
+    fetchQualityIncidentTriage(incidentId, ac.signal)
+      .then((result) => {
+        setTriage(result);
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if ((err as Error)?.name === "AbortError") return;
+        setError(err instanceof ApiError ? err.message : String(err));
+        setLoading(false);
+      });
+    return () => ac.abort();
+  }, [incidentId]);
+
+  if (loading) return <p className="qinc__triageload" role="status">Suggesting a root cause…</p>;
+  if (error) return <p className="qinc__triageerror" role="alert">{error}</p>;
+  if (!triage) return null;
+
+  return (
+    <div className="qinc__triage" aria-label="Suggested root cause">
+      <div className="qinc__triagesection">
+        <span className="qinc__triagelabel">Likely cause</span>
+        <ul>
+          {triage.likely_causes.map((cause) => (
+            <li key={cause}>{cause}</li>
+          ))}
+        </ul>
+      </div>
+      <div className="qinc__triagesection">
+        <span className="qinc__triagelabel">Suggested next step</span>
+        <ul>
+          {triage.recommended_next_steps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ul>
+      </div>
+      {triage.basis.length > 0 && (
+        <p className="qinc__triagebasis">
+          Based on: {triage.basis.join(", ")} — check these fields in the incident's own evidence.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function IncidentRow({
   incident,
   focused,
@@ -85,6 +139,7 @@ function IncidentRow({
   onTransition: (status: "ACKNOWLEDGED" | "RESOLVED") => void;
   transitioning: boolean;
 }) {
+  const [triageOpen, setTriageOpen] = useState(false);
   return (
     <article
       className={`qinc${focused ? " qinc--focused" : ""}`}
@@ -133,7 +188,11 @@ function IncidentRow({
             </Button>
           </>
         )}
+        <Button onClick={() => setTriageOpen((open) => !open)} title="A deterministic root-cause hint, computed on demand — never stored">
+          {triageOpen ? "Hide suggested cause" : "Suggest root cause"}
+        </Button>
       </div>
+      {triageOpen && <TriagePanel incidentId={incident.id} />}
     </article>
   );
 }

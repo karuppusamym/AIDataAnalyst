@@ -24,8 +24,8 @@ import {
    five non-governed parser-produced edge tables (view / procedure /
    dbt-column / OpenLineage-table / OpenLineage-column). Approve / Reject
    post to the same maker-checker endpoint the RelationshipCandidate
-   review flow uses; bulk-decide is wired but the toolbar exposes only the
-   single-item path in this first cut. Filter by edge_type + confidence.
+   review flow uses. Single and bulk decisions require a reason; the queue
+   supports pagination and filtering by edge type and confidence.
 --------------------------------------------------------------------------- */
 
 const EDGE_TYPES: ParsedLineageEdgeType[] = [
@@ -58,6 +58,9 @@ function confidenceFloat(raw: string | number | null): number | null {
 export function ParsedLineageReviewScreen() {
   const [items, setItems] = useState<ParsedLineageEdgeReviewQueueItemRead[]>([]);
   const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [edgeType, setEdgeType] = useState<ParsedLineageEdgeType | "">("");
@@ -76,11 +79,12 @@ export function ParsedLineageReviewScreen() {
             edgeType: edgeType || null,
             minConfidence: parsed != null && !Number.isNaN(parsed) ? parsed : null,
             limit: 100,
-            offset: 0,
+            offset,
           },
           signal,
         );
         setItems(result.items);
+        setSelected(new Set());
         setTotal(result.total);
       } catch (err) {
         if ((err as { name?: string })?.name === "AbortError") return;
@@ -89,7 +93,7 @@ export function ParsedLineageReviewScreen() {
         setLoading(false);
       }
     },
-    [edgeType, minConfidence],
+    [edgeType, minConfidence, offset],
   );
 
   useEffect(() => {
@@ -103,16 +107,13 @@ export function ParsedLineageReviewScreen() {
       item: ParsedLineageEdgeReviewQueueItemRead,
       decision: ParsedLineageEdgeDecision,
     ) => {
-      const reason = window.prompt(
-        `Reason for ${decision.toLowerCase()} on ${item.edge_type} edge?`,
-      );
-      if (!reason) return;
+      if (!reason.trim()) return;
       setInflight(item.edge_id);
       try {
         await decideParsedLineageEdge(item.edge_id, {
           edge_type: item.edge_type,
           decision,
-          reason,
+          reason: reason.trim(),
         });
         setAckMessage(
           `${item.edge_type} edge ${decision === "APPROVED" ? "approved" : "rejected"}.`,
@@ -124,8 +125,25 @@ export function ParsedLineageReviewScreen() {
         setInflight(null);
       }
     },
-    [load],
+    [load, reason],
   );
+
+  const bulkDecide = async (decision: ParsedLineageEdgeDecision) => {
+    if (!reason.trim() || !selected.size) return;
+    setInflight("bulk");
+    setError(null);
+    try {
+      const result = await bulkDecideParsedLineageEdges({
+        items: items.filter(item => selected.has(`${item.edge_type}:${item.edge_id}`))
+          .map(({edge_type, edge_id}) => ({edge_type, edge_id})),
+        decision, reason: reason.trim(),
+      });
+      setAckMessage(`${result.succeeded_count} succeeded; ${result.failed_count} failed. ${result.results.filter(row => row.status === "FAILED").map(row => `${row.edge_type} ${row.edge_id}: ${row.reason ?? "Decision refused"}`).join("; ")}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Bulk decision failed");
+    } finally { setInflight(null); }
+  };
 
   const summary = useMemo(
     () => `${items.length} shown of ${total} total PROPOSED edges`,
@@ -133,7 +151,7 @@ export function ParsedLineageReviewScreen() {
   );
 
   return (
-    <section aria-labelledby="parsed-lineage-review-title" style={{ padding: "1rem" }}>
+    <section aria-labelledby="parsed-lineage-review-title" className="parsed-review">
       <header style={{ marginBottom: "1rem" }}>
         <h1 id="parsed-lineage-review-title">Parsed lineage review</h1>
         <p style={{ maxWidth: "60ch" }}>
@@ -145,12 +163,12 @@ export function ParsedLineageReviewScreen() {
       </header>
 
       <div
-        style={{ display: "flex", gap: "0.5rem", alignItems: "end", marginBottom: "0.75rem" }}
+        style={{ display: "flex", gap: "0.5rem", alignItems: "end", flexWrap: "wrap", marginBottom: "0.75rem" }}
       >
         <Field label="Edge type">
           <select
             value={edgeType}
-            onChange={(event) => setEdgeType(event.target.value as ParsedLineageEdgeType | "")}
+            onChange={(event) => { setOffset(0); setEdgeType(event.target.value as ParsedLineageEdgeType | ""); }}
           >
             <option value="">All</option>
             {EDGE_TYPES.map((type) => (
@@ -167,7 +185,7 @@ export function ParsedLineageReviewScreen() {
             max={1}
             step={0.05}
             value={minConfidence}
-            onChange={(event) => setMinConfidence(event.target.value)}
+            onChange={(event) => { setOffset(0); setMinConfidence(event.target.value); }}
             placeholder="0.0 - 1.0"
           />
         </Field>
@@ -194,9 +212,16 @@ export function ParsedLineageReviewScreen() {
       {items.length > 0 ? (
         <>
           <div style={{ margin: "0.5rem 0" }}>{summary}</div>
+          <div className="parsed-review__actions">
+            <Field label="Decision reason"><input value={reason} onChange={event => setReason(event.target.value)} placeholder="Explain the review decision" /></Field>
+            <Button disabled={!selected.size || !reason.trim() || !!inflight || loading} onClick={() => void bulkDecide("APPROVED")}>Approve selected ({selected.size})</Button>
+            <Button disabled={!selected.size || !reason.trim() || !!inflight || loading} onClick={() => void bulkDecide("REJECTED")}>Reject selected ({selected.size})</Button>
+          </div>
+          <div className="parsed-review__table" tabIndex={0} role="region" aria-label="Proposed lineage edges">
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ textAlign: "left" }}>
+                <th><input type="checkbox" aria-label="Select all on this page" checked={items.length > 0 && selected.size === items.length} onChange={event => setSelected(event.target.checked ? new Set(items.map(item => `${item.edge_type}:${item.edge_id}`)) : new Set())} /></th>
                 <th>Type</th>
                 <th>Source</th>
                 <th>Target</th>
@@ -211,7 +236,8 @@ export function ParsedLineageReviewScreen() {
               {items.map((item) => {
                 const confidenceHint = confidenceFloat(item.confidence);
                 return (
-                  <tr key={item.edge_id} style={{ borderTop: "1px solid #eee" }}>
+                  <tr key={`${item.edge_type}:${item.edge_id}`} style={{ borderTop: "1px solid #eee" }}>
+                    <td><input type="checkbox" aria-label={`Select ${item.source_label} to ${item.target_label}`} checked={selected.has(`${item.edge_type}:${item.edge_id}`)} onChange={event => setSelected(previous => { const next = new Set(previous); const key = `${item.edge_type}:${item.edge_id}`; if(event.target.checked) next.add(key); else next.delete(key); return next; })} /></td>
                     <td>
                       <Pill>{item.edge_type}</Pill>
                     </td>
@@ -247,13 +273,13 @@ export function ParsedLineageReviewScreen() {
                     <td>
                       <Button
                         onClick={() => void decide(item, "APPROVED")}
-                        disabled={inflight === item.edge_id}
+                        disabled={!!inflight || loading || !reason.trim()}
                       >
                         Approve
                       </Button>{" "}
                       <Button
                         onClick={() => void decide(item, "REJECTED")}
-                        disabled={inflight === item.edge_id}
+                        disabled={!!inflight || loading || !reason.trim()}
                       >
                         Reject
                       </Button>
@@ -263,24 +289,14 @@ export function ParsedLineageReviewScreen() {
               })}
             </tbody>
           </table>
+          </div>
         </>
       ) : null}
 
-      {/* Bulk-decide is intentionally not wired to a control here yet --
-          the helper is exported so a follow-up can add multi-select. */}
-      <div style={{ display: "none" }}>
-        <button
-          type="button"
-          onClick={() =>
-            void bulkDecideParsedLineageEdges({
-              items: [],
-              decision: "APPROVED",
-              reason: "n/a",
-            })
-          }
-        >
-          bulk placeholder
-        </button>
+      <div className="parsed-review__actions" aria-label="Queue pagination">
+        <Button disabled={loading || !!inflight || offset === 0} onClick={() => setOffset(Math.max(0, offset - 100))}>Previous page</Button>
+        <span>Page {Math.floor(offset / 100) + 1}</span>
+        <Button disabled={loading || !!inflight || offset + 100 >= total} onClick={() => setOffset(offset + 100)}>Next page</Button>
       </div>
     </section>
   );

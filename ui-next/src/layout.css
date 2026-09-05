@@ -1,0 +1,62 @@
+/* The shell owns document scrolling. Virtualized workspaces retain a bounded
+   results area, with a minimum usable height when filters or editors expand. */
+.sview > :is(.agscreen,.air,.aiinbox,.roster,.deleg,.revagent,.pbk) {
+  padding:24px; width:100%;
+}
+.sview > :is(.apscreen,.adminscreen,.aig,.cplx,.cpscreen,.xs,
+  .reliability,.stew,.tpscreen,.trscreen,.txscreen,.wsaccess,.ops,.pfa,.narrscreen) {
+  height:auto; min-height:100%; overflow:visible;
+}
+.sview > :is(.cat,.aud,.bm,.rq,.rel,.qual,.nk,.askscreen,.smscreen,.srcscreen,.csscreen,.mktscreen,.refscreen,.ult) {
+  overflow:auto;
+}
+.sview :is(.cat__main,.aud__main,.bm__main,.rq__main,.rel__main,
+  .qual__main,.nk__main,.askscreen__main,.smscreen__main,.srcscreen__main,.csscreen__main,.mktscreen__main,.refscreen__main) {
+  min-height:360px;
+}
+.sview > * > :is(header,form,details,[role="status"],[role="alert"]) { flex-shrink:0; }
+.sview :is(.tpscreen__body,.trscreen__body,.adminscreen__main) { min-width:0; }
+.sview :is(.field,input,select,textarea) { min-width:0; max-width:100%; }
+.sview :is(.workflow-author,.workflow-author__grid) { min-width:0; flex-shrink:0; }
+.sview :is(p,dd,.field__label) { overflow-wrap:anywhere; }
+.sview pre { max-width:100%; overflow:auto; }
+.sview :is(.smscreen__head,.smscreen__filters,.cpscreen__filters,.trscreen__filters,
+  .txscreen__filters,.csscreen__filters,.xs__head) { flex-wrap:wrap; }
+.sview .ult__layout { min-height:450px; grid-template-columns:minmax(0,1fr) minmax(240px,320px); }
+.sview .ult__layout--wide { grid-template-columns:minmax(0,1fr); }
+
+/* Include the 248px sidebar in the desktop breakpoint. Avoid containment on
+   the shell: existing fixed dialogs and fullscreen lineage must cover the
+   viewport. Keep virtual lists measurable after stacking. */
+@media (max-width:1148px) {
+  .sview :is(.cat__main,.aud__main,.bm__main,.rq__main,.rel__main,
+    .qual__main,.nk__main,.askscreen__main,.smscreen__main,.srcscreen__main,.csscreen__main,.mktscreen__main,.refscreen__main,
+    .tpscreen__body,.trscreen__body,.adminscreen__main) { flex-direction:column; }
+  .sview :is(.cat,.aud,.bm,.rq,.rel,.qual,.nk,.askscreen,.smscreen,.srcscreen,.csscreen,.mktscreen,.refscreen,.ult) {
+    height:auto; min-height:100%; overflow:visible;
+  }
+  .sview :is(.vlist,.ctable) { height:60vh; min-height:320px; flex:none; width:100%; }
+  .sview :is(.evp,.tpscreen__main,.tpscreen__rail,.trscreen__main,.trscreen__rail,.adminscreen__rail) {
+    width:100%; max-width:100%; flex-basis:auto; position:static;
+  }
+  .sview .evp { min-height:260px; max-height:70vh; }
+  .sview :is(.ult__layout,.air__body,.adminscreen__setupgrid,.adminscreen__row3) { grid-template-columns:minmax(0,1fr); }
+}
+@media (max-width:560px) {
+  .sview > * { padding:16px; }
+  .sview :is(.rq__tiles,.rel__tiles,.qual__tiles,.wsaccess__cols,.tpform__grid,.tpdetail__grid) { grid-template-columns:minmax(0,1fr); }
+  .sview .tpform__span2 { grid-column:auto; }
+  .sview .field { width:100%; }
+}
+
+.sview .vlist { min-height:280px; }
+.sview :is(.trregistry,.cpscreen__main) > .vlist { height:52vh; flex:none; }
+.sview .tile { min-width:0; }
+.sview .tile__n { overflow-wrap:anywhere; }
+.parsed-review { padding:24px; }
+.parsed-review__actions { display:flex; flex-wrap:wrap; align-items:end; gap:12px; margin:16px 0; }
+.parsed-review__actions .field { flex:1; min-width:min(280px,100%); }
+.parsed-review__table { overflow:auto; border:1px solid var(--line); border-radius:var(--radius); }
+.parsed-review__table table { min-width:900px; }
+.parsed-review__table :is(td,th) { padding:10px 12px; text-align:left; vertical-align:top; }
+.parsed-review__table td { max-width:260px; overflow-wrap:anywhere; }

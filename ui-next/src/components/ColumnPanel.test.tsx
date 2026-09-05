@@ -3,6 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import type { ColumnDocumentationRead } from "../lib/_column_documentation_api";
 
 const fetchColumns = vi.fn();
+const requestWithdrawal = vi.fn();
 vi.mock("../lib/_column_documentation_api", async () => {
   const actual = await vi.importActual<Record<string, unknown>>(
     "../lib/_column_documentation_api",
@@ -10,6 +11,7 @@ vi.mock("../lib/_column_documentation_api", async () => {
   return {
     ...actual,
     fetchColumnDocumentation: (...args: unknown[]) => fetchColumns(...args),
+    requestDescriptionWithdrawal: (...args: unknown[]) => requestWithdrawal(...args),
   };
 });
 
@@ -17,6 +19,7 @@ import { ColumnPanel } from "./ColumnPanel";
 
 beforeEach(() => {
   fetchColumns.mockReset();
+  requestWithdrawal.mockReset();
 });
 
 function column(overrides: Partial<ColumnDocumentationRead>): ColumnDocumentationRead {
@@ -35,6 +38,7 @@ function column(overrides: Partial<ColumnDocumentationRead>): ColumnDocumentatio
     description_approved_by: null,
     description_approved_at: null,
     source_claim_id: null,
+    withdrawn_description: null,
     ...overrides,
   };
 }
@@ -132,4 +136,94 @@ it("says the table has no columns rather than rendering an empty list", async ()
     expect(screen.getByText("This table has no active columns.")).toBeInTheDocument(),
   );
   expect(screen.getByText("none")).toBeInTheDocument();
+});
+
+
+/* ---------------------------------------------------------------------------
+   Withdrawal (2026-09-05). Publishing a description was governed from the
+   start; retiring one was not possible at all.
+--------------------------------------------------------------------------- */
+
+it("distinguishes a retired description from a column nobody has described", async () => {
+  // Materially different facts: "we looked and decided to say nothing" versus
+  // "nobody has looked". Collapsing them would lose a real editorial decision.
+  fetchColumns.mockResolvedValue([
+    column({ business_description: null, withdrawn_description: "The retired text." }),
+  ]);
+
+  render(<ColumnPanel tableId="t1" />);
+
+  await waitFor(() => expect(screen.getByText("Withdrawn description")).toBeInTheDocument());
+  expect(screen.getByText("The retired text.")).toBeInTheDocument();
+  expect(screen.getByText(/this column reads as undescribed/)).toBeInTheDocument();
+  // Not the generic empty state.
+  expect(screen.queryByText("No description.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Business description")).not.toBeInTheDocument();
+});
+
+it("offers withdrawal only where there is an approved description to retire", async () => {
+  fetchColumns.mockResolvedValue([
+    column({ column_id: "c1", name: "described", business_description: "Live." }),
+    column({ column_id: "c2", name: "bare" }),
+  ]);
+
+  render(<ColumnPanel tableId="t1" />);
+
+  await waitFor(() => expect(screen.getByText("Live.")).toBeInTheDocument());
+  expect(screen.getAllByRole("button", { name: "Withdraw" })).toHaveLength(1);
+});
+
+it("requests a withdrawal with the steward's reason and says a reviewer decides", async () => {
+  fetchColumns.mockResolvedValue([column({ business_description: "Wrong text." })]);
+  requestWithdrawal.mockResolvedValue({ id: "w1", status: "PENDING_REVIEW" });
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue("describes the wrong column");
+
+  render(<ColumnPanel tableId="t1" />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Withdraw" })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+
+  await waitFor(() =>
+    expect(requestWithdrawal).toHaveBeenCalledWith("COLUMN", "c1", "describes the wrong column"),
+  );
+  expect(
+    screen.getByText(/stays published until a reviewer approves it/),
+  ).toBeInTheDocument();
+  prompt.mockRestore();
+});
+
+it("does not request a withdrawal when the reason is cancelled or too short", async () => {
+  // The server requires a reason, and a reviewer deciding a retraction needs
+  // one -- the text itself cannot say what was wrong with it.
+  fetchColumns.mockResolvedValue([column({ business_description: "Live." })]);
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue(null);
+
+  render(<ColumnPanel tableId="t1" />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Withdraw" })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+  expect(requestWithdrawal).not.toHaveBeenCalled();
+
+  prompt.mockReturnValue("no");
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+  expect(requestWithdrawal).not.toHaveBeenCalled();
+  prompt.mockRestore();
+});
+
+it("surfaces a refused withdrawal instead of implying it worked", async () => {
+  const { ApiError } = await import("../lib/api");
+  fetchColumns.mockResolvedValue([column({ business_description: "Live." })]);
+  requestWithdrawal.mockRejectedValue(
+    new ApiError(409, "a withdrawal for this asset is already awaiting review"),
+  );
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue("a good reason");
+
+  render(<ColumnPanel tableId="t1" />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Withdraw" })).toBeInTheDocument());
+  fireEvent.click(screen.getByRole("button", { name: "Withdraw" }));
+
+  await waitFor(() =>
+    expect(
+      screen.getByText("a withdrawal for this asset is already awaiting review"),
+    ).toBeInTheDocument(),
+  );
+  prompt.mockRestore();
 });

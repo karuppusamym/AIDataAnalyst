@@ -38,16 +38,9 @@ import "./ToolPlansScreen.css";
    `plan-validate` / `plan-execute` / `plan-evidence` / `plan-cancel` button
    bindings (`ui/scripts/features/control-center.js`, end of `bindEvents`).
 
-   SCOPE CUT, deliberate: like the legacy form, "Create plan" below only ever
-   builds a *single-step* plan (one tool_id/tool_version/parameters/timeout/
-   expected_cost). `ToolPlanCreate.steps` is a real array and the backend
-   happily accepts many steps with cross-step `dependencies` -- multi-step
-   plan *authoring* (an add-step / reorder / wire-a-dependency UI) is left
-   as a future enhancement, not something forced into this first cut. Tool
-   id/version are plain text inputs rather than a picker sourced from
-   `fetchTools` -- that call is project-scoped and this screen has no
-   project selector of its own; free-typing matches what the legacy form
-   did.
+   Plans support multiple steps, published-tool selection, typed parameters,
+   dependencies, saved templates, and editable prompt recommendations.
+   Creating a draft never executes it; validation and execution are explicit.
 
    Every route above is gated by BOTH a role check AND an edition
    entitlement check for capability `"multi_step_tool_plans"`

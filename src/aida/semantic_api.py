@@ -12,6 +12,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from aida.agent_contract_request_api import definition_from_json
+from aida.agent_contracts import AgentContractValidationError, validate_contract_definition
 from aida.agent_eval_gate import (
     DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
     compute_agent_eval_gate,
@@ -41,6 +43,8 @@ from aida.metric_suggestion_service import (
 )
 from aida.model_import import apply_model_import_batch, reject_model_import_batch
 from aida.models import (
+    AgentContract,
+    AgentContractRequest,
     AiAsset,
     AiAssetVersion,
     AssetDescriptionDraft,
@@ -1874,6 +1878,92 @@ async def _apply_governance_review_decision(
             "version": ai_version.version,
             "review_id": str(review.id),
             "eval_gate_verdict": eval_gate_verdict,
+        }
+    elif review.object_type == "AGENT_CONTRACT_REQUEST":
+        request = await session.get(AgentContractRequest, UUID(review.object_id))
+        if request is None or request.organization_id != review.organization_id:
+            raise HTTPException(status_code=409, detail="review target is unavailable")
+        if request.status != "PENDING":
+            raise HTTPException(status_code=409, detail="agent contract request is no longer pending")
+        contract_eval_gate_verdict: str | None = None
+        if decision == "APPROVE":
+            # AG-10 extension: see `agent_contract_request_api`'s module
+            # docstring. Mirrors the AI_ASSET_VERSION branch above verbatim --
+            # same gate, same "raise rather than land in a half-decided
+            # state" rule, computed live so a stale pass can never carry a
+            # request through.
+            request_ai_version = await session.get(AiAssetVersion, request.ai_asset_version_id)
+            if request_ai_version is None or request_ai_version.organization_id != review.organization_id:
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            gate_result = await compute_agent_eval_gate(
+                session,
+                organization_id=review.organization_id,
+                extra_verdicts=stored_steward_verdicts(request_ai_version),
+                threshold=DEFAULT_AGENT_EVAL_GATE_THRESHOLD,
+            )
+            contract_eval_gate_verdict = gate_result.verdict
+            if gate_result.verdict != "PASS":
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "agent evaluation gate did not pass "
+                        f"({gate_result.verdict}): {gate_result.reason}"
+                    ),
+                )
+            record_agent_eval_gate_evidence(
+                session,
+                request_ai_version,
+                gate_result,
+                context=replace(context, organization_id=review.organization_id),
+                stage="PUBLISH",
+            )
+            try:
+                definition = definition_from_json(request.definition)
+                validate_contract_definition(
+                    definition,
+                    actor_principal_id=context.principal_id,
+                    human_principal_ids=frozenset({request.requested_by}),
+                )
+            except AgentContractValidationError as exc:
+                raise HTTPException(status_code=422, detail=exc.code) from exc
+            contract = await session.scalar(
+                select(AgentContract).where(
+                    AgentContract.organization_id == review.organization_id,
+                    AgentContract.ai_asset_version_id == request.ai_asset_version_id,
+                )
+            )
+            if contract is None:
+                contract = AgentContract(
+                    organization_id=review.organization_id,
+                    ai_asset_version_id=request.ai_asset_version_id,
+                    created_by=request.requested_by,
+                    kill_engaged=False,
+                )
+                session.add(contract)
+            contract.agent_principal_id = definition.agent_principal_id.strip()
+            contract.capability_envelope = definition.capability_envelope.as_json()
+            contract.autonomy_tier = definition.autonomy_tier
+            contract.supervisor_persona = definition.supervisor_persona
+            contract.kill_scope = definition.kill_scope
+            contract.sampling_rate = definition.sampling_rate
+            contract.daily_token_cap = definition.daily_token_cap
+            contract.per_run_token_cap = definition.per_run_token_cap
+            contract.wall_clock_seconds_cap = definition.wall_clock_seconds_cap
+            contract.eval_gate_threshold = definition.eval_gate_threshold
+            request.status = "ACTIVATED"
+            request.activated_at = now
+            request.eval_gate_verdict = contract_eval_gate_verdict
+            event_type = "agent_contract_request.activated.v1"
+        else:
+            request.status = "REJECTED"
+            event_type = "agent_contract_request.rejected.v1"
+        aggregate_type = "agent_contract_request"
+        aggregate_id = str(request.id)
+        payload = {
+            "agent_contract_request_id": str(request.id),
+            "ai_asset_version_id": str(request.ai_asset_version_id),
+            "review_id": str(review.id),
+            "eval_gate_verdict": contract_eval_gate_verdict,
         }
     elif review.object_type == "METADATA_ENRICHMENT_PROPOSAL":
         proposal = await session.get(MetadataEnrichmentProposal, UUID(review.object_id))

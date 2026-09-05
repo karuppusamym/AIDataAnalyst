@@ -91,8 +91,9 @@ async def request_description_withdrawal(
             raise HTTPException(status_code=404, detail="column not found")
         table = await session.get(MetadataTable, column.table_id)
         label = f"{table.name}.{column.name}" if table else column.name
-        version = await _current_column_version(session, column.id)
-        text = version.description if version else None
+        column_version = await _current_column_version(session, column.id)
+        version: ColumnDocumentationVersion | AssetDocumentationVersion | None = column_version
+        text = column_version.description if column_version else None
     else:
         table = await session.get(MetadataTable, subject_id)
         if table is None or table.organization_id != organization_id:
@@ -166,10 +167,14 @@ async def apply_description_withdrawal(
         raise HTTPException(status_code=409, detail="this withdrawal is no longer pending review")
 
     subject_id = UUID(withdrawal.subject_id)
-    if withdrawal.subject_type == "COLUMN":
-        current = await _current_column_version(session, subject_id)
-    else:
-        current = await _current_table_version(session, subject_id)
+    # One union-typed local rather than two branches: the retirement below is
+    # identical for both stores (flip `status`, stamp `updated_at`), and only
+    # the lookup differs.
+    current: ColumnDocumentationVersion | AssetDocumentationVersion | None = (
+        await _current_column_version(session, subject_id)
+        if withdrawal.subject_type == "COLUMN"
+        else await _current_table_version(session, subject_id)
+    )
 
     withdrawal.status = "APPROVED"
     withdrawal.reviewed_by = reviewer

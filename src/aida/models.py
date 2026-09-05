@@ -5517,6 +5517,72 @@ class AgentContract(Base, TimestampMixin):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
 
 
+#: Terminal/in-flight states for `AgentContractRequest.status`. `PENDING` is
+#: the only state a `GovernanceReview` decision may act on (enforced by the
+#: generic PENDING-only guard every review decision already applies);
+#: `ACTIVATED` means the eval gate passed and the contract was written;
+#: `REJECTED` means a human declined it; `EVAL_BLOCKED` is currently unused
+#: by the write path (see `agent_contract_request_api`'s module docstring for
+#: why a failed eval gate raises rather than lands here) but is kept in the
+#: allowlist so a future row can distinguish "declined" from "not yet
+#: eval-ready" without a migration.
+AGENT_CONTRACT_REQUEST_STATUSES = ("PENDING", "ACTIVATED", "REJECTED", "EVAL_BLOCKED")
+
+
+class AgentContractRequest(Base, TimestampMixin):
+    """AG-10 self-service extension: a *proposed* agent contract, submitted by
+    a trusted-but-not-unilateral principal (an `AgentDeveloper`, typically —
+    see `agent_contract_request_api.AGENT_CONTRACT_REQUEST_SUBMITTERS`) and
+    activated only after both a human governance decision (maker != checker,
+    the existing `GovernanceReview` queue every other proposal in this
+    codebase already uses) AND a passing AT-8/N17 evaluation gate
+    (`aida.agent_eval_gate.compute_agent_eval_gate`) at decision time.
+
+    This does not replace `AgentContract`'s existing direct-write path
+    (`PUT .../agents/{version}/contract`, still available to
+    `PlatformAdmin`/`AgentDeveloper`/`ModelRiskManager` for corrections) — it
+    adds a *reviewed, eval-gated* path alongside it, which is what makes a
+    contract change from an external or newly-onboarded agent developer
+    something the platform actually checked rather than something it merely
+    accepted.
+
+    `definition` stores exactly the fields `agent_contracts.
+    AgentContractDefinition` needs to reconstruct itself
+    (`capability_envelope`/`autonomy_tier`/`supervisor_persona`/`kill_scope`/
+    `sampling_rate`/the three caps/`eval_gate_threshold`) as one JSON blob,
+    the same "one proposal, one payload" shape every other reviewed proposal
+    in this codebase stores next to its own `GovernanceReview` row (there is
+    no shared payload column on `GovernanceReview` itself — see that model's
+    own fields).
+    """
+
+    __tablename__ = "agent_contract_request"
+    __table_args__ = (
+        Index("ix_agent_contract_request_org_status", "organization_id", "status"),
+        Index("ix_agent_contract_request_version", "ai_asset_version_id"),
+        CheckConstraint(
+            "status IN ('PENDING', 'ACTIVATED', 'REJECTED', 'EVAL_BLOCKED')",
+            name="ck_agent_contract_request_status",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    organization_id: Mapped[UUID] = mapped_column(
+        ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    ai_asset_version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("ai_asset_version.id", ondelete="CASCADE"), nullable=False
+    )
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING", nullable=False)
+    governance_review_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("governance_review.id", ondelete="SET NULL")
+    )
+    eval_gate_verdict: Mapped[str | None] = mapped_column(String(20))
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class AgentTask(Base, TimestampMixin):
     """One unit of agent work (AG-10): intent, value-free inputs fingerprint,
     the proposal it produced (if any), its status and the sampled-audit

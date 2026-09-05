@@ -13,6 +13,7 @@ import type {
   ConsumerFooterRead,
   DataQualityIncidentRead,
   DataQualityIncidentTransition,
+  DataQualityIncidentTriageRead,
   DataQualitySummaryRead,
   DataSourceRead,
   DisagreementReportRead,
@@ -117,6 +118,7 @@ import {
   makeFixtureSubmitStudioChangeSet,
   makeFixtureTableBusinessAnnotation,
   makeFixtureTransitionQualityIncident,
+  makeFixtureQualityIncidentTriage,
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
@@ -1113,6 +1115,19 @@ export async function transitionQualityIncident(
     signal,
   );
 }
+
+/** `GET /v1/quality-incidents/{id}/triage` (`quality_api.py::
+ *  get_quality_incident_triage`, `dq_triage_agent.suggest_triage`) -- a
+ *  deterministic root-cause hint for one incident. Read-only, computed
+ *  fresh every call, nothing persisted. */
+export async function fetchQualityIncidentTriage(
+  incidentId: string,
+  signal?: AbortSignal,
+): Promise<DataQualityIncidentTriageRead> {
+  if (USE_FIXTURES) return makeFixtureQualityIncidentTriage(incidentId);
+  return get<DataQualityIncidentTriageRead>(`/v1/quality-incidents/${incidentId}/triage`, signal);
+}
+
 /* ---------------------------------------------------------------------------
    UX-16: Business meaning — datasource-scoped browse of approved business
    annotations, plus an org-wide taxonomy view (business-map).
@@ -2569,6 +2584,64 @@ export async function runAgentEvaluation(
 }
 
 /* ---------------------------------------------------------------------------
+   Agent contract requests -- the reviewed, eval-gated path alongside the
+   direct-write `PUT .../agents/{version}/contract`. A `CONTRACT_AUTHORS`
+   principal submits a requested `AgentContractDefinition`; a different
+   principal decides it through the ordinary `GovernanceReview` queue
+   (`object_type=AGENT_CONTRACT_REQUEST`); on APPROVE the AT-8/N17 eval gate
+   is checked live before the contract is actually written. See
+   `agent_contract_request_api.py`'s module docstring for the full flow and
+   its honestly-scoped limitation (reuses `CONTRACT_AUTHORS`, does not invent
+   a narrower "external agent" role).
+--------------------------------------------------------------------------- */
+
+import { makeFixtureAgentContractRequests, makeFixtureSubmitAgentContractRequest } from "./fixtures";
+import type { AgentContractRequestCreate, AgentContractRequestRead } from "./types";
+
+export interface AgentContractRequestQuery {
+  status?: "PENDING" | "ACTIVATED" | "REJECTED" | "EVAL_BLOCKED";
+  aiAssetVersionId?: string;
+  limit?: number;
+  offset?: number;
+}
+
+/** `GET /v1/organizations/{organization_id}/agent-contract-requests`
+ *  (`list_agent_contract_requests`) -- newest submission first. */
+export async function fetchAgentContractRequests(
+  organizationId: string,
+  query: AgentContractRequestQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AgentContractRequestRead>> {
+  if (USE_FIXTURES) return makeFixtureAgentContractRequests(organizationId, query);
+  const params = new URLSearchParams();
+  if (query.status) params.set("status", query.status);
+  if (query.aiAssetVersionId) params.set("ai_asset_version_id", query.aiAssetVersionId);
+  params.set("limit", String(query.limit ?? 50));
+  params.set("offset", String(query.offset ?? 0));
+  return get<PageOf<AgentContractRequestRead>>(
+    `/v1/organizations/${organizationId}/agent-contract-requests?${params}`,
+    signal,
+  );
+}
+
+/** `POST /v1/organizations/{organization_id}/agent-contract-requests`
+ *  (`submit_agent_contract_request`) -- opens a `GovernanceReview` rather
+ *  than activating the contract; returns `202 Accepted` with the new
+ *  request's `PENDING` state. */
+export async function submitAgentContractRequest(
+  organizationId: string,
+  body: AgentContractRequestCreate,
+  signal?: AbortSignal,
+): Promise<AgentContractRequestRead> {
+  if (USE_FIXTURES) return makeFixtureSubmitAgentContractRequest(organizationId, body);
+  return postJson<AgentContractRequestRead>(
+    `/v1/organizations/${organizationId}/agent-contract-requests`,
+    body,
+    signal,
+  );
+}
+
+/* ---------------------------------------------------------------------------
    Unified lineage -- nav id `unified-lineage`, `UnifiedLineageScreen`'s own
    routes. See that screen's file-top comment for the full endpoint list and
    what was deliberately left out of scope (domain scope / cross-boundary
@@ -3180,6 +3253,7 @@ import type {
   CatalogBulkOwnRequest,
   CatalogBulkTagRequest,
   CatalogBulkActionRunRead,
+  DocumentationWorklistEntryRead,
   UnownedAssetBacklogRouteRequest,
   UnownedAssetBacklogRouteResult,
   UnownedAssetEscalationRead,
@@ -3189,6 +3263,7 @@ import {
   makeFixtureBulkClassifyCatalogColumns,
   makeFixtureBulkOwnCatalogTables,
   makeFixtureBulkTagCatalogTables,
+  makeFixtureDocumentationWorklist,
   makeFixtureRouteUnownedAssetBacklog,
   makeFixtureUnownedAssetBacklog,
 } from "./fixtures";
@@ -3283,6 +3358,34 @@ export async function fetchUnownedAssetBacklog(
   params.set("offset", String(query.offset ?? 0));
   return get<PageOf<UnownedAssetEscalationRead>>(
     `/v1/organizations/${organizationId}/stewardship/unowned-backlog?${params}`,
+    signal,
+  );
+}
+
+export interface DocumentationWorklistQuery {
+  limit?: number;
+  offset?: number;
+  includeZeroVolume?: boolean;
+  ranking?: "priority" | "query_volume";
+}
+
+/** `GET /v1/organizations/{organization_id}/stewardship/documentation-worklist`
+ *  (`stewardship_api.py::list_documentation_worklist`, AT-5/SW-1) -- the
+ *  ranked "document this next" backlog: real query volume x downstream
+ *  impact x a five-field documentation deficit, not usage alone. */
+export async function fetchDocumentationWorklist(
+  organizationId: string,
+  query: DocumentationWorklistQuery = {},
+  signal?: AbortSignal,
+): Promise<PageOf<DocumentationWorklistEntryRead>> {
+  if (USE_FIXTURES) return makeFixtureDocumentationWorklist(organizationId, query);
+  const params = new URLSearchParams();
+  params.set("limit", String(query.limit ?? 100));
+  params.set("offset", String(query.offset ?? 0));
+  if (query.includeZeroVolume) params.set("include_zero_volume", "true");
+  if (query.ranking) params.set("ranking", query.ranking);
+  return get<PageOf<DocumentationWorklistEntryRead>>(
+    `/v1/organizations/${organizationId}/stewardship/documentation-worklist?${params}`,
     signal,
   );
 }

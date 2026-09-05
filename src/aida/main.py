@@ -15,6 +15,7 @@ from temporalio.client import Client
 from aida import __version__
 from aida.access_review_api import router as access_review_router
 from aida.agent_contract_api import router as agent_contract_router
+from aida.agent_contract_request_api import router as agent_contract_request_router
 from aida.agent_roster_api import router as agent_roster_router
 from aida.ai_decision_lineage_api import router as ai_decision_lineage_router
 from aida.ai_governance_api import router as ai_governance_router
@@ -312,6 +313,7 @@ app.include_router(operational_router)
 app.include_router(intelligence_router)
 app.include_router(ai_governance_router)
 app.include_router(agent_contract_router)
+app.include_router(agent_contract_request_router)
 app.include_router(retrieval_ops_router)
 app.include_router(ai_registry_router)
 app.include_router(agent_roster_router)

@@ -446,11 +446,11 @@ export function ReliabilityScreen() {
   }, [contractId, setParams]);
 
   return (
-    <div className="rel">
-      <header className="rel__head">
+    <div className="reliability">
+      <header className="reliability__head">
         <div>
-          <h1 className="rel__h1">Reliability</h1>
-          <p className="rel__lede">
+          <h1 className="reliability__h1">Reliability</h1>
+          <p className="reliability__lede">
             Error-budget posture for the SLOs governing agent and platform behavior, the
             escalation routes that page someone when they slip, the WORM archive evidence
             trail behind every audit event, and a live contract inspector for the runtime
@@ -459,7 +459,7 @@ export function ReliabilityScreen() {
         </div>
       </header>
 
-      {status ? <div className={`rel__status rel__status--${status.kind}`} role="status">{status.text}</div> : null}
+      {status ? <div className={`reliability__status reliability__status--${status.kind}`} role="status">{status.text}</div> : null}
 
       <section className="relsec" aria-label="Archive and WORM evidence posture">
         <header className="relsec__head">
@@ -469,9 +469,9 @@ export function ReliabilityScreen() {
         {archiveError ? (
           <ErrorState title="Archive status could not be loaded" detail={archiveError} onRetry={() => void load()} />
         ) : loading && !archive ? (
-          <div className="rel__skeleton" role="status" aria-live="polite">Loading archive status…</div>
+          <div className="reliability__skeleton" role="status" aria-live="polite">Loading archive status…</div>
         ) : archive ? (
-          <div className="rel__tiles">
+          <div className="reliability__tiles">
             <div className="tile">
               <div className="tile__status">
                 <StateDot tone={archiveTone(archive.status)} title={archive.status} />
@@ -494,7 +494,7 @@ export function ReliabilityScreen() {
           </div>
         ) : null}
         {archive?.latest_archive_id ? (
-          <p className="rel__archivemeta">
+          <p className="reliability__archivemeta">
             Latest archive <code>{archive.latest_archive_id}</code>
             {archive.latest_checksum ? <> · checksum <code>{archive.latest_checksum.slice(0, 16)}…</code></> : null}
           </p>
@@ -511,7 +511,7 @@ export function ReliabilityScreen() {
             {sloError ? (
               <ErrorState title="SLOs could not be loaded" detail={sloError} onRetry={() => void load()} />
             ) : loading && slos.length === 0 ? (
-              <div className="rel__skeleton" role="status" aria-live="polite">Loading SLOs…</div>
+              <div className="reliability__skeleton" role="status" aria-live="polite">Loading SLOs…</div>
             ) : slos.length === 0 ? (
               <Empty title="No SLO definitions" hint="Define one to start tracking an error budget." />
             ) : (
@@ -535,7 +535,7 @@ export function ReliabilityScreen() {
                             <StateDot tone={budgetTone(budget.status)} title={budget.status} />
                             <Pill tone={budgetTone(budget.status)}>{humanize(budget.status)}</Pill>
                             {budget.current_value !== null ? (
-                              <span className="rel__budgetval tnum">{budget.current_value.toFixed(2)}%</span>
+                              <span className="reliability__budgetval tnum">{budget.current_value.toFixed(2)}%</span>
                             ) : null}
                           </span>
                         ) : typeof budget === "string" && budget !== "loading" ? (
@@ -565,7 +565,7 @@ export function ReliabilityScreen() {
             {rulesError ? (
               <ErrorState title="Notification rules could not be loaded" detail={rulesError} onRetry={() => void load()} />
             ) : loading && rules.length === 0 ? (
-              <div className="rel__skeleton" role="status" aria-live="polite">Loading notification rules…</div>
+              <div className="reliability__skeleton" role="status" aria-live="polite">Loading notification rules…</div>
             ) : rules.length === 0 ? (
               <Empty title="No notification rules" hint="Create one to route an alert to a channel and a set of recipients." />
             ) : (
@@ -627,7 +627,7 @@ export function ReliabilityScreen() {
               {evidence.evaluation.reason ? <span className="relevidence__reason">{evidence.evaluation.reason}</span> : null}
             </div>
 
-            <div className="rel__tiles rel__tiles--sla">
+            <div className="reliability__tiles reliability__tiles--sla">
               <div className={`tile${evidence.sla.compliant ? " tile--ok" : " tile--bad"}`}>
                 <div className="tile__n tnum">{evidence.sla.compliant ? "Compliant" : "Non-compliant"}</div>
                 <div className="tile__l">SLA status (30d)</div>

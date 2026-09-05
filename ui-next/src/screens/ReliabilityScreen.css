@@ -1,13 +1,13 @@
-.rel{display:flex;flex-direction:column;min-height:0;height:100%;padding:22px 24px;gap:18px;overflow-y:auto}
-.rel__head{flex:none}
-.rel__h1{margin:0;font-size:22px;letter-spacing:-.015em}
-.rel__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:76ch}
+.reliability{display:flex;flex-direction:column;min-height:0;height:100%;padding:22px 24px;gap:18px;overflow-y:auto}
+.reliability__head{flex:none}
+.reliability__h1{margin:0;font-size:22px;letter-spacing:-.015em}
+.reliability__lede{margin:5px 0 0;color:var(--ink-2);font-size:13.5px;max-width:76ch}
 .tnum{font-variant-numeric:tabular-nums}
 
-.rel__status{flex:none;font-size:12.5px;padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--line)}
-.rel__status--info{background:var(--sunk);color:var(--ink-2)}
-.rel__status--success{background:var(--ok-soft);color:var(--ok);border-color:var(--ok)}
-.rel__status--error{background:var(--bad-soft);color:var(--bad);border-color:var(--bad)}
+.reliability__status{flex:none;font-size:12.5px;padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--line)}
+.reliability__status--info{background:var(--sunk);color:var(--ink-2)}
+.reliability__status--success{background:var(--ok-soft);color:var(--ok);border-color:var(--ok)}
+.reliability__status--error{background:var(--bad-soft);color:var(--bad);border-color:var(--bad)}
 
 .relsec{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:12px;flex:none}
 .relsec__head{display:flex;flex-direction:column;gap:2px}
@@ -18,11 +18,11 @@
 .relsec__body{display:flex;gap:16px;align-items:flex-start}
 .relsec__list{flex:1;min-width:0}
 
-.rel__skeleton{padding:20px;text-align:center;color:var(--ink-3);font-size:13px;border:1px solid var(--line);border-radius:var(--radius);background:var(--sunk)}
+.reliability__skeleton{padding:20px;text-align:center;color:var(--ink-3);font-size:13px;border:1px solid var(--line);border-radius:var(--radius);background:var(--sunk)}
 
-.rel__tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
-.rel__tiles--sla{margin-top:2px}
-@media (max-width:900px){.rel__tiles{grid-template-columns:repeat(2,1fr)}}
+.reliability__tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.reliability__tiles--sla{margin-top:2px}
+@media (max-width:900px){.reliability__tiles{grid-template-columns:repeat(2,1fr)}}
 .tile{border:1px solid var(--line);border-top-width:3px;border-radius:var(--radius);background:var(--surface);padding:13px 15px}
 .tile--ok{border-top-color:var(--ok)}
 .tile--warn{border-top-color:var(--warn)}
@@ -34,8 +34,8 @@
 .tile__l{font-size:12px;color:var(--ink-3);margin-top:3px}
 .tile__status{display:flex;align-items:center;gap:6px}
 
-.rel__archivemeta{margin:0;font-size:12px;color:var(--ink-3)}
-.rel__archivemeta code{font-family:var(--mono);background:var(--sunk);padding:1px 5px;border-radius:3px}
+.reliability__archivemeta{margin:0;font-size:12px;color:var(--ink-3)}
+.reliability__archivemeta code{font-family:var(--mono);background:var(--sunk);padding:1px 5px;border-radius:3px}
 
 .rellist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 .relrow{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--surface);padding:10px 12px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
@@ -48,7 +48,7 @@
 .relrow__act{flex:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .relrow__budget{display:flex;align-items:center;gap:6px}
 .relrow__budgeterr{font-size:11.5px;color:var(--bad)}
-.rel__budgetval{font-size:12px;color:var(--ink-2)}
+.reliability__budgetval{font-size:12px;color:var(--ink-2)}
 .relrow__evidence{margin:4px 0 0;padding:8px 10px;background:var(--sunk);border:1px solid var(--line);border-radius:var(--radius-sm);font-family:var(--mono);font-size:11px;color:var(--ink-2);overflow-x:auto;white-space:pre}
 
 .relpanel{flex:none;width:340px;border:1px solid var(--line);border-radius:var(--radius);background:var(--sunk);padding:14px;display:flex;flex-direction:column;gap:10px}

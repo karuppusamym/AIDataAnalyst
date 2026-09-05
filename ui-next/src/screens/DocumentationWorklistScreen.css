@@ -1,0 +1,46 @@
+/* Documentation worklist (AT-5 / SW-1). Token-only styling, no invented
+   variables, no hex fallbacks. */
+
+.wklist { display: flex; flex-direction: column; gap: 14px; max-width: 900px; margin: 0 auto; padding-bottom: 32px; }
+
+.wklist__head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.wklist__head h1 { margin: 0; font-size: 21px; letter-spacing: -0.015em; }
+.wklist__sub { margin: 4px 0 0; color: var(--ink-3); font-size: 12.5px; max-width: 62ch; }
+
+.wklist__controls { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+.wklist__checkbox { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+
+.wklist__count { margin: 0; color: var(--ink-3); font-size: 12px; }
+.wklist__loading { margin: 0; padding: 24px; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+
+.wklist__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.wklist__row {
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface);
+  box-shadow: var(--shadow-1); padding: 12px 16px; display: flex; flex-direction: column; gap: 8px;
+}
+
+.wklist__rowhead { display: flex; align-items: center; gap: 12px; }
+.wklist__rank { font-family: var(--mono); font-size: 11px; color: var(--ink-3); min-width: 2em; }
+.wklist__name { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
+.wklist__name strong { font-size: 13.5px; }
+.wklist__score {
+  font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.wklist__factors { display: flex; gap: 18px; flex-wrap: wrap; }
+.wklist__factor { display: inline-flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--ink-3); }
+.wklist__factorlabel { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.04em; width: 3.6em; }
+.wklist__factortrack { display: block; width: 4.5rem; height: 5px; border-radius: 999px; background: var(--sunk); overflow: hidden; }
+.wklist__factorfill { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-hover)); }
+.wklist__factorvalue { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.wklist__meta { display: flex; gap: 12px; flex-wrap: wrap; color: var(--ink-3); font-size: 11.5px; align-items: center; }
+.wklist__muted { color: var(--ink-3); font-size: 11px; }
+
+.wklist__missing { display: flex; gap: 6px; flex-wrap: wrap; }
+
+@media (max-width: 620px) {
+  .wklist__head { flex-direction: column; align-items: flex-start; }
+}

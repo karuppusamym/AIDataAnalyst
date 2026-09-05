@@ -46,6 +46,7 @@ const PlaybooksScreen = lazy(() => import("./screens/PlaybooksScreen").then((mod
 const DelegationsScreen = lazy(() => import("./screens/DelegationsScreen").then((module) => ({ default: module.DelegationsScreen })));
 const PortfolioAnalyticsScreen = lazy(() => import("./screens/PortfolioAnalyticsScreen").then((module) => ({ default: module.PortfolioAnalyticsScreen })));
 const NegativeKnowledgeScreen = lazy(() => import("./screens/NegativeKnowledgeScreen").then((module) => ({ default: module.NegativeKnowledgeScreen })));
+const DocumentationWorklistScreen = lazy(() => import("./screens/DocumentationWorklistScreen").then((module) => ({ default: module.DocumentationWorklistScreen })));
 
 /* UX-20: navigation is organised by *persona workbench*, not by feature area.
    Thirty flat items grouped by what the code does is a feature map; a person
@@ -98,6 +99,7 @@ const NAV: NavItem[] = [
   { id: "portfolio-analytics", label: "Portfolio analytics", group: "Consumer", icon: "▨", keywords: "marketplace portfolio analytics trends lifecycle usage quality data products" },
   // --- Steward: make the estate mean something ----------------------------
   { id: "stewardship", label: "Stewardship", group: "Steward", icon: "⚑", keywords: "bulk tag classify own certify unowned backlog route escalation" },
+  { id: "worklist", label: "Documentation worklist", group: "Steward", icon: "☰", keywords: "worklist priority usage impact deficit at-5 sw-1 rank document next" },
   { id: "playbooks", label: "Playbooks", group: "Steward", icon: "⚡", keywords: "playbook scheduled bulk tag classify own certify automation at-1" },
   { id: "negative-knowledge", label: "Negative knowledge", group: "Steward", icon: "⊘", keywords: "negative knowledge rejected suppressed assertions ee.3 material change" },
   { id: "meaning", label: "Business meaning", group: "Steward", icon: "Aa", keywords: "glossary terms annotations" },
@@ -194,6 +196,7 @@ function Screen({
     case "agents": return <AiGovernanceScreen />;
     case "administration": return <AdministrationScreen />;
     case "stewardship": return <StewardshipScreen />;
+    case "worklist": return <DocumentationWorklistScreen />;
     case "playbooks": return <PlaybooksScreen />;
     case "negative-knowledge": return <NegativeKnowledgeScreen />;
     case "access-policies": return <AccessPolicyScreen />;
@@ -215,6 +218,8 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(() => NAV.find(item => item.id === currentFromHash())?.group ?? GROUPS[0]!);
+  useEffect(() => { setExpandedGroup(NAV.find(item => item.id === view)?.group ?? null); }, [view]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -306,13 +311,15 @@ export default function App() {
         <div className="snav__links">
           {GROUPS.map((group) => (
             <div key={group} className="snav__group">
-              <div className="snav__ghead">{group}</div>
+              <button className="snav__ghead" aria-expanded={expandedGroup === group} aria-controls={`nav-${group}`} onClick={() => setExpandedGroup(expandedGroup === group ? null : group)}><span>{group}</span><span aria-hidden="true">{expandedGroup === group ? "-" : "+"}</span></button>
+              <div id={`nav-${group}`} hidden={expandedGroup !== group}>
               {NAV.filter((item) => item.group === group).map((item) => (
                 <button key={item.id} className="snav__item" data-nav={item.id} aria-current={item.id === view ? "page" : undefined} onClick={() => navigate(item.id)}>
                   <span className="snav__icon" aria-hidden="true">{item.icon}</span>
                   <span>{item.label}</span>
                 </button>
               ))}
+              </div>
             </div>
           ))}
         </div>
@@ -362,7 +369,7 @@ export default function App() {
           </div>
         </nav>
 
-        <div className="sview">
+        <div className="sview" key={view} data-screen={view}>
           <Suspense fallback={<div className="screenloading" role="status">Loading {current.label}…</div>}>
             {view === "home" ? <HomeScreen persona={persona} onNavigate={navigate} /> : <Screen view={view} personaKey={personaKey} onNavigate={navigate} />}
           </Suspense>

@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   fetchModelImportChanges,
+  setModelImportExclusion,
   submitModelImport,
   uploadModelWorkbook,
   type ModelImportBatchRead,
@@ -31,6 +32,12 @@ import "./WorkbookImport.css";
    2. Nothing here publishes. The submit button says "for review", and the
       component never claims a change is live; the server would refuse a
       self-approval anyway, but the UI should not imply one is possible.
+   3. A wrong row can be dropped without rejecting the file. A reviewer decides
+      the batch as one thing -- that is what batching is for -- so the release
+      valve sits on the uploader's side of the review boundary: rows can be
+      excluded while the batch is DRAFT, and are frozen the moment it is
+      submitted. Excluding is not deciding; an excluded row is withdrawn before
+      anyone was asked to look at it.
 --------------------------------------------------------------------------- */
 
 const STATUS_TONE: Record<string, Tone> = {
@@ -39,10 +46,12 @@ const STATUS_TONE: Record<string, Tone> = {
   SKIPPED_STALE: "warn",
   SKIPPED_MISSING: "warn",
   REJECTED: "bad",
+  EXCLUDED: "mute",
 };
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: "ready",
+  EXCLUDED: "excluded",
   APPLIED: "applied",
   SKIPPED_STALE: "superseded",
   SKIPPED_MISSING: "gone",
@@ -53,11 +62,35 @@ function truncate(value: string, limit = 160): string {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
-function ChangeRow({ change }: { change: ModelImportChangeRead }) {
-  const failed = change.status !== "PENDING" && change.status !== "APPLIED";
+function ChangeRow({
+  change,
+  editable,
+  onToggle,
+}: {
+  change: ModelImportChangeRead;
+  /** Only a DRAFT batch can be trimmed; after submit the set is fixed. */
+  editable: boolean;
+  onToggle: (change: ModelImportChangeRead) => void;
+}) {
+  const excluded = change.status === "EXCLUDED";
+  const failed =
+    change.status !== "PENDING" && change.status !== "APPLIED" && !excluded;
   return (
-    <li className={`wbi__row${failed ? " wbi__row--bad" : ""}`}>
+    <li
+      className={`wbi__row${failed ? " wbi__row--bad" : ""}${
+        excluded ? " wbi__row--excluded" : ""
+      }`}
+    >
       <div className="wbi__rowhead">
+        {editable && (change.status === "PENDING" || excluded) ? (
+          <input
+            type="checkbox"
+            className="wbi__include"
+            checked={!excluded}
+            aria-label={`Include ${change.subject_label} ${change.field}`}
+            onChange={() => onToggle(change)}
+          />
+        ) : null}
         <span className="wbi__subject" title={change.subject_label}>
           {change.subject_label}
         </span>
@@ -94,8 +127,38 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [batch, setBatch] = useState<ModelImportBatchRead | null>(null);
   const [changes, setChanges] = useState<ModelImportChangeRead[]>([]);
-  const [busy, setBusy] = useState<"upload" | "submit" | null>(null);
+  const [busy, setBusy] = useState<"upload" | "submit" | "exclude" | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const toggleInclusion = useCallback(
+    async (change: ModelImportChangeRead) => {
+      if (!batch || batch.status !== "DRAFT") return;
+      const excluded = change.status !== "EXCLUDED";
+      setBusy("exclude");
+      setError(null);
+      // Optimistic: the row flips immediately, and the server's updated
+      // change_count replaces the batch below. A failure re-reads the truth
+      // rather than leaving the checkbox lying.
+      setChanges((prev) =>
+        prev.map((c) =>
+          c.id === change.id ? { ...c, status: excluded ? "EXCLUDED" : "PENDING" } : c,
+        ),
+      );
+      try {
+        setBatch(await setModelImportExclusion(batch.id, [change.id], excluded));
+      } catch (e) {
+        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        try {
+          setChanges(await fetchModelImportChanges(batch.id));
+        } catch {
+          /* the error above is the one worth showing */
+        }
+      } finally {
+        setBusy(null);
+      }
+    },
+    [batch],
+  );
 
   const reset = useCallback(() => {
     setBatch(null);
@@ -191,6 +254,11 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
             <Pill tone={batch.change_count > 0 ? "info" : "mute"}>
               {batch.change_count} {batch.change_count === 1 ? "change" : "changes"}
             </Pill>
+            {changes.some((c) => c.status === "EXCLUDED") ? (
+              <Pill tone="mute">
+                {changes.filter((c) => c.status === "EXCLUDED").length} excluded
+              </Pill>
+            ) : null}
             {batch.status === "APPLIED" ? (
               <Pill tone="ok">{batch.applied_count} applied</Pill>
             ) : null}
@@ -208,7 +276,12 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
           {ordered.length > 0 ? (
             <ol className="wbi__list">
               {ordered.map((change) => (
-                <ChangeRow key={change.id} change={change} />
+                <ChangeRow
+                  key={change.id}
+                  change={change}
+                  editable={batch.status === "DRAFT" && busy === null}
+                  onToggle={(c) => void toggleInclusion(c)}
+                />
               ))}
             </ol>
           ) : null}

@@ -67,6 +67,20 @@ _TIERS: Final[Mapping[str, str]] = {
     # Bulk stewardship is T1 only below the governance threshold; see
     # `risk_tier_for`, which reads the item count out of the payload.
     "BULK_STEWARDSHIP_OPERATION": TIER_T1,
+    # A workbook import is bulk language, so it takes the same shape as bulk
+    # stewardship above: T1 at a size a steward could plausibly have typed by
+    # hand, T2 beyond it. A 900-row import is not a bigger version of a small
+    # one -- nobody reads 900 rows carefully, which is exactly why an agent
+    # must not wave it through.
+    "MODEL_IMPORT_BATCH": TIER_T1,
+    # --- T2: published meaning and executable capability ------------------
+    # Retiring a description is deliberately *above* the tier of publishing
+    # one (`ASSET_DOCUMENTATION_VERSION`, T0). The asymmetry is the point: a
+    # withdrawal undoes a decision a human already made and removes grounding
+    # an agent run may have cited. Publishing bad language is visible and
+    # correctable; silently un-publishing good language is neither, and an
+    # agent should never be the one to do it unattended.
+    "DESCRIPTION_WITHDRAWAL": TIER_T2,
     # --- T2: published meaning and executable capability ------------------
     "SEMANTIC_MODEL_VERSION": TIER_T2,
     "SEMANTIC_METRIC": TIER_T2,
@@ -85,6 +99,7 @@ _TIERS: Final[Mapping[str, str]] = {
     "AI_ASSET": TIER_T3,
     "AI_ASSET_VERSION": TIER_T3,
     "AGENT_CONTRACT": TIER_T3,
+    "AGENT_CONTRACT_REQUEST": TIER_T3,
     "CROSS_BOUNDARY_GRANT": TIER_T3,
     "DATA_PRODUCT_ACCESS_REQUEST": TIER_T3,
     "ACCESS_POLICY": TIER_T3,
@@ -93,22 +108,38 @@ _TIERS: Final[Mapping[str, str]] = {
 }
 
 
+#: Object types whose tier depends on how much they change, not only on what
+#: they are. Both are bulk paths where size is the risk.
+_COUNT_ESCALATED: Final[frozenset[str]] = frozenset(
+    {"BULK_STEWARDSHIP_OPERATION", "MODEL_IMPORT_BATCH"}
+)
+
+
 def risk_tier_for(object_type: str, payload: Mapping[str, Any] | None = None) -> RiskTier:
     """The tier for one review item. Unknown types are `T3` (fail closed).
 
-    `payload` is optional evidence about the specific item. Only one rule
-    uses it today: a `BULK_STEWARDSHIP_OPERATION` is T1 at the size a
-    steward could have applied directly, and T2 above it -- the same
-    threshold `AIDA_BULK_GOVERNANCE_THRESHOLD` uses to decide whether the
-    operation needed review in the first place. An operation large enough
-    that the platform insisted on a human is not one an agent should wave
-    through.
+    `payload` is optional evidence about the specific item. Two rules use it,
+    both the same idea: a bulk change is T1 at the size a steward could have
+    applied directly, and T2 above it -- the same threshold
+    `AIDA_BULK_GOVERNANCE_THRESHOLD` uses to decide whether the operation
+    needed review in the first place. An operation large enough that the
+    platform insisted on a human is not one an agent should wave through.
+
+    `BULK_STEWARDSHIP_OPERATION` counts items; `MODEL_IMPORT_BATCH` counts the
+    changes a workbook would publish. They are the same question asked of two
+    different bulk paths, so they escalate the same way rather than growing
+    two thresholds that could drift.
     """
     tier = _TIERS.get(object_type)
     if tier is None:
         return TIER_T3
-    if object_type == "BULK_STEWARDSHIP_OPERATION" and payload is not None:
-        count = payload.get("item_count") or payload.get("applied_count") or 0
+    if object_type in _COUNT_ESCALATED and payload is not None:
+        count = (
+            payload.get("item_count")
+            or payload.get("change_count")
+            or payload.get("applied_count")
+            or 0
+        )
         threshold = payload.get("governance_threshold", 10)
         try:
             if int(count) > int(threshold):

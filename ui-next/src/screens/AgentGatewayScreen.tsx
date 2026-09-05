@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
 import type {
+  AgentContractRequestCreate,
+  AgentContractRequestRead,
   ConsumptionRecordRead,
   ContextProductRead,
   GovernedToolVersionRead,
@@ -8,11 +11,13 @@ import type {
 } from "../lib/types";
 import {
   ApiError,
+  fetchAgentContractRequests,
   fetchConsumptionRecords,
   fetchContextProducts,
   fetchMe,
   fetchOrgProjects,
   fetchTools,
+  submitAgentContractRequest,
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { navigateTo } from "../lib/navigate";
@@ -49,13 +54,21 @@ import "./AgentGatewayScreen.css";
    from read endpoints the caller is already entitled to.
 --------------------------------------------------------------------------- */
 
-type TabId = "connect" | "exposure" | "consumption";
+type TabId = "connect" | "exposure" | "register" | "consumption";
 
 const TABS: { id: TabId; label: string }[] = [
   { id: "connect", label: "Connect" },
   { id: "exposure", label: "What agents see" },
+  { id: "register", label: "Register" },
   { id: "consumption", label: "Consumption" },
 ];
+
+const AUTONOMY_TIERS = ["T0", "T1", "T2", "T3"] as const;
+const SUPERVISOR_PERSONAS = ["ANALYST", "CONSUMER", "STEWARD", "REVIEWER", "OPERATOR", "AUDITOR"] as const;
+const KILL_SCOPES = ["AGENT", "TIER", "ALL"] as const;
+
+const requestStatusTone = (status: string): Tone =>
+  status === "ACTIVATED" ? "ok" : status === "REJECTED" || status === "EVAL_BLOCKED" ? "bad" : "warn";
 
 /** Mirrors `mcp_server.py`'s module constants. Pinned here rather than
  *  fetched because `initialize` is a negotiation an agent performs, not a

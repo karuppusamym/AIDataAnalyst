@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   fetchColumnDocumentation,
+  requestDescriptionWithdrawal,
   type ColumnDocumentationRead,
 } from "../lib/_column_documentation_api";
 import { Pill } from "./primitives";
@@ -29,6 +30,13 @@ import "./ColumnPanel.css";
       been described, and a pane that quietly showed the source comment under a
       "business description" heading when the authored one was missing would be
       asserting a review that never happened.
+   3. A *retired* description is not the same absence. "We looked and decided
+      to say nothing" and "nobody has looked" are different facts about an
+      asset, so a withdrawn description renders as its own state, showing the
+      text that was retired rather than reverting to looking untouched.
+
+   Withdrawing is a request, not an act: it files a review that someone else
+   decides, and the description stays live until they do. The button says so.
 --------------------------------------------------------------------------- */
 
 function classificationTone(classification: string): "accent" | "warn" | "mute" {
@@ -37,7 +45,15 @@ function classificationTone(classification: string): "accent" | "warn" | "mute" 
   return "accent";
 }
 
-function ColumnRow({ column }: { column: ColumnDocumentationRead }) {
+function ColumnRow({
+  column,
+  onWithdraw,
+  busy,
+}: {
+  column: ColumnDocumentationRead;
+  onWithdraw: (column: ColumnDocumentationRead) => void;
+  busy: boolean;
+}) {
   const documented = column.business_description !== null;
   return (
     <li className="colp__row">
@@ -60,6 +76,25 @@ function ColumnRow({ column }: { column: ColumnDocumentationRead }) {
               ? ` · ${new Date(column.description_approved_at).toLocaleDateString()}`
               : ""}
             {column.source_claim_id ? " · from an uploaded data dictionary" : ""}
+            {" · "}
+            <button
+              className="colp__withdraw"
+              disabled={busy}
+              onClick={() => onWithdraw(column)}
+              title="Ask for this description to be retired. It stays published until a reviewer approves."
+            >
+              Withdraw
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {!documented && column.withdrawn_description ? (
+        <div className="colp__claim colp__claim--withdrawn">
+          <div className="colp__label">Withdrawn description</div>
+          <div className="colp__text">{column.withdrawn_description}</div>
+          <div className="colp__source">
+            Retired after review · this column reads as undescribed
           </div>
         </div>
       ) : null}
@@ -74,7 +109,7 @@ function ColumnRow({ column }: { column: ColumnDocumentationRead }) {
         </div>
       ) : null}
 
-      {!documented && !column.source_description ? (
+      {!documented && !column.source_description && !column.withdrawn_description ? (
         <div className="colp__none">No description.</div>
       ) : null}
     </li>
@@ -85,6 +120,33 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
   const [columns, setColumns] = useState<ColumnDocumentationRead[] | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [withdrawing, setWithdrawing] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const withdraw = useCallback(async (column: ColumnDocumentationRead) => {
+    // The reason is required by the server, and rightly so: a reviewer
+    // deciding a retraction needs to know what was wrong with the text, which
+    // the text itself cannot tell them.
+    const reason = window.prompt(
+      `Why should the description for ${column.name} be retired?`,
+      "",
+    );
+    if (reason === null || reason.trim().length < 3) return;
+    setWithdrawing(column.column_id);
+    setNotice(null);
+    setActionError(null);
+    try {
+      await requestDescriptionWithdrawal("COLUMN", column.column_id, reason.trim());
+      setNotice(
+        `Withdrawal requested for ${column.name}. The description stays published until a reviewer approves it.`,
+      );
+    } catch (e) {
+      setActionError(e instanceof ApiError ? e.detail : (e as Error).message);
+    } finally {
+      setWithdrawing(null);
+    }
+  }, []);
 
   useEffect(() => {
     const ac = new AbortController();
@@ -103,6 +165,8 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
   // this pane leads with off the screen.
   useEffect(() => {
     setExpanded(false);
+    setNotice(null);
+    setActionError(null);
   }, [tableId]);
 
   if (error) {
@@ -143,13 +207,29 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
         </span>
       </div>
 
+      {notice ? (
+        <div className="colp__notice" role="status">
+          {notice}
+        </div>
+      ) : null}
+      {actionError ? (
+        <div className="colp__error" role="alert">
+          {actionError}
+        </div>
+      ) : null}
+
       {columns.length === 0 ? (
         <div className="colp__none">This table has no active columns.</div>
       ) : (
         <>
           <ol className="colp__list">
             {shown.map((column) => (
-              <ColumnRow key={column.column_id} column={column} />
+              <ColumnRow
+                key={column.column_id}
+                column={column}
+                onWithdraw={(c) => void withdraw(c)}
+                busy={withdrawing !== null}
+              />
             ))}
           </ol>
           {columns.length > shown.length ? (

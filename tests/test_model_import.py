@@ -41,6 +41,7 @@ from aida.model_import import (
     TABLE_FIELDS,
     apply_model_import_batch,
     parse_and_diff_workbook,
+    set_change_exclusion,
     submit_batch_for_review,
 )
 from aida.models import (
@@ -742,3 +743,141 @@ async def test_applying_a_batch_twice_is_refused(session) -> None:
     published = (await current_descriptions_by_column_id(session, [column.id]))[column.id]
     assert published.version == 1
     assert UUID(str(batch.id)) == batch.id
+
+
+# ---------------------------------------------------------------------------
+# Excluding rows before submitting
+# ---------------------------------------------------------------------------
+
+
+async def _two_column_workbook(session, datasource, table):
+    """A workbook editing two columns, so one can be dropped and one kept."""
+    second = MetadataColumn(
+        id=uuid4(),
+        organization_id=table.organization_id,
+        table_id=table.id,
+        name="segment_code",
+        ordinal_position=1,
+        physical_type="varchar",
+        nullable=True,
+        status="ACTIVE",
+        fingerprint="fp",
+    )
+    session.add(second)
+    await session.flush()
+
+    def mutate(name, headers, rows):
+        if name != COLUMN_SHEET:
+            return
+        for row in rows:
+            row[headers.index("business_description")] = f"Description for {row[headers.index('column')]}."
+
+    return _rewrite(await _export(session, datasource), mutate), second
+
+
+async def test_excluding_a_row_drops_it_from_what_a_reviewer_is_asked_to_decide(session) -> None:
+    """One wrong row used to force rejecting the whole file and re-uploading.
+    Excluding is an uploader-side edit, not a partial approval.
+    """
+    datasource, table, column = await _seed(session)
+    content, second = await _two_column_workbook(session, datasource, table)
+    batch = await _upload(session, datasource, content)
+    assert batch.change_count == 2
+
+    changes = await _changes(session, batch.id)
+    dropped = next(c for c in changes if c.subject_id == str(second.id))
+    remaining = await set_change_exclusion(
+        session, batch, change_ids=[dropped.id], excluded=True
+    )
+
+    assert remaining == 1
+    assert batch.change_count == 1
+    await session.refresh(dropped)
+    assert dropped.status == "EXCLUDED"
+    assert "excluded by the uploader" in (dropped.skip_reason or "")
+
+
+async def test_an_excluded_row_is_never_applied_and_never_counted_as_skipped(session) -> None:
+    """Excluded is not "decided and skipped": it is a row the uploader
+    withdrew before anyone was asked to look at it.
+    """
+    datasource, table, column = await _seed(session)
+    content, second = await _two_column_workbook(session, datasource, table)
+    batch = await _upload(session, datasource, content)
+    changes = await _changes(session, batch.id)
+    dropped = next(c for c in changes if c.subject_id == str(second.id))
+    await set_change_exclusion(session, batch, change_ids=[dropped.id], excluded=True)
+
+    await _approve(session, batch, table.organization_id)
+
+    await session.refresh(batch)
+    assert (batch.applied_count, batch.skipped_count) == (1, 0)
+    published = await current_descriptions_by_column_id(session, [column.id, second.id])
+    assert column.id in published
+    assert second.id not in published
+
+
+async def test_an_excluded_row_can_be_put_back(session) -> None:
+    datasource, table, column = await _seed(session)
+    content, second = await _two_column_workbook(session, datasource, table)
+    batch = await _upload(session, datasource, content)
+    changes = await _changes(session, batch.id)
+    dropped = next(c for c in changes if c.subject_id == str(second.id))
+
+    await set_change_exclusion(session, batch, change_ids=[dropped.id], excluded=True)
+    remaining = await set_change_exclusion(
+        session, batch, change_ids=[dropped.id], excluded=False
+    )
+
+    assert remaining == 2
+    await session.refresh(dropped)
+    assert (dropped.status, dropped.skip_reason) == ("PENDING", None)
+
+
+async def test_excluding_every_row_leaves_nothing_to_submit(session) -> None:
+    datasource, table, column = await _seed(session)
+    content, _ = await _two_column_workbook(session, datasource, table)
+    batch = await _upload(session, datasource, content)
+    await set_change_exclusion(
+        session, batch, change_ids=[c.id for c in await _changes(session, batch.id)], excluded=True
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await submit_batch_for_review(session, batch, requested_by=_MAKER)
+    assert exc_info.value.status_code == 409
+
+
+async def test_a_submitted_batch_can_no_longer_be_edited(session) -> None:
+    """What a reviewer sees must be fixed the moment it is submitted --
+    otherwise "approve this batch" would not name a stable thing.
+    """
+    datasource, table, column = await _seed(session)
+    content, _ = await _two_column_workbook(session, datasource, table)
+    batch = await _upload(session, datasource, content)
+    changes = await _changes(session, batch.id)
+    await submit_batch_for_review(session, batch, requested_by=_MAKER)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await set_change_exclusion(session, batch, change_ids=[changes[0].id], excluded=True)
+    assert exc_info.value.status_code == 409
+    assert "decides it as one batch" in exc_info.value.detail
+
+
+async def test_a_rejected_diff_row_cannot_be_toggled_into_a_change(session) -> None:
+    """REJECTED rows are the diff's own findings, not proposals -- they were
+    never going to apply, and un-excluding one must not smuggle it in.
+    """
+    datasource, table, _ = await _seed(session)
+    content = _rewrite(
+        await _export(session, datasource),
+        _set_cell(COLUMN_SHEET, "column_id", str(uuid4())),
+    )
+    batch = await _upload(session, datasource, content)
+    rejected = (await _changes(session, batch.id))[0]
+    assert rejected.status == "REJECTED"
+
+    await set_change_exclusion(session, batch, change_ids=[rejected.id], excluded=False)
+
+    await session.refresh(rejected)
+    assert rejected.status == "REJECTED"
+    assert batch.change_count == 0

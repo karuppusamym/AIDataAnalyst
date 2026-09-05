@@ -4,6 +4,7 @@ import App from "./App";
 import { OrgProvider } from "./lib/org";
 import { ScopeProvider } from "./lib/scope";
 import "./tokens.css";
+import "./layout.css";
 import "./components/workflow-author.css";
 
 const el = document.getElementById("root");

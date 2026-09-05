@@ -123,6 +123,11 @@ async def create_description_withdrawal(
     approves the review this creates.
     """
     await _authorize_subject(body, context, session, settings)
+    if context.organization_id is None:
+        # `enforce_organization` in `_authorize_subject` already narrowed this
+        # for every real caller; the check keeps the type honest rather than
+        # asserting past it.
+        raise HTTPException(status_code=403, detail="ORGANIZATION_SCOPE_REQUIRED")
     withdrawal, review = await request_description_withdrawal(
         session,
         organization_id=context.organization_id,

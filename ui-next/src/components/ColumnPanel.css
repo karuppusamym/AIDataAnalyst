@@ -32,3 +32,13 @@
 
 .colp__more{margin-top:10px;background:none;border:1px solid var(--line);border-radius:var(--radius-sm);color:var(--ink-2);font-size:12px;padding:5px 10px;cursor:pointer}
 .colp__more:hover{color:var(--ink);border-color:var(--ink-3)}
+
+/* A retired description keeps its own state rather than reverting the column
+   to looking untouched: struck through, because the words still exist and are
+   still what a past agent run was grounded on -- they are just no longer what
+   the platform says. */
+.colp__claim--withdrawn .colp__text{color:var(--ink-3);text-decoration:line-through}
+.colp__withdraw{background:none;border:0;padding:0;font-family:var(--mono);font-size:10px;color:var(--accent);cursor:pointer;text-decoration:underline}
+.colp__withdraw:hover:not(:disabled){color:var(--ink)}
+.colp__withdraw:disabled{color:var(--ink-3);cursor:default;text-decoration:none}
+.colp__notice{font-size:12px;color:var(--ink-2);line-height:1.45;border-left:2px solid var(--ok);padding-left:10px;margin-bottom:9px}
