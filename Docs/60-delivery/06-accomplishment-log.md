@@ -11728,11 +11728,47 @@ differently-filtered copy of that screen. Relationships render **directionally**
 relationship points one way, and rendering it symmetrically would misstate which
 side is the reference.
 
+### 4. Three shared gates caught real integration gaps in the above
+
+Worth recording, because all three were things the feature work itself would
+never have surfaced:
+
+- **`test_event_catalog_gate`** — new `record_outbox` event types must appear in
+  `Docs/30-contracts/04-event-catalog.md`. Six rows added
+  (`model_import.submitted/applied/rejected`, `description.withdrawal.
+  requested/approved/rejected/superseded`).
+- **`test_reviewer_agent::test_every_object_type_the_codebase_creates_is_classified`**
+  — a review object type absent from the ADR-0027 tier table silently defaults
+  to T3. `MODEL_IMPORT_BATCH` takes `BULK_STEWARDSHIP_OPERATION`'s shape (T1
+  below the governance threshold, T2 above, now shared through
+  `_COUNT_ESCALATED` rather than a second threshold that could drift).
+  `DESCRIPTION_WITHDRAWAL` is **T2, deliberately above the tier of publishing**
+  (`ASSET_DOCUMENTATION_VERSION`, T0): a withdrawal undoes a decision a human
+  already made and removes grounding a run may have cited. Publishing bad
+  language is visible and correctable; silently un-publishing good language is
+  neither, so it sits above `DEFAULT_MAX_AGENT_TIER` and a human always decides.
+- **`test_migration_orm_drift`** — reported three indexes that
+  `alembic upgrade head` builds but `Base.metadata` never declared, on
+  `governance_review` and `ownership_assignment`. **Pre-existing, from
+  migrations `a1b2c3d4e5f6` and `b7e3f19d5c24`, unrelated to this work** —
+  fixed anyway, by declaring them on the models, since the ORM should tell the
+  truth about the database it maps.
+
 ### Verification
 
-- Backend: `tests/test_description_withdrawal.py` (15) and 6 added to
-  `tests/test_model_import.py` (27 total). `mypy` clean on the touched modules,
-  one Alembic head.
+**A correction to the two entries above this one.** Both reported the backend
+suite as green citing "exit code 0". That signal was worthless: the command was
+`pytest … | tail -6`, and a shell pipeline's exit code is the *last* command's
+(`tail`, always 0), never pytest's. The captured output was also truncated to
+its final few hundred bytes, so the `grep -c FAILED` run over it found nothing
+because the failures had scrolled out, not because there were none. Re-run
+properly here (no pipeline, full output to a file), the suite was **exit 1 with
+5 failures** — two of which were the gaps in §4 above. Anyone reading those two
+entries should treat their "suite green" line as unverified.
+
+- Backend, verified: `tests/test_description_withdrawal.py` (15) and 6 added to
+  `tests/test_model_import.py` (27 total). All five previously-failing gates
+  now pass. `mypy` clean on 327 files, `lint-imports` 8/8, one Alembic head.
 - `ui-next`: **358 tests** across 54 files, up from 343 — 5 added to
   `ColumnPanel.test.tsx`, 5 to `WorkbookImport.test.tsx`, 5 to
   `CrossSourceScreen.test.tsx`. `tsc --noEmit` clean, production build clean.
@@ -11760,3 +11796,6 @@ side is the reference.
   (`App.test.tsx`, `LineageRefusalScreen.test.tsx` — neither touched by this
   work) and passed clean on re-run. The 5s default timeout is tight for those
   two files; worth raising rather than re-running.
+- **Never assert a suite passed from a piped exit code.** The correction above
+  cost two entries' worth of false confidence. Redirect to a file and read
+  pytest's own summary line.

@@ -26,10 +26,19 @@ exact version id it was raised against. If someone publishes a newer version in
 the window before approval, the request no longer refers to the text the
 reviewer read, and it is refused rather than applied to content nobody looked
 at -- the same lost-update reasoning `model_import`'s `expected_version` carries.
+
+Reinstatement (`request_type="REINSTATE"`) is the inverse request, and it is
+*not* the inverse operation: it republishes the withdrawn text as a **new**
+version rather than flipping the WITHDRAWN row back to APPROVED. Flipping it
+back would rewrite history -- the version chain would no longer record that the
+description was ever retired, and a reader auditing why an agent run cited text
+that "was always approved" would be misled. A reinstatement is a fresh publish
+whose provenance happens to be an older version's words.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
@@ -37,9 +46,14 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aida.asset_description_service import publish_asset_documentation_version
 from aida.catalog_read_model import _latest_approved_documentation
-from aida.column_documentation import current_descriptions_by_column_id
+from aida.column_documentation import (
+    current_descriptions_by_column_id,
+    publish_column_description,
+)
 from aida.models import (
+    AssetDocumentation,
     AssetDocumentationVersion,
     ColumnDocumentation,
     ColumnDocumentationVersion,
@@ -67,6 +81,56 @@ async def _current_table_version(
     return (await _latest_approved_documentation(session, [table_id])).get(table_id)
 
 
+async def _latest_withdrawn_version(
+    session: AsyncSession, subject_type: str, subject_id: UUID
+) -> ColumnDocumentationVersion | AssetDocumentationVersion | None:
+    """The most recently withdrawn version for a subject, if any.
+
+    What a reinstatement brings back. Ordered by version so the newest retired
+    text wins -- reinstating anything older would be an edit dressed as an undo.
+    """
+    rows: Sequence[ColumnDocumentationVersion] | Sequence[AssetDocumentationVersion]
+    if subject_type == "COLUMN":
+        rows = (
+            (
+                await session.execute(
+                    select(ColumnDocumentationVersion)
+                    .join(
+                        ColumnDocumentation,
+                        ColumnDocumentation.id == ColumnDocumentationVersion.documentation_id,
+                    )
+                    .where(
+                        ColumnDocumentation.column_id == subject_id,
+                        ColumnDocumentationVersion.status == WITHDRAWN,
+                    )
+                    .order_by(ColumnDocumentationVersion.version)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    else:
+        rows = (
+            (
+                await session.execute(
+                    select(AssetDocumentationVersion)
+                    .join(
+                        AssetDocumentation,
+                        AssetDocumentation.id == AssetDocumentationVersion.documentation_id,
+                    )
+                    .where(
+                        AssetDocumentation.table_id == subject_id,
+                        AssetDocumentationVersion.status == WITHDRAWN,
+                    )
+                    .order_by(AssetDocumentationVersion.version)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    return rows[-1] if rows else None
+
+
 async def request_description_withdrawal(
     session: AsyncSession,
     *,
@@ -75,15 +139,21 @@ async def request_description_withdrawal(
     subject_id: UUID,
     reason: str,
     requested_by: str,
+    request_type: str = "WITHDRAW",
 ) -> tuple[DescriptionWithdrawal, GovernanceReview]:
-    """Raise a withdrawal for the subject's *current* approved description.
+    """Raise a withdrawal, or a reinstatement, for one asset's description.
 
-    Refuses when there is nothing approved to withdraw, rather than filing a
-    review that would resolve to nothing -- a reviewer should never be handed a
-    decision whose subject does not exist.
+    Refuses when there is nothing to act on -- no approved description to
+    retire, or no retired one to bring back -- rather than filing a review that
+    would resolve to nothing. A reviewer should never be handed a decision whose
+    subject does not exist.
     """
     if subject_type not in ("TABLE", "COLUMN"):
         raise HTTPException(status_code=422, detail="subject_type must be TABLE or COLUMN")
+    if request_type not in ("WITHDRAW", "REINSTATE"):
+        raise HTTPException(
+            status_code=422, detail="request_type must be WITHDRAW or REINSTATE"
+        )
 
     if subject_type == "COLUMN":
         column = await session.get(MetadataColumn, subject_id)
@@ -103,7 +173,31 @@ async def request_description_withdrawal(
         version = table_version
         text = table_version.readme if table_version else None
 
-    if version is None or text is None:
+    if request_type == "REINSTATE":
+        # A reinstatement acts on the retired text, not the current one -- and
+        # only when there is nothing current, because republishing over a live
+        # description is a correction, which is authored rather than undone.
+        if version is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "this asset already has an approved description; publish a correction "
+                    "rather than reinstating an older one"
+                ),
+            )
+        retired = await _latest_withdrawn_version(session, subject_type, subject_id)
+        if retired is None:
+            raise HTTPException(
+                status_code=409,
+                detail="there is no withdrawn description on this asset to reinstate",
+            )
+        version = retired
+        text = (
+            retired.description
+            if isinstance(retired, ColumnDocumentationVersion)
+            else retired.readme
+        )
+    elif version is None or text is None:
         raise HTTPException(
             status_code=409,
             detail="there is no approved description on this asset to withdraw",
@@ -123,6 +217,7 @@ async def request_description_withdrawal(
 
     withdrawal = DescriptionWithdrawal(
         organization_id=organization_id,
+        request_type=request_type,
         subject_type=subject_type,
         subject_id=str(subject_id),
         subject_label=label[:600],
@@ -138,7 +233,9 @@ async def request_description_withdrawal(
         organization_id=organization_id,
         object_type="DESCRIPTION_WITHDRAWAL",
         object_id=str(withdrawal.id),
-        requested_action="WITHDRAW_DESCRIPTION",
+        requested_action=(
+            "WITHDRAW_DESCRIPTION" if request_type == "WITHDRAW" else "REINSTATE_DESCRIPTION"
+        ),
         requested_by=requested_by,
     )
     session.add(review)
@@ -155,18 +252,23 @@ async def apply_description_withdrawal(
     reviewer: str,
     now: datetime,
 ) -> tuple[str, bool]:
-    """Move the named version to `WITHDRAWN`.
+    """Apply an approved request: retire the named version, or republish it.
 
     Called only from `semantic_api.decide_governance_review`, after its shared
-    maker-checker guard. Returns the event type and whether the version was
-    actually retired -- `False` when a newer version was published between the
-    request and the decision, in which case nothing is touched: the reviewer
-    approved the retraction of text that is no longer what the asset says.
+    maker-checker guard. Returns the event type and whether the request actually
+    took effect -- `False` when the asset moved on between the request and the
+    decision, in which case nothing is touched: the reviewer decided about text
+    that is no longer what the asset says.
     """
     if withdrawal.status != "PENDING_REVIEW":
-        raise HTTPException(status_code=409, detail="this withdrawal is no longer pending review")
+        raise HTTPException(status_code=409, detail="this request is no longer pending review")
 
     subject_id = UUID(withdrawal.subject_id)
+    if withdrawal.request_type == "REINSTATE":
+        return await _apply_reinstatement(
+            session, withdrawal, subject_id=subject_id, reviewer=reviewer, now=now
+        )
+
     # One union-typed local rather than two branches: the retirement below is
     # identical for both stores (flip `status`, stamp `updated_at`), and only
     # the lookup differs.
@@ -192,19 +294,96 @@ async def apply_description_withdrawal(
     return "description.withdrawal.approved.v1", True
 
 
+async def _apply_reinstatement(
+    session: AsyncSession,
+    withdrawal: DescriptionWithdrawal,
+    *,
+    subject_id: UUID,
+    reviewer: str,
+    now: datetime,
+) -> tuple[str, bool]:
+    """Republish a withdrawn description as a new version.
+
+    Never flips the WITHDRAWN row back to APPROVED: the version chain has to go
+    on recording that the description was retired, or an audit of why an agent
+    cited text that "was always approved" would be misled. This is a fresh
+    publish whose provenance happens to be an older version's words.
+    """
+    withdrawal.status = "APPROVED"
+    withdrawal.reviewed_by = reviewer
+    withdrawal.reviewed_at = now
+
+    # Someone described the asset again while this was pending; their text is
+    # current and reinstating over it would silently replace it.
+    current: ColumnDocumentationVersion | AssetDocumentationVersion | None = (
+        await _current_column_version(session, subject_id)
+        if withdrawal.subject_type == "COLUMN"
+        else await _current_table_version(session, subject_id)
+    )
+    if current is not None:
+        return "description.reinstatement.superseded.v1", False
+
+    if withdrawal.subject_type == "COLUMN":
+        column = await session.get(MetadataColumn, subject_id)
+        if column is None:
+            return "description.reinstatement.superseded.v1", False
+        await publish_column_description(
+            session,
+            organization_id=withdrawal.organization_id,
+            table_id=column.table_id,
+            column_id=column.id,
+            description=withdrawal.withdrawn_text,
+            created_by=withdrawal.requested_by,
+            approved_by=reviewer,
+            approved_at=now,
+        )
+    else:
+        table = await session.get(MetadataTable, subject_id)
+        if table is None:
+            return "description.reinstatement.superseded.v1", False
+        await publish_asset_documentation_version(
+            session,
+            organization_id=withdrawal.organization_id,
+            table_id=table.id,
+            readme=withdrawal.withdrawn_text,
+            created_by=withdrawal.requested_by,
+            approved_by=reviewer,
+            approved_at=now,
+        )
+    await session.flush()
+    return "description.reinstatement.approved.v1", True
+
+
 async def reject_description_withdrawal(
     withdrawal: DescriptionWithdrawal,
     *,
     reviewer: str,
     now: datetime,
 ) -> str:
-    """Reject a withdrawal; the description stays published, untouched."""
+    """Reject a request; the asset's description stays exactly as it is."""
     if withdrawal.status != "PENDING_REVIEW":
-        raise HTTPException(status_code=409, detail="this withdrawal is no longer pending review")
+        raise HTTPException(status_code=409, detail="this request is no longer pending review")
     withdrawal.status = "REJECTED"
     withdrawal.reviewed_by = reviewer
     withdrawal.reviewed_at = now
-    return "description.withdrawal.rejected.v1"
+    return (
+        "description.reinstatement.rejected.v1"
+        if withdrawal.request_type == "REINSTATE"
+        else "description.withdrawal.rejected.v1"
+    )
+
+
+async def latest_withdrawn_table_version(
+    session: AsyncSession, table_id: UUID
+) -> AssetDocumentationVersion | None:
+    """The most recently withdrawn documentation for one table, if any.
+
+    The table-level counterpart to `withdrawn_column_versions`, so a read
+    surface can say "this was documented, and the documentation was retired"
+    rather than reverting the table to looking never-documented.
+    """
+    version = await _latest_withdrawn_version(session, "TABLE", table_id)
+    return version if isinstance(version, AssetDocumentationVersion) else None
 
 
 async def withdrawn_column_versions(

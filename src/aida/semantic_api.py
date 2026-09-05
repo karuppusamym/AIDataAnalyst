@@ -2250,11 +2250,12 @@ async def _apply_governance_review_decision(
         if withdrawal is None or withdrawal.organization_id != review.organization_id:
             raise HTTPException(status_code=409, detail="review target is unavailable")
         if decision == "APPROVE":
-            # The version keeps its text and moves to WITHDRAWN -- a run
-            # grounded on it stays replayable. `retired` is False when someone
-            # published a newer version between the request and this decision,
-            # in which case nothing is touched: the reviewer read one
-            # description and would otherwise be removing another.
+            # WITHDRAW moves the version to WITHDRAWN, keeping its text so a
+            # run grounded on it stays replayable. REINSTATE republishes that
+            # text as a *new* version rather than flipping the old row back,
+            # so the chain goes on recording that it was retired. Either way
+            # the flag is False when the asset moved on in between: the
+            # reviewer decided about text that is no longer current.
             event_type, retired = await apply_description_withdrawal(
                 session, withdrawal, reviewer=context.principal_id, now=now
             )
@@ -2267,9 +2268,13 @@ async def _apply_governance_review_decision(
         aggregate_id = str(withdrawal.id)
         payload = {
             "withdrawal_id": str(withdrawal.id),
+            "request_type": withdrawal.request_type,
             "subject_type": withdrawal.subject_type,
             "subject_id": withdrawal.subject_id,
             "version_id": str(withdrawal.version_id),
+            # False when the asset moved on between the request and this
+            # decision, in which case nothing was touched.
+            "applied": retired,
             "retired": retired,
             "review_id": str(review.id),
         }

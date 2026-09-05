@@ -28,10 +28,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.authorization_gate import gate_read
+from aida.catalog_read_model import _latest_approved_documentation
 from aida.column_documentation import current_descriptions_for_table
 from aida.config import Settings, get_settings
 from aida.db import get_session
-from aida.description_withdrawal import withdrawn_column_versions
+from aida.description_withdrawal import (
+    latest_withdrawn_table_version,
+    withdrawn_column_versions,
+)
 from aida.models import MetadataColumn, MetadataTable
 from aida.schemas import ApiModel, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
@@ -77,6 +81,68 @@ class ColumnDocumentationRead(ApiModel):
     #: one says "we looked and decided to say nothing", the other says
     #: "nobody has looked".
     withdrawn_description: str | None = None
+
+
+class TableDescriptionRead(ApiModel):
+    """One table's authored documentation, in the same shape the column pane
+    already renders per column.
+
+    Exists because the evidence pane's `items` are *prose claims* -- good for
+    reading, useless for driving an action. A withdraw or reinstate control
+    needs to know structurally whether there is an approved description, which
+    version it is, and whether a previous one was retired; none of that can be
+    recovered from a sentence.
+    """
+
+    table_id: UUID
+    name: str
+    source_description: str | None = None
+    readme: str | None = None
+    readme_version: int | None = None
+    approved_by: str | None = None
+    approved_at: datetime | None = None
+    #: Set when the table *had* documentation that was retired through review.
+    withdrawn_readme: str | None = None
+
+
+@router.get("/tables/{table_id}/description", response_model=TableDescriptionRead)
+async def get_table_description(
+    table_id: UUID,
+    context: SecurityContext = Depends(require_roles(*_COLUMN_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> TableDescriptionRead:
+    """The table's own documentation state, gated exactly like its columns."""
+    table = await session.get(MetadataTable, table_id)
+    if table is None:
+        raise HTTPException(status_code=404, detail="table not found")
+    enforce_organization(context, table.organization_id)
+    await gate_read(
+        session,
+        context,
+        settings,
+        action="READ_METADATA",
+        resource_type="table",
+        resource_id=str(table.id),
+        datasource_id=table.datasource_id,
+    )
+
+    current = (await _latest_approved_documentation(session, [table.id])).get(table.id)
+    # Only asked for when nothing is current: a documented table does not need
+    # its retired history on this surface.
+    retired = (
+        await latest_withdrawn_table_version(session, table.id) if current is None else None
+    )
+    return TableDescriptionRead(
+        table_id=table.id,
+        name=table.name,
+        source_description=table.source_description,
+        readme=current.readme if current else None,
+        readme_version=current.version if current else None,
+        approved_by=current.approved_by if current else None,
+        approved_at=current.approved_at if current else None,
+        withdrawn_readme=retired.readme if retired else None,
+    )
 
 
 @router.get("/tables/{table_id}/column-documentation", response_model=Page)

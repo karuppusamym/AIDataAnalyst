@@ -2166,7 +2166,17 @@ class ColumnDocumentationVersion(Base, TimestampMixin):
 
 
 class DescriptionWithdrawal(Base, TimestampMixin):
-    """A request to retire an approved description, routed through review.
+    """A governed request to change what an asset's description store *says*,
+    without authoring new text -- retire the current description, or bring a
+    retired one back.
+
+    The table name says "withdrawal" because retirement was the case it was
+    built for; `request_type` now discriminates `WITHDRAW` from `REINSTATE`.
+    Kept as one table deliberately rather than split or renamed: both are the
+    same decision shape -- this asset, this exact version, this reason, decided
+    by someone other than the requester -- and every column below serves both.
+    A rename would cost a migration and every reference for no behavioural
+    gain.
 
     Publishing a description was governed from the first commit; un-publishing
     one was not possible at all -- a steward who approved a wrong column
@@ -2195,6 +2205,10 @@ class DescriptionWithdrawal(Base, TimestampMixin):
         CheckConstraint(
             "subject_type IN ('TABLE', 'COLUMN')", name="withdrawal_subject_type_is_supported"
         ),
+        CheckConstraint(
+            "request_type IN ('WITHDRAW', 'REINSTATE')",
+            name="withdrawal_request_type_is_supported",
+        ),
         Index("ix_description_withdrawal_org_status", "organization_id", "status"),
     )
 
@@ -2202,15 +2216,23 @@ class DescriptionWithdrawal(Base, TimestampMixin):
     organization_id: Mapped[UUID] = mapped_column(
         ForeignKey("organization.id", ondelete="RESTRICT"), nullable=False, index=True
     )
+    #: WITHDRAW retires the current approved description; REINSTATE republishes
+    #: a previously withdrawn one as a *new* version. Reinstatement never flips
+    #: the old row back to APPROVED -- that would rewrite history and lose the
+    #: fact that it was withdrawn at all. See `description_withdrawal`.
+    request_type: Mapped[str] = mapped_column(String(20), default="WITHDRAW", nullable=False)
     subject_type: Mapped[str] = mapped_column(String(10), nullable=False)
-    #: The column or table whose description is being withdrawn.
+    #: The column or table this request is about.
     subject_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     subject_label: Mapped[str] = mapped_column(String(600), nullable=False)
-    #: The exact version row this request was raised against. Re-checked at
-    #: approval time: if a newer version has been published in between, the
-    #: withdrawal no longer refers to the text anyone reviewed, and is refused
-    #: rather than applied to content nobody looked at.
+    #: The exact version row this request is about -- the one being retired, or
+    #: the withdrawn one being brought back. Re-checked at approval time: if the
+    #: asset has moved on since, the request no longer refers to the text anyone
+    #: reviewed, and is refused rather than applied to content nobody looked at.
     version_id: Mapped[UUID] = mapped_column(nullable=False)
+    #: The text this request is about, snapshotted when it was raised, so a
+    #: reviewer sees exactly what they are deciding on without resolving the
+    #: version themselves.
     withdrawn_text: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(String(2000), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="PENDING_REVIEW", nullable=False)

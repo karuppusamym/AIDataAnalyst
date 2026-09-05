@@ -23,7 +23,7 @@ from aida.column_documentation import (
     current_descriptions_by_column_id,
     publish_column_description,
 )
-from aida.column_documentation_api import list_column_documentation
+from aida.column_documentation_api import get_table_description, list_column_documentation
 from aida.config import Settings
 from aida.db import Base
 from aida.description_withdrawal import (
@@ -525,3 +525,301 @@ async def test_endpoint_refuses_a_subject_in_another_organization(session) -> No
         )
     assert exc_info.value.status_code in (403, 404)
     assert (await session.execute(select(DescriptionWithdrawal))).scalars().all() == []
+
+
+# ---------------------------------------------------------------------------
+# Reinstatement
+# ---------------------------------------------------------------------------
+
+
+async def _withdraw_and_approve(session, table, column) -> None:
+    _, review = await _request(session, table, column)
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+
+async def _reinstate(session, table, column, reason="withdrawn by mistake"):
+    return await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="COLUMN",
+        subject_id=column.id,
+        reason=reason,
+        requested_by=_MAKER,
+        request_type="REINSTATE",
+    )
+
+
+async def test_reinstating_republishes_as_a_new_version_not_a_status_flip(session) -> None:
+    """The version chain has to go on recording that the description was
+    retired -- flipping the old row back would rewrite history, and an audit of
+    why an agent cited text that "was always approved" would be misled.
+    """
+    table, column = await _seed(session)
+    await _describe(session, table, column, "The original text.")
+    await _withdraw_and_approve(session, table, column)
+
+    _, review = await _reinstate(session, table, column)
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    versions = (
+        (
+            await session.execute(
+                select(ColumnDocumentationVersion).order_by(ColumnDocumentationVersion.version)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [(v.version, v.status) for v in versions] == [(1, WITHDRAWN), (2, "APPROVED")]
+    assert versions[1].description == "The original text."
+    # Provenance: the requester authored the reinstatement, the reviewer approved.
+    assert versions[1].created_by == _MAKER
+    assert versions[1].approved_by == _CHECKER
+    resolved = await current_descriptions_by_column_id(session, [column.id])
+    assert resolved[column.id].description == "The original text."
+
+
+async def test_reinstating_a_column_that_has_a_live_description_is_refused(session) -> None:
+    """Republishing over a live description is a correction, which is authored
+    rather than undone.
+    """
+    table, column = await _seed(session)
+    await _describe(session, table, column)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _reinstate(session, table, column)
+    assert exc_info.value.status_code == 409
+    assert "publish a correction" in exc_info.value.detail
+
+
+async def test_reinstating_a_column_that_was_never_withdrawn_is_refused(session) -> None:
+    table, column = await _seed(session)
+    with pytest.raises(HTTPException) as exc_info:
+        await _reinstate(session, table, column)
+    assert exc_info.value.status_code == 409
+    assert "no withdrawn description" in exc_info.value.detail
+
+
+async def test_a_reinstatement_is_skipped_if_the_column_was_described_again(session) -> None:
+    """Someone wrote a fresh description while the reinstatement was pending;
+    bringing the old text back would silently replace theirs.
+    """
+    table, column = await _seed(session)
+    await _describe(session, table, column, "The original text.")
+    await _withdraw_and_approve(session, table, column)
+    _, review = await _reinstate(session, table, column)
+    await session.commit()
+
+    await _describe(session, table, column, "Someone wrote this in the meantime.")
+
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    resolved = await current_descriptions_by_column_id(session, [column.id])
+    assert resolved[column.id].description == "Someone wrote this in the meantime."
+
+
+async def test_rejecting_a_reinstatement_leaves_the_column_undescribed(session) -> None:
+    table, column = await _seed(session)
+    await _describe(session, table, column, "The original text.")
+    await _withdraw_and_approve(session, table, column)
+    withdrawal, review = await _reinstate(session, table, column)
+    await session.commit()
+
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="REJECT", reason="it was withdrawn for a reason"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    assert await current_descriptions_by_column_id(session, [column.id]) == {}
+    await session.refresh(withdrawal)
+    assert (withdrawal.status, withdrawal.request_type) == ("REJECTED", "REINSTATE")
+
+
+async def test_the_requester_cannot_approve_their_own_reinstatement(session) -> None:
+    table, column = await _seed(session)
+    await _describe(session, table, column, "The original text.")
+    await _withdraw_and_approve(session, table, column)
+    _, review = await _reinstate(session, table, column)
+    await session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await decide_governance_review(
+            review.id,
+            GovernanceDecisionRequest(decision="APPROVE"),
+            _context(table.organization_id, _MAKER),
+            session,
+        )
+    assert exc_info.value.status_code == 409
+    assert await current_descriptions_by_column_id(session, [column.id]) == {}
+
+
+async def test_a_table_readme_can_be_reinstated_too(session) -> None:
+    table, _ = await _seed(session)
+    await publish_asset_documentation_version(
+        session,
+        organization_id=table.organization_id,
+        table_id=table.id,
+        readme="Customer master, loaded nightly.",
+        created_by=_MAKER,
+        approved_by=_CHECKER,
+        approved_at=datetime.now(UTC),
+    )
+    _, withdraw_review = await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="TABLE",
+        subject_id=table.id,
+        reason="superseded",
+        requested_by=_MAKER,
+    )
+    await session.commit()
+    await decide_governance_review(
+        withdraw_review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    _, reinstate_review = await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="TABLE",
+        subject_id=table.id,
+        reason="withdrawn by mistake",
+        requested_by=_MAKER,
+        request_type="REINSTATE",
+    )
+    await session.commit()
+    await decide_governance_review(
+        reinstate_review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    versions = (
+        (
+            await session.execute(
+                select(AssetDocumentationVersion).order_by(AssetDocumentationVersion.version)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [(v.version, v.status) for v in versions] == [(1, WITHDRAWN), (2, "APPROVED")]
+    assert versions[1].readme == "Customer master, loaded nightly."
+
+
+async def test_an_unknown_request_type_is_refused(session) -> None:
+    table, column = await _seed(session)
+    await _describe(session, table, column)
+    with pytest.raises(HTTPException) as exc_info:
+        await request_description_withdrawal(
+            session,
+            organization_id=table.organization_id,
+            subject_type="COLUMN",
+            subject_id=column.id,
+            reason="x",
+            requested_by=_MAKER,
+            request_type="DELETE",
+        )
+    assert exc_info.value.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# The table-level description read
+# ---------------------------------------------------------------------------
+
+
+async def test_table_description_endpoint_reports_the_current_readme(session) -> None:
+    table, _ = await _seed(session)
+    await publish_asset_documentation_version(
+        session,
+        organization_id=table.organization_id,
+        table_id=table.id,
+        readme="Customer master.",
+        created_by=_MAKER,
+        approved_by=_CHECKER,
+        approved_at=datetime.now(UTC),
+    )
+
+    read = await get_table_description(
+        table.id,
+        context=_context(table.organization_id, _CHECKER),
+        session=session,
+        settings=_SETTINGS,
+    )
+    assert read.readme == "Customer master."
+    assert read.readme_version == 1
+    assert read.approved_by == _CHECKER
+    assert read.withdrawn_readme is None
+
+
+async def test_table_description_endpoint_distinguishes_retired_from_never_written(
+    session,
+) -> None:
+    table, _ = await _seed(session)
+    await publish_asset_documentation_version(
+        session,
+        organization_id=table.organization_id,
+        table_id=table.id,
+        readme="The retired readme.",
+        created_by=_MAKER,
+        approved_by=_CHECKER,
+        approved_at=datetime.now(UTC),
+    )
+    _, review = await request_description_withdrawal(
+        session,
+        organization_id=table.organization_id,
+        subject_type="TABLE",
+        subject_id=table.id,
+        reason="superseded",
+        requested_by=_MAKER,
+    )
+    await session.commit()
+    await decide_governance_review(
+        review.id,
+        GovernanceDecisionRequest(decision="APPROVE"),
+        _context(table.organization_id, _CHECKER),
+        session,
+    )
+
+    read = await get_table_description(
+        table.id,
+        context=_context(table.organization_id, _CHECKER),
+        session=session,
+        settings=_SETTINGS,
+    )
+    assert read.readme is None
+    assert read.withdrawn_readme == "The retired readme."
+
+
+async def test_table_description_endpoint_on_an_undocumented_table(session) -> None:
+    table, _ = await _seed(session)
+    read = await get_table_description(
+        table.id,
+        context=_context(table.organization_id, _CHECKER),
+        session=session,
+        settings=_SETTINGS,
+    )
+    assert (read.readme, read.withdrawn_readme) == (None, None)
+    assert read.name == "customers"

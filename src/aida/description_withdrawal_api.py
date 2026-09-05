@@ -46,6 +46,10 @@ _WITHDRAW_READ_ROLES = (*_WITHDRAW_WRITE_ROLES, "Reviewer", "Analyst", "Viewer",
 class DescriptionWithdrawalCreate(ApiModel):
     subject_type: str = Field(pattern="^(TABLE|COLUMN)$")
     subject_id: UUID
+    #: WITHDRAW retires the current approved description; REINSTATE republishes
+    #: a previously withdrawn one as a new version. Defaults to WITHDRAW so
+    #: every existing caller is unchanged.
+    request_type: str = Field(default="WITHDRAW", pattern="^(WITHDRAW|REINSTATE)$")
     #: Required, and not merely for the audit trail: a reviewer deciding a
     #: retraction needs to know what was wrong with the text, which the text
     #: itself cannot tell them.
@@ -55,6 +59,7 @@ class DescriptionWithdrawalCreate(ApiModel):
 class DescriptionWithdrawalRead(ApiModel):
     id: UUID
     organization_id: UUID
+    request_type: str
     subject_type: str
     subject_id: str
     subject_label: str
@@ -116,11 +121,11 @@ async def create_description_withdrawal(
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> DescriptionWithdrawal:
-    """Ask for the subject's current approved description to be retired.
+    """Ask for a description to be retired, or a retired one brought back.
 
     202, not 201: nothing has happened to the description yet. It is still
-    published and still what every reader resolves, until a different principal
-    approves the review this creates.
+    exactly what every reader resolves, until a different principal approves
+    the review this creates.
     """
     await _authorize_subject(body, context, session, settings)
     if context.organization_id is None:
@@ -135,6 +140,7 @@ async def create_description_withdrawal(
         subject_id=body.subject_id,
         reason=body.reason,
         requested_by=context.principal_id,
+        request_type=body.request_type,
     )
     record_audit(
         session,
@@ -145,6 +151,7 @@ async def create_description_withdrawal(
         outcome="SUCCESS",
         correlation_id=get_correlation_id(),
         details={
+            "request_type": withdrawal.request_type,
             "subject_type": withdrawal.subject_type,
             "subject_id": withdrawal.subject_id,
             "version_id": str(withdrawal.version_id),
@@ -159,6 +166,7 @@ async def create_description_withdrawal(
         event_type="description.withdrawal.requested.v1",
         payload={
             "withdrawal_id": str(withdrawal.id),
+            "request_type": withdrawal.request_type,
             "subject_type": withdrawal.subject_type,
             "subject_id": withdrawal.subject_id,
             "review_id": str(review.id),

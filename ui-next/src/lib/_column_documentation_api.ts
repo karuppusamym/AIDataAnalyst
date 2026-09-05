@@ -381,6 +381,7 @@ export async function submitModelImport(
 export interface DescriptionWithdrawalRead {
   id: string;
   organization_id: string;
+  request_type: "WITHDRAW" | "REINSTATE";
   subject_type: "TABLE" | "COLUMN";
   subject_id: string;
   subject_label: string;
@@ -394,20 +395,21 @@ export interface DescriptionWithdrawalRead {
   reviewed_at: string | null;
 }
 
-/** Ask for an approved description to be retired.
+/** Ask for an approved description to be retired, or a retired one brought back.
  *
- *  Publishes nothing: the description stays live and stays what every reader
- *  resolves until a *different* principal approves the review this creates, on
- *  the Review queue. There is deliberately no approve call here. */
+ *  Publishes nothing either way: the description stays exactly what every
+ *  reader resolves until a *different* principal approves the review this
+ *  creates, on the Review queue. There is deliberately no approve call here. */
 export async function requestDescriptionWithdrawal(
   subjectType: "TABLE" | "COLUMN",
   subjectId: string,
   reason: string,
+  requestType: "WITHDRAW" | "REINSTATE" = "WITHDRAW",
   signal?: AbortSignal,
 ): Promise<DescriptionWithdrawalRead> {
   if (USE_FIXTURES) {
     throw new Error(
-      "Withdrawal is reviewed on the server. Run against a live API (VITE_USE_FIXTURES=0) to request one.",
+      "This is reviewed on the server. Run against a live API (VITE_USE_FIXTURES=0) to request it.",
     );
   }
   const res = await fetch("/v1/descriptions/withdrawals", {
@@ -419,7 +421,12 @@ export async function requestDescriptionWithdrawal(
       ...identityHeaders(),
     },
     credentials: "same-origin",
-    body: JSON.stringify({ subject_type: subjectType, subject_id: subjectId, reason }),
+    body: JSON.stringify({
+      subject_type: subjectType,
+      subject_id: subjectId,
+      reason,
+      request_type: requestType,
+    }),
   });
   if (!res.ok) {
     let detail = `${res.status} ${res.statusText}`;
@@ -471,4 +478,44 @@ export async function setModelImportExclusion(
     throw new ApiError(res.status, detail);
   }
   return (await res.json()) as ModelImportBatchRead;
+}
+
+/** `src/aida/column_documentation_api.py::TableDescriptionRead`.
+ *
+ *  The table's own documentation state. The evidence pane's items are prose
+ *  claims — good for reading, useless for driving an action; a withdraw or
+ *  reinstate control needs to know structurally whether there is an approved
+ *  description and which version it is. */
+export interface TableDescriptionRead {
+  table_id: string;
+  name: string;
+  source_description: string | null;
+  readme: string | null;
+  readme_version: number | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  withdrawn_readme: string | null;
+}
+
+export async function fetchTableDescription(
+  tableId: string,
+  signal?: AbortSignal,
+): Promise<TableDescriptionRead> {
+  if (USE_FIXTURES) {
+    return {
+      table_id: tableId,
+      name: "customer_dim",
+      source_description: "customer master, loaded nightly",
+      readme:
+        "One row per retail banking customer. Sourced from the party master and deduplicated nightly; closed relationships are retained, not deleted.",
+      readme_version: 3,
+      approved_by: "checker@example.com",
+      approved_at: "2026-08-28T11:20:00Z",
+      withdrawn_readme: null,
+    };
+  }
+  return readJson<TableDescriptionRead>(
+    `/v1/tables/${encodeURIComponent(tableId)}/description`,
+    signal,
+  );
 }

@@ -2,9 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { ApiError } from "../lib/api";
 import {
   fetchColumnDocumentation,
-  requestDescriptionWithdrawal,
+  fetchTableDescription,
   type ColumnDocumentationRead,
+  type TableDescriptionRead,
 } from "../lib/_column_documentation_api";
+import {
+  DescriptionActionDialog,
+  type DescriptionActionSubject,
+} from "./DescriptionActionDialog";
 import { Pill } from "./primitives";
 import "./ColumnPanel.css";
 
@@ -35,8 +40,16 @@ import "./ColumnPanel.css";
       asset, so a withdrawn description renders as its own state, showing the
       text that was retired rather than reverting to looking untouched.
 
-   Withdrawing is a request, not an act: it files a review that someone else
-   decides, and the description stays live until they do. The button says so.
+   Withdrawing and reinstating are requests, not acts: each files a review that
+   someone else decides, and nothing changes until they do. The dialog says so
+   rather than the button implying it.
+
+   The table's own documentation renders here too, above its columns. It is the
+   same kind of claim about the same asset, and giving it a separate home would
+   have meant a steward looking in two places to answer one question -- and,
+   more practically, the evidence pane's items are prose, which cannot drive a
+   withdraw control that needs to know structurally whether a description
+   exists.
 --------------------------------------------------------------------------- */
 
 function classificationTone(classification: string): "accent" | "warn" | "mute" {
@@ -47,11 +60,11 @@ function classificationTone(classification: string): "accent" | "warn" | "mute" 
 
 function ColumnRow({
   column,
-  onWithdraw,
+  onAct,
   busy,
 }: {
   column: ColumnDocumentationRead;
-  onWithdraw: (column: ColumnDocumentationRead) => void;
+  onAct: (action: "WITHDRAW" | "REINSTATE", subject: DescriptionActionSubject) => void;
   busy: boolean;
 }) {
   const documented = column.business_description !== null;
@@ -80,7 +93,14 @@ function ColumnRow({
             <button
               className="colp__withdraw"
               disabled={busy}
-              onClick={() => onWithdraw(column)}
+              onClick={() =>
+                onAct("WITHDRAW", {
+                  subjectType: "COLUMN",
+                  subjectId: column.column_id,
+                  label: column.name,
+                  text: column.business_description ?? "",
+                })
+              }
               title="Ask for this description to be retired. It stays published until a reviewer approves."
             >
               Withdraw
@@ -94,7 +114,22 @@ function ColumnRow({
           <div className="colp__label">Withdrawn description</div>
           <div className="colp__text">{column.withdrawn_description}</div>
           <div className="colp__source">
-            Retired after review · this column reads as undescribed
+            Retired after review · this column reads as undescribed{" · "}
+            <button
+              className="colp__withdraw"
+              disabled={busy}
+              onClick={() =>
+                onAct("REINSTATE", {
+                  subjectType: "COLUMN",
+                  subjectId: column.column_id,
+                  label: column.name,
+                  text: column.withdrawn_description ?? "",
+                })
+              }
+              title="Ask for this description to be published again as a new version."
+            >
+              Reinstate
+            </button>
           </div>
         </div>
       ) : null}
@@ -120,53 +155,52 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
   const [columns, setColumns] = useState<ColumnDocumentationRead[] | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [withdrawing, setWithdrawing] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [table, setTable] = useState<TableDescriptionRead | null>(null);
+  const [pending, setPending] = useState<
+    { action: "WITHDRAW" | "REINSTATE"; subject: DescriptionActionSubject } | null
+  >(null);
 
-  const withdraw = useCallback(async (column: ColumnDocumentationRead) => {
-    // The reason is required by the server, and rightly so: a reviewer
-    // deciding a retraction needs to know what was wrong with the text, which
-    // the text itself cannot tell them.
-    const reason = window.prompt(
-      `Why should the description for ${column.name} be retired?`,
-      "",
-    );
-    if (reason === null || reason.trim().length < 3) return;
-    setWithdrawing(column.column_id);
-    setNotice(null);
-    setActionError(null);
-    try {
-      await requestDescriptionWithdrawal("COLUMN", column.column_id, reason.trim());
-      setNotice(
-        `Withdrawal requested for ${column.name}. The description stays published until a reviewer approves it.`,
-      );
-    } catch (e) {
-      setActionError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setWithdrawing(null);
-    }
-  }, []);
+  const act = useCallback(
+    (action: "WITHDRAW" | "REINSTATE", subject: DescriptionActionSubject) => {
+      setNotice(null);
+      setPending({ action, subject });
+    },
+    [],
+  );
+
+  const load = useCallback(
+    (signal?: AbortSignal) => {
+      setError(null);
+      fetchColumnDocumentation(tableId, signal)
+        .then(setColumns)
+        .catch((e: unknown) => {
+          if ((e as Error)?.name === "AbortError") return;
+          setError(e as Error);
+        });
+      // The table's own documentation failing must not blank the column list:
+      // they are separate claims about the same asset.
+      fetchTableDescription(tableId, signal)
+        .then(setTable)
+        .catch(() => setTable(null));
+    },
+    [tableId],
+  );
 
   useEffect(() => {
     const ac = new AbortController();
     setColumns(null);
-    setError(null);
-    fetchColumnDocumentation(tableId, ac.signal)
-      .then(setColumns)
-      .catch((e: unknown) => {
-        if ((e as Error)?.name === "AbortError") return;
-        setError(e as Error);
-      });
+    setTable(null);
+    load(ac.signal);
     return () => ac.abort();
-  }, [tableId]);
+  }, [load]);
 
   // Collapsed by default: a wide table would otherwise push the evidence items
   // this pane leads with off the screen.
   useEffect(() => {
     setExpanded(false);
     setNotice(null);
-    setActionError(null);
+    setPending(null);
   }, [tableId]);
 
   if (error) {
@@ -198,6 +232,76 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
 
   return (
     <div className="colp">
+      {/* The table's own documentation, above its columns: the same kind of
+          claim about the same asset, so looking in two places to answer one
+          question would be the wrong shape. */}
+      {table && (table.readme || table.withdrawn_readme) ? (
+        <div className="colp__table">
+          <div className="colp__sub">Table description</div>
+          {table.readme ? (
+            <div className="colp__claim">
+              <div className="colp__text">{table.readme}</div>
+              <div className="colp__source">
+                {`Approved v${table.readme_version ?? "?"}`}
+                {table.approved_by ? ` by ${table.approved_by}` : ""}
+                {" · "}
+                <button
+                  className="colp__withdraw"
+                  disabled={pending !== null}
+                  onClick={() =>
+                    act("WITHDRAW", {
+                      subjectType: "TABLE",
+                      subjectId: table.table_id,
+                      label: table.name,
+                      text: table.readme ?? "",
+                    })
+                  }
+                  title="Ask for this table's documentation to be retired."
+                >
+                  Withdraw
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="colp__claim colp__claim--withdrawn">
+              <div className="colp__text">{table.withdrawn_readme}</div>
+              <div className="colp__source">
+                Retired after review · this table reads as undocumented{" · "}
+                <button
+                  className="colp__withdraw"
+                  disabled={pending !== null}
+                  onClick={() =>
+                    act("REINSTATE", {
+                      subjectType: "TABLE",
+                      subjectId: table.table_id,
+                      label: table.name,
+                      text: table.withdrawn_readme ?? "",
+                    })
+                  }
+                  title="Ask for this documentation to be published again as a new version."
+                >
+                  Reinstate
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {pending ? (
+        <DescriptionActionDialog
+          action={pending.action}
+          subject={pending.subject}
+          onClose={() => setPending(null)}
+          onRequested={(message) => {
+            setNotice(message);
+            // Re-read rather than patching state: the request may have been
+            // refused for a reason the server knows and this component does not.
+            load();
+          }}
+        />
+      ) : null}
+
       <div className="colp__sub">
         Columns
         <span className="colp__count">
@@ -212,12 +316,6 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
           {notice}
         </div>
       ) : null}
-      {actionError ? (
-        <div className="colp__error" role="alert">
-          {actionError}
-        </div>
-      ) : null}
-
       {columns.length === 0 ? (
         <div className="colp__none">This table has no active columns.</div>
       ) : (
@@ -227,8 +325,8 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
               <ColumnRow
                 key={column.column_id}
                 column={column}
-                onWithdraw={(c) => void withdraw(c)}
-                busy={withdrawing !== null}
+                onAct={act}
+                busy={pending !== null}
               />
             ))}
           </ol>

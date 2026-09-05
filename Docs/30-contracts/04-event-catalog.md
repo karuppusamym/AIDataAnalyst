@@ -192,7 +192,9 @@ Every event carries the same envelope (see `10-architecture/07-event-and-messagi
 | `model_import.applied.v1` / `.rejected.v1` | Governed decision on one workbook import batch. `applied_count` can be lower than `change_count`: a change superseded between export and approval is skipped, not applied | batch_id, datasource_id, filename, content_sha256, change_count, applied_count, skipped_count, review_id |
 | `description.withdrawal.requested.v1` | A steward asked for an approved table or column description to be retired. Nothing is un-published yet | withdrawal_id, subject_type, subject_id, review_id |
 | `description.withdrawal.approved.v1` / `.rejected.v1` | Governed decision on a withdrawal. Approval moves the version to `WITHDRAWN`, preserving its text | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
-| `description.withdrawal.superseded.v1` | The withdrawal was approved, but a newer version had been published since it was raised, so nothing was retired | withdrawal_id, subject_type, subject_id, version_id, retired, review_id |
+| `description.withdrawal.superseded.v1` | The withdrawal was approved, but a newer version had been published since it was raised, so nothing was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
+| `description.reinstatement.approved.v1` / `.rejected.v1` | Governed decision on bringing a withdrawn description back. Approval republishes the retired text as a **new** version; the withdrawn row is never flipped back, so the chain still records that it was retired | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
+| `description.reinstatement.superseded.v1` | The reinstatement was approved, but the asset had been described again since it was raised, so nothing was republished | withdrawal_id, request_type, subject_type, subject_id, version_id, applied, review_id |
 
 ### Lineage — topic `atlas.lineage.v1` (key: `datasource_id`)
 
@@ -291,6 +293,7 @@ and carry no actions: a notification here is never a control surface.
 | Event | Trigger | Key payload |
 |---|---|---|
 | `agent.contract_published.v1` | AG-10: an agent version's contract was created or replaced -- its workload identity, capability envelope, autonomy tier, budget caps and kill scope. The contract is the agent's authority, so a change here is the change an auditor most wants to see | ai_asset_version_id, agent_principal_id, autonomy_tier |
+| `agent_contract_request.submitted.v1` | AG-10 extension: a `CONTRACT_AUTHORS` principal submitted a contract definition for review rather than writing it directly -- opens a `GovernanceReview` (`AGENT_CONTRACT_REQUEST`) that a different principal must decide, and which is blocked on a live AT-8/N17 eval-gate PASS at decision time before the contract is actually written | agent_contract_request_id, ai_asset_version_id, review_id |
 | `agent.kill_switch_engaged.v1` | AG-10: an agent's kill switch was engaged. Takes effect on the agent's very next run -- the orchestrator queries the switch live rather than caching it | ai_asset_version_id, kill_scope, agent_principal_id |
 | `agent.kill_switch_released.v1` | AG-10: an agent's kill switch was released and its runs may resume | ai_asset_version_id, kill_scope, agent_principal_id |
 | `reviewer_agent.sample_resolved.v1` | ADR-0027 condition (b): a human resolved one sampled agent decision. The DISAGREED rate per object type is the metric ADR-0027's revisit trigger watches | sample_id, human_outcome, object_type, risk_tier |

@@ -61,7 +61,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aida.agent_contract_api import AgentContractWrite, CONTRACT_AUTHORS, CONTRACT_READERS
+from aida.agent_contract_api import CONTRACT_AUTHORS, CONTRACT_READERS, AgentContractWrite
 from aida.agent_contracts import (
     AgentContractDefinition,
     AgentContractValidationError,
