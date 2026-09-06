@@ -77,6 +77,7 @@ export async function exportAssetEvidence(tableId: string): Promise<void> {
 
 export interface CatalogQuery {
   organizationId: string;
+  datasourceId?: string;
   q?: string;
   objectType?: string;
   status?: string;
@@ -101,6 +102,7 @@ export function fetchCatalogRows(
     async () => makeFixtureCatalog(query),
     async () => {
       const params = new URLSearchParams();
+      if (query.datasourceId) params.set("datasource_id", query.datasourceId);
       if (query.q) params.set("q", query.q);
       if (query.objectType && query.objectType !== "ALL")
         params.set("object_type", query.objectType);

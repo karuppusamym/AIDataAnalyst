@@ -28,6 +28,7 @@ export function CatalogScreen() {
   const [params, setParams] = useUrlState();
 
   const q = params.get("q") ?? "";
+  const datasourceId = params.get("ds") ?? "";
   const objectType = params.get("type") ?? "ALL";
   const certification = params.get("cert") ?? "ALL";
   const selectedId = params.get("asset");
@@ -62,7 +63,7 @@ export function CatalogScreen() {
     setError(null);
     try {
       const page = await fetchCatalogRows(
-        { organizationId: ORG, q, objectType, certification, limit: 100 },
+        { organizationId: ORG, datasourceId, q, objectType, certification, limit: 100 },
         ac.signal,
       );
       if (seq !== reqSeq.current) return;
@@ -76,7 +77,7 @@ export function CatalogScreen() {
     } finally {
       if (seq === reqSeq.current) setLoading(false);
     }
-  }, [q, objectType, certification]);
+  }, [datasourceId, q, objectType, certification]);
 
   useEffect(() => {
     void loadFirstPage();
@@ -89,6 +90,7 @@ export function CatalogScreen() {
     try {
       const page = await fetchCatalogRows({
         organizationId: ORG,
+        datasourceId,
         q,
         objectType,
         certification,
@@ -102,7 +104,7 @@ export function CatalogScreen() {
     } finally {
       setLoadingMore(false);
     }
-  }, [cursor, loadingMore, loading, q, objectType, certification]);
+  }, [cursor, loadingMore, loading, datasourceId, q, objectType, certification]);
 
   // Debounce typing so each keystroke does not become a request.
   useEffect(() => {
@@ -190,6 +192,13 @@ export function CatalogScreen() {
           <span><b className="tnum">{nf.format(uncertified)}</b> uncertified loaded</span>
         </div>
       </header>
+
+      {datasourceId ? (
+        <div className="cat__scope" role="status">
+          <span>Showing tables from the selected source.</span>
+          <Button onClick={() => setParams({ ds: null, asset: null })}>Show all sources</Button>
+        </div>
+      ) : null}
 
       <div className="cat__filters">
         <Field label="Search">

@@ -10,6 +10,7 @@ import {
 import { downloadDatasourceModelWorkbook } from "../lib/_column_documentation_api";
 import { WorkbookImport } from "../components/WorkbookImport";
 import { useScopeSelection } from "../lib/scope";
+import { useSession } from "../lib/session";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
@@ -117,6 +118,12 @@ function HealthPane({
   source: DataSourceRead;
   onClose: () => void;
 }) {
+  const roles = useSession().me?.roles;
+  const canImportWorkbook =
+    roles === undefined ||
+    roles.some((role) =>
+      ["PlatformAdmin", "MetadataAdmin", "DataAdmin", "DataSteward"].includes(role),
+    );
   const [health, setHealth] = useState<ConnectorHealthScoreRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const [generating, setGenerating] = useState<"markdown" | "json" | null>(null);
@@ -220,7 +227,44 @@ function HealthPane({
               </div>
             ) : null}
 
-            <div className="evp__sub" style={{ marginTop: 14 }}>Factor breakdown</div>
+          </>
+        )}
+
+        <section className="src__model" aria-labelledby="src-model-heading">
+          <div className="evp__sub" id="src-model-heading">Model workbook</div>
+          <p className="src__modellede">
+            Tables, columns and data types are populated by discovery scans. Use the
+            Catalog link below to inspect them. The workbook is for bulk business-description
+            review, not for creating the physical schema.
+          </p>
+          <ol className="src__modelsteps">
+            <li>Download the current model.</li>
+            <li>Edit it in Excel or another spreadsheet app and save the file.</li>
+            <li>Upload the saved file here to preview the changes.</li>
+          </ol>
+          <div className="src__modelaction">
+            <Button
+              disabled={exportingWorkbook}
+              onClick={() => void exportWorkbook()}
+              title="Download every table, column and relationship for this source as an Excel workbook, for offline bulk review"
+            >
+              {exportingWorkbook ? "Exporting…" : "Download model (.xlsx)"}
+            </Button>
+            <span>This is a manual round trip; saving in Excel does not upload automatically.</span>
+          </div>
+          {canImportWorkbook ? (
+            <WorkbookImport datasourceId={source.id} />
+          ) : (
+            <p className="src__modelreadonly">
+              Analysts can download and inspect this workbook. Uploading changes requires
+              Data Steward, Metadata Admin, Data Admin or Platform Admin access.
+            </p>
+          )}
+        </section>
+
+        {health ? (
+          <section className="src__factors" aria-labelledby="src-factors-heading">
+            <div className="evp__sub" id="src-factors-heading">Factor breakdown</div>
             <ol className="evl">
               {health.factors.map((f) => (
                 <li key={f.name} className={`evi evi--${healthTone(health.status) === "mute" ? "info" : healthTone(health.status)}`}>
@@ -238,29 +282,23 @@ function HealthPane({
                 </li>
               ))}
             </ol>
-          </>
-        )}
-      </div>
+          </section>
+        ) : null}
 
-      {/* The other half of the workbook round trip the footer's export button
-          opens. Placed on the same pane as the export, because the two are one
-          workflow: download here, edit offline, come back here. */}
-      <div className="evp__links">
-        <WorkbookImport datasourceId={source.id} />
-      </div>
-
-      <div className="evp__links">
+        <div className="evp__links">
         {/* Everything downstream of a source is scoped by its id. Sources was
-            a leaf screen; these are the four places an operator goes next. */}
+            a leaf screen; these are the places an operator goes next. */}
         <CrossLinks
           label="This source in"
           links={[
+            { screen: "catalog", label: "Tables & columns", params: { ds: source.id }, title: "Discovered tables, column definitions and descriptions for this source" },
             { screen: "operations", label: "Operations", params: { ds: source.id, batch_ds: source.id }, title: "Analysis runs and ingestion batches for this source" },
             { screen: "quality", label: "Quality", params: { ds: source.id }, title: "Open incidents for this source" },
             { screen: "relationships", label: "Relationships", params: { ds: source.id }, title: "Key and relationship candidates" },
             { screen: "lineage", label: "Lineage", params: { ds: source.id }, title: "Narrated lineage for this source" },
           ]}
         />
+        </div>
       </div>
 
       <footer className="evp__foot">
@@ -286,18 +324,7 @@ function HealthPane({
         >
           {generating === "json" ? "Generating…" : "Generate context (.json)"}
         </Button>
-        {/* The workbook is the bulk-review surface, not another rendering of
-            the context snapshot above: it carries every table, column and
-            relationship with stable ids, so a steward can work through the
-            whole model offline. */}
-        <Button
-          disabled={exportingWorkbook}
-          onClick={() => void exportWorkbook()}
-          title="Download every table, column and relationship for this source as an Excel workbook, for offline bulk review"
-        >
-          {exportingWorkbook ? "Exporting…" : "Export model (.xlsx)"}
-        </Button>
-        <span className="evp__hint">Per-source · not fanned out to every row</span>
+        <span className="evp__hint">Context snapshots</span>
       </footer>
       {generateNotice && (
         <p className="evp__notice" role="status">

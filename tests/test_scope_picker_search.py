@@ -337,6 +337,9 @@ async def test_get_datasource_resolves_in_scope_and_refuses_other_organizations(
     )
     assert resolved.id == alpha.datasource.id
     assert resolved.name == "Alpha Ledger"
+    # The summary projection, not `DataSourceRead`: this route is readable down
+    # to Viewer, and `DataSourceRead` carries `credential_reference`.
+    assert not hasattr(resolved, "credential_reference")
 
     with pytest.raises(HTTPException) as cross_tenant:
         await get_datasource(

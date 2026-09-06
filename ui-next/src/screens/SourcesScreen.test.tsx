@@ -158,6 +158,9 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     expect(panel).toHaveTextContent("RUN SUCCESS RATE");
     expect(panel).toHaveTextContent("100% of recent runs succeeded.");
     expect(panel).toHaveTextContent("DATASOURCE ENABLEMENT");
+    expect(panel).toHaveTextContent("Tables, columns and data types are populated by discovery scans.");
+    expect(panel).toHaveTextContent("saving in Excel does not upload automatically");
+    expect(screen.getByRole("button", { name: /Tables & columns/ })).toBeInTheDocument();
   });
 
   it("shows a blocker pill when the health response reports one", async () => {

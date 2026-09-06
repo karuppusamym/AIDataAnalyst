@@ -90,8 +90,15 @@ BOUNDED_CONTEXTS = (
     "observability_audit",
 )
 
-# Group ids are mermaid node ids as well, so they stay identifier-safe.
+# The three package `__init__` modules that are not inside any one group's
+# subtree. Every `from aida.x import y` also touches `aida`, so leaving them in
+# with the domain modules would put a 200-plus fan-in node in the middle of the
+# map that means nothing except "this is a package".
+PACKAGE_ROOTS = frozenset({"aida", "atlas", "atlas.modules"})
+
+# Group ids double as mermaid node ids, so they stay identifier-safe.
 GROUP_LABELS: dict[str, str] = {
+    "roots": "package roots",
     "app": "aida.main (composition root)",
     "platform": "atlas.platform",
     "routers": "aida routers (*_api)",
@@ -103,6 +110,7 @@ GROUP_LABELS: dict[str, str] = {
 }
 
 GROUP_ORDER = (
+    "roots",
     "app",
     "routers",
     "domain",
@@ -116,6 +124,8 @@ GROUP_ORDER = (
 
 def group_of(module: str) -> str:
     """The one group a module belongs to. Pure function of its dotted path."""
+    if module in PACKAGE_ROOTS:
+        return "roots"
     if module == "aida.main":
         # Its own group, not a domain module. `main.py` is the composition root:
         # importing 60 routers is its job, and folding it in with the domain
@@ -468,7 +478,8 @@ def render() -> str:
         "|---|---|---:|",
     ]
     rules = {
-        "app": "`aida.main` alone -- the composition root",
+        "roots": "`aida`, `atlas`, `atlas.modules` — package `__init__` files",
+        "app": "`aida.main` alone — the composition root",
         "platform": "`atlas.platform.*`",
         "routers": "flat `aida.*` whose filename ends `_api`",
         "domain": "everything else flat in `aida.*`",
@@ -491,15 +502,21 @@ def render() -> str:
         "",
         "An edge means *importing anything in the source group loads something in the",
         "target group*. Weights are the number of module-level imports aggregated into",
-        "that line.",
+        "that line. The *package roots* group is counted in the table above but not drawn:",
+        "every `from aida.x import y` also touches `aida`, so an edge into a package root",
+        "restates the edge next to it and nothing more.",
         "",
         "```mermaid",
         "graph LR",
     ]
-    for group in GROUP_ORDER:
+    drawn_groups = [g for g in GROUP_ORDER if g != "roots"]
+    for group in drawn_groups:
         count = len(group_members.get(group, []))
-        lines.append(f'  {_mermaid_id(group)}["{GROUP_LABELS[group]}<br/>{count} modules"]')
+        noun = "module" if count == 1 else "modules"
+        lines.append(f'  {_mermaid_id(group)}["{GROUP_LABELS[group]}<br/>{count} {noun}"]')
     for (src, dst), weight in sorted(group_edges.items(), key=lambda kv: (-kv[1], kv[0])):
+        if "roots" in (src, dst):
+            continue
         lines.append(f"  {_mermaid_id(src)} -->|{weight}| {_mermaid_id(dst)}")
     lines += [
         "```",
@@ -588,7 +605,8 @@ def render() -> str:
         only = len(exclusive[entry])
         if only:
             node = f"only_{_mermaid_id(entry)}"
-            lines.append(f'  {node}["only this process<br/>{only} modules"]')
+            noun = "module" if only == 1 else "modules"
+            lines.append(f'  {node}["only this process<br/>{only} {noun}"]')
             lines.append(f"  {_mermaid_id(entry)} --> {node}")
     lines += ["```", ""]
 
@@ -674,12 +692,16 @@ def render() -> str:
         "## Most-imported modules",
         "",
         "The hubs: what a change here touches. Fan-in counts direct importers inside",
-        "`src/`, so a high number means a wide blast radius, not importance.",
+        "`src/`, so a high number means a wide blast radius, not importance. Package",
+        "`__init__` modules are excluded — every submodule import touches its parent, so",
+        "a package's fan-in measures nothing but the size of the package.",
         "",
         "| Module | Group | Direct importers |",
         "|---|---|---:|",
     ]
-    for module, count in sorted(fan_in.items(), key=lambda kv: (-kv[1], kv[0]))[:15]:
+    packages = {name for name, (_, is_pkg) in modules.items() if is_pkg}
+    hubs = [(m, c) for m, c in fan_in.items() if m not in packages]
+    for module, count in sorted(hubs, key=lambda kv: (-kv[1], kv[0]))[:15]:
         lines.append(f"| `{module}` | {GROUP_LABELS[group_of(module)]} | {count} |")
     lines += [
         "",

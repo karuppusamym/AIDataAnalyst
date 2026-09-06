@@ -44,8 +44,8 @@ graph. Nothing here is hand-maintained.
 
 ## Coverage
 
-- Surfaces covered: **464**
-- By family: BULK 11, EXPORT 5, JOB 22, MCP 9, REST 416, SDK 1
+- Surfaces covered: **468**
+- By family: BULK 11, EXPORT 5, JOB 22, MCP 9, REST 420, SDK 1
 - Rows with at least one `unknown` cell: **1**
 - `unknown` cells in total: **6**
 
@@ -188,6 +188,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/datasources/{datasource_id}/unified-lineage/graph` | REST | `aida.unified_lineage_api.get_unified_lineage_graph` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/unified-lineage/impact/{node_id}` | REST | `aida.unified_lineage_api.get_unified_lineage_impact` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/datasources/{datasource_id}/view-lineage` | REST | `aida.view_lineage_api.list_view_lineage` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
+| `GET /v1/datasources/{datasource_id}` | REST | `aida.operational_api.get_datasource` | Analyst, DataAdmin, MetadataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/dbt-artifact-imports/{artifact_id}/lineage` | REST | `aida.dbt_api.get_dbt_lineage` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/dbt-artifact-imports/{artifact_id}/resources` | REST | `aida.dbt_api.list_dbt_resources` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
 | `GET /v1/dbt-projects/{dbt_project_id}/artifact-imports` | REST | `aida.dbt_api.list_dbt_artifact_imports` | Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | writes | no | not cancellable |
@@ -281,6 +282,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/organizations/{organization_id}/stewardship/unowned-backlog` | REST | `aida.stewardship_api.list_unowned_asset_backlog` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/tool-first-rate` | REST | `aida.operational_api.organization_tool_first_rate` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations/{organization_id}/workspaces` | REST | `atlas.modules.identity_tenancy.router.list_workspaces` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
+| `GET /v1/organizations/{organization_id}` | REST | `atlas.modules.identity_tenancy.router.get_organization` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
 | `GET /v1/organizations` | REST | `atlas.modules.identity_tenancy.router.list_organizations` | Auditor, Operations, OrganizationAdmin, PlatformAdmin | no | no | read | no | not cancellable |
 | `GET /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.get_playbook` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/procedure-lineage/capability-matrix` | REST | `aida.procedure_lineage_api.get_procedure_lineage_capability_matrix` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | no | no | read | no | not cancellable |
@@ -292,6 +294,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/projects/{project_id}/documents` | REST | `aida.document_ingestion_api.list_documents` | Analyst, DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin, Reviewer, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/semantic-model-versions` | REST | `aida.semantic_api.list_semantic_model_versions` | Analyst, DataSteward, PlatformAdmin, SemanticAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/projects/{project_id}/tools` | REST | `aida.tool_api.list_tools` | AgentDeveloper, Analyst, PlatformAdmin, SemanticAdmin, ToolDeveloper, Viewer | yes | yes | writes | yes | not cancellable |
+| `GET /v1/projects/{project_id}` | REST | `aida.operational_api.get_project` | DataAdmin, Operations, OrganizationAdmin, PlatformAdmin, ProjectAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/quality-incidents/{incident_id}/triage` | REST | `aida.quality_api.get_quality_incident_triage` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/quality-rule-packs/{rule_pack_id}/rules` | REST | `aida.quality_api.list_rules` | Analyst, DataAdmin, DataSteward, Operations, PlatformAdmin, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/query-executions/{execution_id}/lineage` | REST | `aida.api.get_query_lineage` | AgentDeveloper, Analyst, Auditor, MetadataAdmin, PlatformAdmin | yes | no | read | no | not cancellable |
@@ -328,6 +331,7 @@ graph. Nothing here is hand-maintained.
 | `GET /v1/tools/{tool_id}/certification-status` | REST | `aida.tool_api.get_tool_certification_status` | AgentDeveloper, Analyst, Auditor, PlatformAdmin, Reviewer, SemanticAdmin, ToolDeveloper, Viewer | yes | no | read | no | not cancellable |
 | `GET /v1/workspaces/{workspace_id}/members` | REST | `atlas.modules.identity_tenancy.router.list_members` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `GET /v1/workspaces/{workspace_id}/source-bindings` | REST | `atlas.modules.identity_tenancy.router.list_source_bindings` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
+| `GET /v1/workspaces/{workspace_id}` | REST | `atlas.modules.identity_tenancy.router.get_workspace` | Analyst, DataAdmin, OrganizationAdmin, PlatformAdmin, Reviewer, Steward | yes | no | read | no | not cancellable |
 | `PATCH /v1/datasources/{datasource_id}` | REST | `atlas.modules.connectivity.router.update_datasource` | DataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |
 | `PATCH /v1/graph-perspectives/{perspective_id}` | REST | `aida.graph_perspectives_api.update_graph_perspective` | Analyst, Auditor, DataAdmin, DataSteward, MetadataAdmin, MetadataReviewer, PlatformAdmin, Viewer | yes | no | writes | yes | not cancellable |
 | `PATCH /v1/playbooks/{playbook_id}` | REST | `aida.playbooks_api.update_playbook` | DataAdmin, DataSteward, MetadataAdmin, PlatformAdmin | yes | no | writes | yes | not cancellable |

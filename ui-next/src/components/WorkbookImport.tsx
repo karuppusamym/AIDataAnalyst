@@ -210,7 +210,7 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
   return (
     <div className="wbi">
       <div className="wbi__sub">
-        Import edited workbook
+        Upload edited workbook
         {batch ? (
           <button className="wbi__reset" onClick={reset}>
             Start over
@@ -221,8 +221,8 @@ export function WorkbookImport({ datasourceId }: { datasourceId: string }) {
       {batch === null ? (
         <>
           <p className="wbi__lede">
-            Upload a workbook exported from this source. It is checked against the
-            current model and nothing is published until a reviewer approves it.
+            Select the saved .xlsx file. Atlas checks it against the current model,
+            shows the exact changes, and publishes nothing until a reviewer approves it.
           </p>
           <input
             ref={fileInput}

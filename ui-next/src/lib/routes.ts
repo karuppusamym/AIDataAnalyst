@@ -113,7 +113,7 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   home: [],
   inbox: ["persona"],
   analyst: ["ds", "run"],
-  catalog: ["asset", "cert", "q", "type"],
+  catalog: ["asset", "cert", "ds", "q", "type"],
   semantics: ["metric", "model", "project"],
   tools: ["project", "status", "tool"],
   "tool-plans": ["plan"],

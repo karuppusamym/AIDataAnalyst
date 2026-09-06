@@ -138,6 +138,7 @@ def _asset_certification_read(
 @router.get("/organizations/{organization_id}/catalog/rows", response_model=CursorPage)
 async def list_catalog_rows(
     organization_id: UUID,
+    datasource_id: UUID | None = None,
     q: str | None = Query(default=None, min_length=2, max_length=200),
     object_type: str | None = Query(default=None, max_length=30),
     table_status: str = Query(default="ACTIVE", alias="status", max_length=30),
@@ -174,6 +175,8 @@ async def list_catalog_rows(
 
     order_columns: tuple[Any, ...] = (MetadataTable.name, MetadataTable.id)
     filters: list[Any] = [MetadataTable.organization_id == organization_id]
+    if datasource_id is not None:
+        filters.append(MetadataTable.datasource_id == datasource_id)
     if table_status != "ALL":
         filters.append(MetadataTable.status == table_status)
     if object_type and object_type != "ALL":

@@ -69,6 +69,7 @@ import ast
 import re
 import sys
 import tomllib
+from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,7 +123,7 @@ SHIMS: tuple[Shim, ...] = (
         path="src/aida/db.py",
         module="aida.db",
         replacement="`atlas.platform.db`",
-        replacement_detail="`atlas.platform.db` -- the same objects, moved, not copied.",
+        replacement_detail="`atlas.platform.db` — the same objects, moved, not copied.",
         owner="Platform infrastructure",
         introduced="ST-04, Phase 1 of Docs/40-engineering/06-refactor-plan.md",
         removal_condition=(
@@ -193,7 +194,7 @@ SHIMS: tuple[Shim, ...] = (
         replacement="`atlas.modules.<context>.models` (re-exported classes only)",
         replacement_detail=(
             "Each re-exported class has moved to the `models` module of the bounded "
-            "context that owns it; import it from there. The rest of the file -- the "
+            "context that owns it; import it from there. The rest of the file — the "
             "large majority of it -- has not moved and has no replacement path yet."
         ),
         owner="Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, "
@@ -695,7 +696,15 @@ def collect_rows() -> list[Row]:
     return rows
 
 
-def _fmt_files(files: Iterable[str], limit: int = 6) -> str:
+# Below this many callers the register lists every one of them by name: that is
+# the range where a migration is actually planned, and a name is worth more than
+# a number. Above it, naming an arbitrary alphabetical handful adds nothing and
+# makes the file churn every time someone adds a file that sorts early, so the
+# breakdown by source root is given instead.
+NAME_CALLERS_UPTO = 8
+
+
+def _fmt_files(files: Iterable[str], limit: int = 8) -> str:
     files = list(files)
     if not files:
         return "none"
@@ -703,6 +712,20 @@ def _fmt_files(files: Iterable[str], limit: int = 6) -> str:
     if len(files) > limit:
         shown += f", +{len(files) - limit} more"
     return shown
+
+
+def _caller_breakdown(files: Iterable[str]) -> str:
+    """Callers per source root -- stable under the addition of one more caller."""
+    buckets: dict[str, int] = defaultdict(int)
+    for path in files:
+        parts = path.split("/")
+        if parts[0] == "src" and len(parts) > 1:
+            buckets[f"src/{parts[1]}"] += 1
+        elif parts[0] == "ui-next" and len(parts) > 2:
+            buckets[f"ui-next/{parts[1]}/{parts[2]}"] += 1
+        else:
+            buckets[parts[0]] += 1
+    return ", ".join(f"`{root}` {count}" for root, count in sorted(buckets.items()))
 
 
 def render(rows: list[Row]) -> str:
@@ -724,6 +747,12 @@ def render(rows: list[Row]) -> str:
         "*do not remove them solely because they look redundant.* Nothing here authorises",
         "a deletion; the register exists so that a deletion, when it happens, is a",
         "decision against a stated condition rather than a guess against an appearance.",
+        "",
+        "Related: the generated",
+        "[architecture map](../10-architecture/14-generated-architecture-map.md) shows which",
+        "bounded contexts are still reached through one of these shims rather than through",
+        "their own public face, and the",
+        "[domain guides](../20-modules/domain-guides/) say what each of those contexts owns.",
         "",
         "## Which columns are generated and which are not",
         "",
@@ -863,12 +892,18 @@ def _render_detail(row: Row) -> list[str]:
         f"- **Re-exports** — {len(m.reexported_names)} name(s) from "
         f"{_fmt_files(m.reexport_sources, limit=8)}",
         f"- **Callers** — {row.caller_count} file(s), {m.caller_statements} import "
-        f"statement(s): {_fmt_files(m.caller_files)}",
+        f"statement(s)",
     ]
+    if row.caller_count == 0:
+        out.append("  - No in-repository importer. **Not evidence enough to remove it.**")
+    elif row.caller_count <= NAME_CALLERS_UPTO:
+        out.append(f"  - {_fmt_files(m.caller_files, limit=NAME_CALLERS_UPTO)}")
+    else:
+        out.append(f"  - By source root: {_caller_breakdown(m.caller_files)}")
     if m.string_reference_files:
         out.append(
             f"- **String references** — {len(m.string_reference_files)} file(s): "
-            f"{_fmt_files(m.string_reference_files, limit=4)}"
+            f"{_fmt_files(m.string_reference_files)}"
         )
     if m.contracts:
         out.append(

@@ -203,6 +203,7 @@ function rowAt(i: number): CatalogRowRead {
 }
 
 function matches(row: CatalogRowRead, q: CatalogQuery): boolean {
+  if (q.datasourceId && row.datasource_id !== q.datasourceId) return false;
   if (q.q) {
     const needle = q.q.toLowerCase();
     const hay = `${row.name} ${row.description ?? ""} ${row.schema_name}`.toLowerCase();
@@ -221,7 +222,7 @@ export async function makeFixtureCatalog(
 ): Promise<CursorPage<CatalogRowRead>> {
   const limit = q.limit ?? 100;
   const start = q.cursor ? Number(atob(q.cursor)) : 0;
-  const filtered = Boolean(q.q || (q.objectType && q.objectType !== "ALL") ||
+  const filtered = Boolean(q.datasourceId || q.q || (q.objectType && q.objectType !== "ALL") ||
     (q.certification && q.certification !== "ALL"));
 
   const items: CatalogRowRead[] = [];

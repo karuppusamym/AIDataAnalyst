@@ -57,12 +57,12 @@ describe("buildLink", () => {
 
   it("carries estate context only to a screen that reads it", () => {
     const from = { ...BASE, search: "?ds=ds_1&severity=HIGH" };
-    // Lineage reads `ds`; Catalog does not.
+    // Lineage and Catalog read `ds`; the screen-specific severity filter is dropped.
     expect(buildRelativeLink({ screen: "lineage", params: { node: "t_1" } }, from.search)).toBe(
       "?ds=ds_1&node=t_1#/lineage",
     );
     expect(buildRelativeLink({ screen: "catalog", params: { asset: "t_1" } }, from.search)).toBe(
-      "?asset=t_1#/catalog",
+      "?asset=t_1&ds=ds_1#/catalog",
     );
   });
 

@@ -18,9 +18,10 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 
 | Group | Rule | Modules |
 |---|---|---:|
-| aida.main (composition root) | `aida.main` alone -- the composition root | 1 |
+| package roots | `aida`, `atlas`, `atlas.modules` — package `__init__` files | 3 |
+| aida.main (composition root) | `aida.main` alone — the composition root | 1 |
 | aida routers (*_api) | flat `aida.*` whose filename ends `_api` | 58 |
-| aida domain modules | everything else flat in `aida.*` | 202 |
+| aida domain modules | everything else flat in `aida.*` | 199 |
 | atlas.modules.catalog | `atlas.modules.catalog.*` | 12 |
 | atlas.modules.connectivity | `atlas.modules.connectivity.*` | 12 |
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 12 |
@@ -39,13 +40,15 @@ is to show how much of the system has and has not moved into one.
 
 An edge means *importing anything in the source group loads something in the
 target group*. Weights are the number of module-level imports aggregated into
-that line.
+that line. The *package roots* group is counted in the table above but not drawn:
+every `from aida.x import y` also touches `aida`, so an edge into a package root
+restates the edge next to it and nothing more.
 
 ```mermaid
 graph LR
-  app["aida.main (composition root)<br/>1 modules"]
+  app["aida.main (composition root)<br/>1 module"]
   routers["aida routers (*_api)<br/>58 modules"]
-  domain["aida domain modules<br/>202 modules"]
+  domain["aida domain modules<br/>199 modules"]
   ctx_catalog["atlas.modules.catalog<br/>12 modules"]
   ctx_connectivity["atlas.modules.connectivity<br/>12 modules"]
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>12 modules"]
@@ -55,19 +58,18 @@ graph LR
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
   platform["atlas.platform<br/>5 modules"]
-  routers -->|555| domain
+  routers -->|494| domain
   app -->|58| routers
-  workflows -->|40| domain
+  workflows -->|36| domain
   domain -->|31| platform
-  ctx_catalog -->|30| domain
-  ctx_identity_tenancy -->|19| domain
-  app -->|16| domain
-  ctx_connectivity -->|15| domain
-  ctx_ingestion -->|12| domain
-  ctx_observability_audit -->|12| domain
+  ctx_catalog -->|19| domain
+  ctx_identity_tenancy -->|15| domain
+  app -->|13| domain
   domain -->|12| routers
-  projectors -->|12| domain
-  connectors -->|11| domain
+  ctx_connectivity -->|10| domain
+  projectors -->|10| domain
+  ctx_ingestion -->|9| domain
+  ctx_observability_audit -->|9| domain
   domain -->|9| ctx_catalog
   domain -->|7| connectors
   domain -->|4| ctx_connectivity
@@ -91,7 +93,6 @@ graph LR
   routers -->|2| ctx_ingestion
   routers -->|2| ctx_observability_audit
   ctx_catalog -->|1| routers
-  platform -->|1| domain
   projectors -->|1| routers
   workflows -->|1| routers
 ```
@@ -144,9 +145,10 @@ Per group, how much of each group each process pulls in:
 
 | Group | main | worker | scheduler | graph_projector | outbox_publisher | Group size |
 |---|---:|---:|---:|---:|---:|---:|
+| package roots | 3 | 3 | 3 | 3 | 3 | 3 |
 | aida.main (composition root) | 1 | 0 | 0 | 0 | 0 | 1 |
 | aida routers (*_api) | 58 | 0 | 2 | 1 | 0 | 58 |
-| aida domain modules | 189 | 54 | 58 | 34 | 8 | 202 |
+| aida domain modules | 186 | 51 | 55 | 31 | 5 | 199 |
 | atlas.modules.catalog | 7 | 5 | 5 | 5 | 2 | 12 |
 | atlas.modules.connectivity | 5 | 3 | 3 | 3 | 2 | 12 |
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 12 |
@@ -180,7 +182,7 @@ graph LR
   aida_workflows_scheduler --> only_aida_workflows_scheduler
   aida_projectors_graph_projector --> shared
   aida_projectors_outbox_publisher --> shared
-  only_aida_projectors_outbox_publisher["only this process<br/>1 modules"]
+  only_aida_projectors_outbox_publisher["only this process<br/>1 module"]
   aida_projectors_outbox_publisher --> only_aida_projectors_outbox_publisher
 ```
 
@@ -300,11 +302,12 @@ graph LR
 ## Most-imported modules
 
 The hubs: what a change here touches. Fan-in counts direct importers inside
-`src/`, so a high number means a wide blast radius, not importance.
+`src/`, so a high number means a wide blast radius, not importance. Package
+`__init__` modules are excluded — every submodule import touches its parent, so
+a package's fan-in measures nothing but the size of the package.
 
 | Module | Group | Direct importers |
 |---|---|---:|
-| `aida` | aida domain modules | 228 |
 | `aida.models` | aida domain modules | 169 |
 | `aida.security` | aida domain modules | 94 |
 | `aida.schemas` | aida domain modules | 90 |
@@ -312,13 +315,14 @@ The hubs: what a change here touches. Fan-in counts direct importers inside
 | `aida.events` | aida domain modules | 78 |
 | `aida.config` | aida domain modules | 77 |
 | `aida.context` | aida domain modules | 63 |
-| `atlas` | aida domain modules | 32 |
-| `atlas.platform` | atlas.platform | 21 |
-| `aida.connectors` | aida.connectors | 15 |
 | `aida.connectors.base` | aida.connectors | 13 |
 | `aida.secrets` | aida domain modules | 12 |
-| `atlas.modules` | aida domain modules | 12 |
 | `atlas.platform.config` | atlas.platform | 11 |
+| `aida.authorization_gate` | aida domain modules | 10 |
+| `aida.business_annotation_versions` | aida domain modules | 10 |
+| `aida.classification` | aida domain modules | 10 |
+| `aida.timeutil` | aida domain modules | 9 |
+| `atlas.platform.db` | atlas.platform | 9 |
 
 ## What this map cannot tell you
 

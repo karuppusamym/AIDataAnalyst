@@ -19,7 +19,7 @@ import {
 import type { PageOf } from "../lib/ui-types";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./ReviewerAgentScreen.css";
 
@@ -232,25 +232,39 @@ export function ReviewerAgentScreen() {
     return () => controller.abort();
   }, [loadSamples]);
 
-  const onSuspendResume = useCallback(async () => {
-    if (!state) return;
-    const wantSuspend = !state.suspended;
-    const reason = window.prompt(
-      wantSuspend
-        ? "Suspend the reviewer agent?\n\nADR-0027 condition (c): one human action, effective immediately. Give a reason (recorded in the audit ledger):"
-        : "Resume the reviewer agent?\n\nGive a reason (recorded in the audit ledger):",
-    );
-    if (reason === null || reason.trim() === "") return;
-    try {
-      const updated = wantSuspend
-        ? await suspendReviewerAgent(organizationId, reason.trim())
-        : await resumeReviewerAgent(organizationId, reason.trim());
-      setState(updated);
-      setActionNotice(wantSuspend ? "Reviewer agent suspended." : "Reviewer agent resumed.");
-    } catch (err: unknown) {
-      setActionNotice(err instanceof Error ? err.message : String(err));
-    }
-  }, [state, organizationId]);
+  /* ADR-0027 condition (c) is "one human action, effective immediately" --
+     and the rationale for that action goes in the audit ledger. Both this and
+     the audit-sample resolution below collected it with `window.prompt`,
+     which cannot be labelled, cannot say the reason is mandatory, cannot show
+     the request failing, and returns `null` both when the human cancels and
+     when the browser refuses to show it at all -- so a suspension a reviewer
+     believed they had ordered silently did not happen
+     (review 2026-09-05, F21). */
+  const [suspendOpen, setSuspendOpen] = useState(false);
+  const [suspendBusy, setSuspendBusy] = useState(false);
+  const [suspendError, setSuspendError] = useState<string | null>(null);
+  const wantSuspend = state ? !state.suspended : false;
+
+  const confirmSuspendResume = useCallback(
+    async (reason: string) => {
+      if (!state) return;
+      setSuspendBusy(true);
+      setSuspendError(null);
+      try {
+        const updated = wantSuspend
+          ? await suspendReviewerAgent(organizationId, reason)
+          : await resumeReviewerAgent(organizationId, reason);
+        setState(updated);
+        setActionNotice(wantSuspend ? "Reviewer agent suspended." : "Reviewer agent resumed.");
+        setSuspendOpen(false);
+      } catch (err: unknown) {
+        setSuspendError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSuspendBusy(false);
+      }
+    },
+    [state, wantSuspend, organizationId],
+  );
 
   const onPreReview = useCallback(async () => {
     setTriggerBusy("pre-review");
@@ -280,24 +294,44 @@ export function ReviewerAgentScreen() {
     }
   }, [organizationId]);
 
+  const [resolveTarget, setResolveTarget] = useState<{
+    sample: ReviewAuditSampleRead;
+    humanOutcome: "AGREED" | "DISAGREED";
+  } | null>(null);
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+
   const onResolve = useCallback(
-    async (sample: ReviewAuditSampleRead, humanOutcome: "AGREED" | "DISAGREED") => {
-      const rationale = window.prompt(
-        `Give a rationale for marking this sampled decision as ${humanOutcome.toLowerCase()} (recorded in the audit ledger):`,
-      );
-      if (rationale === null || rationale.trim() === "") return;
+    (sample: ReviewAuditSampleRead, humanOutcome: "AGREED" | "DISAGREED") => {
+      setResolveError(null);
+      setResolveTarget({ sample, humanOutcome });
+    },
+    [],
+  );
+
+  const confirmResolve = useCallback(
+    async (rationale: string) => {
+      const target = resolveTarget;
+      if (!target) return;
+      setResolveBusy(true);
+      setResolveError(null);
       try {
-        await resolveAuditSample(organizationId, sample.sample_id, {
-          human_outcome: humanOutcome,
-          rationale: rationale.trim(),
+        await resolveAuditSample(organizationId, target.sample.sample_id, {
+          human_outcome: target.humanOutcome,
+          rationale,
         });
-        setActionNotice(`Marked the ${sample.object_type} sample as ${humanOutcome.toLowerCase()}.`);
+        setActionNotice(
+          `Marked the ${target.sample.object_type} sample as ${target.humanOutcome.toLowerCase()}.`,
+        );
+        setResolveTarget(null);
         loadSamples();
       } catch (err: unknown) {
-        setActionNotice(err instanceof Error ? err.message : String(err));
+        setResolveError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setResolveBusy(false);
       }
     },
-    [organizationId, loadSamples],
+    [resolveTarget, organizationId, loadSamples],
   );
 
   return (
@@ -353,15 +387,15 @@ export function ReviewerAgentScreen() {
                 </div>
               </dl>
               <div className="revagent__actions">
-                {state.suspended ? (
-                  <Button variant="primary" onClick={() => void onSuspendResume()}>
-                    Resume
-                  </Button>
-                ) : (
-                  <Button variant="primary" onClick={() => void onSuspendResume()}>
-                    Suspend
-                  </Button>
-                )}
+                <Button
+                  variant="primary"
+                  onClick={() => {
+                    setSuspendError(null);
+                    setSuspendOpen(true);
+                  }}
+                >
+                  {state.suspended ? "Resume" : "Suspend"}
+                </Button>
               </div>
             </div>
           ) : null}
@@ -490,6 +524,39 @@ export function ReviewerAgentScreen() {
           )}
         </div>
       </section>
+
+      {suspendOpen && state ? (
+        <ConfirmDialog
+          title={wantSuspend ? "Suspend the reviewer agent?" : "Resume the reviewer agent?"}
+          description={
+            wantSuspend
+              ? "ADR-0027 condition (c): one human action, effective immediately. Nothing is auto-decided while it is suspended."
+              : "The agent resumes pre-reviewing and auto-deciding low-risk items immediately."
+          }
+          confirmLabel={wantSuspend ? "Suspend" : "Resume"}
+          destructive={wantSuspend}
+          requireReason
+          reasonLabel="Reason (recorded in the audit ledger)"
+          busy={suspendBusy}
+          error={suspendError}
+          onConfirm={(reason) => void confirmSuspendResume(reason)}
+          onCancel={() => setSuspendOpen(false)}
+        />
+      ) : null}
+
+      {resolveTarget ? (
+        <ConfirmDialog
+          title={`Mark this sampled decision as ${resolveTarget.humanOutcome.toLowerCase()}?`}
+          description={`The ${resolveTarget.sample.object_type} sample and your rationale are recorded in the audit ledger.`}
+          confirmLabel={resolveTarget.humanOutcome === "AGREED" ? "Agree" : "Disagree"}
+          requireReason
+          reasonLabel="Rationale (recorded in the audit ledger)"
+          busy={resolveBusy}
+          error={resolveError}
+          onConfirm={(rationale) => void confirmResolve(rationale)}
+          onCancel={() => setResolveTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }

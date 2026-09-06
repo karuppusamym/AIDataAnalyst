@@ -10804,6 +10804,98 @@
         "title": "DataSourceRead",
         "type": "object"
       },
+      "DataSourceSummaryRead": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "additionalProperties": true,
+            "title": "Capabilities",
+            "type": "object"
+          },
+          "connector_type": {
+            "title": "Connector Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "data_domain_id": {
+            "format": "uuid",
+            "title": "Data Domain Id",
+            "type": "string"
+          },
+          "dialect": {
+            "title": "Dialect",
+            "type": "string"
+          },
+          "environment": {
+            "title": "Environment",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "line_of_business_id": {
+            "format": "uuid",
+            "title": "Line Of Business Id",
+            "type": "string"
+          },
+          "max_concurrency": {
+            "title": "Max Concurrency",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "network_zone": {
+            "title": "Network Zone",
+            "type": "string"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "project_id": {
+            "format": "uuid",
+            "title": "Project Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "organization_id",
+          "line_of_business_id",
+          "data_domain_id",
+          "project_id",
+          "name",
+          "connector_type",
+          "dialect",
+          "environment",
+          "network_zone",
+          "status",
+          "max_concurrency",
+          "capabilities",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DataSourceSummaryRead",
+        "type": "object"
+      },
       "DataSourceUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -22497,6 +22589,17 @@
       "QueryExecutionResponse": {
         "additionalProperties": false,
         "properties": {
+          "applied_row_limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Row Limit"
+          },
           "column_lineage": {
             "items": {
               "additionalProperties": true,
@@ -22546,6 +22649,17 @@
           "row_count": {
             "title": "Row Count",
             "type": "integer"
+          },
+          "row_limit_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Row Limit Source"
           },
           "rows": {
             "items": {
@@ -41217,6 +41331,133 @@
       }
     },
     "/v1/datasources/{datasource_id}": {
+      "get": {
+        "description": "F15: resolve one datasource by id, for a deep link or a remembered selection.\n\nSame summary projection the list route returns, so a picker showing a\nresolved-by-id source and a picker showing a listed one render identically.\nRoles mirror `list_organization_datasources` exactly: a caller who can find\na source by paging can find it by id, and no caller gains reach by using\nthis route instead.",
+        "operationId": "get_datasource_v1_datasources__datasource_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "datasource_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Datasource Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DataSourceSummaryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Datasource",
+        "tags": [
+          "operations"
+        ]
+      },
       "patch": {
         "operationId": "update_datasource_v1_datasources__datasource_id__patch",
         "parameters": [
@@ -63304,8 +63545,28 @@
     },
     "/v1/organizations": {
       "get": {
+        "description": "F15: `q` searches organization name and slug server-side.\n\nThe tenant restriction below is applied first and independently of `q`: a\nnon-PlatformAdmin caller is pinned to their own organization's row, so a\nsearch term matching some other tenant's name matches nothing for them.",
         "operationId": "list_organizations_v1_organizations_get",
         "parameters": [
+          {
+            "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+              "title": "Q"
+            }
+          },
           {
             "in": "query",
             "name": "limit",
@@ -63564,6 +63825,135 @@
           }
         },
         "summary": "Create Organization",
+        "tags": [
+          "workspaces"
+        ]
+      }
+    },
+    "/v1/organizations/{organization_id}": {
+      "get": {
+        "description": "F15: resolve one organization by id, for a deep link or a remembered selection.\n\n`enforce_organization` first, then the row: the organization id *is* the\ntenant boundary here, so there is nothing to load before deciding whether\nthis caller may ask. Same order as `list_lines_of_business` and\n`aida.operational_api._require_organization`.",
+        "operationId": "get_organization_v1_organizations__organization_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "organization_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Organization Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Organization",
         "tags": [
           "workspaces"
         ]
@@ -67663,6 +68053,23 @@
           },
           {
             "in": "query",
+            "name": "datasource_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Datasource Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "q",
             "required": false,
             "schema": {
@@ -68533,7 +68940,7 @@
     },
     "/v1/organizations/{organization_id}/datasources": {
       "get": {
-        "description": "List source summaries directly at tenant scope for large fleet consoles.",
+        "description": "List source summaries directly at tenant scope for large fleet consoles.\n\nF15: `q` searches the source name server-side (a datasource has no slug or\nkey, so name is the only thing a person types), keeping a source beyond the\npicker's first page selectable in one request.",
         "operationId": "list_organization_datasources_v1_organizations__organization_id__datasources_get",
         "parameters": [
           {
@@ -68544,6 +68951,25 @@
               "format": "uuid",
               "title": "Organization Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+              "title": "Q"
             }
           },
           {
@@ -74572,7 +74998,7 @@
     },
     "/v1/organizations/{organization_id}/projects": {
       "get": {
-        "description": "List a tenant's projects without an N+1 traversal through every LOB.",
+        "description": "List a tenant's projects without an N+1 traversal through every LOB.\n\nF15: `q` searches name and slug server-side, so a project beyond the\npicker's first page is still reachable in one request rather than only by\npaging the whole estate.",
         "operationId": "list_organization_projects_v1_organizations__organization_id__projects_get",
         "parameters": [
           {
@@ -74583,6 +75009,25 @@
               "format": "uuid",
               "title": "Organization Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+              "title": "Q"
             }
           },
           {
@@ -78343,6 +78788,7 @@
     },
     "/v1/organizations/{organization_id}/workspaces": {
       "get": {
+        "description": "F15: `q` searches workspace name and slug server-side.\n\nThe filter is appended to the tenant filter, never substituted for it, so a\nsearch can only narrow the page this caller already had.",
         "operationId": "list_workspaces_v1_organizations__organization_id__workspaces_get",
         "parameters": [
           {
@@ -78353,6 +78799,25 @@
               "format": "uuid",
               "title": "Organization Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional case-insensitive substring filter, applied within the rows this caller is already entitled to see. Absent, empty, or whitespace-only means no filter.",
+              "title": "Q"
             }
           },
           {
@@ -80042,6 +80507,135 @@
           }
         },
         "summary": "Revoke Profiling Exception Policy"
+      }
+    },
+    "/v1/projects/{project_id}": {
+      "get": {
+        "description": "F15: resolve one project by id, for a deep link or a remembered selection.\n\nThe picker's fallback before this route existed was to page the list route\nuntil the id turned up -- one request per page, bounded only by how deep the\nproject happens to sit. This is that scan collapsed into one request.\n\nTenant boundary and 404-vs-403 behaviour are `aida.resource_scope`'s, not a\nfourth copy of them: missing is 404, and whether another organization's\nproject is 403 or 404 is `enforce_organization`'s decision for every caller\nof that helper at once.",
+        "operationId": "get_project_v1_projects__project_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Project",
+        "tags": [
+          "operations"
+        ]
       }
     },
     "/v1/projects/{project_id}/bi-connections": {
@@ -93852,6 +94446,135 @@
         "summary": "Get Tool Certification Status",
         "tags": [
           "governed-tools"
+        ]
+      }
+    },
+    "/v1/workspaces/{workspace_id}": {
+      "get": {
+        "description": "F15: resolve one workspace by id, for a deep link or a remembered selection.\n\n`_load_workspace` (404 when missing) then `enforce_organization` -- the same\ntwo steps, in the same order, as every other by-id workspace route in this\nfile, so this route cannot answer for a workspace the caller's organization\ndoes not own.",
+        "operationId": "get_workspace_v1_workspaces__workspace_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Workspace",
+        "tags": [
+          "workspaces"
         ]
       }
     },

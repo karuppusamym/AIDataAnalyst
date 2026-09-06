@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
@@ -69,30 +69,50 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
     expect(screen.queryByRole("button", { name: "Suspend" })).toBeNull();
   });
 
-  it("requires a reason before suspending the agent", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("   ");
+  /* Both rationales are collected in a real dialog, not `window.prompt`
+     (review 2026-09-05, F21). */
+  async function openSuspendDialog() {
     render(<ReviewerAgentScreen />);
-
     await waitFor(() => expect(screen.getByRole("button", { name: "Suspend" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Suspend" }));
+    return await screen.findByRole("dialog");
+  }
 
+  it("requires a reason before suspending the agent", async () => {
+    const dialog = await openSuspendDialog();
+
+    const confirm = within(dialog).getByRole("button", { name: "Suspend" });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), { target: { value: "   " } });
+    expect(confirm).toBeDisabled();
     expect(suspendReviewerAgent).not.toHaveBeenCalled();
-    promptSpy.mockRestore();
   });
 
   it("suspends the agent with the reason a human gave, and shows a notice", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("false positives rising");
     suspendReviewerAgent.mockResolvedValue({ ...makeFixtureReviewerAgentState(ORG), suspended: true });
-    render(<ReviewerAgentScreen />);
+    const dialog = await openSuspendDialog();
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Suspend" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Suspend" }));
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), {
+      target: { value: "false positives rising" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Suspend" }));
 
     await waitFor(() =>
       expect(suspendReviewerAgent).toHaveBeenCalledWith(ORG, "false positives rising"),
     );
     expect(await screen.findByText(/reviewer agent suspended/i)).toBeInTheDocument();
-    promptSpy.mockRestore();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps the suspend dialog open and reports the refusal, rather than looking like it worked", async () => {
+    suspendReviewerAgent.mockRejectedValue(new ApiError(403, "only a Reviewer may suspend the agent"));
+    const dialog = await openSuspendDialog();
+
+    fireEvent.change(within(dialog).getByLabelText(/reason/i), { target: { value: "drift" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Suspend" }));
+
+    expect(await screen.findByText("only a Reviewer may suspend the agent")).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("runs the reviewer agent and shows the decision counts it returned", async () => {
@@ -155,24 +175,28 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
     expect(screen.getAllByRole("button", { name: "Disagree" }).length).toBeGreaterThan(0);
   });
 
-  it("requires a rationale before resolving a sampled decision", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("");
+  async function openAgreeDialog() {
     render(<ReviewerAgentScreen />);
-
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Agree" }).length).toBeGreaterThan(0));
     fireEvent.click(screen.getAllByRole("button", { name: "Agree" })[0]!);
+    return await screen.findByRole("dialog");
+  }
 
+  it("requires a rationale before resolving a sampled decision", async () => {
+    const dialog = await openAgreeDialog();
+
+    expect(within(dialog).getByRole("button", { name: "Agree" })).toBeDisabled();
     expect(resolveAuditSample).not.toHaveBeenCalled();
-    promptSpy.mockRestore();
   });
 
   it("resolves a sampled decision with the human's rationale and reloads the queue", async () => {
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("Matches the source definition.");
     resolveAuditSample.mockResolvedValue({});
-    render(<ReviewerAgentScreen />);
+    const dialog = await openAgreeDialog();
 
-    await waitFor(() => expect(screen.getAllByRole("button", { name: "Agree" }).length).toBeGreaterThan(0));
-    fireEvent.click(screen.getAllByRole("button", { name: "Agree" })[0]!);
+    fireEvent.change(within(dialog).getByLabelText(/rationale/i), {
+      target: { value: "Matches the source definition." },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Agree" }));
 
     await waitFor(() =>
       expect(resolveAuditSample).toHaveBeenCalledWith(
@@ -183,6 +207,6 @@ describe("ReviewerAgentScreen (ADR-0027)", () => {
     );
     expect(await screen.findByText(/marked the .* sample as agreed/i)).toBeInTheDocument();
     expect(fetchReviewerAgentSamples).toHaveBeenCalledTimes(2);
-    promptSpy.mockRestore();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

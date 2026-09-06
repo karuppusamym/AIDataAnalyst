@@ -342,6 +342,13 @@ async def get_datasource(
     Roles mirror `list_organization_datasources` exactly: a caller who can find
     a source by paging can find it by id, and no caller gains reach by using
     this route instead.
+
+    Deliberately `DataSourceSummaryRead` and deliberately here rather than
+    beside `PATCH /v1/datasources/{id}` in `atlas.modules.connectivity.router`:
+    that route answers with `DataSourceRead`, which carries
+    `credential_reference`, and is gated to DataAdmin/PlatformAdmin. This route
+    is readable down to Viewer, so it must not be able to return that field --
+    pairing it with the list route's projection is what guarantees it cannot.
     """
     datasource = await load_datasource_in_scope(session, context, datasource_id)
     return DataSourceSummaryRead.model_validate(datasource)
