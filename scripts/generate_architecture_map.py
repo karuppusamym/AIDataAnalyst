@@ -82,12 +82,18 @@ ENTRY_POINTS: dict[str, str] = {
     "aida.projectors.outbox_publisher": "Outbox publisher (Kafka producer)",
 }
 
+# Kept in sync by hand with the directories under `src/atlas/modules/`.
+# `tests/test_architecture_map_contexts.py` fails if a directory exists that is
+# not named here -- a relocated context that is missing from this tuple does not
+# error, it silently reports its modules under "aida domain modules", which reads
+# as the monolith having grown rather than shrunk.
 BOUNDED_CONTEXTS = (
     "catalog",
     "connectivity",
     "identity_tenancy",
     "ingestion",
     "observability_audit",
+    "profiling",
 )
 
 # The three package `__init__` modules that are not inside any one group's
@@ -494,9 +500,10 @@ def render() -> str:
         )
     lines += [
         "",
-        "What is deliberately *not* aggregated away: the five bounded contexts each keep",
-        "their own group even though four of them are small, because the point of the map",
-        "is to show how much of the system has and has not moved into one.",
+        f"What is deliberately *not* aggregated away: the {len(BOUNDED_CONTEXTS)} bounded "
+        "contexts each keep",
+        "their own group even though every one of them is small, because the point of the",
+        "map is to show how much of the system has and has not moved into one.",
         "",
         "## Module graph, by group",
         "",
@@ -613,7 +620,8 @@ def render() -> str:
     lines += [
         "## Bounded contexts",
         "",
-        "The five module directories under `src/atlas/modules/`. Tables and routes are",
+        f"All {len(BOUNDED_CONTEXTS)} module directories under `src/atlas/modules/`. "
+        "Tables and routes are",
         "read out of each context's own `models.py` and `router.py`; *mounted via* is read",
         "out of `aida.main`'s imports, which is the fact that says whether a context's",
         "public face is being used or a compatibility shim still stands in front of it.",

@@ -110,7 +110,12 @@ export const CONTEXT_FIELDS = ["ds", "project", "dom"] as const;
  * is misspelled.
  */
 export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> = {
-  home: [],
+  /* T15: Overview reads `ds` so first-source setup resumes on the source you
+     were actually setting up. It is a CONTEXT field, so it is also inherited
+     when you come back here from Sources or Operations -- which is the point:
+     returning to the landing page should not silently switch which source the
+     setup steps are describing. */
+  home: ["ds"],
   inbox: ["persona"],
   analyst: ["ds", "run"],
   catalog: ["asset", "cert", "ds", "q", "type"],

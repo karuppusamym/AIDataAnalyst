@@ -28,10 +28,10 @@
 
 import { identityHeaders as configuredIdentityHeaders, USE_FIXTURES } from "../appConfig";
 import { authorizationHeaders } from "../authSession";
-import { request, setHeaderProvider } from "../http";
+import { decodeError, request, setHeaderProvider } from "../http";
 import { getCurrentOrgId } from "../org-context";
 
-export { ApiError } from "../http";
+export { ApiError, requestBlob } from "../http";
 export type { FieldError } from "../http";
 export { USE_FIXTURES } from "../appConfig";
 
@@ -82,17 +82,18 @@ export async function deleteRequest(path: string, signal?: AbortSignal): Promise
 /**
  * The demo-data adapter (R05).
  *
- * `if (USE_FIXTURES) return makeFixtureX(); return get(...)` is repeated in
- * several hundred functions in `api.ts`. Stated once, the rule is: in demo
- * mode a function answers from the bundled fixture and issues no request. The
- * branch is the same either way -- this just names it, so a reader sees the
- * demo answer and the live call as two halves of one decision instead of an
- * `if` they have to re-read in every function.
+ * `if (USE_FIXTURES) return makeFixtureX(); return get(...)` was repeated in
+ * every function in the client. Stated once, the rule is: in demo mode a
+ * function answers from the bundled fixture and issues no request. The branch
+ * is the same either way -- this just names it, so a reader sees the demo
+ * answer and the live call as two halves of one decision instead of an `if`
+ * they have to re-read in every function.
  *
- * Migration is deliberately incremental: the modules extracted from `api.ts`
- * use it, the ones still inside it keep their inline branch until they move.
- * Rewriting five hundred call sites in a correctness pass would be a large
- * untested diff to fix a readability problem.
+ * A handful of functions keep an inline branch, and each is one where the two
+ * arms are not the same shape: the demo arm refuses (a write with no fixture
+ * to return), or the branch sits mid-function after work both arms share.
+ * Forcing those into this adapter would restructure the function rather than
+ * name its decision.
  */
 export function demoOr<T>(demo: () => Promise<T>, live: () => Promise<T>): Promise<T> {
   return USE_FIXTURES ? demo() : live();
@@ -121,4 +122,42 @@ export function requestWithInit<T>(
   // would send a request the server accepts and cannot attribute.
   const headers = init.headers as Record<string, string> | undefined;
   return request<T>(method, path, { body, signal, headers });
+}
+
+/**
+ * The one raw-byte upload in this client.
+ *
+ * `request` JSON-stringifies its body, so a `File` cannot go through it: an
+ * octet-stream upload has to hand `fetch` the `File` itself. That is a real
+ * gap in `http.ts`, not a licence for a second transport -- so the exception
+ * lives here, once, and uses the same header provider and the same
+ * `decodeError` as every other verb. `./columnDocumentation.ts` hand-rolled
+ * five `fetch` calls, of which this is the only one that has to: three were
+ * plain JSON POSTs and one was a download `requestBlob` already covers. Each
+ * carried a private decoder that understood only `{"detail": ...}`, so the
+ * error code, correlation id and 422 field errors F14 preserves were dropped
+ * on all five.
+ *
+ * KNOWN GAP, deliberately not hidden: an outcome here does not reach
+ * `observeRequests`, because `http.ts` does not export its notifier. So a
+ * failed workbook upload is invisible to the shell's connection state (F13).
+ * Closing it means a raw-body verb in `http.ts`; this module cannot fix it
+ * from the outside.
+ */
+export async function requestRawBody<T>(
+  method: "POST" | "PUT",
+  path: string,
+  body: BodyInit,
+  contentType: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(path, {
+    method,
+    signal,
+    body,
+    headers: { Accept: "application/json", "Content-Type": contentType, ...requestHeaders() },
+    credentials: "same-origin",
+  });
+  if (!res.ok) throw await decodeError(res);
+  return (await res.json()) as T;
 }

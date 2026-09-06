@@ -356,8 +356,7 @@ export function fetchAiAssessmentTemplates(
    heading "Models, agents, and evaluations"), ported onto the real,
    already-merged `ai_governance_api.py` model-route routes plus `api.py`'s
    `/ai/runtime-status` and `/agent-evaluations` routes that view calls.
-   Added here as a clearly-delimited block, same convention as the Context
-   Products block above. See `AiGovernanceScreen.tsx`'s own header comment
+   See `AiGovernanceScreen.tsx`'s own header comment
    for the full endpoint list, file:line citations, and what was
    deliberately left out (the kill switch; `AgentEvalGateRead`, which is
    `AiRegistryScreen`'s per-asset-version concern, not this org-wide suite).

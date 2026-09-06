@@ -103,6 +103,27 @@ def _event(**overrides: object) -> SecurityEvent:
     return SecurityEvent(**values)  # type: ignore[arg-type]
 
 
+# ---------------------------------------------------------------------------
+# The worker's clock for this file.
+#
+# Derived from the run rather than written as a calendar instant. `route_to_siem`
+# enqueues inside the caller's transaction at wall-clock time and takes no clock
+# parameter -- correct for production, but it means a hard-coded `now` here is
+# only in the future while real time is behind it. These tests were written
+# against `2026-09-06 12:00Z` and passed for the few hours before that instant,
+# then failed permanently. Every progression below is relative to this base, so
+# ordering is a property of the fixture and not of the hour the suite runs.
+# ---------------------------------------------------------------------------
+
+def claim_at() -> datetime:
+    """An instant just after whatever was queued a moment ago.
+
+    Sampled per call, not at import: the intents these tests drain are enqueued
+    inside the test body at wall-clock time, so a module-level constant is
+    already in the past by the time it is used."""
+    return datetime.now(UTC) + timedelta(seconds=1)
+
+
 async def _queue(session: AsyncSession, settings: Settings, **event_overrides: object) -> None:
     outcome = route_to_siem(session, _event(**event_overrides), siem_config_from_settings(settings))
     assert outcome is DeliveryOutcome.QUEUED
@@ -125,7 +146,7 @@ async def _drain(
     session: AsyncSession, settings: Settings, *, now: datetime | None = None
 ) -> DeliveryPassResult:
     return await run_delivery_worker_pass(
-        settings, now=now or datetime.now(UTC), session=session, owner="test-worker"
+        settings, now=now or claim_at(), session=session, owner="test-worker"
     )
 
 
@@ -353,7 +374,7 @@ async def test_a_refused_connection_is_retryable_and_backs_off(
     settings = _settings(siem_transport="webhook", siem_endpoint=f"http://127.0.0.1:{port}/hook")
     await _queue(session, settings)
 
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = claim_at()
     await _drain(session, settings, now=now)
 
     intent = await _intent(session)
@@ -370,7 +391,7 @@ async def test_backoff_actually_holds_the_intent_back(session: AsyncSession) -> 
     settings = _settings(siem_transport="webhook", siem_endpoint=f"http://127.0.0.1:{port}/hook")
     await _queue(session, settings)
 
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = claim_at()
     await _drain(session, settings, now=now)
     # Still inside the backoff window: the worker must not claim it again.
     result = await _drain(session, settings, now=now + timedelta(milliseconds=500))
@@ -432,7 +453,7 @@ async def test_the_retry_budget_is_finite_and_ends_in_a_dead_letter(
     )
     await _queue(session, settings)
 
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = claim_at()
     for step in range(3):
         now = now + timedelta(minutes=10 * step + 1)
         await _drain(session, settings, now=now)
@@ -455,7 +476,7 @@ async def test_an_outage_followed_by_recovery_eventually_delivers(
         settings = _settings(siem_transport="webhook", siem_endpoint=stub.url)
         await _queue(session, settings)
 
-        now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+        now = claim_at()
         await _drain(session, settings, now=now)
         outage_intent = await _intent(session)
         assert outage_intent.state == STATE_RETRYING
@@ -487,7 +508,7 @@ async def test_attempts_survive_a_restart(session: AsyncSession) -> None:
     port = unused_tcp_port()
     settings = _settings(siem_transport="webhook", siem_endpoint=f"http://127.0.0.1:{port}/hook")
     await _queue(session, settings)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = claim_at()
     await _drain(session, settings, now=now)
 
     maker = async_sessionmaker(session.bind, expire_on_commit=False)

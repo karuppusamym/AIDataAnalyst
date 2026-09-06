@@ -111,7 +111,7 @@ function SourceRow({
   );
 }
 
-function HealthPane({
+function SourceDetailsPane({
   source,
   onClose,
 }: {
@@ -136,7 +136,7 @@ function HealthPane({
     try {
       await downloadDatasourceModelWorkbook(source.id, source.name);
       setGenerateNotice(
-        "Workbook downloaded. Edit the business_description columns only — the README sheet says which cells apply on re-upload.",
+        "Workbook downloaded. Edit only the fields identified in its README sheet, then upload the saved file here.",
       );
     } catch (e) {
       setGenerateNotice(e instanceof ApiError ? e.detail : (e as Error).message);
@@ -181,7 +181,7 @@ function HealthPane({
 
 
   return (
-    <aside className="evp" aria-label={`Health for ${source.name}`}>
+    <aside className="evp" aria-label={`Source details for ${source.name}`}>
       <header className="evp__head">
         <div className="evp__title">
           <div className="evp__name" title={source.name}>{source.name}</div>
@@ -189,7 +189,7 @@ function HealthPane({
             {source.connector_type.toLowerCase()} · {source.dialect} · {source.environment.toLowerCase()}
           </div>
         </div>
-        <button className="evp__x" onClick={onClose} aria-label="Close health">×</button>
+        <button className="evp__x" onClick={onClose} aria-label="Close source details">×</button>
       </header>
 
       <div className="evp__body">
@@ -532,16 +532,16 @@ export function SourcesScreen() {
           />
         )}
         {selected ? (
-          <HealthPane source={selected} onClose={() => setParams({ source: null })} />
+          <SourceDetailsPane source={selected} onClose={() => setParams({ source: null })} />
         ) : selectedId ? (
-          <aside className="evp evp--idle" aria-label="Health">
+          <aside className="evp evp--idle" aria-label="Source details">
             <Empty
               title="Source not in the loaded fleet"
               hint="This permalink points at a source outside the current 500-source page."
             />
           </aside>
         ) : (
-          <aside className="evp evp--idle" aria-label="Health">
+          <aside className="evp evp--idle" aria-label="Source details">
             <Empty
               title="Select a source"
               hint="Its health score and factor breakdown — where every point came from — appears here."

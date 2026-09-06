@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Pill } from "../components/primitives";
 import { OnboardingWizard } from "../components/OnboardingWizard";
+/* T15: setup readiness derived from the server, not from checkboxes. It leads
+   the page for an estate that is not finished being set up, because the review
+   is explicit that for an empty installation the prerequisites must lead the
+   checklist -- the previous ordering put Administration after Sources and
+   Operations, which is the order in which they cannot be done. */
+import { FirstSourceSetup } from "../components/FirstSourceSetup";
 import { fetchCatalogRows, fetchOrgDatasources, fetchReviewQueue, get, USE_FIXTURES } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import type { DataSourceRead, ReviewQueueSummaryRead } from "../lib/types";
@@ -141,6 +147,8 @@ export function HomeScreen({
       </section>
 
       {partialError ? <div className="home__notice" role="status">Some workspace signals are temporarily unavailable. Available data is shown below.</div> : null}
+
+      <FirstSourceSetup onNavigate={onNavigate} />
 
       <section className="homekpis" aria-label="Workspace summary">
         <button className="homekpi" onClick={() => onNavigate("catalog")}>

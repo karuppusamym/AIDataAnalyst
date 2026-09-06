@@ -11,11 +11,23 @@ import type {
 } from "../lib/ui-types";
 import {
   Button,
+  CopyLinkButton,
   Empty,
   ErrorState,
   Field,
   Pill,
 } from "../components/primitives";
+/* T18: the same review-detail shell the governance queue decides inside. The
+   edge-type rules, the five parser tables and the bulk semantics below are
+   untouched -- what this screen gains is the detail every review type owes a
+   reviewer, and a lost race presented as the other decision rather than as an
+   error string. */
+import {
+  ReviewDetailShell,
+  conflictFromError,
+  type ReviewConflict,
+} from "../components/ReviewDetail";
+import { useUrlState } from "../lib/useUrlState";
 
 /* ---------------------------------------------------------------------------
    P1-05 / ADR-0026 — parsed-lineage-edge review queue.
@@ -55,7 +67,18 @@ function confidenceFloat(raw: string | number | null): number | null {
   return CONFIDENCE_STRING_TO_FLOAT[key] ?? null;
 }
 
+/** One edge's stable key across the five parser tables. `edge_id` alone is not
+ *  unique: each table has its own id space, which is why every selection in
+ *  this screen is `${edge_type}:${edge_id}`. */
+const edgeKey = (item: { edge_type: string; edge_id: string }) =>
+  `${item.edge_type}:${item.edge_id}`;
+
 export function ParsedLineageReviewScreen() {
+  const [params, setParams] = useUrlState();
+  /* The focused edge lives in the URL, so the pane a reviewer is looking at is
+   * shareable and survives Back/Forward -- `parsed-lineage-review` already
+   * declares `review` in `SCREEN_QUERY_FIELDS`; nothing on this screen read it. */
+  const focusedKey = params.get("review");
   const [items, setItems] = useState<ParsedLineageEdgeReviewQueueItemRead[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
@@ -67,6 +90,12 @@ export function ParsedLineageReviewScreen() {
   const [minConfidence, setMinConfidence] = useState<string>("");
   const [inflight, setInflight] = useState<string | null>(null);
   const [ackMessage, setAckMessage] = useState<string | null>(null);
+  /* A refusal about an edge's own review state (already decided, or the maker
+     trying to check their own edge) is not a load failure and does not belong
+     in the screen's error strip, which is what it used to get: `setError` there
+     put "parsed lineage edge is already approved" where "Could not load queue"
+     goes. It belongs on the edge, in the shared conflict panel. */
+  const [conflicts, setConflicts] = useState<Record<string, ReviewConflict>>({});
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -106,26 +135,41 @@ export function ParsedLineageReviewScreen() {
     async (
       item: ParsedLineageEdgeReviewQueueItemRead,
       decision: ParsedLineageEdgeDecision,
+      decisionReason: string,
     ) => {
-      if (!reason.trim()) return;
+      if (!decisionReason.trim()) return;
+      const key = edgeKey(item);
       setInflight(item.edge_id);
+      setConflicts((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
       try {
         await decideParsedLineageEdge(item.edge_id, {
           edge_type: item.edge_type,
           decision,
-          reason: reason.trim(),
+          reason: decisionReason.trim(),
         });
         setAckMessage(
           `${item.edge_type} edge ${decision === "APPROVED" ? "approved" : "rejected"}.`,
         );
         await load();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Decision failed");
+        const conflict = conflictFromError(err);
+        if (conflict) {
+          setConflicts((current) => ({ ...current, [key]: conflict }));
+          setParams({ review: key });
+          await load();
+        } else {
+          setError(err instanceof Error ? err.message : "Decision failed");
+        }
       } finally {
         setInflight(null);
       }
     },
-    [load, reason],
+    [load, setParams],
   );
 
   const bulkDecide = async (decision: ParsedLineageEdgeDecision) => {
@@ -148,6 +192,11 @@ export function ParsedLineageReviewScreen() {
   const summary = useMemo(
     () => `${items.length} shown of ${total} total PROPOSED edges`,
     [items.length, total],
+  );
+
+  const focused = useMemo(
+    () => items.find((item) => edgeKey(item) === focusedKey) ?? null,
+    [items, focusedKey],
   );
 
   return (
@@ -242,7 +291,16 @@ export function ParsedLineageReviewScreen() {
                       <Pill>{item.edge_type}</Pill>
                     </td>
                     <td>
-                      <code>{item.source_label}</code>
+                      {/* Opens the shared review detail. The table stays the
+                          queue; the decision happens with the evidence in
+                          front of the reviewer (T18). */}
+                      <button
+                        type="button"
+                        className="parsed-review__open"
+                        onClick={() => setParams({ review: edgeKey(item) })}
+                      >
+                        <code>{item.source_label}</code>
+                      </button>
                     </td>
                     <td>
                       <code>{item.target_label}</code>
@@ -272,13 +330,13 @@ export function ParsedLineageReviewScreen() {
                     </td>
                     <td>
                       <Button
-                        onClick={() => void decide(item, "APPROVED")}
+                        onClick={() => void decide(item, "APPROVED", reason)}
                         disabled={!!inflight || loading || !reason.trim()}
                       >
                         Approve
                       </Button>{" "}
                       <Button
-                        onClick={() => void decide(item, "REJECTED")}
+                        onClick={() => void decide(item, "REJECTED", reason)}
                         disabled={!!inflight || loading || !reason.trim()}
                       >
                         Reject
@@ -298,6 +356,116 @@ export function ParsedLineageReviewScreen() {
         <span>Page {Math.floor(offset / 100) + 1}</span>
         <Button disabled={loading || !!inflight || offset + 100 >= total} onClick={() => setOffset(offset + 100)}>Next page</Button>
       </div>
+
+      {focused ? (
+        <ReviewDetailShell
+          label="Parsed lineage edge detail"
+          className="parsed-review__detail"
+          identity={{
+            subject: `${focused.source_label} → ${focused.target_label}`,
+            target: `${focused.edge_type} edge · parsed lineage`,
+            // Only PROPOSED edges are in this queue: the read model filters on
+            // it. Naming the status rather than implying it keeps the shell's
+            // vocabulary the same across review types.
+            status: "PROPOSED",
+            raisedBy: focused.created_by,
+            raisedAt: focused.created_at,
+            confidence: confidenceFloat(focused.confidence),
+          }}
+          assignment={{
+            /* Parsed lineage edges carry no assignee: the queue is open to any
+               reviewer who did not write the edge. The maker-checker rule is
+               enforced server-side (409), so it is reported when it bites
+               rather than guessed at here from `created_by`, which is not
+               necessarily this principal. */
+            blockedReason: null,
+          }}
+          diff={
+            <p className="rvd__none">
+              Approving adds this edge to the shared lineage graph; rejecting keeps it
+              out and records why. Parsed edges have no before/after field diff — the
+              edge itself is the change.
+            </p>
+          }
+          impact={
+            <p className="rvd__none">
+              {focused.edge_type === "OPENLINEAGE_COLUMN" || focused.edge_type === "DBT"
+                ? "A column-level edge. Approving affects column lineage and any impact answer that traverses it."
+                : "A table-level edge. Approving affects table lineage and any impact answer that traverses it."}
+            </p>
+          }
+          evidence={
+            /* The type-specific slot. Each of the five parser tables carries a
+               different natural key back to its source SQL, so what establishes
+               the edge differs by kind -- that is exactly what the shell must
+               not flatten. */
+            <dl className="rvd__facts">
+              <div>
+                <dt>Edge type</dt>
+                <dd>{focused.edge_type}</dd>
+              </div>
+              <div>
+                <dt>Transformation</dt>
+                <dd>{focused.transformation_type ?? "not recorded"}</dd>
+              </div>
+              <div>
+                <dt>Parser confidence</dt>
+                <dd>
+                  {confidenceDisplay(focused.confidence)}
+                  {typeof focused.confidence === "string" &&
+                  confidenceFloat(focused.confidence) !== null
+                    ? ` (coerced to ${confidenceFloat(focused.confidence)?.toFixed(2)})`
+                    : confidenceFloat(focused.confidence) === null
+                      ? " — this parser reports no comparable confidence"
+                      : ""}
+                </dd>
+              </div>
+              {Object.entries(focused.source_sql_reference).map(([key, value]) => (
+                <div key={key}>
+                  <dt>{key === "kind" ? "Source" : key.replace(/_/g, " ")}</dt>
+                  <dd>
+                    <code>{value}</code>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          }
+          decision={{
+            busy: inflight === focused.edge_id,
+            error: null,
+            /* This endpoint records a rationale for BOTH verdicts, unlike the
+               governance queue, which requires one only for a rejection. */
+            reasonRequiredFor: ["APPROVE", "REJECT"],
+            approveLabel: "Approve edge",
+            rejectLabel: "Reject edge",
+            onDecide: (verdict, decisionReason) =>
+              void decide(
+                focused,
+                verdict === "APPROVE" ? "APPROVED" : "REJECTED",
+                decisionReason ?? "",
+              ),
+          }}
+          conflict={conflicts[edgeKey(focused)] ?? null}
+          onRefresh={() => void load()}
+          onDismissConflict={() =>
+            setConflicts((current) => {
+              const next = { ...current };
+              delete next[edgeKey(focused)];
+              return next;
+            })
+          }
+          onClose={() => setParams({ review: null })}
+          footer={
+            <CopyLinkButton
+              target={{
+                screen: "parsed-lineage-review",
+                params: { review: edgeKey(focused) },
+              }}
+              label="Copy permalink"
+            />
+          }
+        />
+      ) : null}
     </section>
   );
 }

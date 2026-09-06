@@ -25,6 +25,15 @@ import "./OnboardingWizard.css";
    nav's own "legacy" pill already draws, so onboarding never promises a
    screen this shell does not yet have.
 
+   T15 — WHAT THIS COMPONENT IS NOT. The ticks below are a personal reading
+   list, not setup certification: they are per-browser and prove nothing about
+   the estate. Whether an organization actually has a workspace, a registered
+   source, a scan that succeeded and a catalog with rows in it is derived from
+   the server by `FirstSourceSetup`, which is what a returning user resumes
+   from. Keeping both is deliberate; conflating them is the defect the review
+   named ("manual local checkboxes are a personal convenience, not setup
+   certification").
+
    Completion state is `localStorage`-only (`atlas.onboarding.*`): there is
    no backend field for "has this principal finished onboarding" and this
    item's scope does not permit adding one (ui-next-only, no `src/aida`

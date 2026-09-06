@@ -30,8 +30,8 @@ import type { PageOf } from "../ui-types";
    is no org-wide "browse every published semantic model" endpoint, so this
    is a project picker (`fetchOrgProjects`, the real
    `GET /v1/organizations/{id}/projects`) feeding project-scoped model/metric
-   lists — the same composition shape `fetchOrgDatasources` above already
-   uses to bridge a display name to an id `unified-lineage` needs.
+   lists — the same composition shape `fetchOrgDatasources` (`./identity.ts`)
+   already uses to bridge a display name to an id `unified-lineage` needs.
 --------------------------------------------------------------------------- */
 
 

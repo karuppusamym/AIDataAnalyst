@@ -48,18 +48,18 @@ describe("CrossLinks", () => {
     expect(heard).toBe(1);
   });
 
-  it("replaces the previous selection rather than merging into it", () => {
+  it("drops stale page filters while preserving datasource context", () => {
     history.replaceState(null, "", "/?ds=ds_old&incident=inc_1");
     render(<CrossLinks links={[{ screen: "catalog", label: "Catalog", params: { asset: "t_2" } }]} />);
 
     fireEvent.click(screen.getByRole("button", { name: /Catalog/ }));
 
-    // Carrying `incident=inc_1` onto the Catalog would leave a stale filter in
-    // a shareable URL that the target screen does not understand.
+    // `incident` belongs only to Quality, while `ds` is estate context the
+    // Catalog now understands and should preserve.
     const params = new URLSearchParams(location.search);
     expect(params.get("asset")).toBe("t_2");
     expect(params.get("incident")).toBeNull();
-    expect(params.get("ds")).toBeNull();
+    expect(params.get("ds")).toBe("ds_old");
   });
 
   it("renders nothing at all when there is nothing to link to", () => {

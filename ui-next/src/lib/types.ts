@@ -1793,6 +1793,24 @@ export interface DataSourceRead {
   updated_at: string;
 }
 
+export interface DataSourceSummaryRead {
+  id: string;
+  organization_id: string;
+  line_of_business_id: string;
+  data_domain_id: string;
+  project_id: string;
+  name: string;
+  connector_type: string;
+  dialect: string;
+  environment: string;
+  network_zone: string;
+  status: string;
+  max_concurrency: number;
+  capabilities: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface DataSourceUpdate {
   enabled?: boolean | null;
   max_concurrency?: number | null;
@@ -3778,6 +3796,8 @@ export interface QueryExecutionResponse {
   elapsed_ms: number;
   masked_columns: string[];
   rows: Record<string, unknown>[];
+  applied_row_limit?: number | null;
+  row_limit_source?: string | null;
 }
 
 export interface QueryFeedbackRead {

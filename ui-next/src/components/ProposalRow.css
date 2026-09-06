@@ -28,5 +28,7 @@
 .prop__whyt{font-size:13px;color:var(--ink);margin:0;line-height:1.5}
 .prop__ev{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin:4px 0 0;line-height:1.5}
 
-.prop__act{display:flex;align-items:center;gap:8px;padding:13px 15px;margin-top:8px;border-top:1px solid var(--line-soft);background:var(--sunk)}
+.prop__act{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:13px 15px;margin-top:8px;border-top:1px solid var(--line-soft);background:var(--sunk)}
 .prop__done{font-size:12px;color:var(--ink-3);flex:1}
+.prop__own-review{font-size:12px;color:var(--ink-2);flex:1 1 100%}
+.prop__decision-error{font-size:12px;color:var(--bad);flex:1 1 100%}

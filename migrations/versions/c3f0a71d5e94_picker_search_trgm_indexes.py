@@ -22,6 +22,14 @@ branch is indexable (it bitmap-ORs them); indexing `name` alone would leave
 the whole predicate unindexable and the index unused. `datasource` gets one
 index because a datasource has no slug -- its search is name only.
 
+Measured, not assumed: on a 200k-row probe table with this exact predicate
+shape (including the parameterised `LIKE '%' || $1 || '%'` form SQLAlchemy's
+`.contains()` actually emits), the planner produces
+`BitmapAnd(org_id index, BitmapOr(name_trgm, slug_trgm))` at cost 81; with
+the two trgm indexes dropped and everything else identical it falls back to
+the org index plus a filter at cost 1906, touching 1000 heap blocks to
+discard 999 rows.
+
 **`organization` is deliberately not indexed here.** `list_organizations`
 also gained `q=`, but that table holds one row per tenant: it is bounded by
 how many organizations exist, not by the size of any estate, and a scan of

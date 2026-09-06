@@ -198,7 +198,7 @@ SHIMS: tuple[Shim, ...] = (
             "large majority of it -- has not moved and has no replacement path yet."
         ),
         owner="Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, "
-        "observability_audit) jointly",
+        "observability_audit, profiling) jointly",
         introduced="ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md",
         removal_condition=(
             "**Not removable as a file at all** until every remaining class in it has "
@@ -210,7 +210,7 @@ SHIMS: tuple[Shim, ...] = (
             "requires `migrations/env.py` to import the context model modules directly."
         ),
         note=(
-            "Named in the `allowed_importers` list of all five module-privacy contracts, "
+            "Named in the `allowed_importers` list of all six module-privacy contracts, "
             "which is what lets the shim import the private module it re-exports from."
         ),
     ),
@@ -225,7 +225,7 @@ SHIMS: tuple[Shim, ...] = (
             "context that owns it. The rest of the file has not moved."
         ),
         owner="Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, "
-        "observability_audit) jointly",
+        "observability_audit, profiling) jointly",
         introduced="ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md",
         removal_condition=(
             "Same shape as `aida.models`, plus one hard constraint: the moved DTO "
@@ -862,10 +862,12 @@ def render(rows: list[Row]) -> str:
         "- `ui-next/src/lib/api.ts` ends with four `export * from` lines but is not",
         "  matched, because the rest of the file is real code. It is the canonical client",
         "  barrel — the intended import surface for screens — not a compatibility path.",
-        "- Three of the five bounded contexts' `api.py` files do not re-export their",
-        "  router, so they are not matched either. That is not tidiness: `aida.main` still",
-        "  mounts those three routers through the `aida.*` shims above, which is exactly",
-        "  what their removal conditions say has to change first.",
+        "- Four of the six bounded contexts' `api.py` files do not re-export their",
+        "  router, so they are not matched either. For three of them that is not tidiness:",
+        "  `aida.main` still mounts those routers through the `aida.*` shims above, which",
+        "  is exactly what their removal conditions say has to change first. The fourth,",
+        "  `profiling`, has no routes yet at all — only its models and DTOs have been",
+        "  relocated (see `40-engineering/10-bounded-context-relocation-procedure.md`).",
         "",
     ]
     return "\n".join(lines)

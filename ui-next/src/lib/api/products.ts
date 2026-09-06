@@ -165,8 +165,6 @@ export function fetchPortfolioAnalyticsTrends(
    Context products — the legacy portal's `context-products` view
    (`ui/scripts/features/context-lineage-control-plane.js`), ported onto the
    same real, already-merged `context_product_api.py` routes that view calls.
-   Added here as a clearly-delimited block, same convention as the AI
-   registry and Relationships blocks above.
 
    Endpoints used (all `src/aida/context_product_api.py` unless noted):
      - POST   /v1/projects/{project_id}/context-products                  create_context_product          :308
@@ -364,18 +362,20 @@ export function fetchContextProductBindings(
  *  — pin or move one named consumer onto one version. Idempotent by
  *  (product, consumer): calling it again moves the existing binding rather
  *  than creating a second one. 422 if the version belongs to another product. */
-export async function setContextProductBinding(
+export function setContextProductBinding(
   productId: string,
   consumerPrincipalId: string,
   boundVersionId: string,
   signal?: AbortSignal,
 ): Promise<ContextProductConsumerBindingRead> {
-  if (USE_FIXTURES)
-    return makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId);
-  return putJson<ContextProductConsumerBindingRead>(
-    `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
-    { bound_version_id: boundVersionId },
-    signal,
+  return demoOr(
+    async () => makeFixtureSetContextProductBinding(productId, consumerPrincipalId, boundVersionId),
+    async () =>
+      putJson<ContextProductConsumerBindingRead>(
+        `/v1/context-products/${productId}/bindings/${encodeURIComponent(consumerPrincipalId)}`,
+        { bound_version_id: boundVersionId },
+        signal,
+      ),
   );
 }
 
@@ -464,36 +464,40 @@ export interface ConsumptionQuery {
  *  Routes to `by-consumer`, `by-resource` or `graph` depending on which
  *  filter the caller supplied — three endpoints with one shape, so screens
  *  do not have to pick. */
-export async function fetchConsumptionRecords(
+export function fetchConsumptionRecords(
   organizationId: string,
   query: ConsumptionQuery = {},
   signal?: AbortSignal,
 ): Promise<ConsumptionRecordPage> {
-  if (USE_FIXTURES)
-    return makeFixtureConsumptionRecords(
-      { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
-      query,
-    );
-  const params = new URLSearchParams();
-  params.set("limit", String(query.limit ?? 100));
-  params.set("offset", String(query.offset ?? 0));
-  if (query.consumerId) {
-    params.set("consumer_id", query.consumerId);
-    return get<ConsumptionRecordPage>(
-      `/v1/organizations/${organizationId}/consumption-lineage/by-consumer?${params}`,
-      signal,
-    );
-  }
-  if (query.resourceType && query.resourceId) {
-    params.set("resource_type", query.resourceType);
-    params.set("resource_id", query.resourceId);
-    return get<ConsumptionRecordPage>(
-      `/v1/organizations/${organizationId}/consumption-lineage/by-resource?${params}`,
-      signal,
-    );
-  }
-  return get<ConsumptionRecordPage>(
-    `/v1/organizations/${organizationId}/consumption-lineage/graph?${params}`,
-    signal,
+  return demoOr(
+    async () =>
+      makeFixtureConsumptionRecords(
+        { consumerId: query.consumerId, resourceType: query.resourceType, resourceId: query.resourceId },
+        query,
+      ),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(query.limit ?? 100));
+      params.set("offset", String(query.offset ?? 0));
+      if (query.consumerId) {
+        params.set("consumer_id", query.consumerId);
+        return get<ConsumptionRecordPage>(
+          `/v1/organizations/${organizationId}/consumption-lineage/by-consumer?${params}`,
+          signal,
+        );
+      }
+      if (query.resourceType && query.resourceId) {
+        params.set("resource_type", query.resourceType);
+        params.set("resource_id", query.resourceId);
+        return get<ConsumptionRecordPage>(
+          `/v1/organizations/${organizationId}/consumption-lineage/by-resource?${params}`,
+          signal,
+        );
+      }
+      return get<ConsumptionRecordPage>(
+        `/v1/organizations/${organizationId}/consumption-lineage/graph?${params}`,
+        signal,
+      );
+    },
   );
 }

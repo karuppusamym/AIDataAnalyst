@@ -26,10 +26,10 @@ import type { PageOf } from "../ui-types";
    Quality — UX-15/UX-16, `QualityScreen`.
 
    Both real, already-merged routes (`quality_api.py`), gated by `USE_FIXTURES`
-   the same way as every call above. `list_quality_incidents` and
-   `quality_summary` are scoped per datasource, matching UX-20's
-   `fetchLineageImpact` above rather than `fetchCatalogRows`'s organization
-   scoping.
+   the same way as every other call in this client. `list_quality_incidents`
+   and `quality_summary` are scoped per datasource, matching UX-20's
+   `fetchLineageImpact` (`./lineage.ts`) rather than `fetchCatalogRows`'s
+   organization scoping.
 --------------------------------------------------------------------------- */
 
 export interface QualityIncidentsQuery {

@@ -21,7 +21,7 @@ import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../t
 
 /* ---------------------------------------------------------------------------
    Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses
-   `fetchOrgDatasources` above for the fleet list (see that function's own
+   `fetchOrgDatasources` (`./identity.ts`) for the fleet list (see that function's own
    comment for the `DataSourceRead`/`DataSourceSummaryRead` shape note this
    screen also relies on -- `credential_reference` is typed but not actually
    present on this endpoint's wire response; this screen never reads it). The
@@ -330,7 +330,8 @@ export function renderContextSnapshotMarkdown(snapshot: DatasourceContextSnapsho
 }
 
 /** Builds the snapshot and triggers a same-origin blob download, the same
- *  idiom `exportAssetEvidence` above uses (a bare `<a download href>` can't
+ *  idiom `exportAssetEvidence` (`./catalog.ts`) uses (a bare
+ *  `<a download href>` can't
  *  carry this app's identity headers). */
 export async function downloadDatasourceContextSnapshot(
   datasource: DataSourceRead,

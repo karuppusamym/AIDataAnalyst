@@ -60,19 +60,26 @@ function text(value: unknown): string | null {
 }
 
 /**
- * The LIMIT the executed SQL actually carried.
+ * Whether the result stopped at a bound the *caller did not choose*.
  *
- * The gateway applies a default/hard row limit (`row_limit_finding`) by
- * rewriting the statement, and records the applied limit in its audit
- * details -- not in the response. Reading it back off `normalized_sql` is the
- * only evidence the browser has, so it is used only to *ask* whether the
- * result stopped at the limit, never to claim a total.
+ * This used to be read back out of `normalized_sql` with a regex over
+ * `LIMIT <n>`, on the belief that the applied limit reached the browser
+ * nowhere else. That heuristic could never have worked: `normalized_sql` is
+ * the literal-redacted form, so an executed `LIMIT 5000` arrives as
+ * `LIMIT %(redacted)s` and the pattern matched nothing on any execution. The
+ * banner it drove had therefore never once rendered.
+ *
+ * `applied_row_limit` is now the gateway's own number, and `row_limit_source`
+ * says who chose it -- which matters, because "you asked for 100 rows and got
+ * 100" is not truncation and must not be reported as though rows were
+ * withheld. Only `GATEWAY_CAP` means there may be matching rows the user
+ * never asked to skip.
  */
-function limitFromSql(sql: string): number | null {
-  const match = /\blimit\s+(\d+)\b/i.exec(sql);
-  if (!match?.[1]) return null;
-  const value = Number.parseInt(match[1], 10);
-  return Number.isFinite(value) ? value : null;
+function truncatedByGatewayCap(execution: QueryExecutionResponse): boolean {
+  const limit = execution.applied_row_limit;
+  if (typeof limit !== "number") return false;
+  if (execution.row_limit_source !== "GATEWAY_CAP") return false;
+  return execution.row_count >= limit;
 }
 
 function describeColumns(execution: QueryExecutionResponse): ColumnMeta[] {
@@ -162,8 +169,8 @@ export function QueryResultTable({
   const [expanded, setExpanded] = useState(false);
   const columns = useMemo(() => describeColumns(execution), [execution]);
 
-  const limit = limitFromSql(execution.normalized_sql);
-  const truncatedByPolicy = limit !== null && execution.row_count >= limit;
+  const limit = execution.applied_row_limit ?? null;
+  const truncatedByPolicy = truncatedByGatewayCap(execution);
   const shown = expanded
     ? execution.rows
     : execution.rows.slice(0, MAX_DISPLAY_ROWS);

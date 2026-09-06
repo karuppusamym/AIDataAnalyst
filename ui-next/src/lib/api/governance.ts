@@ -52,10 +52,10 @@ import type { AuditEventRead, PageOf } from "../ui-types";
    UX-15: review queue, marketplace, lineage refusals and Studio change sets.
    UX-20: narrated lineage traversal (the impact endpoint's per-hop evidence).
 
-   Every one of these hits a real, already-merged route (see this file's
-   comment above `fetchCatalogRows` for what "merged" means here) — no
+   Every one of these hits a real, already-merged route (see the comment on
+   `fetchCatalogRows` in `./catalog.ts` for what "merged" means here) — no
    backend stub, no invented endpoint. `USE_FIXTURES` gates each the same way
-   the calls above already do, so `npm run dev`/`npm run test` need no
+   every other call in this client does, so `npm run dev`/`npm run test` need no
    backend, and `VITE_USE_FIXTURES=0` runs every one of these against the
    real API on :8000.
 --------------------------------------------------------------------------- */
@@ -112,9 +112,7 @@ export function decideGovernanceReview(
    UX-16: Relationships — the review queue for N4's impact-ordered,
    diff-based `RelationshipCandidate` surface (`relationship_candidate_review.py`),
    plus RL-6's single/bulk decision endpoints and RL-7's optional confidence-
-   calibration summary. Added here as a clearly-delimited block rather than
-   folded into the imports/exports above, so this screen's additions are easy
-   to find and to lift out cleanly if this file is ever split per screen.
+   calibration summary.
 --------------------------------------------------------------------------- */
 
 export interface RelationshipCandidateReviewQueueQuery {

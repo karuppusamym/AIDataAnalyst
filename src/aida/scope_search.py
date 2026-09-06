@@ -25,6 +25,14 @@ is why normalization lives here: ``None``, ``""`` and ``"   "`` all collapse
 to "no filter", so a caller cannot accidentally turn a cleared search box
 into an error or into ``contains("")``.
 
+**Known property, kept for convention parity.** `contains` is not
+auto-escaped here, exactly as in the catalog routes: a term containing `%`
+or `_` is a wildcard rather than a literal. Inside a tenant that is a UX
+quirk (`%` behaves as "no filter"), not a boundary question -- the tenant
+predicate is ANDed, so no wildcard can reach another organization's rows.
+Escaping should be added to all search routes at once or to none, not to
+these four alone.
+
 **This filters, it never widens.** The predicate returned here is one more
 ``AND``-ed term on top of the tenant filter its caller already applied. It
 can only remove rows from a page the caller was already entitled to see;

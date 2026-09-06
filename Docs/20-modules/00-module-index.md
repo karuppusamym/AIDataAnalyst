@@ -4,11 +4,12 @@
 > One spec per bounded context defined in `10-architecture/04-module-decomposition.md`.
 >
 > **These specs describe target bounded contexts, not the current package layout** (stated
-> 2026-08-30; the module-directory count corrected 2026-09-06). Five module directories now
+> 2026-08-30; the module-directory count corrected 2026-09-06). Six module directories now
 > exist under `src/atlas/modules/` — `catalog`, `connectivity`, `identity_tenancy`,
-> `ingestion` and `observability_audit`, each with real models, schemas and routes — and
-> every other module's behaviour, where it exists at all, still lives in the flat
-> `src/aida/` package. The five that exist have their own guides under
+> `ingestion` and `observability_audit`, each with real models, schemas and routes, plus
+> `profiling`, relocated on 2026-09-06 under review point R04 with real models and schemas
+> but no routes yet — and every other module's behaviour, where it exists at all, still
+> lives in the flat `src/aida/` package. The six that exist have their own guides under
 > [`domain-guides/`](domain-guides/), which say what is real in each and what is still an
 > empty scaffold; the sentence this paragraph replaced ("one module directory exists…
 > `identity_tenancy`, 69 lines") was true when written and had since become false.
@@ -23,8 +24,8 @@
 ## Two kinds of document live under this directory
 
 The numbered specs below describe **target** bounded contexts — what each module
-will own when it exists. The five guides under
-[`domain-guides/`](domain-guides/) describe the five contexts that have a real
+will own when it exists. The six guides under
+[`domain-guides/`](domain-guides/) describe the six contexts that have a real
 module directory today, and describe them as they actually are:
 
 | Guide | Owns | Routes | Spec |
@@ -34,6 +35,7 @@ module directory today, and describe them as they actually are:
 | [identity_tenancy](domain-guides/identity-tenancy.md) | Tenant hierarchy, workspaces, business hierarchy, delegation | 28 | [01](01-identity-and-tenancy.md) |
 | [ingestion](domain-guides/ingestion.md) | Ingestion jobs, batches and chunks, and their state machine | 15 | [03](03-ingestion.md) |
 | [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, SLOs | 5 | [20](20-observability-and-audit.md) |
+| [profiling](domain-guides/profiling.md) | Analysis runs and tasks, scan policy, value-free profiles, the value-profiling exception gate, classification evidence | 0 | [05](05-profiling-and-classification.md) |
 
 Each guide answers four questions and stops: what the context owns, what must
 stay true inside it, how you get into it, and what is deliberately somebody
@@ -72,7 +74,7 @@ Every module spec follows the same sections, so a reader can find the same fact 
 | [02](02-connectivity.md) | connectivity | L1 | Reaching sources safely, with honest capabilities | **Yes** ([guide](domain-guides/connectivity.md)) | `connectors/` — 5 real drivers (`postgres`, `sqlserver`, `oracle`, `snowflake`, `bigquery`); `registry.py` declares Databricks/Teradata/Db2 **planned** |
 | [03](03-ingestion.md) | ingestion | L1 | Getting metadata in, idempotently, at any scale | **Yes** ([guide](domain-guides/ingestion.md)) | `ingestion.py`, `ingestion_api.py`, `batch_ingestion.py`, `workflows/ingestion.py`, `fleet.py` |
 | [04](04-catalog.md) | catalog | L2 | The authoritative inventory of the estate | **Yes** ([guide](domain-guides/catalog.md)) | `models.py` (`MetadataCatalog`/`Schema`/`Table`/`Column`/`Constraint`), `api.py`, `workflows/activities.py` |
-| [05](05-profiling-and-classification.md) | profiling | L2 | What the data looks like, without looking at it | No | `workflows/activities.py` (`profile_table_task`, `classify_column_name`), `analysis_tasks.py` |
+| [05](05-profiling-and-classification.md) | profiling | L2 | What the data looks like, without looking at it | **Yes** ([guide](domain-guides/profiling.md)) | `workflows/activities.py` (`profile_table_task`, `classify_column_name`), `analysis_tasks.py` · plus `src/atlas/modules/profiling/` (9 owned tables, 0 routes — models and DTOs only) |
 | [06](06-relationship-intelligence.md) | relationships | L2 | How tables connect, with evidence and negative knowledge | No | `intelligence_api.py` (`RelationshipCandidate`). Request-path, not a worker |
 | [07](07-semantic-layer.md) | semantic-layer | L2 | What the data means, versioned and approved | No | `semantic_api.py`, `semantic_inference.py`, `semantic_intelligence_api.py` |
 | [08](08-glossary-and-stewardship.md) | glossary-stewardship | L2 | Who owns meaning, and how disagreement is resolved | No | `glossary_api.py`, `stewardship_api.py`, `stewardship_service.py` |
@@ -92,11 +94,12 @@ Every module spec follows the same sections, so a reader can find the same fact 
 
 **How to read the last two columns (added 2026-08-30, sourced from the code; the "Module
 dir?" column re-derived 2026-09-06).** "Module dir?" answers only *"does
-`src/atlas/modules/<name>/` exist?"* — five now do, and each of those five links to its guide.
+`src/atlas/modules/<name>/` exist?"* — six now do, and each of those six links to its guide.
 It still says nothing about whether the *capability* is built: modules 16 and 19 are among the
 strongest-implemented parts of the platform and have no module directory at all, while several
-of the five that do have one still hold their business rules in the router with `service.py`
-and `repository.py` left as empty scaffolds. Each guide says which. Capability status per module is in that module's own
+of the six that do have one still hold their business rules in the router with `service.py`
+and `repository.py` left as empty scaffolds — and `profiling` has no router either, only
+models and DTOs. Each guide says which. Capability status per module is in that module's own
 "Current state → target" section, and the two are independent axes.
 
 **The last column is a dated snapshot, not a living status field.** It was sourced from the code on

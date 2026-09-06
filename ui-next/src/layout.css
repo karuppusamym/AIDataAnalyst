@@ -60,3 +60,10 @@
 .parsed-review__table table { min-width:900px; }
 .parsed-review__table :is(td,th) { padding:10px 12px; text-align:left; vertical-align:top; }
 .parsed-review__table td { max-width:260px; overflow-wrap:anywhere; }
+/* T18: the row opens the shared review-detail shell rather than making the
+   reviewer decide from a table cell. Button, not a link: it changes the
+   selection on this screen, it does not navigate away. */
+.parsed-review__open { background:none; border:0; padding:0; cursor:pointer; color:var(--ink); text-align:left; font:inherit; }
+.parsed-review__open:hover code { text-decoration:underline; }
+.parsed-review__detail { margin-top:16px; width:100%; max-height:70vh; }
+@media (min-width:1100px){ .parsed-review__detail { position:fixed; right:24px; bottom:24px; width:352px; z-index:5; box-shadow:0 8px 28px rgba(0,0,0,.18); } }

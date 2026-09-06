@@ -326,6 +326,63 @@ allowed_importers = [
 ]
 
 [[tool.importlinter.contracts]]
+# review-2026-09-05 point R04 ("relocate one bounded context at a time with
+# compatibility exports; separate persistence, API DTOs, and domain values"),
+# profiling's turn -- the sixth module to be populated and the first outside the
+# refactor plan's five Phase 3 leaf modules. Same shape and rationale as the five
+# module-privacy contracts above.
+#
+# This contract is the reason the relocation is worth anything. Without it, the
+# next person who needs `AnalysisRun` can import
+# `atlas.modules.profiling.models` directly from anywhere, and the boundary that
+# was just drawn becomes decoration: `models.py` would shrink while the coupling
+# it represents stayed exactly where it was, spread over more files. With it,
+# there are exactly two doors into this module's persistence and DTOs -- the
+# `aida.models` / `aida.schemas` re-export shims that keep all 155/89 existing
+# importers working unchanged -- and both are named here, counted in
+# `Docs/40-engineering/09-compatibility-shim-register.md`, and removable only
+# against that register's stated condition.
+#
+# `aida.models` and `aida.schemas` are allowed importers for the same reason
+# they are on the five contracts above: they are the sanctioned backward-compat
+# re-export shims for the classes just moved out of them. Nothing else may
+# import these private files.
+#
+# Note what is deliberately NOT here: `atlas.modules.connectivity.router` uses
+# `ScanPolicy` / `ScanPolicyRead` / `ScanPolicyUpsert`, which this pass moved
+# into profiling. It keeps importing them from `aida.models` / `aida.schemas`,
+# exactly as it did before the move, so it needs no entry -- a sibling module
+# reaching a relocated class through the shim is the compatibility export
+# working as intended, not a boundary violation to be exempted. Adding it here
+# would create a real module-to-module coupling where today there is only a
+# shim.
+#
+# Verified green when written.
+name = "profiling module privacy"
+type = "protected"
+protected_modules = [
+  "atlas.modules.profiling.service",
+  "atlas.modules.profiling.repository",
+  "atlas.modules.profiling.models",
+  "atlas.modules.profiling.schemas",
+  "atlas.modules.profiling.router",
+  "atlas.modules.profiling.workers",
+]
+allowed_importers = [
+  "atlas.modules.profiling.api",
+  "atlas.modules.profiling.contracts",
+  "atlas.modules.profiling.service",
+  "atlas.modules.profiling.repository",
+  "atlas.modules.profiling.models",
+  "atlas.modules.profiling.schemas",
+  "atlas.modules.profiling.router",
+  "atlas.modules.profiling.workers",
+  "atlas.modules.profiling.tests",
+  "aida.models",
+  "aida.schemas",
+]
+
+[[tool.importlinter.contracts]]
 # INV-2 / ADR-0004 / tracker QG-7. This is the contract the invariants document and
 # ADR-0004 both name as the enforcement mechanism for the execution choke point.
 # Until now it did not exist, so the platform's most-marketed property was a

@@ -15,6 +15,8 @@ import { deleteRequest, demoOr, get, patchJson, postJson } from "./transport";
 import {
   makeFixtureAnalysisRuns,
   makeFixtureArchiveStatus,
+  makeFixtureCreateAnalysisRun,
+  makeFixtureDatasourceAnalysisRuns,
   makeFixtureContractSlaStatus,
   makeFixtureContractViolations,
   makeFixtureCreateNotificationRule,
@@ -34,6 +36,7 @@ import {
   makeFixtureUpdatePlaybook,
 } from "../fixtures";
 import type {
+  AnalysisRunCreate,
   AnalysisRunRead,
   ArchiveStatusRead,
   EvaluationResponse,
@@ -103,6 +106,65 @@ export function fetchAnalysisRuns(
       params.set("offset", String(query.offset ?? 0));
       return get<PageOf<AnalysisRunRead>>(
         `/v1/organizations/${query.organizationId}/analysis-runs?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/* ---------------------------------------------------------------------------
+   T15 — the two scan routes a first-source setup needs.
+
+   The org-wide `analysis-runs` list above answers "what is the fleet doing";
+   neither of these did exist in this client, because no screen had ever asked
+   "has THIS datasource been scanned, and how did that scan end". Setup
+   readiness cannot be derived from the org-wide list: it is capped and
+   ordered across every source, so an empty page there is not evidence that a
+   particular source has never been scanned.
+--------------------------------------------------------------------------- */
+
+/** `GET /v1/datasources/{datasource_id}/analysis-runs` (`api.py::list_analysis_runs`)
+ *  — this datasource's own run history, newest first. The run row carries the
+ *  outcome (`status`) AND what the run found (`discovered_tables`,
+ *  `created_objects`), which is what makes "the scan succeeded and returned
+ *  nothing" distinguishable from "the scan failed". */
+export function fetchDatasourceAnalysisRuns(
+  datasourceId: string,
+  query: { limit?: number; offset?: number } = {},
+  signal?: AbortSignal,
+): Promise<PageOf<AnalysisRunRead>> {
+  return demoOr(
+    async () => makeFixtureDatasourceAnalysisRuns(datasourceId, query),
+    async () => {
+      const params = new URLSearchParams();
+      params.set("limit", String(query.limit ?? 20));
+      params.set("offset", String(query.offset ?? 0));
+      return get<PageOf<AnalysisRunRead>>(
+        `/v1/datasources/${datasourceId}/analysis-runs?${params}`,
+        signal,
+      );
+    },
+  );
+}
+
+/** `POST /v1/datasources/{datasource_id}/analysis-runs` (`api.py::create_analysis_run`,
+ *  202) — reserve and submit a scan. Returns the QUEUED run; the workflow is
+ *  submitted after the commit, so a 202 is an accepted request, not a
+ *  completed scan, and the caller must read the run back to learn its
+ *  outcome. Roles: PlatformAdmin / MetadataAdmin / DataAdmin — a principal
+ *  without one gets a 403 the caller has to show as a missing permission
+ *  rather than as a failed scan. */
+export function createAnalysisRun(
+  datasourceId: string,
+  body: AnalysisRunCreate = {},
+  signal?: AbortSignal,
+): Promise<AnalysisRunRead> {
+  return demoOr(
+    async () => makeFixtureCreateAnalysisRun(datasourceId, body),
+    async () => {
+      return postJson<AnalysisRunRead>(
+        `/v1/datasources/${datasourceId}/analysis-runs`,
+        body,
         signal,
       );
     },

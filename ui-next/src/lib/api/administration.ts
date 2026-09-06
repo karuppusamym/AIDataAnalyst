@@ -71,9 +71,9 @@ import type { PageOf } from "../ui-types";
    portal itself posts to -- the deliberate four-step hierarchy the backend
    enforces (organization -> line of business -> project -> datasource), not
    an invented "setup" API. `fetchOrganizations`, `fetchOrgProjects` and
-   `fetchOrgDatasources` above already cover this screen's organization,
-   project and datasource reads; `fetchOrgLinesOfBusiness` below is the one
-   read nothing existing exposed yet.
+   `fetchOrgDatasources` in `./identity.ts` already cover this screen's
+   organization, project and datasource reads; `fetchOrgLinesOfBusiness`
+   below is the one read nothing existing exposed yet.
 --------------------------------------------------------------------------- */
 
 /** `POST /v1/organizations` (`create_organization`, `api.py:584`) -- the
@@ -130,7 +130,8 @@ export function requestSourceBinding(
 
 /** `GET /v1/organizations/{organization_id}/lines-of-business`
  *  (`list_lines_of_business`, `api.py:463`) -- the one hierarchy read
- *  `fetchOrgProjects`/`fetchOrgDatasources` above don't already cover; feeds
+ *  `fetchOrgProjects`/`fetchOrgDatasources` (`./identity.ts`) don't already
+ *  cover; feeds
  *  both the "Add project" line-of-business picker and the scope-summary
  *  tree in `AdministrationScreen`. */
 export function fetchOrgLinesOfBusiness(
@@ -298,13 +299,13 @@ export function simulateAuthorization(
 /* ---------------------------------------------------------------------------
    Workspace membership, source-binding decisions, BI/Tableau lineage
    connections -- the piece of the legacy Enterprise Control Center's
-   `renderAccess`/`renderBi` this file's own `fetchOrgWorkspaces`/
-   `fetchWorkspaceSourceBindings`/`createWorkspace`/`requestSourceBinding`
-   (above) do not cover: workspace *members* (`workspace_api.py:160-208`),
+   `renderAccess`/`renderBi` that `fetchOrgWorkspaces`/
+   `fetchWorkspaceSourceBindings` (`./identity.ts`) and `createWorkspace`/
+   `requestSourceBinding` (above) do not cover: workspace *members* (`workspace_api.py:160-208`),
    the *decision* half of the maker-checker source-binding flow
    (`workspace_api.py:293`, `createWorkspace`/`requestSourceBinding` only
-   create/request), and BI connections (`bi_api.py`, new -- nothing in this
-   file touches it yet).
+   create/request), and BI connections (`bi_api.py`, which nothing else in
+   this client touches).
 --------------------------------------------------------------------------- */
 
 /** `POST /v1/workspaces/{workspace_id}/members` (`workspace_api.py:160`,

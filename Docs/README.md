@@ -138,6 +138,7 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [07 Local runbook](40-engineering/07-local-runbook.md) | Start, verify, inspect, triage |
 | [08 Experience shell rebuild plan](40-engineering/08-experience-shell-rebuild-plan.md) | The `ui-next/` rebuild, its phases and its exit criteria |
 | [09 Compatibility shim register](40-engineering/09-compatibility-shim-register.md) | **Generated caller counts, hand-written removal conditions.** Every re-export shim, what replaces it, who still calls it, and what must be true before it can go (review D03) |
+| [10 Bounded-context relocation procedure](40-engineering/10-bounded-context-relocation-procedure.md) | The repeatable steps for moving one context's models and DTOs out of `models.py`/`schemas.py`, the four things it may not change and how each is proved, and what went wrong the last time (review R04) |
 
 ### 50-security — Trust
 

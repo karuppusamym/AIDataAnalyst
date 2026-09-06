@@ -125,13 +125,6 @@ ALLOWLIST: dict[str, str] = {
         "decision with an owner (D01), recorded here rather than hidden: wire it "
         "into the shell nav or delete it, and remove this entry either way."
     ),
-    "lib/_fixtures_append.ts": (
-        "Zero-byte file left behind by the R05 frontend API-client split "
-        "(POINTS-TRACKER.md section 3, R05 = partial). Its three siblings "
-        "(`_api_append.ts`, `_column_documentation_api.ts`, `_cross_source_api.ts`) "
-        "all have live importers; this one has none and no content. Deleting an "
-        "empty file is R05's call, not this gate's."
-    ),
 }
 
 

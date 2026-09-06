@@ -44,7 +44,7 @@ import type { PageOf } from "../ui-types";
    deliberately left out of scope (the multi-table blueprint helper and the
    certification-cases/certification-runs sub-flow -- legacy's `tools-view`
    never calls either). Datasource options for the create panel reuse the
-   already-existing `fetchOrgDatasources` above, filtered client-side by
+   already-existing `fetchOrgDatasources` (`./identity.ts`), filtered client-side by
    `project_id` -- exactly what the legacy screen's own
    `populateProjectSources()` (`ui/scripts/core.js`) does against its
    org-wide `state.sources`; there is no project-scoped datasource-list

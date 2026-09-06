@@ -55,7 +55,7 @@ that still genuinely lives in the file is not use of the shim.
 
 ## Register
 
-14 shims, 801 shim-to-caller-file relationships across 365 distinct files, 0 shim(s) with a measured caller count of zero.
+14 shims, 810 shim-to-caller-file relationships across 367 distinct files, 0 shim(s) with a measured caller count of zero.
 
 | Shim | Kind | Replacement path | Owner area | Callers | Import stmts | String refs |
 |---|---|---|---|---:|---:|---:|
@@ -63,8 +63,8 @@ that still genuinely lives in the file is not use of the shim.
 | [`aida.config`](#aidaconfig) | python | `atlas.platform.config` | Platform infrastructure | 179 | 184 | 1 |
 | [`aida.context`](#aidacontext) | python | `atlas.platform.context` | Platform infrastructure | 63 | 63 | 0 |
 | [`aida.logging`](#aidalogging) | python | `atlas.platform.logging` | Platform infrastructure | 5 | 5 | 0 |
-| [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit) jointly | 278 | 351 | 1 |
-| [`aida.schemas`](#aidaschemas) | python-partial | `atlas.modules.<context>.schemas` (re-exported DTOs only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit) jointly | 17 | 17 | 0 |
+| [`aida.models`](#aidamodels) | python-partial | `atlas.modules.<context>.models` (re-exported classes only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 286 | 359 | 1 |
+| [`aida.schemas`](#aidaschemas) | python-partial | `atlas.modules.<context>.schemas` (re-exported DTOs only) | Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly | 18 | 18 | 0 |
 | [`aida.catalog_read_model`](#aidacatalogreadmodel) | python | `atlas.modules.catalog.service` / `.repository` | Bounded context: catalog | 8 | 8 | 0 |
 | [`aida.catalog_bulk_actions`](#aidacatalogbulkactions) | python | `atlas.modules.catalog.service` | Bounded context: catalog | 6 | 6 | 0 |
 | [`aida.workspace_api`](#aidaworkspaceapi) | python | `atlas.modules.identity_tenancy.router` | Bounded context: identity_tenancy | 1 | 1 | 2 |
@@ -130,28 +130,28 @@ caller today.
 
 ### aida.models
 
-- **File** — `src/aida/models.py` (5748 lines)
+- **File** — `src/aida/models.py` (5378 lines)
 - **Replacement path** *(hand-written)* — Each re-exported class has moved to the `models` module of the bounded context that owns it; import it from there. The rest of the file — the large majority of it -- has not moved and has no replacement path yet.
-- **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit) jointly
+- **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md
-- **Re-exports** — 44 name(s) from `atlas.modules.catalog.models`, `atlas.modules.connectivity.models`, `atlas.modules.identity_tenancy.models`, `atlas.modules.ingestion.models`, `atlas.modules.observability_audit.models`, `atlas.platform.db`
-- **Callers** — 278 file(s), 351 import statement(s)
-  - By source root: `scripts` 6, `src/aida` 113, `src/atlas` 6, `tests` 153
+- **Re-exports** — 53 name(s) from `atlas.modules.catalog.models`, `atlas.modules.connectivity.models`, `atlas.modules.identity_tenancy.models`, `atlas.modules.ingestion.models`, `atlas.modules.observability_audit.models`, `atlas.modules.profiling.models`, `atlas.platform.db`
+- **Callers** — 286 file(s), 359 import statement(s)
+  - By source root: `scripts` 6, `src/aida` 119, `src/atlas` 7, `tests` 154
 - **String references** — 1 file(s): `tests/test_lineage_edge_kind_vocabulary.py`
-- **Named in import-linter contracts** — `catalog module privacy`, `connectivity module privacy`, `identity_tenancy module privacy`, `ingestion module privacy`, `observability_audit module privacy`
+- **Named in import-linter contracts** — `catalog module privacy`, `connectivity module privacy`, `identity_tenancy module privacy`, `ingestion module privacy`, `observability_audit module privacy`, `profiling module privacy`
 - **Removal condition** *(hand-written)* — **Not removable as a file at all** until every remaining class in it has moved to a context -- it is a partial shim, not a shim. The re-export *block* can go when no caller imports a re-exported name and the `aida.models` entry disappears from every `allowed_importers` list in `pyproject.toml`. Note that `Base.metadata` must keep seeing all of these classes for Alembic autogenerate to be correct, so removing the block requires `migrations/env.py` to import the context model modules directly.
-- **Note** — Named in the `allowed_importers` list of all five module-privacy contracts, which is what lets the shim import the private module it re-exports from.
+- **Note** — Named in the `allowed_importers` list of all six module-privacy contracts, which is what lets the shim import the private module it re-exports from.
 
 ### aida.schemas
 
-- **File** — `src/aida/schemas.py` (3946 lines)
+- **File** — `src/aida/schemas.py` (3771 lines)
 - **Replacement path** *(hand-written)* — Each re-exported DTO has moved to the `schemas` module of the bounded context that owns it. The rest of the file has not moved.
-- **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit) jointly
+- **Owner area** *(hand-written)* — Bounded contexts (catalog, connectivity, identity_tenancy, ingestion, observability_audit, profiling) jointly
 - **Introduced by** — ST-05, Phase 3 of Docs/40-engineering/06-refactor-plan.md
-- **Re-exports** — 66 name(s) from `atlas.modules.catalog.schemas`, `atlas.modules.connectivity.schemas`, `atlas.modules.identity_tenancy.schemas`, `atlas.modules.ingestion.schemas`, `atlas.modules.observability_audit.schemas`
-- **Callers** — 17 file(s), 17 import statement(s)
-  - By source root: `src/aida` 5, `src/atlas` 4, `tests` 8
-- **Named in import-linter contracts** — `catalog module privacy`, `connectivity module privacy`, `identity_tenancy module privacy`, `ingestion module privacy`, `observability_audit module privacy`
+- **Re-exports** — 81 name(s) from `atlas.modules.catalog.schemas`, `atlas.modules.connectivity.schemas`, `atlas.modules.identity_tenancy.schemas`, `atlas.modules.ingestion.schemas`, `atlas.modules.observability_audit.schemas`, `atlas.modules.profiling.schemas`
+- **Callers** — 18 file(s), 18 import statement(s)
+  - By source root: `src/aida` 5, `src/atlas` 4, `tests` 9
+- **Named in import-linter contracts** — `catalog module privacy`, `connectivity module privacy`, `identity_tenancy module privacy`, `ingestion module privacy`, `observability_audit module privacy`, `profiling module privacy`
 - **Removal condition** *(hand-written)* — Same shape as `aida.models`, plus one hard constraint: the moved DTO modules import `ApiModel` back from this file, so the re-export block cannot be removed before `ApiModel` moves somewhere neither side owns. The circular import resolves today only because the block sits below `ApiModel`'s definition.
 
 ### aida.catalog_read_model
@@ -271,7 +271,9 @@ Two near-misses worth knowing about, neither of them a shim:
 - `ui-next/src/lib/api.ts` ends with four `export * from` lines but is not
   matched, because the rest of the file is real code. It is the canonical client
   barrel — the intended import surface for screens — not a compatibility path.
-- Three of the five bounded contexts' `api.py` files do not re-export their
-  router, so they are not matched either. That is not tidiness: `aida.main` still
-  mounts those three routers through the `aida.*` shims above, which is exactly
-  what their removal conditions say has to change first.
+- Four of the six bounded contexts' `api.py` files do not re-export their
+  router, so they are not matched either. For three of them that is not tidiness:
+  `aida.main` still mounts those routers through the `aida.*` shims above, which
+  is exactly what their removal conditions say has to change first. The fourth,
+  `profiling`, has no routes yet at all — only its models and DTOs have been
+  relocated (see `40-engineering/10-bounded-context-relocation-procedure.md`).

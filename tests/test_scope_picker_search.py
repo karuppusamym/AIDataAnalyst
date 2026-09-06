@@ -293,6 +293,17 @@ async def test_organization_search_cannot_reach_another_organization(session, es
     assert await _organizations(session, alpha, "bank") == ["Alpha Bank"]
 
 
+async def test_wildcard_search_term_cannot_cross_the_tenant_boundary(session, estate):
+    """`contains` is not auto-escaped (catalog convention -- see `scope_search`),
+    so `%` is a wildcard. The worst it can do is behave as "no filter", and "no
+    filter" is still one tenant's rows."""
+    alpha, _ = estate
+    assert await _projects(session, alpha, "%") == ["Alpha Warehouse"]
+    assert await _datasources(session, alpha, "%") == ["Alpha Ledger"]
+    assert await _workspaces(session, alpha, "%") == ["Alpha Analytics"]
+    assert await _organizations(session, alpha, "%") == ["Alpha Bank"]
+
+
 async def test_platform_admin_organization_search_still_spans_tenants(session, estate):
     """The counterpart assertion: the filter narrows, it does not authorize.
 

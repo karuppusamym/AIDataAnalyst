@@ -82,7 +82,7 @@ const NAV: NavItem[] = [
   { id: "inbox", label: "Agent inbox", group: "Inbox", icon: "⧉", keywords: "agents proposals waiting decisions auto-applied sampled kill switch supervise" },
   // --- Analyst: answer a question, and trust the answer -------------------
   { id: "analyst", label: "Ask Atlas", group: "Analyst", icon: "✦", keywords: "question query analyst ai" },
-  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables data search" },
+  { id: "catalog", label: "Catalog", group: "Analyst", icon: "▦", keywords: "assets tables columns definitions descriptions data search" },
   { id: "semantics", label: "Semantic layer", group: "Analyst", icon: "ƒ", keywords: "metrics models measures" },
   { id: "tools", label: "Tool registry", group: "Analyst", icon: "⛭", keywords: "sql tool version execute registry" },
   { id: "tool-plans", label: "Tool plans", group: "Analyst", icon: "⛓", keywords: "orchestration multi-step budget validate execute evidence" },
@@ -118,7 +118,7 @@ const NAV: NavItem[] = [
   { id: "refusals", label: "Policy refusals", group: "Reviewer", icon: "!", keywords: "lineage blocked denied" },
   { id: "reviewer-agent", label: "Reviewer agent", group: "Reviewer", icon: "◈", keywords: "reviewer agent adr-0027 auto-decide suspend disagreement sample audit tier0 tier1" },
   // --- Operator: keep the estate and the AI running -----------------------
-  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health" },
+  { id: "sources", label: "Sources", group: "Operator", icon: "▱", keywords: "connectors databases health model workbook excel columns import export" },
   { id: "operations", label: "Operations", group: "Operator", icon: "↻", keywords: "runs jobs ingestion outbox" },
   { id: "agents", label: "AI governance", group: "Operator", icon: "⌬", keywords: "model routes agents evaluations runtime" },
   { id: "ai", label: "AI registry", group: "Operator", icon: "◆", keywords: "agents models tools" },

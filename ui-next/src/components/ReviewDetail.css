@@ -1,0 +1,32 @@
+/* The shared review-detail shell (T18). Layout only: it reuses `.evp`
+   (EvidencePane.css) for the pane frame so the two review screens keep the
+   appearance they already had -- this adds the sections the shell owns, it
+   does not restyle either screen. */
+
+.rvd__badges{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
+
+.rvd__sec{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-soft)}
+.rvd__sec:first-of-type{margin-top:0;padding-top:0;border-top:0}
+.rvd__h{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3);margin:0 0 7px;font-weight:600}
+.rvd__none{font-size:12.5px;color:var(--ink-3);margin:0;line-height:1.45}
+
+.rvd__facts{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 10px}
+.rvd__facts>div{display:contents}
+.rvd__facts dt{font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.rvd__facts dd{margin:0;font-size:12.5px;color:var(--ink);word-break:break-word}
+
+.rvd__foot{gap:8px}
+.rvd__blocked{font-size:12px;color:var(--ink-2);line-height:1.4}
+.rvd__err{font-size:12px;color:var(--bad);line-height:1.4;flex-basis:100%}
+
+/* A lost race is not an error message. It is the other decision, shown. */
+.rvdconflict{border:1px solid var(--warn);border-radius:var(--radius-sm);background:var(--sunk);padding:10px 11px;margin-bottom:14px}
+.rvdconflict--refused{border-color:var(--line)}
+.rvdconflict__h{margin:0 0 4px;font-size:13px;font-weight:600;color:var(--ink)}
+.rvdconflict__msg{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.45}
+.rvdconflict__unknown{margin:7px 0 0;font-size:12px;color:var(--ink-3);line-height:1.45}
+.rvdconflict__facts{margin:8px 0 0;display:grid;grid-template-columns:auto 1fr;gap:3px 10px}
+.rvdconflict__facts>div{display:contents}
+.rvdconflict__facts dt{font-size:11.5px;color:var(--ink-3);white-space:nowrap}
+.rvdconflict__facts dd{margin:0;font-size:12.5px;color:var(--ink);word-break:break-word}
+.rvdconflict__act{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}

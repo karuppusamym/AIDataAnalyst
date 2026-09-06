@@ -5,7 +5,7 @@
 > when it is stale. Every number and every edge below is read out of the source
 > tree and `pyproject.toml` at generation time.
 
-348 Python modules under `src/`, 1661 intra-`src` import edges.
+360 Python modules under `src/`, 1670 intra-`src` import edges.
 
 ## How this map aggregates
 
@@ -27,14 +27,15 @@ for its HTTP layer — so it cannot drift from the tree it describes.
 | atlas.modules.identity_tenancy | `atlas.modules.identity_tenancy.*` | 12 |
 | atlas.modules.ingestion | `atlas.modules.ingestion.*` | 12 |
 | atlas.modules.observability_audit | `atlas.modules.observability_audit.*` | 12 |
+| atlas.modules.profiling | `atlas.modules.profiling.*` | 12 |
 | aida.connectors | `aida.connectors.*` | 12 |
 | aida.workflows | `aida.workflows.*` | 7 |
 | aida.projectors | `aida.projectors.*` | 3 |
 | atlas.platform | `atlas.platform.*` | 5 |
 
-What is deliberately *not* aggregated away: the five bounded contexts each keep
-their own group even though four of them are small, because the point of the map
-is to show how much of the system has and has not moved into one.
+What is deliberately *not* aggregated away: the 6 bounded contexts each keep
+their own group even though every one of them is small, because the point of the
+map is to show how much of the system has and has not moved into one.
 
 ## Module graph, by group
 
@@ -54,6 +55,7 @@ graph LR
   ctx_identity_tenancy["atlas.modules.identity_tenancy<br/>12 modules"]
   ctx_ingestion["atlas.modules.ingestion<br/>12 modules"]
   ctx_observability_audit["atlas.modules.observability_audit<br/>12 modules"]
+  ctx_profiling["atlas.modules.profiling<br/>12 modules"]
   connectors["aida.connectors<br/>12 modules"]
   workflows["aida.workflows<br/>7 modules"]
   projectors["aida.projectors<br/>3 modules"]
@@ -76,6 +78,7 @@ graph LR
   domain -->|4| ctx_identity_tenancy
   domain -->|4| ctx_ingestion
   domain -->|4| ctx_observability_audit
+  domain -->|4| ctx_profiling
   domain -->|4| workflows
   ctx_ingestion -->|3| workflows
   workflows -->|3| connectors
@@ -88,11 +91,13 @@ graph LR
   ctx_ingestion -->|2| connectors
   ctx_ingestion -->|2| platform
   ctx_observability_audit -->|2| platform
+  ctx_profiling -->|2| platform
   domain -->|2| projectors
   routers -->|2| ctx_identity_tenancy
   routers -->|2| ctx_ingestion
   routers -->|2| ctx_observability_audit
   ctx_catalog -->|1| routers
+  ctx_profiling -->|1| domain
   projectors -->|1| routers
   workflows -->|1| routers
 ```
@@ -133,13 +138,13 @@ whether code can run in it at all — not whether it does.
 
 | Entry point | Process | Modules reached |
 |---|---|---:|
-| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 294 |
-| `aida.workflows.worker` | Temporal worker | 93 |
-| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 88 |
-| `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 59 |
-| `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 24 |
+| `aida.main` | FastAPI application (`uvicorn aida.main:app`) | 297 |
+| `aida.workflows.worker` | Temporal worker | 96 |
+| `aida.workflows.scheduler` | Fleet scheduler (polling loop) | 91 |
+| `aida.projectors.graph_projector` | Lineage graph projector (Kafka consumer) | 62 |
+| `aida.projectors.outbox_publisher` | Outbox publisher (Kafka producer) | 26 |
 
-Union of all five: 311 of 348 modules.
+Union of all five: 314 of 360 modules.
 
 Per group, how much of each group each process pulls in:
 
@@ -154,23 +159,24 @@ Per group, how much of each group each process pulls in:
 | atlas.modules.identity_tenancy | 4 | 3 | 3 | 3 | 2 | 12 |
 | atlas.modules.ingestion | 4 | 3 | 3 | 3 | 2 | 12 |
 | atlas.modules.observability_audit | 4 | 3 | 3 | 3 | 2 | 12 |
+| atlas.modules.profiling | 3 | 3 | 3 | 3 | 2 | 12 |
 | aida.connectors | 12 | 11 | 0 | 0 | 0 | 12 |
 | aida.workflows | 5 | 6 | 4 | 0 | 0 | 7 |
 | aida.projectors | 0 | 0 | 2 | 2 | 2 | 3 |
 | atlas.platform | 5 | 5 | 5 | 5 | 4 | 5 |
 
-**22 modules are loaded by all five processes** — the shared
+**24 modules are loaded by all five processes** — the shared
 substrate every process pays for. The rest divides into what each process alone
 pulls in:
 
 ```mermaid
 graph LR
-  shared["shared substrate<br/>22 modules"]
-  aida_main(["aida.main<br/>294 reached"])
-  aida_workflows_worker(["aida.workflows.worker<br/>93 reached"])
-  aida_workflows_scheduler(["aida.workflows.scheduler<br/>88 reached"])
-  aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>59 reached"])
-  aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>24 reached"])
+  shared["shared substrate<br/>24 modules"]
+  aida_main(["aida.main<br/>297 reached"])
+  aida_workflows_worker(["aida.workflows.worker<br/>96 reached"])
+  aida_workflows_scheduler(["aida.workflows.scheduler<br/>91 reached"])
+  aida_projectors_graph_projector(["aida.projectors.graph_projector<br/>62 reached"])
+  aida_projectors_outbox_publisher(["aida.projectors.outbox_publisher<br/>26 reached"])
   aida_main --> shared
   only_aida_main["only this process<br/>187 modules"]
   aida_main --> only_aida_main
@@ -188,7 +194,7 @@ graph LR
 
 ## Bounded contexts
 
-The five module directories under `src/atlas/modules/`. Tables and routes are
+All 6 module directories under `src/atlas/modules/`. Tables and routes are
 read out of each context's own `models.py` and `router.py`; *mounted via* is read
 out of `aida.main`'s imports, which is the fact that says whether a context's
 public face is being used or a compatibility shim still stands in front of it.
@@ -200,6 +206,7 @@ public face is being used or a compatibility shim still stands in front of it.
 | [`identity_tenancy`](../20-modules/domain-guides/identity-tenancy.md) | 12 | 19 | 28 | `aida.workspace_api` (compatibility shim) | `identity_tenancy module privacy` |
 | [`ingestion`](../20-modules/domain-guides/ingestion.md) | 12 | 3 | 15 | `aida.ingestion_api` (compatibility shim) | `ingestion module privacy` |
 | [`observability_audit`](../20-modules/domain-guides/observability-audit.md) | 12 | 11 | 5 | `aida.observability_api` (compatibility shim) | `observability_audit module privacy` |
+| [`profiling`](../20-modules/domain-guides/profiling.md) | 12 | 9 | 0 | not mounted from `aida.main` | `profiling module privacy` |
 
 Each context's own guide is linked from the name. Owned tables, per context:
 
@@ -208,6 +215,7 @@ Each context's own guide is linked from the name. Owned tables, per context:
 - **identity_tenancy** — `organization`, `organization_integration_policy`, `line_of_business`, `data_domain`, `cross_boundary_grant`, `isolation_boundary`, `workspace`, `workspace_membership`, `workspace_access_rule`, `authorization_shadow_record`, `source_binding`, `business_node`, `business_assignment`, `business_assignment_rule`, `business_node_closure`, `business_node_rollup`, `project`, `delegation`, `revoked_token`
 - **ingestion** — `metadata_ingestion_job`, `metadata_ingestion_batch`, `metadata_ingestion_chunk`
 - **observability_audit** — `outbox_event`, `slo_definition`, `slo_measurement`, `audit_archive_record`, `audit_archive_membership`, `audit_archive_lease`, `audit_event`, `compliance_pack`, `access_review_report`, `delivery_intent`, `delivery_attempt`
+- **profiling** — `classification_evidence`, `column_derived_classification`, `analysis_run`, `analysis_task`, `scan_policy`, `table_profile`, `column_profile`, `profiling_exception_policy`, `column_value_profile_artifact`
 
 ## Import-linter contracts actually enforced
 
@@ -222,13 +230,14 @@ push rather than described.
 | ingestion module privacy | protected | 6 protected module(s), 12 allowed importer(s) |
 | catalog module privacy | protected | 6 protected module(s), 13 allowed importer(s) |
 | observability_audit module privacy | protected | 6 protected module(s), 12 allowed importer(s) |
+| profiling module privacy | protected | 6 protected module(s), 11 allowed importer(s) |
 | INV-2 connector SQL execution is reachable only from the query gateway | protected | 1 protected module(s), 1 allowed importer(s) |
 | security_types never depends on api (leaf-module ratchet) | forbidden | 1 source module(s) may not import 1 module(s) |
 | C4 / ST-11 lineage and intelligence modules never import the query gateway | forbidden | 12 source module(s) may not import 1 module(s) |
 | F05 the governance decision service is never reached from a router (and never imports one) | forbidden | 3 source module(s) may not import 4 module(s) |
 | R02 extracted lineage/graph/portfolio services never import a router | forbidden | 3 source module(s) may not import 5 module(s) |
 
-10 contracts, 40 forbidden module pairs. The
+11 contracts, 40 forbidden module pairs. The
 forbidden edges, drawn — a dashed line is an import the build rejects:
 
 ```mermaid
@@ -310,7 +319,7 @@ a package's fan-in measures nothing but the size of the package.
 |---|---|---:|
 | `aida.models` | aida domain modules | 169 |
 | `aida.security` | aida domain modules | 94 |
-| `aida.schemas` | aida domain modules | 90 |
+| `aida.schemas` | aida domain modules | 91 |
 | `aida.db` | aida domain modules | 86 |
 | `aida.events` | aida domain modules | 78 |
 | `aida.config` | aida domain modules | 77 |
@@ -321,8 +330,8 @@ a package's fan-in measures nothing but the size of the package.
 | `aida.authorization_gate` | aida domain modules | 10 |
 | `aida.business_annotation_versions` | aida domain modules | 10 |
 | `aida.classification` | aida domain modules | 10 |
+| `atlas.platform.db` | atlas.platform | 10 |
 | `aida.timeutil` | aida domain modules | 9 |
-| `atlas.platform.db` | atlas.platform | 9 |
 
 ## What this map cannot tell you
 

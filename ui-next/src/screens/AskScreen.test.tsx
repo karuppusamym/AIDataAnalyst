@@ -361,10 +361,18 @@ const MASKED_RESPONSE: AgentAnalysisResponse = {
   agent_run_id: "run_masked_1",
   execution: {
     ...ANALYSIS_RESPONSE.execution,
-    // A `LIMIT 2` reached by a 2-row result: the gateway rewrites the
-    // statement with the governed limit and reports the applied value only in
-    // its audit details, so truncation is read off the executed SQL.
-    normalized_sql: "SELECT customer_email, net_amount FROM orders_raw LIMIT 2",
+    // A governed cap of 2 reached by a 2-row result.
+    //
+    // `normalized_sql` is deliberately the LITERAL-REDACTED form the gateway
+    // actually returns. The panel used to infer truncation by regexing
+    // `LIMIT <n>` out of this string, and this fixture used to carry an
+    // un-redacted `LIMIT 2` so that regex would match -- so the test passed on
+    // a code path production could never reach. Truncation now comes from
+    // `applied_row_limit` + `row_limit_source`, and the redacted SQL here
+    // keeps the old heuristic from being reintroduced unnoticed.
+    normalized_sql: "SELECT customer_email, net_amount FROM orders_raw LIMIT %(redacted)s",
+    applied_row_limit: 2,
+    row_limit_source: "GATEWAY_CAP",
     row_count: 2,
     masked_columns: ["customer_email"],
     column_lineage: [
@@ -429,6 +437,23 @@ describe("AskScreen's result panel", () => {
     const result = await ask(MASKED_RESPONSE);
 
     expect(within(result).getByText(/stopped at the governed row limit of 2/)).toBeInTheDocument();
+  });
+
+  it("does not call it truncation when the caller's own LIMIT bound the result", async () => {
+    // Asking for 2 rows and receiving 2 rows is an answered question, not a
+    // withheld result. Only a GATEWAY_CAP means there may be matching rows the
+    // user never asked to skip -- which is the distinction `row_limit_source`
+    // exists to make and a bare `applied_row_limit` could not.
+    const result = await ask({
+      ...MASKED_RESPONSE,
+      agent_run_id: "run_own_limit_1",
+      execution: {
+        ...MASKED_RESPONSE.execution,
+        row_limit_source: "STATEMENT",
+      },
+    });
+
+    expect(within(result).queryByText(/stopped at the governed row limit/)).toBeNull();
   });
 
   it("states that the values are not retained, and points at the value-free alternative", async () => {

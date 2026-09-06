@@ -6,6 +6,7 @@ import type {
   AgentRunRead,
   AiDecisionRead,
   AiRuntimeStatusRead,
+  AnalysisRunCreate,
   AnalysisRunRead,
   AssetEvidenceRead,
   BusinessMapEdgeRead,
@@ -1597,6 +1598,63 @@ export async function makeFixtureAnalysisRuns(
   const offset = query.offset ?? 0;
   const limit = query.limit ?? 100;
   return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `GET /v1/datasources/{datasource_id}/analysis-runs` (T15).
+ *
+ *  Deliberately answers an unknown datasource with an EMPTY page rather than
+ *  the whole fixture list: "this source has never been scanned" is the state
+ *  a first-source setup has to be able to show, and a fixture that always
+ *  returns a successful run would make that state unreachable in demo mode. */
+export async function makeFixtureDatasourceAnalysisRuns(
+  datasourceId: string,
+  query: { limit?: number; offset?: number },
+): Promise<PageOf<AnalysisRunRead>> {
+  await wait(70);
+  const items = ANALYSIS_RUN_FIXTURES.filter((run) => run.datasource_id === datasourceId);
+  const offset = query.offset ?? 0;
+  const limit = query.limit ?? 20;
+  return { items: items.slice(offset, offset + limit), limit, offset, total: items.length };
+}
+
+/** `POST /v1/datasources/{datasource_id}/analysis-runs` (T15). Mutates the
+ *  same in-memory array the reads above see -- the convention
+ *  `makeFixtureRequeueOutboxEvent` already sets -- and returns a QUEUED run,
+ *  because that is what the real 202 returns: an accepted request, never a
+ *  finished scan. */
+export async function makeFixtureCreateAnalysisRun(
+  datasourceId: string,
+  body: AnalysisRunCreate,
+): Promise<AnalysisRunRead> {
+  await wait(90);
+  const now = new Date().toISOString();
+  const run: AnalysisRunRead = {
+    id: `run_${Math.random().toString(36).slice(2, 8)}`,
+    organization_id: OPS_ORG,
+    datasource_id: datasourceId,
+    resumed_from_run_id: null,
+    mode: body.mode ?? "INCREMENTAL",
+    trigger_type: "MANUAL",
+    priority: 50,
+    status: "QUEUED",
+    temporal_workflow_id: null,
+    discovered_catalogs: 0,
+    discovered_schemas: 0,
+    discovered_tables: 0,
+    discovered_columns: 0,
+    discovered_constraints: 0,
+    created_objects: 0,
+    changed_objects: 0,
+    deprecated_objects: 0,
+    profiled_tables: 0,
+    profiled_columns: 0,
+    error_class: null,
+    error_message: null,
+    created_at: now,
+    updated_at: now,
+  };
+  ANALYSIS_RUN_FIXTURES.unshift(run);
+  return run;
 }
 
 const OUTBOX_EVENT_FIXTURES: OutboxEventRead[] = [

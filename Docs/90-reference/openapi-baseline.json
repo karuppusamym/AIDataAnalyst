@@ -41332,7 +41332,7 @@
     },
     "/v1/datasources/{datasource_id}": {
       "get": {
-        "description": "F15: resolve one datasource by id, for a deep link or a remembered selection.\n\nSame summary projection the list route returns, so a picker showing a\nresolved-by-id source and a picker showing a listed one render identically.\nRoles mirror `list_organization_datasources` exactly: a caller who can find\na source by paging can find it by id, and no caller gains reach by using\nthis route instead.",
+        "description": "F15: resolve one datasource by id, for a deep link or a remembered selection.\n\nSame summary projection the list route returns, so a picker showing a\nresolved-by-id source and a picker showing a listed one render identically.\nRoles mirror `list_organization_datasources` exactly: a caller who can find\na source by paging can find it by id, and no caller gains reach by using\nthis route instead.\n\nDeliberately `DataSourceSummaryRead` and deliberately here rather than\nbeside `PATCH /v1/datasources/{id}` in `atlas.modules.connectivity.router`:\nthat route answers with `DataSourceRead`, which carries\n`credential_reference`, and is gated to DataAdmin/PlatformAdmin. This route\nis readable down to Viewer, so it must not be able to return that field --\npairing it with the list route's projection is what guarantees it cannot.",
         "operationId": "get_datasource_v1_datasources__datasource_id__get",
         "parameters": [
           {

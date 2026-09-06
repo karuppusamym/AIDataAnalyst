@@ -152,7 +152,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
       expect(fetchDatasourceHealth).toHaveBeenCalledWith("ds_snowflake_prod", expect.anything()),
     );
 
-    const panel = await screen.findByLabelText("Health for snowflake_prod");
+    const panel = await screen.findByLabelText("Source details for snowflake_prod");
     expect(panel).toHaveTextContent("91");
     expect(panel).toHaveTextContent("healthy");
     expect(panel).toHaveTextContent("RUN SUCCESS RATE");
@@ -177,7 +177,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     await waitFor(() => expect(screen.getByText("oracle_core")).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /oracle_core/ }));
-    const panel = await screen.findByLabelText("Health for oracle_core");
+    const panel = await screen.findByLabelText("Source details for oracle_core");
     await waitFor(() => expect(panel).toHaveTextContent("Administratively disabled"));
   });
 
@@ -240,7 +240,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     render(<SourcesScreen />);
     await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
-    await screen.findByLabelText("Health for snowflake_prod");
+    await screen.findByLabelText("Source details for snowflake_prod");
 
     fireEvent.click(screen.getByRole("button", { name: "Generate context (.md)" }));
 
@@ -276,7 +276,7 @@ describe("SourcesScreen against the real datasource fleet + health endpoints", (
     render(<SourcesScreen />);
     await waitFor(() => expect(screen.getByText("snowflake_prod")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /snowflake_prod/ }));
-    await screen.findByLabelText("Health for snowflake_prod");
+    await screen.findByLabelText("Source details for snowflake_prod");
 
     fireEvent.click(screen.getByRole("button", { name: "Generate context (.json)" }));
 

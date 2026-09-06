@@ -13,13 +13,15 @@
    * `GET /v1/datasources/{datasource_id}/model/export.xlsx`
      (`src/aida/model_export_api.py`) -- the whole model as a workbook.
 
-   Kept in a dedicated append file rather than mixed into the ~4.5k-line
-   `api.ts`, following `_api_append.ts`'s precedent, so this slice reads as one
-   contiguous change. Same reason that file gives for re-deriving the request
-   helpers instead of importing them: `get` is module-private in `api.ts`.
+   Also the model workbook's re-import path (upload, preview, submit) and the
+   withdrawal of an approved description.
+
+   Transport, identity headers and the demo switch come from `./transport`:
+   this module never calls `fetch` and never decodes an error itself.
+   Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { ApiError, USE_FIXTURES, get, requestHeaders } from "./transport";
+import { USE_FIXTURES, get, postJson, requestBlob, requestRawBody } from "./transport";
 
 import type { PageOf } from "../ui-types";
 
@@ -27,9 +29,16 @@ import type { PageOf } from "../ui-types";
  * own `fetch` wrapper. That copy sent the development principal in every live
  * mode -- so the F06 rule (dev headers only in development mode) did not apply
  * to these endpoints -- and decoded only `{"detail": ...}`, discarding the
- * correlation id F14 preserves. It now uses the one shared transport, and the
- * org id reaches the header provider without this module importing the React
- * layer. */
+ * correlation id F14 preserves.
+ *
+ * Five `fetch` calls survived that first correction: the workbook download,
+ * the workbook upload, and three plain JSON POSTs (submit an import, exclude
+ * rows from one, request a description withdrawal). Their headers were right
+ * by then, but each still carried a `{"detail": ...}`-only decoder, so a 409
+ * or a 422 on any of these five reached the screen as a bare status line with
+ * no error code, no correlation id and no field errors -- and none of the
+ * five ever reached `observeRequests`, so the shell's connection state (F13)
+ * could not see them fail. All five now go through `./transport`. */
 
 /** `src/aida/column_documentation_api.py::ColumnDocumentationRead`.
  *
@@ -61,12 +70,6 @@ export interface ColumnDocumentationRead {
 }
 
 const readJson = get;
-
-/* The two calls below exchange raw bytes rather than JSON, so they cannot use
- * the shared verbs -- but they must still identify themselves identically.
- * `requestHeaders` is the same function the transport installs as its header
- * provider, so there is one answer to "who is asking", not two. */
-const identityHeaders = requestHeaders;
 
 /** Fixture columns for a table, so the pane renders something recognisable
  *  under the default `VITE_USE_FIXTURES=1`.
@@ -186,27 +189,13 @@ export async function downloadDatasourceModelWorkbook(
     );
   }
   const path = `/v1/datasources/${encodeURIComponent(datasourceId)}/model/export.xlsx`;
-  const res = await fetch(path, {
-    signal,
-    headers: { ...identityHeaders() },
-    credentials: "same-origin",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      /* the error body may itself be non-JSON */
-    }
-    throw new ApiError(res.status, detail);
-  }
+  const { blob, response } = await requestBlob(path, { signal });
   const slug = datasourceName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   const filename = filenameFromDisposition(
-    res.headers.get("Content-Disposition"),
+    response.headers.get("Content-Disposition"),
     `${slug || "datasource"}-model.xlsx`,
   );
-  const url = URL.createObjectURL(await res.blob());
+  const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
@@ -288,28 +277,13 @@ export async function uploadModelWorkbook(
   const path =
     `/v1/datasources/${encodeURIComponent(datasourceId)}/model/import` +
     `?filename=${encodeURIComponent(file.name)}`;
-  const res = await fetch(path, {
-    method: "POST",
+  return requestRawBody<ModelImportBatchRead>(
+    "POST",
+    path,
+    file,
+    "application/octet-stream",
     signal,
-    body: file,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/octet-stream",
-      ...identityHeaders(),
-    },
-    credentials: "same-origin",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as ModelImportBatchRead;
+  );
 }
 
 /** Every change a batch would make, or made -- rejected rows included.
@@ -336,23 +310,13 @@ export async function submitModelImport(
   signal?: AbortSignal,
 ): Promise<ModelImportBatchRead> {
   if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
-  const res = await fetch(`/v1/model-imports/${encodeURIComponent(batchId)}/submit`, {
-    method: "POST",
+  // No body, deliberately: the batch id in the path is the whole request, so
+  // `postJson` is called with `undefined` and sends no `Content-Type` either.
+  return postJson<ModelImportBatchRead>(
+    `/v1/model-imports/${encodeURIComponent(batchId)}/submit`,
+    undefined,
     signal,
-    headers: { Accept: "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as ModelImportBatchRead;
+  );
 }
 
 /* ---------------------------------------------------------------------------
@@ -394,33 +358,16 @@ export async function requestDescriptionWithdrawal(
       "This is reviewed on the server. Run against a live API (VITE_USE_FIXTURES=0) to request it.",
     );
   }
-  const res = await fetch("/v1/descriptions/withdrawals", {
-    method: "POST",
-    signal,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      ...identityHeaders(),
-    },
-    credentials: "same-origin",
-    body: JSON.stringify({
+  return postJson<DescriptionWithdrawalRead>(
+    "/v1/descriptions/withdrawals",
+    {
       subject_type: subjectType,
       subject_id: subjectId,
       reason,
       request_type: requestType,
-    }),
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as DescriptionWithdrawalRead;
+    },
+    signal,
+  );
 }
 
 /** Drop rows from a parsed batch, or put them back.
@@ -435,31 +382,11 @@ export async function setModelImportExclusion(
   signal?: AbortSignal,
 ): Promise<ModelImportBatchRead> {
   if (USE_FIXTURES) throw new Error(FIXTURE_NOTICE);
-  const res = await fetch(
+  return postJson<ModelImportBatchRead>(
     `/v1/model-imports/${encodeURIComponent(batchId)}/changes/exclusion`,
-    {
-      method: "POST",
-      signal,
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-        ...identityHeaders(),
-      },
-      credentials: "same-origin",
-      body: JSON.stringify({ change_ids: changeIds, excluded }),
-    },
+    { change_ids: changeIds, excluded },
+    signal,
   );
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = body.detail;
-    } catch {
-      /* non-JSON error body */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as ModelImportBatchRead;
 }
 
 /** `src/aida/column_documentation_api.py::TableDescriptionRead`.

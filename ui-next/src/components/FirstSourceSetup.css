@@ -1,0 +1,34 @@
+/* First-source setup (T15). No new visual language: the panel reuses the
+   surface/line/ink tokens every other panel uses. State is carried by a text
+   pill AND a border colour -- colour alone is not a state (review §7). */
+
+.fss{border:1px solid var(--line);border-radius:var(--radius);background:var(--surface);padding:16px 18px}
+.fss__head{display:flex;align-items:flex-start;gap:12px;justify-content:space-between;flex-wrap:wrap}
+.fss__eyebrow{font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-3)}
+.fss__h1{margin:2px 0 4px;font-size:16px;font-weight:600}
+.fss__lede{margin:0;font-size:12.5px;color:var(--ink-2);line-height:1.45;max-width:70ch}
+.fss__toggle{flex:none;background:none;border:1px solid var(--line);border-radius:var(--radius-sm);padding:5px 10px;font-size:12px;color:var(--ink-2);cursor:pointer}
+.fss__toggle:hover{color:var(--ink);border-color:var(--ink-3)}
+
+.fss__list{list-style:none;margin:14px 0 0;padding:0;display:flex;flex-direction:column;gap:8px}
+.fss__step{display:flex;align-items:flex-start;gap:12px;padding:11px 12px;border:1px solid var(--line);border-left-width:3px;border-radius:var(--radius-sm);background:var(--sunk)}
+.fss__step--done{border-left-color:var(--ok)}
+.fss__step--todo{border-left-color:var(--line)}
+.fss__step--running{border-left-color:var(--info)}
+.fss__step--failed{border-left-color:var(--bad)}
+.fss__step--unknown{border-left-color:var(--warn)}
+
+.fss__n{flex:none;width:20px;height:20px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-family:var(--mono);font-size:10.5px;color:var(--ink-3);background:var(--surface)}
+.fss__body{flex:1;min-width:0}
+.fss__title{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:13.5px;font-weight:600}
+.fss__detail{margin:3px 0 0;font-size:12.5px;color:var(--ink-2);line-height:1.45}
+.fss__prereq{margin:4px 0 0;font-size:11.5px;color:var(--ink-3);line-height:1.4}
+.fss__err{margin:5px 0 0;font-size:12px;color:var(--bad);line-height:1.4}
+.fss__act{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.fss__onward{background:none;border:0;padding:0;font-size:12px;color:var(--ink-2);cursor:pointer;text-align:right}
+.fss__onward:hover{color:var(--ink);text-decoration:underline}
+
+@media (max-width:760px){
+  .fss__step{flex-wrap:wrap}
+  .fss__act{align-items:flex-start;flex-direction:row;flex-wrap:wrap;width:100%}
+}

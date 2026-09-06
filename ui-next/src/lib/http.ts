@@ -37,6 +37,7 @@ export interface ApiErrorInit {
   readonly correlationId?: string | null;
   readonly fieldErrors?: readonly FieldError[];
   readonly retryable?: boolean;
+  readonly details?: Readonly<Record<string, unknown>> | null;
 }
 
 /**
@@ -51,6 +52,23 @@ export class ApiError extends Error {
   readonly correlationId: string | null;
   readonly fieldErrors: readonly FieldError[];
   readonly retryable: boolean;
+  /**
+   * A structured `detail` object, when the server sent one instead of a string.
+   *
+   * THE DEFECT this removes: `messageFromDetail` recognised a string and a
+   * validation array and returned nothing for an object, so an object-shaped
+   * `detail` was dropped whole -- message and payload alike -- and the caller
+   * was left with the bare status line. The governance decision service
+   * (F05) answers a lost claim with exactly that shape:
+   * `{"message", "outcome", "review": {status, decided_by, decided_at,
+   * decision_reason}}`. Discarding it meant the reviewer who lost the race was
+   * told "409 Conflict" while the server had already said who decided, what
+   * they decided, and why.
+   *
+   * Kept as raw `unknown` values: this is the wire body, and a consumer that
+   * wants a field narrows it at the point of use.
+   */
+  readonly details: Readonly<Record<string, unknown>> | null;
 
   constructor(
     readonly status: number,
@@ -63,6 +81,7 @@ export class ApiError extends Error {
     this.correlationId = init.correlationId ?? null;
     this.fieldErrors = init.fieldErrors ?? [];
     this.retryable = init.retryable ?? defaultRetryable(status);
+    this.details = init.details ?? null;
   }
 
   /** True when the server refused because someone else changed the record. */
@@ -103,7 +122,11 @@ interface StructuredErrorBody {
   detail?: unknown;
 }
 
-function messageFromDetail(value: unknown): { message: string | null; fields: FieldError[] } {
+function messageFromDetail(value: unknown): {
+  message: string | null;
+  fields: FieldError[];
+  details?: Record<string, unknown>;
+} {
   if (typeof value === "string") return { message: value, fields: [] };
   if (Array.isArray(value)) {
     // FastAPI request validation: [{loc: ["body","name"], msg: "...", ...}]
@@ -122,6 +145,15 @@ function messageFromDetail(value: unknown): { message: string | null; fields: Fi
       fields,
     };
   }
+  if (value && typeof value === "object") {
+    // A structured refusal. `message` is the sentence the server already
+    // intends a person to read (`_ConflictDetail.__str__` in
+    // `semantic_api.py` returns exactly this key); the rest of the object is
+    // kept verbatim for a caller that understands the outcome it names.
+    const record = value as Record<string, unknown>;
+    const message = typeof record.message === "string" && record.message ? record.message : null;
+    return { message, fields: [], details: record };
+  }
   return { message: null, fields: [] };
 }
 
@@ -138,6 +170,7 @@ export async function decodeError(res: Response): Promise<ApiError> {
   let code: string | null = null;
   let correlationId: string | null = headerCorrelationId;
   let fieldErrors: FieldError[] = [];
+  let details: Record<string, unknown> | null = null;
 
   try {
     const body = (await res.json()) as StructuredErrorBody;
@@ -156,6 +189,7 @@ export async function decodeError(res: Response): Promise<ApiError> {
         const decoded = messageFromDetail(body.detail);
         if (decoded.message) message = decoded.message;
         fieldErrors = decoded.fields;
+        details = decoded.details ?? null;
       }
     }
   } catch {
@@ -163,7 +197,7 @@ export async function decodeError(res: Response): Promise<ApiError> {
        plus the correlation header is what we have, and it is still useful. */
   }
 
-  return new ApiError(res.status, message, { code, correlationId, fieldErrors });
+  return new ApiError(res.status, message, { code, correlationId, fieldErrors, details });
 }
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";

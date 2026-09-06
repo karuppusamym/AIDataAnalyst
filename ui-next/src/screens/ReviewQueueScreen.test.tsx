@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { GovernanceReviewRead, ReviewQueueRead } from "../lib/types";
+import type { GovernanceReviewRead, MeRead, ReviewQueueRead } from "../lib/types";
 
 /* ---------------------------------------------------------------------------
    UX-15: this screen was rewired off `fetchReviewBatch` (a fixture standing
@@ -104,7 +104,7 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
       expect.objectContaining({ status: "PENDING" }),
       expect.anything(),
     );
-    expect(screen.getByText("pending your judgment").previousSibling).toHaveTextContent("1");
+    expect(screen.getByText("pending review").previousSibling).toHaveTextContent("1");
   });
 
   it("re-fetches with the new status when the URL-held filter changes", async () => {
@@ -156,6 +156,96 @@ describe("ReviewQueueScreen against the real UX-17 read model", () => {
       ),
     );
     await waitFor(() => expect(fetchReviewQueue).toHaveBeenCalledTimes(2));
+  });
+
+  it("keeps the loaded queue visible when an approval is refused", async () => {
+    fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    const { ApiError } = await import("../lib/http");
+    decideGovernanceReview.mockRejectedValue(
+      new ApiError(409, "maker-checker separation is required"),
+    );
+    render(<ReviewQueueScreen />);
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
+
+    screen.getByRole("button", { name: "Approve" }).click();
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "maker-checker separation is required",
+    );
+    // The queue is still there. Scoped to the row's own title: the refusal
+    // opens the detail on the contested review, so the subject legitimately
+    // appears twice.
+    expect(screen.getByText(/term:mrr/, { selector: ".prop__title" })).toBeInTheDocument();
+    expect(screen.queryByText("The review queue could not be loaded")).not.toBeInTheDocument();
+  });
+
+  /* F05/T18: the decision service answers a lost claim with the review's
+     refreshed state. The reviewer who lost must be told WHICH decision won --
+     the old error slot printed the bare status line, because the structured
+     `detail` was discarded by the decoder before it reached this screen. */
+  it("shows the winning decision to the reviewer who lost the race", async () => {
+    fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    /* Imported AFTER the screen, and from `lib/http` rather than the mocked
+       `lib/api` barrel: `vi.resetModules()` plus a memoized `importOriginal`
+       can leave the barrel holding an older copy of the transport module, and
+       an `ApiError` from that copy is not `instanceof` the one the screen
+       graph loaded. That is a test-harness artifact, not a product one. */
+    const { ApiError } = await import("../lib/http");
+    decideGovernanceReview.mockRejectedValue(
+      new ApiError(409, "governance review is already approved", {
+        details: {
+          message: "governance review is already approved",
+          outcome: "CONFLICT",
+          review: {
+            review_id: "rq_1",
+            status: "APPROVED",
+            decided_by: "priya@tenant.example",
+            decided_at: "2026-09-05T10:15:00Z",
+            decision_reason: "Matches the published finance definition.",
+          },
+        },
+      }),
+    );
+    render(<ReviewQueueScreen />);
+    await waitFor(() => expect(screen.getByText(/term:mrr/)).toBeInTheDocument());
+
+    screen.getByRole("button", { name: "Approve" }).click();
+
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("Another reviewer decided first");
+    expect(banner).toHaveTextContent("priya@tenant.example");
+    expect(banner).toHaveTextContent("Matches the published finance definition.");
+    // The detail opens on the contested review, and the queue is re-read so
+    // the row underneath stops claiming it is still pending.
+    expect(new URLSearchParams(location.search).get("review")).toBe("rq_1");
+    await waitFor(() => expect(fetchReviewQueue).toHaveBeenCalledTimes(2));
+  });
+
+  it("explains maker-checker separation instead of offering actions on your own proposal", async () => {
+    fetchReviewQueue.mockResolvedValue(queueOf([PENDING_PROPOSAL]));
+    const ReviewQueueScreen = await loadScreen();
+    const { SessionProvider } = await import("../lib/session");
+
+    render(
+      <SessionProvider
+        fetchMe={() =>
+          Promise.resolve({ principal_id: PENDING_PROPOSAL.requested_by } as MeRead)
+        }
+      >
+        <ReviewQueueScreen />
+      </SessionProvider>,
+    );
+
+    expect(
+      await screen.findByText(
+        "You proposed this change. Another reviewer must approve or reject it.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+    expect(decideGovernanceReview).not.toHaveBeenCalled();
   });
 
   /* The rationale used to come from `window.prompt`, so "no reason" and "this

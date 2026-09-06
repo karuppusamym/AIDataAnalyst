@@ -94,6 +94,25 @@ def _settings(**overrides: Any) -> Settings:
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]
 
 
+# ---------------------------------------------------------------------------
+# Deterministic clock.
+#
+# `_queue` used to enqueue at wall-clock time while every claim test asked for
+# intents due at a hard-coded `2026-09-06 12:00Z`. That made the whole file a
+# time bomb: `claim_due_intents` selects on `next_attempt_at <= now`, so the
+# tests passed only while real time was *before* noon UTC on that date and
+# failed for every run after it -- which is exactly what happened. A test whose
+# result depends on the hour it runs is not a gate.
+#
+# Both instants are fixed here, and `_queue` defaults to the earlier one, so
+# "queued before the claim window" is a property of the fixture rather than of
+# the clock.
+# ---------------------------------------------------------------------------
+
+QUEUED_AT = datetime(2026, 9, 6, 11, 0, tzinfo=UTC)
+CLAIM_AT = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+
+
 async def _seed_org(session: AsyncSession) -> Organization:
     org = Organization(name="Bank", slug=f"bank-{uuid4().hex[:8]}")
     session.add(org)
@@ -116,7 +135,7 @@ async def _queue(
         destination="https://hooks.example/#abc",
         dedup_key=dedup,
         payload={"text": "hello"},
-        now=now,
+        now=now or QUEUED_AT,
     )
     assert intent is not None
     await session.commit()
@@ -131,9 +150,13 @@ async def _run(
     now: datetime | None = None,
     owner: str = "worker-a",
 ) -> Any:
+    # Same reason as `_queue`: defaulting to wall-clock made a pass ordered
+    # against a fixed `CLAIM_AT` in one test and against the real hour in
+    # another, so a retry scheduled from `datetime.now()` was never due at a
+    # later fixed instant.
     return await run_delivery_worker_pass(
         settings,
-        now=now or datetime.now(UTC),
+        now=now or CLAIM_AT,
         session=session,
         owner=owner,
         resolvers={KIND_NOTIFICATION: lambda _intent, _settings: transport},
@@ -184,6 +207,7 @@ async def test_a_rolled_back_transaction_leaves_no_obligation(session: AsyncSess
         destination="d",
         dedup_key="rolled-back",
         payload={},
+        now=QUEUED_AT,
     )
     await session.rollback()
     assert (await session.scalars(select(DeliveryIntent))).all() == []
@@ -201,6 +225,7 @@ async def test_the_same_session_will_not_stage_the_same_intent_twice(
         destination="d",
         dedup_key="same",
         payload={},
+        now=QUEUED_AT,
     )
     second = enqueue_intent(
         session,
@@ -210,6 +235,7 @@ async def test_the_same_session_will_not_stage_the_same_intent_twice(
         destination="d",
         dedup_key="same",
         payload={},
+        now=QUEUED_AT,
     )
     assert first is not None
     assert second is None
@@ -223,7 +249,7 @@ async def test_the_same_session_will_not_stage_the_same_intent_twice(
 async def test_a_claim_is_committed_before_anything_is_sent(session: AsyncSession) -> None:
     org = await _seed_org(session)
     await _queue(session, org)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = CLAIM_AT
 
     claimed = await claim_due_intents(
         session,
@@ -247,7 +273,7 @@ async def test_two_workers_get_disjoint_batches(session: AsyncSession) -> None:
     org = await _seed_org(session)
     await _queue(session, org, dedup="a")
     await _queue(session, org, dedup="b")
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = CLAIM_AT
 
     maker = async_sessionmaker(session.bind, expire_on_commit=False)
     async with maker() as one, maker() as two:
@@ -267,7 +293,7 @@ async def test_an_expired_claim_is_reclaimable(session: AsyncSession) -> None:
     heartbeat, because a claim must survive the connection that took it."""
     org = await _seed_org(session)
     await _queue(session, org)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = CLAIM_AT
     await claim_due_intents(
         session, kinds=(KIND_NOTIFICATION,), owner="dead", now=now, batch_size=10, claim_seconds=60
     )
@@ -302,7 +328,7 @@ async def test_a_retryable_failure_records_an_attempt_and_reschedules(
 ) -> None:
     org = await _seed_org(session)
     await _queue(session, org)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = CLAIM_AT
     transport = RecordingTransport(error=TransportError("collector is down", retryable=True))
 
     result = await _run(session, _settings(), transport, now=now)
@@ -353,7 +379,7 @@ async def test_an_unconfigured_transport_is_discarded_never_delivered(
 async def test_delivery_sets_delivered_and_clears_the_error(session: AsyncSession) -> None:
     org = await _seed_org(session)
     await _queue(session, org)
-    now = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+    now = CLAIM_AT
     await _run(session, _settings(), RecordingTransport(error=TransportError("x", retryable=True)))
 
     transport = RecordingTransport()
@@ -400,6 +426,7 @@ async def test_a_different_channel_is_not_a_duplicate(session: AsyncSession) -> 
         destination="https://hooks.example/#teams",
         dedup_key="shared",
         payload={"text": "hello"},
+        now=QUEUED_AT,
     )
     await session.commit()
 
