@@ -12,7 +12,56 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import {
+  makeFixtureAccessPolicies,
+  makeFixtureAddWorkspaceMember,
+  makeFixtureCreateAccessPolicy,
+  makeFixtureCreateBiConnection,
+  makeFixtureCreateLineOfBusiness,
+  makeFixtureCreateOrganization,
+  makeFixtureCreateProject,
+  makeFixtureCreateWorkspace,
+  makeFixtureDecideSourceBinding,
+  makeFixtureDelegations,
+  makeFixtureGrantDelegation,
+  makeFixtureImportBiArtifact,
+  makeFixtureOrgLinesOfBusiness,
+  makeFixtureProjectBiConnections,
+  makeFixtureRegisterDatasource,
+  makeFixtureRequestSourceBinding,
+  makeFixtureRevokeDelegation,
+  makeFixtureSimulateAuthorization,
+  makeFixtureWorkspaceMembers,
+} from "../fixtures";
+import type {
+  AccessPolicyCreate,
+  AccessPolicyRead,
+  AuthorizationSimulationRead,
+  AuthorizationSimulationRequest,
+  BiArtifactImportRead,
+  BiArtifactImportRequest,
+  BiConnectionCreate,
+  BiConnectionRead,
+  DataSourceCreate,
+  DataSourceRead,
+  DelegationCreate,
+  DelegationRead,
+  LineOfBusinessCreate,
+  LineOfBusinessRead,
+  OrganizationCreate,
+  OrganizationRead,
+  ProjectCreate,
+  ProjectRead,
+  SourceBindingCreate,
+  SourceBindingDecision,
+  SourceBindingRead,
+  WorkspaceCreate,
+  WorkspaceMembershipCreate,
+  WorkspaceMembershipRead,
+  WorkspaceRead,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Administration -- nav id `administration`, the tenant/onboarding wizard

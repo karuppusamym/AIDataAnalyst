@@ -220,13 +220,18 @@ export function ToolRegistryScreen() {
     async (signal) => {
       try {
         return (await fetchOrgDatasources(ORG, signal)).items;
-      } catch {
+      } catch (reason) {
+        // An abort still has to propagate, or a superseded request would be
+        // written to state as "this org has no sources".
+        if (signal.aborted) throw reason;
         return [];
       }
     },
     [ORG],
   );
 
+  // `enabled` is what makes the assertion below safe: with no project there is
+  // no org-wide tool browse to fall back to, so the request is not made.
   const registry = useAsyncResource<PageOf<GovernedToolVersionRead>>(
     (signal) =>
       fetchTools(projectId!, { status: statusFilter !== "ALL" ? statusFilter : null, limit: 200 }, signal),
@@ -247,7 +252,8 @@ export function ToolRegistryScreen() {
     [allDatasources, selectedTool],
   );
 
-  const lifecycle = useVersionLifecycle(channel, registry.reload);
+  const reloadRegistry = registry.reload;
+  const lifecycle = useVersionLifecycle(channel, reloadRegistry);
 
   const [draft, setDraft] = useState<ToolDraft>(INITIAL_DRAFT);
   const [parameters, setParameters] = useState<ParameterDraft[]>([blankParameter()]);
@@ -264,7 +270,7 @@ export function ToolRegistryScreen() {
     async (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
       if (!projectId) {
-        channel.failure(new Error("Select a project before creating a tool version."));
+        channel.failure("Select a project before creating a tool version.");
         return;
       }
       let body;
@@ -283,14 +289,14 @@ export function ToolRegistryScreen() {
         await createToolVersion(projectId, body);
         resetDraft();
         channel.success("Governed tool draft created and SQL contract validated.");
-        registry.reload();
+        reloadRegistry();
       } catch (reason) {
         channel.failure(reason);
       } finally {
         setCreating(false);
       }
     },
-    [projectId, draft, parameters, channel, registry, resetDraft],
+    [projectId, draft, parameters, channel, reloadRegistry, resetDraft],
   );
 
   return (

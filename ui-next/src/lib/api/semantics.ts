@@ -10,7 +10,19 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get } from "./transport";
+import {
+  makeFixtureSemanticMetricConsumers,
+  makeFixtureSemanticMetricVersions,
+  makeFixtureSemanticModelConsumers,
+  makeFixtureSemanticModelVersions,
+} from "../fixtures";
+import type {
+  ConsumerFooterRead,
+  SemanticMetricVersionRead,
+  SemanticModelVersionRead,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Semantics (UX-15/UX-16, `semantics` nav id) — `SemanticsScreen`'s own

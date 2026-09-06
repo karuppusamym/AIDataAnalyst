@@ -166,7 +166,10 @@ def _run_npm_audit(omit_dev: bool) -> dict[str, Any]:
     # `npm audit` exits non-zero *because* it found something, so the return
     # code carries no signal here; the report body is the signal. A genuinely
     # broken invocation shows up as unparsable output, handled below.
-    completed = subprocess.run(
+    # S603: the argument vector is built entirely from constants in this file
+    # plus `shutil.which("npm")`; no caller input reaches it, and `shell=False`
+    # (the default) means nothing here is interpreted by a shell.
+    completed = subprocess.run(  # noqa: S603
         command, cwd=UI_ROOT, capture_output=True, text=True, encoding="utf-8", check=False
     )
     try:

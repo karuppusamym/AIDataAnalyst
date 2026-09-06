@@ -12,7 +12,60 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson, putJson } from "./transport";
+import { USE_FIXTURES } from "../appConfig";
+import {
+  makeFixtureAgentAnalysis,
+  makeFixtureAgentContractRequests,
+  makeFixtureAgentEvaluations,
+  makeFixtureAgentInbox,
+  makeFixtureAgentRoster,
+  makeFixtureAgentRun,
+  makeFixtureAgentRunGroundingReceipts,
+  makeFixtureAgentRuns,
+  makeFixtureAiAssessmentTemplates,
+  makeFixtureAiAssets,
+  makeFixtureAiRemediations,
+  makeFixtureAiRuntimeStatus,
+  makeFixtureAiTrust,
+  makeFixtureCreateModelRoute,
+  makeFixtureDisagreementRates,
+  makeFixtureModelRoutes,
+  makeFixtureReviewerAgentPreReview,
+  makeFixtureReviewerAgentRun,
+  makeFixtureReviewerAgentSamples,
+  makeFixtureReviewerAgentState,
+  makeFixtureRunAgentEvaluation,
+  makeFixtureSubmitAgentContractRequest,
+  makeFixtureSubmitModelRoute,
+  makeFixtureUpdateAiRemediation,
+} from "../fixtures";
+import { ApiError } from "../http";
+import type {
+  AgentAnalysisRequest,
+  AgentAnalysisResponse,
+  AgentContractRequestCreate,
+  AgentContractRequestRead,
+  AgentEvaluationRunRead,
+  AgentInboxRead,
+  AgentRosterRead,
+  AgentRunGroundingReceiptsRead,
+  AgentRunRead,
+  AiAssessmentTemplateRead,
+  AiAssetVersionRead,
+  AiRemediationRead,
+  AiRemediationUpdate,
+  AiRuntimeStatusRead,
+  AiTrustScoreRead,
+  DisagreementReportRead,
+  GovernanceReviewRead,
+  ModelRouteConfigurationCreate,
+  ModelRouteConfigurationRead,
+  ReviewAuditSampleRead,
+  ReviewerAgentRunResult,
+  ReviewerAgentStateRead,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Ask (UX-15/UX-16, tracker rows UX-15/UX-16): the single-shot governed

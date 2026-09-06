@@ -7,7 +7,23 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import {
+  makeFixtureCreateDbtProject,
+  makeFixtureDbtArtifactImports,
+  makeFixtureDbtLineage,
+  makeFixtureDbtProjects,
+  makeFixtureDbtResources,
+  makeFixtureImportDbtManifest,
+} from "../fixtures";
+import type {
+  DbtArtifactImportRead,
+  DbtArtifactImportRequest,
+  DbtLineageRead,
+  DbtProjectCreate,
+  DbtProjectRead,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Transformations -- nav id `transformations`, `TransformationsScreen`'s own

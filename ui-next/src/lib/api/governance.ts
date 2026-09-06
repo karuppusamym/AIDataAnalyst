@@ -13,7 +13,40 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import { USE_FIXTURES } from "../appConfig";
+import {
+  makeFixtureAuditEvents,
+  makeFixtureBulkDecideRelationshipCandidates,
+  makeFixtureCompliancePacks,
+  makeFixtureDecideRelationshipCandidate,
+  makeFixtureDecideReview,
+  makeFixtureDownloadCompliancePack,
+  makeFixtureGenerateCompliancePack,
+  makeFixtureLiftSuppression,
+  makeFixtureNegativeKnowledgeSearch,
+  makeFixtureNegativeKnowledgeSubject,
+  makeFixtureRelationshipCandidateCalibration,
+  makeFixtureRelationshipCandidateReviewQueue,
+  makeFixtureRelationshipCandidates,
+  makeFixtureReviewQueue,
+} from "../fixtures";
+import type {
+  CompliancePackRead,
+  GeneratePackRequest,
+  GovernanceDecisionRequest,
+  GovernanceReviewRead,
+  LiftSuppressionRequest,
+  NegativeAssertionRead,
+  RelationshipCandidateBulkDecisionRequest,
+  RelationshipCandidateBulkDecisionResultRead,
+  RelationshipCandidateCalibrationRead,
+  RelationshipCandidateDecision,
+  RelationshipCandidateRead,
+  RelationshipCandidateReviewQueueRead,
+  ReviewQueueRead,
+} from "../types";
+import type { AuditEventRead, PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    UX-15: review queue, marketplace, lineage refusals and Studio change sets.

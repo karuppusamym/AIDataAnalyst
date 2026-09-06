@@ -12,9 +12,12 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get } from "./transport";
 import { fetchBusinessAnnotations, fetchTablesLegacy } from "./catalog";
 import { fetchQualityIncidents, fetchQualitySummary } from "./quality";
+import { makeFixtureDatasourceHealth } from "../fixtures";
+import { ApiError } from "../http";
+import type { ConnectorHealthScoreRead, DataSourceRead, ProjectRead } from "../types";
 
 /* ---------------------------------------------------------------------------
    Sources — UX-15/UX-16 follow-on (nav id `sources`). Reuses

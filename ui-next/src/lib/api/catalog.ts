@@ -12,7 +12,53 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import { USE_FIXTURES } from "../appConfig";
+import {
+  makeFixtureBulkCertifyCatalogTables,
+  makeFixtureBulkClassifyCatalogColumns,
+  makeFixtureBulkOwnCatalogTables,
+  makeFixtureBulkReaffirmOwnershipAssignments,
+  makeFixtureBulkTagCatalogTables,
+  makeFixtureBusinessAnnotations,
+  makeFixtureBusinessMap,
+  makeFixtureCatalog,
+  makeFixtureDocumentationWorklist,
+  makeFixtureEvidence,
+  makeFixtureOwnershipAssignments,
+  makeFixtureReaffirmOwnershipAssignment,
+  makeFixtureRouteUnownedAssetBacklog,
+  makeFixtureTableBusinessAnnotation,
+  makeFixtureUnownedAssetBacklog,
+} from "../fixtures";
+import { ApiError } from "../http";
+import type {
+  AssetCertificationRead as _AssetCertificationRead_p208,
+  AssetDescriptionDraftRead,
+  AssetEvidenceRead,
+  BusinessMapRead,
+  CatalogBulkActionRunRead,
+  CatalogBulkCertifyRequest,
+  CatalogBulkClassifyRequest,
+  CatalogBulkOwnRequest,
+  CatalogBulkTagRequest,
+  CertificationRevokeRequest as _CertificationRevokeRequest_p208,
+  GovernanceReviewRead,
+  MetadataBusinessAnnotationRead,
+  Page,
+  UnownedAssetBacklogRouteRequest,
+  UnownedAssetBacklogRouteResult,
+  UnownedAssetEscalationRead,
+} from "../types";
+import type {
+  AssetDescriptionDraftGenerateResponse,
+  AssetDescriptionDraftListResponse,
+  CatalogRowRead,
+  CursorPage,
+  DocumentationWorklistEntryRead,
+  MetadataTableRead,
+  PageOf,
+} from "../ui-types";
 
 /** Downloads use the same identity and authorization boundary as screen reads. */
 export async function exportAssetEvidence(tableId: string): Promise<void> {

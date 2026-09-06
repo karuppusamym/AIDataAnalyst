@@ -33,6 +33,18 @@ export * from "./api/glossary";
 export * from "./api/crossSource";
 export * from "./api/columnDocumentation";
 
+/* Two different functions are named `decideRelationshipCandidate`, and they
+ * POST to the same route: the governed one below, which takes a
+ * `RelationshipCandidateDecision` body and honours the demo switch, and one in
+ * `./api/crossSource`, which takes `(id, decision, reason)` and throws in demo
+ * mode. While every endpoint lived in one file the collision was invisible --
+ * a local declaration outranks a star export, so `../lib/api` silently bound
+ * the governed one and the other was reachable only through
+ * `./_cross_source_api`. Named explicitly here so that binding stays exactly
+ * what it was; the duplicate itself is a defect for its owner to resolve, not
+ * something to fix inside a move. */
+export { decideRelationshipCandidate } from "./api/governance";
+
 export * from "./api/catalog";
 export * from "./api/governance";
 export * from "./api/quality";

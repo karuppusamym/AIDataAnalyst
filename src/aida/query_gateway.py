@@ -228,24 +228,34 @@ def row_limit_source(
     though -- the request and both configured bounds -- so this reconstructs
     it rather than leaving the response to conflate the two:
 
-    * `STATEMENT` -- the statement's own `LIMIT` is below what the gateway
-      would have imposed, so it, not policy, is what bounded the result;
-    * `REQUEST` -- the caller's own `max_rows` is the binding value;
-    * `GATEWAY_CAP` -- the configured default/hard limit is. This is the only
-      one that means the caller may be missing rows it did not ask to skip.
+    * `STATEMENT` -- the statement's own `LIMIT` is below the bound the
+      gateway was prepared to allow, so it, not policy, bounded the result;
+    * `REQUEST` -- the caller's own `max_rows` is the binding value, and the
+      gateway honoured it as asked;
+    * `GATEWAY_CAP` -- the configured default (no `max_rows` was given) or the
+      hard limit (a larger `max_rows` was clamped to it) is the binding
+      value. This is the only one that means the caller may be missing rows
+      it did not itself ask to skip.
+
+    `target` below is the same expression the guard uses
+    (`SqlGuard.validate`) and that `agent_orchestrator._checkpoint_executed`
+    re-derives for its own bound check -- note that an explicit `max_rows`
+    *replaces* the default rather than being further capped by it, so a
+    request above the default raises the gateway's bound and only the hard
+    limit clamps it.
 
     Returns None exactly when `applied_row_limit` is None (the guard applied
     no limit at all), so the pair is either both present or both absent.
     """
     if applied_row_limit is None:
         return None
-    cap = min(settings.default_query_row_limit, settings.hard_query_row_limit)
-    target = min(requested_limit or settings.default_query_row_limit, settings.hard_query_row_limit)
+    hard = settings.hard_query_row_limit
+    target = min(requested_limit or settings.default_query_row_limit, hard)
     if applied_row_limit < target:
         return ROW_LIMIT_SOURCE_STATEMENT
-    if requested_limit is not None and target < cap:
-        return ROW_LIMIT_SOURCE_REQUEST
-    return ROW_LIMIT_SOURCE_GATEWAY_CAP
+    if requested_limit is None or requested_limit > hard:
+        return ROW_LIMIT_SOURCE_GATEWAY_CAP
+    return ROW_LIMIT_SOURCE_REQUEST
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,12 +270,13 @@ class GatewayResult:
     # counted as fully redacted.
     tokenized_columns: tuple[str, ...] = ()
     # F20: the row limit the guard actually rewrote this statement with, and
-    # which bound produced it. Recorded in `query.validate.gateway`'s audit
-    # details since QG-1 but never returned, which left every consumer
-    # inferring truncation by regexing `LIMIT n` back out of `normalized_sql`
-    # -- a guess over generated SQL that a `LIMIT` inside a subquery or CTE
-    # can silently answer wrong. None means the guard applied no limit at
-    # all; it never means "unlimited by default".
+    # which bound produced it. `validate` has always recorded the number in
+    # `query.validate.gateway`'s audit details, where no caller can read it,
+    # so every consumer was left inferring truncation by regexing `LIMIT n`
+    # back out of `normalized_sql` -- a guess over generated SQL that a
+    # `LIMIT` inside a subquery answers wrong, and that the response's
+    # literal redaction (`LIMIT %(redacted)s`) defeats outright. None means
+    # the guard applied no limit at all; never "unlimited by default".
     applied_row_limit: int | None = None
     row_limit_source: str | None = None
 

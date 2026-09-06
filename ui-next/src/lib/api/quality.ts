@@ -7,7 +7,20 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import {
+  makeFixtureQualityIncidentTriage,
+  makeFixtureQualityIncidents,
+  makeFixtureQualitySummary,
+  makeFixtureTransitionQualityIncident,
+} from "../fixtures";
+import type {
+  DataQualityIncidentRead,
+  DataQualityIncidentTransition,
+  DataQualityIncidentTriageRead,
+  DataQualitySummaryRead,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Quality — UX-15/UX-16, `QualityScreen`.

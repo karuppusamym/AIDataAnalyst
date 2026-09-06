@@ -8,7 +8,20 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import {
+  makeFixtureStudioChangeSetItems,
+  makeFixtureStudioChangeSets,
+  makeFixtureStudioDiff,
+  makeFixtureStudioImpact,
+  makeFixtureSubmitStudioChangeSet,
+} from "../fixtures";
+import type {
+  StudioChangeItemRead,
+  StudioChangeSetRead,
+  StudioDiffRead,
+  StudioImpactPreview,
+} from "../types";
 
 export interface StudioChangeSetQuery {
   status?: string | null;

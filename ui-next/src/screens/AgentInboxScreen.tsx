@@ -12,7 +12,7 @@ import type {
 import { ApiError, engageAgentKillSwitch, fetchAgentInbox } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
-import { Button, Empty, ErrorState, Field, Pill, StateDot } from "../components/primitives";
+import { Button, ConfirmDialog, Empty, ErrorState, Field, Pill, StateDot } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "./AgentInboxScreen.css";
 
@@ -190,24 +190,36 @@ export function AgentInboxScreen({
     [onNavigate],
   );
 
-  const onKill = useCallback(
-    async (agent: AgentInboxAgent) => {
-      if (agent.version_id === null) return;
-      const reason = window.prompt(
-        `Engage the kill switch for "${agent.name}"?\n\n` +
-          `Scope: ${agent.kill_scope}. It takes effect on this agent's very next run.\n` +
-          `Give a reason (recorded in the audit ledger):`,
-      );
-      if (reason === null || reason.trim() === "") return;
+  /* Engaging a kill switch is a governance act: it stops an agent and is
+     recorded in the audit ledger with the operator's own words. That
+     rationale used to be collected with `window.prompt`, which cannot be
+     labelled, cannot show that the reason is mandatory, cannot report the
+     request failing, and is blocked outright by some browsers -- in which
+     case it returns `null` and this code read that as "cancelled", so the
+     operator's decision to stop a misbehaving agent silently did nothing
+     (review 2026-09-05, F21). */
+  const [killTarget, setKillTarget] = useState<AgentInboxAgent | null>(null);
+  const [killBusy, setKillBusy] = useState(false);
+  const [killError, setKillError] = useState<string | null>(null);
+
+  const confirmKill = useCallback(
+    async (reason: string) => {
+      const agent = killTarget;
+      if (!agent || agent.version_id === null) return;
+      setKillBusy(true);
+      setKillError(null);
       try {
-        await engageAgentKillSwitch(organizationId, agent.version_id, reason.trim());
+        await engageAgentKillSwitch(organizationId, agent.version_id, reason);
+        setKillTarget(null);
         setNotice(`Kill switch engaged for ${agent.name}.`);
         load();
       } catch (err: unknown) {
-        setNotice(err instanceof Error ? err.message : String(err));
+        setKillError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setKillBusy(false);
       }
     },
-    [organizationId, load],
+    [killTarget, organizationId, load],
   );
 
   const summary = inbox?.summary;
@@ -356,8 +368,14 @@ export function AgentInboxScreen({
                     <span>scope {agent.kill_scope}</span>
                     {agent.supervisor_persona && <span>supervised by {agent.supervisor_persona}</span>}
                   </span>
-                  {!agent.kill_engaged && (
-                    <Button onClick={() => void onKill(agent)} title="Stops this agent on its very next run">
+                  {!agent.kill_engaged && agent.version_id !== null && (
+                    <Button
+                      onClick={() => {
+                        setKillError(null);
+                        setKillTarget(agent);
+                      }}
+                      title="Stops this agent on its very next run"
+                    >
                       Engage kill switch
                     </Button>
                   )}
@@ -396,6 +414,21 @@ export function AgentInboxScreen({
           )}
         </div>
       </section>
+
+      {killTarget ? (
+        <ConfirmDialog
+          title={`Engage the kill switch for "${killTarget.name}"?`}
+          description={`Scope: ${killTarget.kill_scope}. It takes effect on this agent's very next run.`}
+          confirmLabel="Engage kill switch"
+          destructive
+          requireReason
+          reasonLabel="Reason (recorded in the audit ledger)"
+          busy={killBusy}
+          error={killError}
+          onConfirm={(reason) => void confirmKill(reason)}
+          onCancel={() => setKillTarget(null)}
+        />
+      ) : null}
     </section>
   );
 }

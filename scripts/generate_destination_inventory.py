@@ -131,7 +131,11 @@ STRING_ANNOTATIONS = ("str", "SecretStr", "dict[str, str]")
 # resolves it to NOT_CONFIGURED -- and the others are the equivalent idioms.
 PLACEHOLDER_VALUES = frozenset({"", "unset", "development-only-change-me", "none"})
 PLACEHOLDER_SCHEMES = frozenset({"internal"})
-LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"})
+# S104: these are hostnames this generator RECOGNIZES in a default value, not a
+# bind address it uses.
+LOCAL_HOSTS = frozenset(
+    {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}  # noqa: S104
+)
 
 # Names that mean "a governance decision gates this use". Same idea as the
 # surface matrix's call-name sets: the inventory and the code agree on what
@@ -256,7 +260,10 @@ def describe_default(value: object, kind: str) -> tuple[str, str]:
     if not isinstance(value, str):
         return UNKNOWN, UNKNOWN
     if value.strip().lower() in PLACEHOLDER_VALUES:
-        return ("empty string" if not value else "placeholder literal"), INERT_NOTHING
+        return (
+            ("empty string" if not value else "placeholder literal"),
+            (INERT_NOTHING if not value or kind == "destination" else INERT_PLACEHOLDER),
+        )
     if kind == "credential":
         # A credential default is a development placeholder by construction --
         # `reject_insecure_production_configuration` refuses several of them in
@@ -310,16 +317,33 @@ def _python_sources() -> list[Path]:
     )
 
 
-def consumer_index() -> dict[str, list[str]]:
-    """setting name -> modules that actually read it as an attribute.
+def _names_in(node: ast.AST) -> set[str]:
+    return {
+        child.id if isinstance(child, ast.Name) else child.attr
+        for child in ast.walk(node)
+        if isinstance(child, ast.Name | ast.Attribute)
+    }
+
+
+def consumer_index() -> tuple[dict[str, list[str]], set[str]]:
+    """(setting name -> modules that read it, settings read beside an approval).
 
     Attribute reads (`settings.siem_endpoint`, `self.settings.openai_base_url`,
-    `loop_settings.audit_archive_bucket_name`) rather than a bare word search,
-    so the many docstrings that discuss a setting by name are not mistaken for
-    code that uses it. The compatibility shim `aida/config.py` is excluded: it
+    `loop_settings.audit_archive_bucket_name`) rather than a bare word search, so
+    the many docstrings that discuss a setting by name are not mistaken for code
+    that uses it. The compatibility shim `aida/config.py` is excluded: it
     re-exports the model and reads nothing.
+
+    The approval half is scoped to the **enclosing function** of the read, not to
+    the module. Module scope was tried first and is useless: `aida.graph_store`
+    happens to mention `APPROVED` somewhere, which would have made this table
+    claim a governance gate on the Neo4j password. A marker in the same function
+    that reads the setting is a weak signal too -- it means "a governance
+    identifier is in scope here", not "this destination is approved" -- and the
+    generated document says exactly that rather than more.
     """
     index: dict[str, list[str]] = {}
+    approved: set[str] = set()
     for path in _python_sources():
         module = ".".join(path.relative_to(SRC_ROOT).with_suffix("").parts)
         if module == "aida.config":
@@ -328,46 +352,87 @@ def consumer_index() -> dict[str, list[str]]:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         except SyntaxError:
             continue
+        scopes: list[ast.AST] = [tree]
         for node in ast.walk(tree):
-            if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                scopes.append(node)
+        for scope in scopes:
+            scope_names = _names_in(scope)
+            has_approval = bool(scope_names & APPROVAL_MARKERS)
+            for node in ast.walk(scope):
+                if not isinstance(node, ast.Attribute) or not isinstance(node.ctx, ast.Load):
+                    continue
                 index.setdefault(node.attr, [])
                 if module not in index[node.attr]:
                     index[node.attr].append(module)
-    return index
+                # Only a function scope counts; the module scope pass exists to
+                # find reads at import time, which are never governance-gated.
+                if has_approval and isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef):
+                    approved.add(node.attr)
+    return index, approved
 
 
-def approval_modules() -> set[str]:
-    """Modules whose source names a governance-approval marker."""
-    named: set[str] = set()
-    for path in _python_sources():
-        text = path.read_text(encoding="utf-8")
-        if any(marker in text for marker in APPROVAL_MARKERS):
-            named.add(".".join(path.relative_to(SRC_ROOT).with_suffix("").parts))
-    return named
+@dataclass(frozen=True, slots=True)
+class ReadinessScope:
+    """What `/health/ready` can observe, derived from `aida.readiness`.
 
+    Deliberately narrow -- `aida.readiness` itself plus the modules it imports
+    directly. A full transitive walk would reach most of the package through
+    `aida.models` and would claim health coverage that does not exist;
+    over-claiming is the worse error of the two.
 
-def readiness_scope() -> set[str]:
-    """Setting names observable from `/health/ready`.
+    Three ways a setting counts as probed, because a probe rarely reads the
+    setting itself -- `probe_postgresql` is handed a session factory and
+    `probe_temporal` is handed a client, both constructed elsewhere:
 
-    Deliberately narrow: `aida.readiness` itself plus the `aida.*` modules it
-    imports directly. A wider transitive walk would reach most of the package
-    through `aida.models` and would claim health coverage that does not exist.
-    The known cost of the narrow rule is stated in the generated document.
+    1. the setting is read inside that import scope;
+    2. a module that reads the setting has the same leaf name as a module the
+       probe imports (`atlas.platform.db` and `aida.db`, its re-export shim);
+    3. the setting's name shares a word with a `probe_*` function's name
+       (`temporal_address` / `probe_temporal`).
     """
+
+    read_names: frozenset[str]
+    module_leaves: frozenset[str]
+    probe_tokens: frozenset[str]
+
+    def covers(self, setting: str, consumers: list[str]) -> bool:
+        if setting in self.read_names:
+            return True
+        if any(module.rsplit(".", 1)[-1] in self.module_leaves for module in consumers):
+            return True
+        return bool(set(_tokens(setting)) & self.probe_tokens)
+
+
+def readiness_scope() -> ReadinessScope:
     if not READINESS_MODULE.is_file():
-        return set()
+        return ReadinessScope(frozenset(), frozenset(), frozenset())
     tree = ast.parse(READINESS_MODULE.read_text(encoding="utf-8"), filename=str(READINESS_MODULE))
     modules = {READINESS_MODULE}
+    leaves = {"readiness"}
+    probe_tokens: set[str] = set()
     for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name.startswith(
+            "probe_"
+        ):
+            probe_tokens.update(_tokens(node.name)[1:])
         bases: list[str] = []
         if isinstance(node, ast.ImportFrom) and node.module:
             bases.append(node.module)
         elif isinstance(node, ast.Import):
             bases.extend(alias.name for alias in node.names)
         for base in bases:
-            if not base.startswith("aida"):
+            if not base.startswith(("aida", "atlas")):
                 continue
             candidate = SRC_ROOT / Path(*base.split(".")).with_suffix(".py")
+            # `atlas.platform.config` is imported by everything, `readiness`
+            # included, and its own validators reference most of the settings in
+            # this table. Counting those references as "a readiness probe reads
+            # this" reported `oidc_issuer` and `openai_base_url` as health-probed,
+            # which is nonsense; the module that DEFINES the settings is excluded.
+            if candidate in {CONFIG_MODULE, SRC_ROOT / "aida" / "config.py"}:
+                continue
+            leaves.add(base.rsplit(".", 1)[-1])
             if candidate.is_file():
                 modules.add(candidate)
     names: set[str] = set()
@@ -379,7 +444,10 @@ def readiness_scope() -> set[str]:
         for node in ast.walk(subtree):
             if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
                 names.add(node.attr)
-    return names
+    # A probe token that is also an ordinary English word in a setting name
+    # would match everything; keep only the distinctive ones.
+    generic = {"background", "task", "status", "posture", "backlog", "authorization"}
+    return ReadinessScope(frozenset(names), frozenset(leaves), frozenset(probe_tokens) - generic)
 
 
 def enabling_flag(name: str, boolean_fields: dict[str, bool]) -> tuple[str, bool] | None:
@@ -403,10 +471,13 @@ def enabling_flag(name: str, boolean_fields: dict[str, bool]) -> tuple[str, bool
     return best
 
 
+NO_READER = "no reader found in `src/`"
+NOT_APPLICABLE = "n/a -- nothing reads this setting"
+
+
 def collect_rows() -> list[Row]:
     fields = Settings.model_fields
-    consumers = consumer_index()
-    approvers = approval_modules()
+    consumers, approved_reads = consumer_index()
     probed = readiness_scope()
     boolean_fields = {
         name: bool(field.default)
@@ -419,9 +490,7 @@ def collect_rows() -> list[Row]:
         kind = classify(name, field.annotation)
         if kind is None:
             continue
-        default = field.default
-        if default is None and field.default_factory is not None:
-            default = field.default_factory()  # type: ignore[call-arg]
+        default = field.default_factory() if field.default_factory else field.default  # type: ignore[call-arg]
         default_text, inert = describe_default(default, kind)
         modules = consumers.get(name, [])
         flag = enabling_flag(name, boolean_fields)
@@ -433,30 +502,34 @@ def collect_rows() -> list[Row]:
                 points_at=describe_target(name, default, kind),
                 default=default_text,
                 inert=inert,
-                consumed_by=", ".join(f"`{m}`" for m in modules) if modules else UNKNOWN,
-                configured=(
-                    "no -- the shipped default names nothing"
-                    if inert.startswith("yes")
-                    else ("ships with a default target" if inert.startswith("no") else UNKNOWN)
-                ),
+                consumed_by=", ".join(f"`{m}`" for m in modules) if modules else NO_READER,
+                configured={
+                    INERT_NOTHING: "no -- the shipped default names nothing",
+                    INERT_LOCAL: "no external target -- localhost default only",
+                    INERT_PLACEHOLDER: "no -- the shipped default is a placeholder",
+                    NOT_INERT: "yes -- ships with a default target",
+                }.get(inert, UNKNOWN),
                 approved=(
-                    UNKNOWN
+                    NOT_APPLICABLE
                     if not modules
                     else (
-                        "governance check in the consuming module"
-                        if any(m in approvers for m in modules)
+                        "a governance identifier is in scope where it is read "
+                        "(weak signal -- verify by hand)"
+                        if name in approved_reads
                         else "no approval gate found -- whoever sets the variable decides"
                     )
                 ),
                 active=(
                     f"`{flag[0]}` defaults {'on' if flag[1] else 'off'}"
                     if flag
-                    else ("no enabling flag -- used whenever read" if modules else UNKNOWN)
+                    else (
+                        "no enabling flag -- used whenever read" if modules else NOT_APPLICABLE
+                    )
                 ),
                 healthy=(
                     "probed by `/health/ready`"
-                    if name in probed
-                    else ("no readiness probe" if modules else UNKNOWN)
+                    if probed.covers(name, modules)
+                    else ("no readiness probe" if modules else NOT_APPLICABLE)
                 ),
                 # Runtime evidence. See the module docstring: nothing static can
                 # answer this, and pretending otherwise is the exact defect the
@@ -505,9 +578,14 @@ def render(rows: list[Row]) -> str:
         "  question and no other. A deployment that sets the variable is configured;",
         "  this table cannot see that and does not claim to.",
         "- **Approved** -- does a governance decision gate the use, or does whoever",
-        "  set the environment variable decide? Derived from whether the consuming",
-        "  module names an approval marker (`APPROVED`, `GovernanceReview`,",
-        "  `evaluate_entitlement`, `authorize_enforced`).",
+        "  set the environment variable decide? Derived from whether the *function*",
+        "  that reads the setting also names an approval marker (`APPROVED`,",
+        "  `GovernanceReview`, `evaluate_entitlement`, `authorize_enforced`). Module",
+        "  scope was tried first and was useless -- `aida.graph_store` mentions",
+        "  `APPROVED` somewhere, which made this table claim a governance gate on the",
+        "  Neo4j password. Even at function scope this is a weak signal that says a",
+        "  governance identifier is in the same scope, not that the destination is",
+        "  approved, and the cell says so.",
         "- **Active** -- the feature flag that decides whether the code opens the",
         "  connection at all, and which way it defaults. Almost every outbound path",
         "  here is off by default, deliberately (see the review's F01/F04 notes);",
@@ -526,13 +604,18 @@ def render(rows: list[Row]) -> str:
         "  bucket and a real SOC collector are not.",
         "- A deployment's actual environment is invisible here. `Configured` is a",
         "  statement about the shipped default only.",
-        "- `Healthy` uses a deliberately narrow one-hop scope. A probe handed an",
-        "  already-constructed client (`probe_temporal` receives its client from",
-        "  `aida.main`'s lifespan) therefore reads as `no readiness probe` against the",
-        "  *address setting*, even though the service itself is probed. A wider",
-        "  transitive walk would reach most of the package through `aida.models` and",
-        "  would claim health coverage that does not exist; over-claiming is the worse",
-        "  error of the two.",
+        "- `Healthy` uses a deliberately narrow one-hop scope around",
+        "  `aida.readiness`, because a full transitive walk would reach most of the",
+        "  package through `aida.models` and claim health coverage that does not",
+        "  exist. A probe is rarely handed the setting itself -- `probe_postgresql`",
+        "  receives a session factory and `probe_temporal` a client, both built",
+        "  elsewhere -- so a setting also counts as probed when a module that reads",
+        "  it shares a leaf name with a module the probe imports, or when its name",
+        "  shares a word with a `probe_*` function. Those are structural rules, not",
+        "  a hand-written mapping, and they can be wrong in both directions.",
+        "- `Healthy` says a probe observes the destination. It does NOT say the probe",
+        "  gates: per F18, PostgreSQL is the only required probe; Temporal is",
+        "  reported and never gating.",
         "- A destination reached through a dynamically-built string, or configured",
         "  per-organization in a database row rather than in `Settings`, is not a",
         "  field on this model and is therefore not in this table.",
@@ -547,16 +630,55 @@ def render(rows: list[Row]) -> str:
         "",
     ]
 
-    if unknown_rows:
-        lines += [
-            "### Gap list -- cells the analysis could not determine",
-            "",
-            "| Setting | Undetermined cells |",
-            "|---|---|",
-        ]
-        for row in unknown_rows:
-            lines.append(f"| {row.setting} | {', '.join(row.unknown_cells)} |")
-        lines.append("")
+    lines += [
+        "### Gap list -- cells the analysis could not determine",
+        "",
+        "| Cell | Rows | Which |",
+        "|---|---|---|",
+    ]
+    by_cell: dict[str, list[str]] = {}
+    for row in rows:
+        for cell in row.unknown_cells:
+            by_cell.setdefault(cell, []).append(row.setting)
+    if by_cell:
+        for cell, settings in sorted(by_cell.items()):
+            which = "every row" if len(settings) == len(rows) else ", ".join(settings)
+            lines.append(f"| {cell} | {len(settings)} | {which} |")
+    else:
+        lines.append("| -- | 0 | no `unknown` cells |")
+    lines.append("")
+
+    # The negative facts worth reading on their own, all derived from the rows
+    # above. A destination nothing reads, and a destination nothing probes, are
+    # the two findings this inventory exists to surface.
+    unread = [row.setting for row in rows if row.consumed_by == NO_READER]
+    unprobed = [
+        row.setting
+        for row in rows
+        if row.kind == "destination" and row.healthy == "no readiness probe"
+    ]
+    ships_configured = [row.setting for row in rows if row.inert == NOT_INERT]
+    lines += [
+        "### Findings",
+        "",
+        f"- **Settings no code in `src/` reads ({len(unread)}):** "
+        + (", ".join(unread) if unread else "none")
+        + ". A destination or credential that nothing consumes is either dead"
+        " configuration or a consumer that reads it some way this analysis cannot"
+        " see; either way it should not sit in `Settings` unexplained.",
+        f"- **Destinations with no readiness probe ({len(unprobed)} of "
+        f"{destinations}):** "
+        + (", ".join(unprobed) if unprobed else "none")
+        + ". `/health/ready` gates on PostgreSQL only and reports Temporal, the"
+        " archive task, the reconnect task and the outbox backlog (F18); nothing"
+        " else below is observed at all.",
+        f"- **Destinations that ship pointing somewhere real ({len(ships_configured)}):** "
+        + (", ".join(ships_configured) if ships_configured else "none")
+        + ". Every other destination is inert on arrival, which is the posture the"
+        " review's F01/F04 notes describe: a deployment that has named nothing"
+        " talks to nothing, rather than to a default somebody forgot about.",
+        "",
+    ]
 
     lines += [
         "## Inventory",

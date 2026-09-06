@@ -16,10 +16,10 @@ This module covers the two claims the new fields make:
    your result" and "your own statement said LIMIT 3" are not the same
    answer -- the distinction the single number cannot carry.
 
-`test_a_subquery_limit_defeats_the_regex_the_field_replaces` is the
-regression: it constructs the case where reading the limit back off the
-generated SQL is not merely fragile but *wrong*, and pins that the field
-disagrees with the guess.
+`test_the_response_sql_cannot_be_regexed_for_the_bound` is the regression,
+and it records something F20 did not know: the response's `normalized_sql`
+has its literals **redacted**, so the regex finds no digits after `LIMIT`
+at all. The inference was not merely fragile -- it never fired.
 
 Both API routes are covered by covering `query_execution_response` once --
 `aida.api` and `aida.tool_api` share that single projection by construction
@@ -29,6 +29,7 @@ enough for both.
 
 from __future__ import annotations
 
+import re
 from uuid import uuid4
 
 import pytest
@@ -169,22 +170,57 @@ async def test_a_request_above_the_hard_limit_is_clamped_and_reported_as_the_cap
 # ---------------------------------------------------------------------------
 
 
-async def test_a_subquery_limit_defeats_the_regex_the_field_replaces(
+#: The exact expression `ui-next/src/components/QueryResultTable.tsx`
+#: currently infers the bound with (`limitFromSql`). Reproduced here so this
+#: file can state what it does and does not find in a real response.
+_UI_LIMIT_REGEX = re.compile(r"\blimit\s+(\d+)\b", re.IGNORECASE)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT id FROM analytics.customers",
+        "SELECT id FROM analytics.customers LIMIT 3",
+        "SELECT c.id FROM (SELECT id FROM analytics.customers LIMIT 7) AS c",
+    ],
+)
+async def test_the_response_sql_cannot_be_regexed_for_the_bound(
+    monkeypatch: pytest.MonkeyPatch, sql: str
+) -> None:
+    """The inference the new field replaces cannot work at all, and this
+    pins why.
+
+    `normalized_sql` on the response is not the statement that ran: it is the
+    guard-normalised statement with its **literals redacted**
+    (`_run_validation` builds the report from `redact_sql_literals(...)`,
+    because the executable form with values intact must never leave the
+    gateway). Redaction rewrites `LIMIT 5000` to `LIMIT %(redacted)s`, so
+    `limitFromSql`'s `/\\blimit\\s+(\\d+)\\b/i` matches nothing, returns
+    null, and `truncatedByPolicy` is false for every execution -- including
+    the ones that really were capped.
+
+    So the browser's truncation banner was not merely fragile, as F20
+    recorded; on this path it could never fire. `applied_row_limit` is the
+    number the guard actually applied, and it is present in all three shapes
+    below where the regex finds nothing.
+    """
+    result = await _execute(monkeypatch, sql=sql, requested_limit=None)
+
+    normalized = result.execution.normalized_sql or ""
+    assert "LIMIT" in normalized.upper(), "the guard did rewrite the statement with a bound"
+    assert _UI_LIMIT_REGEX.search(normalized) is None, (
+        f"the bound is not readable from the response SQL: {normalized!r}"
+    )
+    assert result.applied_row_limit is not None
+    assert result.row_limit_source is not None
+
+
+async def test_a_subquery_limit_is_not_mistaken_for_the_applied_bound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reading the bound back off the generated SQL is not just fragile here,
-    it is wrong.
-
-    `SqlGuard` rewrites only the *outer* statement, so a `LIMIT` inside a
-    subquery survives ahead of it in the normalized text. The browser's
-    `/\\blimit\\s+(\\d+)\\b/i` takes the first match, so it would read 7 --
-    a number that bounds an inner scan and says nothing about how many rows
-    the caller received. `applied_row_limit` is the outer bound the result
-    actually ran under, and this test pins that the two disagree, so the
-    field can never be quietly replaced by the guess again.
-    """
-    import re
-
+    """`SqlGuard` rewrites only the outer statement, so an inner `LIMIT 7`
+    bounds a scan and says nothing about how many rows the caller received.
+    The reported bound is the outer one -- 7 must not appear."""
     settings = Settings(_env_file=None)
     result = await _execute(
         monkeypatch,
@@ -193,13 +229,8 @@ async def test_a_subquery_limit_defeats_the_regex_the_field_replaces(
     )
 
     assert result.applied_row_limit == settings.default_query_row_limit
+    assert result.applied_row_limit != 7
     assert result.row_limit_source == "GATEWAY_CAP"
-
-    normalized = result.execution.normalized_sql or ""
-    guessed = re.search(r"\blimit\s+(\d+)\b", normalized, re.IGNORECASE)
-    assert guessed is not None
-    assert int(guessed.group(1)) == 7, "the regex reads the subquery's bound, not the applied one"
-    assert int(guessed.group(1)) != result.applied_row_limit
 
 
 # ---------------------------------------------------------------------------
@@ -288,12 +319,19 @@ def test_the_response_field_is_optional_so_the_schema_change_is_additive() -> No
     ("applied", "requested", "expected"),
     [
         (None, None, None),
+        # No request: the default is the platform's own bound.
         (5000, None, "GATEWAY_CAP"),
-        (5000, 5000, "GATEWAY_CAP"),
-        (5000, 9000, "GATEWAY_CAP"),
+        (3, None, "STATEMENT"),
+        # An explicit `max_rows` replaces the default rather than being
+        # capped by it, so asking for more than the default *raises* the
+        # gateway's bound -- and a result below it came from the statement.
+        (5000, 5000, "REQUEST"),
+        (9000, 9000, "REQUEST"),
+        (5000, 9000, "STATEMENT"),
         (10, 10, "REQUEST"),
         (3, 10, "STATEMENT"),
-        (3, None, "STATEMENT"),
+        # Only the hard limit turns a request back into a platform cap.
+        (100_000, 200_000, "GATEWAY_CAP"),
     ],
 )
 def test_row_limit_source_classification(
@@ -301,10 +339,11 @@ def test_row_limit_source_classification(
 ) -> None:
     """Every branch of the classifier, stated as a table.
 
-    The boundary worth naming is `(5000, 5000)`: a caller that asks for
-    exactly the default gets `GATEWAY_CAP`, because the platform would have
-    applied the same bound anyway -- there is no observable difference to
-    report, and claiming `REQUEST` would understate a genuine cap.
+    The row worth naming is `(5000, 9000)`: the caller asked for 9000, the
+    hard limit allows it, and the result still stopped at 5000 -- which can
+    only be the statement's own `LIMIT`, never the default. Reporting that as
+    a platform cap would be exactly the conflation this field exists to
+    remove.
     """
     assert (
         row_limit_source(applied, requested_limit=requested, settings=Settings(_env_file=None))

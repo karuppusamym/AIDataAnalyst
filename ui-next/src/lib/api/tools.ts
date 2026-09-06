@@ -10,7 +10,33 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { demoOr, get, postJson } from "./transport";
+import {
+  makeFixtureCancelToolPlan,
+  makeFixtureCreateToolPlan,
+  makeFixtureCreateToolVersion,
+  makeFixtureExecuteToolPlan,
+  makeFixtureExecuteToolVersion,
+  makeFixtureRequestToolDeprecation,
+  makeFixtureSubmitToolForReview,
+  makeFixtureToolPlan,
+  makeFixtureToolPlanEvidence,
+  makeFixtureTools,
+  makeFixtureValidateToolPlan,
+} from "../fixtures";
+import type {
+  ExecutionRead,
+  GovernanceReviewRead,
+  GovernedToolVersionCreate,
+  GovernedToolVersionRead,
+  ToolExecutionRequest,
+  ToolExecutionResponse,
+  ToolPlanCreate,
+  ToolPlanDetailRead,
+  ToolPlanRead,
+  ValidationResponse,
+} from "../types";
+import type { PageOf } from "../ui-types";
 
 /* ---------------------------------------------------------------------------
    Tool registry -- nav id `tools`, `ToolRegistryScreen`'s own routes. See

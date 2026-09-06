@@ -12,7 +12,40 @@
    Re-exported from `lib/api.ts`; no screen import changed.
 --------------------------------------------------------------------------- */
 
-import { demoOr } from "./transport";
+import { deleteRequest, demoOr, get, postJson, putJson } from "./transport";
+import { USE_FIXTURES } from "../appConfig";
+import {
+  makeFixtureCompileContextProductVersion,
+  makeFixtureConsumptionRecords,
+  makeFixtureContextProductBindings,
+  makeFixtureContextProductVersions,
+  makeFixtureContextProducts,
+  makeFixtureCreateContextProduct,
+  makeFixtureDeprecateContextProductVersion,
+  makeFixtureMarketplaceAccessRequest,
+  makeFixtureMarketplaceProducts,
+  makeFixturePortfolioAnalyticsSummary,
+  makeFixturePortfolioAnalyticsTrends,
+  makeFixtureRemoveContextProductBinding,
+  makeFixtureSetContextProductBinding,
+  makeFixtureSubmitContextProductVersion,
+} from "../fixtures";
+import { requestBlob } from "../http";
+import type {
+  ConsumptionRecordPage,
+  ContextCompilationRead,
+  ContextProductConsumerBindingRead,
+  ContextProductCreate,
+  ContextProductRead,
+  ContextProductScopeRead,
+  ContextProductVersionRead,
+  GovernanceReviewRead,
+  MarketplaceAccessRequestCreate,
+  MarketplaceAccessRequestRead,
+  PortfolioAnalyticsSummaryRead,
+  PortfolioAnalyticsTrendsRead,
+} from "../types";
+import type { MarketplaceProductRead, PageOf } from "../ui-types";
 
 export interface MarketplaceQuery {
   organizationId: string;

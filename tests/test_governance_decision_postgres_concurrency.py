@@ -25,18 +25,28 @@ On PostgreSQL the first guard is real: the loser's `FOR UPDATE` *blocks* on
 the winner's row lock, and at READ COMMITTED re-reads the row after the
 winner commits -- so the loser is refused by the router's own already-decided
 check before it ever reaches the claim. That is a stronger outcome than
-SQLite could demonstrate, and it is what `test_single_vs_single`,
-`test_single_vs_bulk` and `test_bulk_vs_bulk` assert.
+SQLite could demonstrate, and it is what the three router shapes here assert
+(`..._single_vs_single...`, `..._single_vs_bulk...`, `..._bulk_vs_bulk...`).
 
 It also means those three shapes do not, on PostgreSQL, exercise the
-compare-and-set itself. `test_service_claim_race` and
-`test_service_claim_race_three_way` do: they race
+compare-and-set itself. `..._service_claim_race...`, `..._three_way...` and
+`..._bulk_sweep_vs_lock_free_decider...` do: they race
 `governance_decision_service.decide_review` directly, with no `FOR UPDATE`
-anywhere, which is the shape the reviewer agent (ADR-0027) and any future
-lock-free caller actually run in. There the loser's `UPDATE` blocks on the
-winner's uncommitted row, PostgreSQL re-evaluates `status = 'PENDING'`
-against the newly committed version, `rowcount` is 0, and the caller is
-refused `CONFLICT` carrying the review's refreshed state.
+in front of it, which is the shape the reviewer agent (ADR-0027) and any
+future lock-free caller actually run in. There the loser's `UPDATE` blocks
+on the winner's uncommitted row, PostgreSQL re-evaluates `status =
+'PENDING'` against the newly committed version, `rowcount` is 0, and the
+caller is refused `CONFLICT` carrying the review's refreshed state.
+
+**What makes this falsifiable.** Removing `AND status = 'PENDING'` from the
+claim does *not*, on its own, break most of the outcomes here: the losing
+caller's rollback still erases its bogus claim, and the TERM_SEMANTIC_BINDING
+adapter still refuses a target that has already moved. The invariant would
+survive by accident, propped up by a target-specific precondition rather than
+by the guard that owns it. The `adapter_calls` fixture is what states the
+real property -- a contended review enters its target's side-effect path
+exactly **once** -- and it is the assertion that goes red (2 and 3 entries
+instead of 1) when the guard is taken out.
 
 **Isolation levels.** Every test runs twice, at READ COMMITTED (PostgreSQL's
 default and the one the application runs at) and at REPEATABLE READ. The
@@ -48,8 +58,9 @@ access due to concurrent update") instead of letting it observe the decided
 status. The loser is still refused and still writes nothing, but it is
 refused as a serialization failure, not as a 409 CONFLICT. An operator who
 raises the isolation level therefore needs a retry loop; nothing in the
-application supplies one today. `_expected_refusal` below pins that
-difference per isolation level rather than accepting "either" everywhere.
+application supplies one today. `_expected_router_refusal` and
+`_expected_claim_refusal` below pin that difference per isolation level
+rather than accepting "either" everywhere.
 
 **Skipping.** Same idiom as `tests/test_migration_orm_drift.py`: only a
 failure to *reach* PostgreSQL is a skip. Anything after that -- a broken
@@ -90,11 +101,11 @@ from sqlalchemy.pool import NullPool
 
 from aida import (  # noqa: F401 -- registers every ORM table on Base.metadata
     envelope_models,
+    governance_decision_service,
     graph_store,
     models,
     procedure_lineage_models,
 )
-from aida import governance_decision_service
 from aida.db import Base
 from aida.governance_decision_contracts import GovernanceDecisionRefused
 from aida.governance_decision_service import decide_review, record_decision_outbox

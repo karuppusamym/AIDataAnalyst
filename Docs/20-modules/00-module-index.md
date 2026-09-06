@@ -4,15 +4,48 @@
 > One spec per bounded context defined in `10-architecture/04-module-decomposition.md`.
 >
 > **These specs describe target bounded contexts, not the current package layout** (stated
-> 2026-08-30). One module directory exists under `src/atlas/modules/` — `identity_tenancy`,
-> 69 lines, labelled "scaffold only" — and every other module's behaviour, where it exists at
-> all, lives in the flat `src/aida/` package. Wherever a spec below refers to
+> 2026-08-30; the module-directory count corrected 2026-09-06). Five module directories now
+> exist under `src/atlas/modules/` — `catalog`, `connectivity`, `identity_tenancy`,
+> `ingestion` and `observability_audit`, each with real models, schemas and routes — and
+> every other module's behaviour, where it exists at all, still lives in the flat
+> `src/aida/` package. The five that exist have their own guides under
+> [`domain-guides/`](domain-guides/), which say what is real in each and what is still an
+> empty scaffold; the sentence this paragraph replaced ("one module directory exists…
+> `identity_tenancy`, 69 lines") was true when written and had since become false.
+> Wherever a spec below refers to
 > `<module>/api.py`, `<module>/repository.py` and so on, it is describing the anatomy that
 > module will have when it is extracted, not a file you can open today. Each spec's §11
 > ("Current state → target") is the section that states what is actually built. Tracker
 > items ST-05/06/07 are the extraction work; ST-02 (CI) and QG-7 (gateway exclusivity) landed
 > 2026-08-30 and are the first boundaries that are now mechanically enforced rather than
 > described.
+
+## Two kinds of document live under this directory
+
+The numbered specs below describe **target** bounded contexts — what each module
+will own when it exists. The five guides under
+[`domain-guides/`](domain-guides/) describe the five contexts that have a real
+module directory today, and describe them as they actually are:
+
+| Guide | Owns | Routes | Spec |
+|---|---|---|---|
+| [catalog](domain-guides/catalog.md) | The seven `metadata_*` tables, the catalog read model, bulk stewardship actions | 10 | [04](04-catalog.md) |
+| [connectivity](domain-guides/connectivity.md) | Source registration, scan policy, certification runs | 7 | [02](02-connectivity.md) |
+| [identity_tenancy](domain-guides/identity-tenancy.md) | Tenant hierarchy, workspaces, business hierarchy, delegation | 28 | [01](01-identity-and-tenancy.md) |
+| [ingestion](domain-guides/ingestion.md) | Ingestion jobs, batches and chunks, and their state machine | 15 | [03](03-ingestion.md) |
+| [observability_audit](domain-guides/observability-audit.md) | The audit ledger, outbox, archive, delivery intents, SLOs | 5 | [20](20-observability-and-audit.md) |
+
+Each guide answers four questions and stops: what the context owns, what must
+stay true inside it, how you get into it, and what is deliberately somebody
+else's problem. They are orientation, not specification — read the numbered spec
+when you need the full contract.
+
+The counts above and the shape of the import graph behind them are generated, not
+typed, into
+[`../10-architecture/14-generated-architecture-map.md`](../10-architecture/14-generated-architecture-map.md).
+Where a context is still reached through a compatibility shim rather than its own
+public face, the shim and the condition for removing it are recorded in
+[`../40-engineering/09-compatibility-shim-register.md`](../40-engineering/09-compatibility-shim-register.md).
 
 ## Spec template
 
@@ -35,10 +68,10 @@ Every module spec follows the same sections, so a reader can find the same fact 
 
 | # | Module | Layer | Purpose in one line | Module dir? | Lives today in (`src/aida/` unless noted) |
 |---|---|---|---|---|---|
-| [01](01-identity-and-tenancy.md) | identity-tenancy | L1 | Who is asking, on behalf of which part of the bank | **Scaffold** | `security.py`, `oidc.py`, `secrets.py`, `entitlements.py`, `domain_service.py`, `workspace_service.py`, `business_graph.py` · plus `src/atlas/modules/identity_tenancy/` (69 lines, no logic) |
-| [02](02-connectivity.md) | connectivity | L1 | Reaching sources safely, with honest capabilities | No | `connectors/` — 5 real drivers (`postgres`, `sqlserver`, `oracle`, `snowflake`, `bigquery`); `registry.py` declares Databricks/Teradata/Db2 **planned** |
-| [03](03-ingestion.md) | ingestion | L1 | Getting metadata in, idempotently, at any scale | No | `ingestion.py`, `ingestion_api.py`, `batch_ingestion.py`, `workflows/ingestion.py`, `fleet.py` |
-| [04](04-catalog.md) | catalog | L2 | The authoritative inventory of the estate | No | `models.py` (`MetadataCatalog`/`Schema`/`Table`/`Column`/`Constraint`), `api.py`, `workflows/activities.py` |
+| [01](01-identity-and-tenancy.md) | identity-tenancy | L1 | Who is asking, on behalf of which part of the bank | **Yes** ([guide](domain-guides/identity-tenancy.md)) | `security.py`, `oidc.py`, `secrets.py`, `entitlements.py`, `domain_service.py`, `workspace_service.py`, `business_graph.py` · plus `src/atlas/modules/identity_tenancy/` (19 owned tables, 28 routes) |
+| [02](02-connectivity.md) | connectivity | L1 | Reaching sources safely, with honest capabilities | **Yes** ([guide](domain-guides/connectivity.md)) | `connectors/` — 5 real drivers (`postgres`, `sqlserver`, `oracle`, `snowflake`, `bigquery`); `registry.py` declares Databricks/Teradata/Db2 **planned** |
+| [03](03-ingestion.md) | ingestion | L1 | Getting metadata in, idempotently, at any scale | **Yes** ([guide](domain-guides/ingestion.md)) | `ingestion.py`, `ingestion_api.py`, `batch_ingestion.py`, `workflows/ingestion.py`, `fleet.py` |
+| [04](04-catalog.md) | catalog | L2 | The authoritative inventory of the estate | **Yes** ([guide](domain-guides/catalog.md)) | `models.py` (`MetadataCatalog`/`Schema`/`Table`/`Column`/`Constraint`), `api.py`, `workflows/activities.py` |
 | [05](05-profiling-and-classification.md) | profiling | L2 | What the data looks like, without looking at it | No | `workflows/activities.py` (`profile_table_task`, `classify_column_name`), `analysis_tasks.py` |
 | [06](06-relationship-intelligence.md) | relationships | L2 | How tables connect, with evidence and negative knowledge | No | `intelligence_api.py` (`RelationshipCandidate`). Request-path, not a worker |
 | [07](07-semantic-layer.md) | semantic-layer | L2 | What the data means, versioned and approved | No | `semantic_api.py`, `semantic_inference.py`, `semantic_intelligence_api.py` |
@@ -54,15 +87,16 @@ Every module spec follows the same sections, so a reader can find the same fact 
 | [17](17-policy-and-governance.md) | policy-governance | L1 | Policy, entitlement, and maker-checker as primitives | No | `policy_engine.py`, `context_product_policy.py`, `integration_service.py`, `ai_governance_api.py`. Maker≠checker real and tested; **ABAC and bulk decisions not implemented** |
 | [18](18-studio.md) | studio | L5 | Authoring semantics and tools with tests and version control | No | *(2026-08-30 snapshot: "Nothing. Zero matches for `studio` anywhere in `src/`.")* `studio.py`, `studio_api.py`, `studio_test_harness.py` now exist — see `60-delivery/00-status.md` §4 |
 | [19](19-context-products-and-mcp.md) | context-products-mcp | L4 | Governed context for external agents | No | `mcp_server.py` (1,776 lines, real JSON-RPC 2.0), `mcp_budget.py`, `context_product_api.py`, `context_compiler.py`, `context_compiler_api.py`, `product_marketplace_api.py` |
-| [20](20-observability-and-audit.md) | observability-audit | L1 | Evidence, telemetry, and the ledger | No | `events.py` (audit + outbox), `logging.py`, `operational_api.py`. **No OpenTelemetry export, no SIEM routing** despite the dependency being present |
+| [20](20-observability-and-audit.md) | observability-audit | L1 | Evidence, telemetry, and the ledger | **Yes** ([guide](domain-guides/observability-audit.md)) | `events.py` (audit + outbox), `logging.py`, `operational_api.py`. **No OpenTelemetry export, no SIEM routing** despite the dependency being present |
 | [21](21-experience-shell.md) | experience-shell | L5 | Persona-derived navigation and the product frame | No | `ui-next/` — React 18 + TypeScript SPA, 40 screens in `SCREEN_IDS`. **No server-side module.** *(The vanilla-JS `ui/` portal this row used to name was deleted on 2026-09-05; see D05 in `../review-2026-09-05/POINTS-TRACKER.md`.)* |
 
-**How to read the last two columns (added 2026-08-30, sourced from the code).** "Module dir?"
-answers only *"does `src/atlas/modules/<name>/` exist?"* — for 20 of 21 the answer is No, and
-for the one exception it is a scaffold with no business rules. It says nothing about whether the
-*capability* is built: modules 16 and 19 are among the strongest-implemented parts of the
-platform and have no module directory at all, while module 01 has the only directory and the
-least of it filled in. Capability status per module is in that module's own
+**How to read the last two columns (added 2026-08-30, sourced from the code; the "Module
+dir?" column re-derived 2026-09-06).** "Module dir?" answers only *"does
+`src/atlas/modules/<name>/` exist?"* — five now do, and each of those five links to its guide.
+It still says nothing about whether the *capability* is built: modules 16 and 19 are among the
+strongest-implemented parts of the platform and have no module directory at all, while several
+of the five that do have one still hold their business rules in the router with `service.py`
+and `repository.py` left as empty scaffolds. Each guide says which. Capability status per module is in that module's own
 "Current state → target" section, and the two are independent axes.
 
 **The last column is a dated snapshot, not a living status field.** It was sourced from the code on

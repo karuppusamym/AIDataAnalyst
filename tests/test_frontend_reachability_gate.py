@@ -96,9 +96,8 @@ def test_lazy_dynamic_imports_are_followed() -> None:
     result = analyse(UI_ROOT)
     unreachable = result["unreachable"]
     assert isinstance(unreachable, set)
-    assert not {m for m in unreachable if m.startswith("screens/")}, (
-        f"screens reported unreachable: {sorted(m for m in unreachable if m.startswith('screens/'))}"
-    )
+    dead_screens = sorted(m for m in unreachable if m.startswith("screens/"))
+    assert not dead_screens, f"screens reported unreachable: {dead_screens}"
 
 
 def test_type_only_import_does_not_confer_reachability(tmp_path: Path) -> None:
@@ -155,7 +154,9 @@ def test_a_test_file_alone_does_not_make_a_module_reachable(tmp_path: Path) -> N
         {
             "main.tsx": "export {};\n",
             "components/Orphan.tsx": "export function Orphan() { return null; }\n",
-            "components/Orphan.test.tsx": 'import { Orphan } from "./Orphan";\nexport default Orphan;\n',
+            "components/Orphan.test.tsx": (
+                'import { Orphan } from "./Orphan";\nexport default Orphan;\n'
+            ),
         },
     )
     result = analyse(root)

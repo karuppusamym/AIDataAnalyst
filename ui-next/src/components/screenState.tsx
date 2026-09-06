@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DependencyList, ReactNode } from "react";
 
 import { ApiError } from "../lib/http";
@@ -82,9 +82,22 @@ export interface AsyncResource<T> {
 export function useAsyncResource<T>(
   load: (signal: AbortSignal) => Promise<T>,
   deps: DependencyList,
-  options: { enabled?: boolean } = {},
+  options: {
+    enabled?: boolean;
+    /** Called for each accepted response -- not for a superseded one. Screens
+     *  whose message strip reports what the list now holds hang that off this,
+     *  so the report is tied to the *event* of loading and a reload that
+     *  returned the same rows still supersedes a stale action message. */
+    onLoad?: (value: T) => void;
+  } = {},
 ): AsyncResource<T> {
   const enabled = options.enabled ?? true;
+  const onLoadRef = useRef(options.onLoad);
+  // Declared before the effect that issues the request, so the first response
+  // can never find an unset callback.
+  useEffect(() => {
+    onLoadRef.current = options.onLoad;
+  });
   const [data, setDataState] = useState<T | undefined>(undefined);
   // Seeded from `enabled` so an enabled resource never renders its empty
   // state for one frame before the request it is about to make.
@@ -114,6 +127,7 @@ export function useAsyncResource<T>(
           if (mine !== ticket.current) return;
           setDataState(value);
           setLoading(false);
+          onLoadRef.current?.(value);
         },
         (reason: unknown) => {
           if (mine !== ticket.current || isAbort(reason)) return;
@@ -136,7 +150,12 @@ export function useAsyncResource<T>(
     [],
   );
 
-  return { data, loading, error, reload: run, setData };
+  // Memoized so a consumer can list the resource itself in a dependency array
+  // without re-running on every render of the screen that owns it.
+  return useMemo(
+    () => ({ data, loading, error, reload: run, setData }),
+    [data, loading, error, run, setData],
+  );
 }
 
 export interface SubmitAction<T> {
@@ -201,7 +220,12 @@ export function useSubmitAction<T>(): SubmitAction<T> {
     setResult(null);
   }, []);
 
-  return { submitting, error, result, run, fail, reset };
+  // Memoized: every form lists the action in the dependencies of its own
+  // `submit` callback.
+  return useMemo(
+    () => ({ submitting, error, result, run, fail, reset }),
+    [submitting, error, result, run, fail, reset],
+  );
 }
 
 /** A write that failed, in the server's own words. */
@@ -233,6 +257,7 @@ export interface StatusChannel {
   readonly status: StatusMessage | null;
   readonly info: (text: string) => void;
   readonly success: (text: string) => void;
+  /** A rejected request, or a refusal this screen decided on its own. */
   readonly failure: (reason: unknown) => void;
   readonly clear: () => void;
 }
@@ -249,11 +274,15 @@ export function useStatusChannel(): StatusChannel {
   const info = useCallback((text: string) => setStatus({ text, kind: "info" }), []);
   const success = useCallback((text: string) => setStatus({ text, kind: "success" }), []);
   const failure = useCallback(
-    (reason: unknown) => setStatus({ text: failureText(reason), kind: "error" }),
+    (reason: unknown) =>
+      setStatus({ text: typeof reason === "string" ? reason : failureText(reason), kind: "error" }),
     [],
   );
   const clear = useCallback(() => setStatus(null), []);
-  return { status, info, success, failure, clear };
+  return useMemo(
+    () => ({ status, info, success, failure, clear }),
+    [status, info, success, failure, clear],
+  );
 }
 
 export function StatusStrip({ status }: { status: StatusMessage | null }) {
@@ -326,7 +355,7 @@ export function useVersionLifecycle(channel: StatusChannel, reload: () => void):
     [channel],
   );
 
-  return { busyVersionId, run };
+  return useMemo(() => ({ busyVersionId, run }), [busyVersionId, run]);
 }
 
 /**
