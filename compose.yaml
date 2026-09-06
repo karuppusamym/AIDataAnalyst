@@ -297,17 +297,6 @@ services:
       retries: 20
     restart: unless-stopped
 
-  ui:
-    build: ./ui
-    depends_on:
-      api:
-        condition: service_healthy
-    ports:
-      - "3000:80"
-    restart: unless-stopped
-
-  # Keep the React rebuild deployable beside the legacy portal during the
-  # strangle migration. Remove this service when ui/ is retired.
   ui-next:
     build:
       context: ./ui-next

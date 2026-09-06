@@ -1,22 +1,38 @@
 #!/usr/bin/env python3
-"""Seed a small, value-free sample banking estate through the governed API.
+"""Seed a real, cross-database sample estate through the governed API.
 
-A fresh install has no metadata, so the catalog, knowledge graph, unified
-lineage and analyst surfaces all render empty and the platform reads as
-"missing" rather than "not yet populated". This script populates a realistic
-retail-and-risk estate so those surfaces have something to show on day one.
+A fresh install has no metadata, so the catalog, knowledge graph and unified
+lineage all render empty. This script builds one organization with three data
+domains, each backed by a real live datasource on a different engine:
 
-It talks only to the public HTTP API using development identity headers and
-the canonical value-free metadata-ingestion envelope (envelope 1.0). It pushes
-*structure only* — catalogs, schemas, tables, columns, and PK/FK constraints —
-never business row values, so it honours the value-free control-plane invariant
-(ADR-0014). After ingestion it discovers relationship candidates from the
-declared foreign keys and approves them, because Unified Lineage shows APPROVED
-suggestions by default.
+    Customer  -- Postgres  (sample-source,       bank_demo)
+    Payments  -- SQL Server (sample-mssql-source, bank_demo_mssql)
+    Risk      -- Oracle     (sample-oracle-source, FREEPDB1)
+
+Unlike a pushed metadata envelope, this registers each sample database as a
+real DataSource and triggers the platform's own connector-based discovery
+(DatasourceDiscoveryWorkflow) against it -- the catalog reflects what the
+connector actually introspects, not a hand-written fixture. `customer_id`/
+`account_id` values were seeded to overlap across all three engines (see the
+infra/*/init.sql files), so the platform's cross-source relationship detector
+finds real matches instead of nothing.
+
+It also exercises the platform's cross-domain governance (ADR-0017): it
+requests and approves cross-boundary grants letting Payments and Risk each
+see into Customer (the natural system-of-record hub), then runs cross-source
+relationship and object-resolution discovery across those boundaries and
+approves what is found. Payments<->Risk is deliberately left ungranted, so
+Unified Lineage shows a real `withheld_cross_boundary_domain_ids` case rather
+than everything being trivially connected.
+
+Every discovery/proposal step is decided by a *second* development identity
+from the one that triggered it: the API enforces maker != checker on
+relationship candidates, cross-source candidates, and governance reviews
+(a single self-approving identity gets a 409 on every one of these).
 
 The script is idempotent: every tenancy object is looked up before it is
-created, ingestion is deduplicated by a stable idempotency key, and only
-PENDING relationship candidates are approved. Re-running it is safe.
+created, and only PENDING candidates/reviews are decided. Re-running it is
+safe.
 
 Usage:
     python scripts/seed_sample_estate.py
@@ -26,8 +42,9 @@ Environment:
     AIDA_BASE_URL   API base URL (default http://localhost:8000)
     AIDA_SEED_SLUG  Organization slug to create/reuse (default sample-bank)
 
-Only ever point this at a development or demonstration environment. It creates
-an organization and registers a datasource; it is not intended for production.
+Only ever point this at a development or demonstration environment. It
+creates an organization and registers datasources; it is not intended for
+production.
 """
 
 from __future__ import annotations
@@ -38,26 +55,39 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import UTC, datetime
 from typing import Any
 
 BASE_URL = os.environ.get("AIDA_BASE_URL", "http://localhost:8000").rstrip("/")
 ORG_SLUG = os.environ.get("AIDA_SEED_SLUG", "sample-bank")
 
-# Every role, because the seed exercises tenancy, ingestion, relationship
-# discovery and maker-checker approval in one pass. This is a development-only
-# identity; production rejects header identities entirely.
+# Every role, because the seed exercises tenancy, live discovery, relationship
+# review and cross-domain governance in one pass. These are development-only
+# identities; production rejects header identities entirely.
 BOOTSTRAP_ROLES = (
     "PlatformAdmin,MetadataAdmin,DataAdmin,MetadataIngestor,SemanticAdmin,"
-    "DataSteward,MetadataReviewer,Auditor,Operations,Analyst,Viewer"
+    "DataSteward,MetadataReviewer,Auditor,Operations,Analyst,Viewer,Reviewer"
 )
-BASE_HEADERS = {
-    "X-Principal-Id": "sample-estate-seed",
-    "X-Principal-Type": "USER",
-    "X-Roles": BOOTSTRAP_ROLES,
-    "X-Business-Purpose": "Seed demonstration estate for local evaluation",
-    "Content-Type": "application/json",
-}
+
+# Two distinct principals: the platform enforces maker != checker on every
+# proposal this script decides (relationship candidates, cross-source
+# candidates, governance reviews) -- one identity triggers discovery/requests,
+# the other decides what came out of it.
+MAKER_PRINCIPAL = "sample-estate-seed"
+CHECKER_PRINCIPAL = "sample-estate-seed-reviewer"
+
+
+def _headers(principal: str) -> dict[str, str]:
+    return {
+        "X-Principal-Id": principal,
+        "X-Principal-Type": "USER",
+        "X-Roles": BOOTSTRAP_ROLES,
+        "X-Business-Purpose": "Seed demonstration estate for local evaluation",
+        "Content-Type": "application/json",
+    }
+
+
+MAKER_HEADERS = _headers(MAKER_PRINCIPAL)
+CHECKER_HEADERS = _headers(CHECKER_PRINCIPAL)
 
 
 class SeedError(RuntimeError):
@@ -70,18 +100,19 @@ def _request(
     body: dict[str, Any] | None = None,
     *,
     org_id: str | None = None,
-    expect: tuple[int, ...] = (200, 201),
+    headers: dict[str, str] | None = None,
+    expect: tuple[int, ...] = (200, 201, 202),
 ) -> Any:
     url = f"{BASE_URL}{path}"
     # The scheme is validated here; the seed only ever calls a first-party
     # development API, so the S310 URL-audit warnings below are suppressed.
     if not url.startswith(("http://", "https://")):
         raise SeedError(f"refusing to open non-HTTP URL: {url}")
-    headers = dict(BASE_HEADERS)
+    request_headers = dict(headers if headers is not None else MAKER_HEADERS)
     if org_id:
-        headers["X-Organization-Id"] = org_id
+        request_headers["X-Organization-Id"] = org_id
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    request = urllib.request.Request(url, data=data, headers=headers, method=method)  # noqa: S310
+    request = urllib.request.Request(url, data=data, headers=request_headers, method=method)  # noqa: S310
     try:
         with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
@@ -161,293 +192,306 @@ def ensure_data_domain(lob_id: str, name: str, code: str, org_id: str) -> dict[s
     return domain
 
 
-def ensure_project(lob_id: str, data_domain_id: str, org_id: str) -> dict[str, Any]:
+def ensure_project(lob_id: str, data_domain_id: str, name: str, slug: str, org_id: str) -> dict[str, Any]:
     path = f"/v1/lines-of-business/{lob_id}/projects"
-    existing = _find(f"{path}?limit=200", "slug", "sample-estate", org_id=org_id)
+    existing = _find(f"{path}?limit=200", "slug", slug, org_id=org_id)
     if existing:
         return existing
     _, project = _request(
         "POST",
         path,
-        {"name": "Sample Estate", "slug": "sample-estate", "data_domain_id": data_domain_id},
+        {"name": name, "slug": slug, "data_domain_id": data_domain_id},
         org_id=org_id,
     )
     print(f"  created project '{project['name']}'")
     return project
 
 
-def ensure_datasource(project_id: str, org_id: str) -> dict[str, Any]:
+def ensure_datasource(
+    project_id: str,
+    org_id: str,
+    *,
+    name: str,
+    connector_type: str,
+    dialect: str,
+    credential_reference: str,
+) -> dict[str, Any]:
     path = f"/v1/projects/{project_id}/datasources"
-    existing = _find(f"{path}?limit=200", "name", "Core Banking (sample)", org_id=org_id)
+    existing = _find(f"{path}?limit=200", "name", name, org_id=org_id)
     if existing:
         return existing
     _, datasource = _request(
         "POST",
         path,
         {
-            "name": "Core Banking (sample)",
-            "connector_type": "postgres",
-            "dialect": "postgres",
+            "name": name,
+            "connector_type": connector_type,
+            "dialect": dialect,
             "environment": "SANDBOX",
             "network_zone": "sample",
-            # Canonical push never resolves this reference; it only records the
-            # source identity. A live pull would resolve it through the secret
-            # provider (env:// is development-only).
-            "credential_reference": "env://AIDA_SAMPLE_SOURCE",
+            "credential_reference": credential_reference,
             "max_concurrency": 2,
         },
         org_id=org_id,
     )
-    print(f"  registered datasource '{datasource['name']}'")
+    print(f"  registered datasource '{datasource['name']}' ({connector_type})")
     return datasource
 
 
-def _column(
-    name: str, ordinal: int, physical_type: str, *, nullable: bool = True, **attributes: Any
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "ordinal_position": ordinal,
-        "physical_type": physical_type,
-        "nullable": nullable,
-        "attributes": attributes,
-    }
+def run_discovery(datasource_id: str, org_id: str, *, timeout_seconds: int = 180) -> None:
+    """Trigger real connector introspection and wait for it to finish.
 
-
-def _pk(name: str, columns: list[str]) -> dict[str, Any]:
-    return {"name": name, "constraint_type": "PRIMARY_KEY", "columns": columns}
-
-
-def _fk(
-    name: str, columns: list[str], ref_schema: str, ref_table: str, ref_columns: list[str]
-) -> dict[str, Any]:
-    return {
-        "name": name,
-        "constraint_type": "FOREIGN_KEY",
-        "columns": columns,
-        "referenced_schema": ref_schema,
-        "referenced_table": ref_table,
-        "referenced_columns": ref_columns,
-    }
-
-
-def build_envelope() -> dict[str, Any]:
-    """A value-free retail-and-risk estate: structure and keys only."""
-    retail_tables = [
-        {
-            "name": "customer",
-            "object_type": "TABLE",
-            "source_description": "Retail banking customers (sample structure).",
-            "attributes": {"business_domain": "customer", "data_tier": "curated"},
-            "columns": [
-                _column("customer_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("first_name", 2, "varchar(120)", classification="PII"),
-                _column("last_name", 3, "varchar(120)", classification="PII"),
-                _column("email", 4, "varchar(320)", classification="PII"),
-                _column("date_of_birth", 5, "date", classification="PII"),
-                _column("segment_code", 6, "varchar(16)"),
-                _column("status", 7, "varchar(16)"),
-                _column("created_at", 8, "timestamptz", nullable=False),
-            ],
-            "constraints": [_pk("pk_customer", ["customer_id"])],
-        },
-        {
-            "name": "account",
-            "object_type": "TABLE",
-            "source_description": "Deposit and lending accounts held by customers.",
-            "attributes": {"business_domain": "customer", "data_tier": "curated"},
-            "columns": [
-                _column("account_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("customer_id", 2, "bigint", nullable=False, classification="INTERNAL"),
-                _column("account_type", 3, "varchar(24)"),
-                _column("currency_code", 4, "char(3)"),
-                _column("branch_code", 5, "varchar(12)"),
-                _column("status", 6, "varchar(16)"),
-                _column("opened_at", 7, "timestamptz", nullable=False),
-            ],
-            "constraints": [
-                _pk("pk_account", ["account_id"]),
-                _fk("fk_account_customer", ["customer_id"], "retail", "customer", ["customer_id"]),
-            ],
-        },
-        {
-            "name": "card",
-            "object_type": "TABLE",
-            "source_description": "Payment cards issued against an account.",
-            "attributes": {"business_domain": "customer", "data_tier": "curated"},
-            "columns": [
-                _column("card_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("account_id", 2, "bigint", nullable=False, classification="INTERNAL"),
-                _column("card_network", 3, "varchar(24)"),
-                _column("status", 4, "varchar(16)"),
-                _column("issued_at", 5, "timestamptz", nullable=False),
-            ],
-            "constraints": [
-                _pk("pk_card", ["card_id"]),
-                _fk("fk_card_account", ["account_id"], "retail", "account", ["account_id"]),
-            ],
-        },
-        {
-            "name": "transaction_fact",
-            "object_type": "TABLE",
-            "source_description": "Posted account transactions (fact table).",
-            "attributes": {
-                "business_domain": "customer",
-                "data_tier": "curated",
-                "grain": "transaction",
-            },
-            "columns": [
-                _column("transaction_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("account_id", 2, "bigint", nullable=False, classification="INTERNAL"),
-                _column("posted_at", 3, "timestamptz", nullable=False),
-                _column("amount_minor", 4, "bigint", nullable=False, classification="CONFIDENTIAL"),
-                _column("currency_code", 5, "char(3)"),
-                _column("direction", 6, "varchar(8)"),
-                _column("merchant_category_code", 7, "varchar(8)"),
-            ],
-            "constraints": [
-                _pk("pk_transaction_fact", ["transaction_id"]),
-                _fk(
-                    "fk_transaction_account",
-                    ["account_id"],
-                    "retail",
-                    "account",
-                    ["account_id"],
-                ),
-            ],
-        },
-    ]
-    risk_tables = [
-        {
-            "name": "customer_risk_snapshot",
-            "object_type": "TABLE",
-            "source_description": "Point-in-time risk banding per customer.",
-            "attributes": {"business_domain": "risk", "data_tier": "curated"},
-            "columns": [
-                _column("snapshot_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("customer_id", 2, "bigint", nullable=False, classification="INTERNAL"),
-                _column("risk_band", 3, "varchar(8)"),
-                _column("pd_score_bucket", 4, "varchar(16)", classification="CONFIDENTIAL"),
-                _column("captured_at", 5, "timestamptz", nullable=False),
-            ],
-            "constraints": [
-                _pk("pk_customer_risk_snapshot", ["snapshot_id"]),
-                _fk(
-                    "fk_risk_snapshot_customer",
-                    ["customer_id"],
-                    "retail",
-                    "customer",
-                    ["customer_id"],
-                ),
-            ],
-        },
-        {
-            "name": "account_exposure",
-            "object_type": "TABLE",
-            "source_description": "Current credit exposure bucketed per account.",
-            "attributes": {"business_domain": "risk", "data_tier": "curated"},
-            "columns": [
-                _column("exposure_id", 1, "bigint", nullable=False, classification="INTERNAL"),
-                _column("account_id", 2, "bigint", nullable=False, classification="INTERNAL"),
-                _column("exposure_bucket", 3, "varchar(16)", classification="CONFIDENTIAL"),
-                _column("as_of_date", 4, "date", nullable=False),
-            ],
-            "constraints": [
-                _pk("pk_account_exposure", ["exposure_id"]),
-                _fk(
-                    "fk_exposure_account",
-                    ["account_id"],
-                    "retail",
-                    "account",
-                    ["account_id"],
-                ),
-            ],
-        },
-    ]
-    return {
-        "envelope_version": "1.0",
-        "idempotency_key": "seed-sample-estate-v1",
-        "producer": "sample-estate-seed/1.0",
-        "transport": "PUSH",
-        "snapshot_type": "FULL",
-        "emitted_at": datetime.now(UTC).isoformat(),
-        "catalogs": [
-            {
-                "name": "core_banking",
-                "attributes": {"environment": "sandbox"},
-                "schemas": [
-                    {"name": "retail", "attributes": {}, "tables": retail_tables},
-                    {"name": "risk", "attributes": {}, "tables": risk_tables},
-                ],
-            }
-        ],
-    }
-
-
-def ingest_estate(datasource_id: str, org_id: str) -> None:
-    _, result = _request(
+    This is the live-pull path (`DatasourceDiscoveryWorkflow` via
+    `POST /v1/datasources/{id}/analysis-runs`) -- the same one
+    `scripts/verify-local.ps1` uses to prove the connectors work -- not a
+    pushed metadata envelope.
+    """
+    _, run = _request(
         "POST",
-        f"/v1/datasources/{datasource_id}/metadata-ingestions",
-        build_envelope(),
+        f"/v1/datasources/{datasource_id}/analysis-runs",
+        {"mode": "INCREMENTAL"},
         org_id=org_id,
-        expect=(200, 201),
     )
-    counts = (result or {}).get("object_counts", {})
-    print(
-        "  ingested estate: "
-        f"{counts.get('tables', '?')} tables, "
-        f"{counts.get('columns', '?')} columns, "
-        f"{counts.get('constraints', '?')} constraints"
-    )
+    run_id = run["id"]
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        _, run = _request("GET", f"/v1/analysis-runs/{run_id}", org_id=org_id)
+        status = run.get("status")
+        if status == "COMPLETED":
+            print(f"  analysis run completed for datasource {datasource_id}")
+            return
+        if status == "FAILED":
+            raise SeedError(f"analysis run {run_id} failed: {run.get('error_class')}")
+        if time.monotonic() > deadline:
+            raise SeedError(f"analysis run {run_id} did not complete within {timeout_seconds}s")
+        time.sleep(1)
 
 
-def discover_and_approve_relationships(datasource_id: str, org_id: str) -> None:
+def discover_and_approve_same_source_relationships(datasource_id: str, org_id: str) -> None:
+    """Discover FK-based relationship candidates within one datasource and
+    approve them. Discovery and decision use different principals -- the API
+    refuses a maker deciding their own candidate."""
     list_path = f"/v1/datasources/{datasource_id}/relationship-candidates?limit=500"
+    _request(
+        "POST",
+        f"/v1/datasources/{datasource_id}/relationship-candidates/discover",
+        {"max_candidates": 500},
+        org_id=org_id,
+    )
     _, existing = _request("GET", list_path, org_id=org_id)
-    if not _items(existing):
-        _request(
-            "POST",
-            f"/v1/datasources/{datasource_id}/relationship-candidates/discover",
-            {"max_candidates": 500},
-            org_id=org_id,
-        )
-        _, existing = _request("GET", list_path, org_id=org_id)
-
     candidates = _items(existing)
     pending = [c for c in candidates if c.get("status") == "PENDING"]
-    approved_already = len(candidates) - len(pending)
     for candidate in pending:
         _request(
             "POST",
             f"/v1/relationship-candidates/{candidate['id']}/decision",
             {"decision": "APPROVE", "reason": "Seeded sample estate: declared foreign key."},
             org_id=org_id,
+            headers=CHECKER_HEADERS,
         )
-    print(
-        f"  relationship candidates: {len(pending)} approved"
-        + (f", {approved_already} already decided" if approved_already else "")
+    print(f"  same-source relationship candidates: {len(pending)} approved")
+
+
+def _find_pending_review(object_type: str, object_id: str, org_id: str) -> dict[str, Any] | None:
+    _, payload = _request(
+        "GET", "/v1/governance/reviews?status=PENDING&limit=200", org_id=org_id, headers=CHECKER_HEADERS
     )
+    for review in _items(payload):
+        if review.get("object_type") == object_type and review.get("object_id") == object_id:
+            return review
+    return None
+
+
+def request_and_approve_grant(
+    source_domain_id: str, target_domain_id: str, org_id: str, *, reason: str
+) -> None:
+    """Request `target_domain_id` visibility into `source_domain_id`, then
+    approve the governance review it files (ADR-0017 SS4) -- with the checker
+    identity, since the requester cannot approve their own request."""
+    _, grants = _request(
+        "GET",
+        f"/v1/data-domains/{source_domain_id}/cross-boundary-grants?limit=200",
+        org_id=org_id,
+    )
+    existing = next(
+        (
+            g
+            for g in _items(grants)
+            if g.get("target_data_domain_id") == target_domain_id and g.get("status") != "REJECTED"
+        ),
+        None,
+    )
+    if existing and existing.get("status") == "ACTIVE":
+        print(f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} already ACTIVE")
+        return
+    if not existing:
+        _, existing = _request(
+            "POST",
+            f"/v1/data-domains/{source_domain_id}/cross-boundary-grants",
+            {
+                "target_data_domain_id": target_domain_id,
+                "edge_kinds": ["SUGGESTED_RELATIONSHIP"],
+                "reason": reason,
+            },
+            org_id=org_id,
+        )
+    review = _find_pending_review("CROSS_BOUNDARY_GRANT", existing["id"], org_id)
+    if review is None:
+        print(f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} has no pending review")
+        return
+    _request(
+        "POST",
+        f"/v1/governance/reviews/{review['id']}/decision",
+        {"decision": "APPROVE", "reason": "Seeded sample estate: expected cross-domain resolution need."},
+        org_id=org_id,
+        headers=CHECKER_HEADERS,
+    )
+    print(f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} approved")
+
+
+def discover_and_approve_cross_source(domain_id: str, target_domain_id: str, org_id: str) -> None:
+    """Infer and approve cross-source relationships and object-resolution
+    candidates across an already-granted domain boundary."""
+    for kind, discover_path, decision_path in (
+        (
+            "relationship",
+            f"/v1/data-domains/{domain_id}/relationship-candidates/discover-cross-source",
+            "/v1/relationship-candidates",
+        ),
+        (
+            "object-resolution",
+            f"/v1/data-domains/{domain_id}/cross-source-object-resolution-candidates/discover",
+            "/v1/cross-source-object-resolution-candidates",
+        ),
+    ):
+        _request("POST", discover_path, {"target_data_domain_id": target_domain_id}, org_id=org_id)
+        # Candidates land per-datasource, not per-domain -- list every
+        # datasource in this domain and collect what discovery just proposed.
+        approved = 0
+        _, domain_datasources = _request(
+            "GET", f"/v1/organizations/{org_id}/datasources?limit=200", org_id=org_id
+        )
+        for datasource in _items(domain_datasources):
+            if datasource.get("data_domain_id") not in (domain_id, target_domain_id):
+                continue
+            list_kind_path = (
+                f"/v1/datasources/{datasource['id']}/relationship-candidates?limit=500"
+                if kind == "relationship"
+                else f"/v1/datasources/{datasource['id']}/cross-source-object-resolution-candidates?limit=500"
+            )
+            _, existing = _request("GET", list_kind_path, org_id=org_id)
+            for candidate in _items(existing):
+                if candidate.get("status") != "PENDING":
+                    continue
+                if candidate.get("datasource_id") == candidate.get("target_datasource_id"):
+                    continue
+                _request(
+                    "POST",
+                    f"{decision_path}/{candidate['id']}/decision",
+                    {"decision": "APPROVE", "reason": "Seeded sample estate: cross-source match."},
+                    org_id=org_id,
+                    headers=CHECKER_HEADERS,
+                )
+                approved += 1
+        print(f"  cross-source {kind} candidates: {approved} approved")
+
+
+DOMAINS = (
+    {
+        "code": "CUSTOMER",
+        "name": "Customer",
+        "project_name": "Customer Master",
+        "project_slug": "customer-master",
+        "datasource_name": "Customer Master (Postgres, sample)",
+        "connector_type": "postgres",
+        "dialect": "postgres",
+        "credential_reference": "env://AIDA_SAMPLE_SOURCE_DSN",
+    },
+    {
+        "code": "PAYMENTS",
+        "name": "Payments",
+        "project_name": "Payments & Transactions",
+        "project_slug": "payments-transactions",
+        "datasource_name": "Payments & Transactions (SQL Server, sample)",
+        "connector_type": "sqlserver",
+        "dialect": "tsql",
+        "credential_reference": "env://AIDA_SAMPLE_MSSQL_SOURCE_DSN",
+    },
+    {
+        "code": "RISK",
+        "name": "Risk",
+        "project_name": "Risk & Compliance",
+        "project_slug": "risk-compliance",
+        "datasource_name": "Risk & Compliance (Oracle, sample)",
+        "connector_type": "oracle",
+        "dialect": "oracle",
+        "credential_reference": "env://AIDA_SAMPLE_ORACLE_SOURCE_DSN",
+    },
+)
+
+# Customer is the system-of-record hub: Payments and Risk each get a grant to
+# see into it (both directions, so Unified Lineage renders fully connected
+# viewed from any of the three). Payments<->Risk is deliberately left
+# ungranted -- Unified Lineage should show a real withheld-boundary case.
+GRANT_PAIRS = (
+    ("CUSTOMER", "PAYMENTS", "Payments needs account/customer id resolution against the customer master."),
+    ("PAYMENTS", "CUSTOMER", "Customer stewardship needs to see which accounts have posted activity."),
+    ("CUSTOMER", "RISK", "Risk needs customer/account id resolution for risk snapshots and exposure."),
+    ("RISK", "CUSTOMER", "Customer stewardship needs to see which customers carry an open risk case."),
+)
 
 
 def main() -> int:
-    print(f"Seeding sample estate against {BASE_URL}")
+    print(f"Seeding cross-database sample estate against {BASE_URL}")
     try:
         wait_for_ready()
         org = ensure_organization()
         org_id = org["id"]
         lob = ensure_line_of_business(org_id)
-        customer_domain = ensure_data_domain(lob["id"], "Customer", "CUSTOMER", org_id)
-        ensure_data_domain(lob["id"], "Risk", "RISK", org_id)
-        project = ensure_project(lob["id"], customer_domain["id"], org_id)
-        datasource = ensure_datasource(project["id"], org_id)
-        ingest_estate(datasource["id"], org_id)
-        discover_and_approve_relationships(datasource["id"], org_id)
+
+        domains: dict[str, dict[str, Any]] = {}
+        datasources: dict[str, dict[str, Any]] = {}
+        for spec in DOMAINS:
+            domain = ensure_data_domain(lob["id"], spec["name"], spec["code"], org_id)
+            domains[spec["code"]] = domain
+            project = ensure_project(
+                lob["id"], domain["id"], spec["project_name"], spec["project_slug"], org_id
+            )
+            datasource = ensure_datasource(
+                project["id"],
+                org_id,
+                name=spec["datasource_name"],
+                connector_type=spec["connector_type"],
+                dialect=spec["dialect"],
+                credential_reference=spec["credential_reference"],
+            )
+            datasources[spec["code"]] = datasource
+
+        for code, datasource in datasources.items():
+            print(f"Discovering {code} ({datasource['name']})...")
+            run_discovery(datasource["id"], org_id)
+            discover_and_approve_same_source_relationships(datasource["id"], org_id)
+
+        print("Requesting and approving cross-boundary grants...")
+        for source_code, target_code, reason in GRANT_PAIRS:
+            request_and_approve_grant(
+                domains[source_code]["id"], domains[target_code]["id"], org_id, reason=reason
+            )
+
+        print("Discovering cross-source relationships and object resolutions...")
+        for source_code, target_code, _ in GRANT_PAIRS[::2]:  # one direction per pair is enough to discover both ways
+            discover_and_approve_cross_source(domains[source_code]["id"], domains[target_code]["id"], org_id)
+
     except SeedError as error:
         print(f"\nSeed failed: {error}", file=sys.stderr)
         return 1
 
-    print("\nSample estate ready. Open the Atlas portal and pick 'Northwind Retail Bank (sample)'.")
-    print("The catalog, knowledge graph and unified lineage now render a populated estate.")
+    print("\nSample estate ready. Open ui-next and pick 'Northwind Retail Bank (sample)'.")
+    print(
+        "Catalog, Sources, Relationships, Cross-source, Knowledge graph and Unified "
+        "lineage now render a real, cross-database estate spanning Postgres, SQL "
+        "Server and Oracle."
+    )
     return 0
 
 

@@ -1,6 +1,6 @@
 param(
     [string]$BaseUrl = "http://localhost:8000",
-    [string]$UiUrl = "http://localhost:3000"
+    [string]$UiUrl = "http://localhost:3001"
 )
 
 $ErrorActionPreference = "Stop"
@@ -236,17 +236,20 @@ if (
     throw "Governed term category, synonym, or deprecation state was not retained"
 }
 
+# ui-next is a client-rendered React SPA: its raw served HTML is just the
+# shell (title + #root), with every screen's content -- including the
+# Stewardship screen's markers checked here in the retired static ui/
+# portal -- rendered by JS after load. A plain HTTP GET cannot grep for
+# feature-name strings the way the legacy server-rendered HTML allowed, so
+# this checks the shell actually served, not that any particular screen or
+# feature string exists.
 $ui = Invoke-WebRequest -Uri $UiUrl -UseBasicParsing
-foreach ($marker in @(
-    "STEWARDSHIP CONTROL CENTER",
-    "Infer term links",
-    "Detect conflicts",
-    "Request bulk stewardship action",
-    "Certification expiry"
-)) {
-    if ($ui.Content -notmatch [regex]::Escape($marker)) {
-        throw "Atlas UI is missing stewardship marker: $marker"
-    }
+if (
+    $ui.StatusCode -ne 200 -or
+    $ui.Content -notmatch "<title>Atlas</title>" -or
+    $ui.Content -notmatch 'id="root"'
+) {
+    throw "Atlas UI shell is not being served at $UiUrl"
 }
 
 [pscustomobject]@{

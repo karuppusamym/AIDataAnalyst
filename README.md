@@ -21,17 +21,15 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    docker compose -f compose.yaml -f compose.dev.yaml up --build -d
    ```
 
-   The complete legacy portal remains at `http://localhost:3000`. The React
-   rebuild is also deployed by the default Compose file at
-   `http://localhost:3001`; both use the same API service. With the development
-   overlay, the React rebuild is available at `http://localhost:5174` with
-   hot-module reload, and API changes under `src/` reload automatically.
+   The Atlas portal (`ui-next`, React) is deployed by the default Compose file
+   at `http://localhost:3001`. With the development overlay it is available at
+   `http://localhost:5174` with hot-module reload, and API changes under
+   `src/` reload automatically.
 
 3. Open:
 
    - API documentation: <http://localhost:8000/docs>
-   - Legacy Atlas portal: <http://localhost:3000>
-   - React Atlas portal: <http://localhost:3001> (or <http://localhost:5174> with the development overlay)
+   - Atlas portal: <http://localhost:3001> (or <http://localhost:5174> with the development overlay)
    - Temporal UI: <http://localhost:8080>
    - Neo4j browser: <http://localhost:7474>
    - MinIO console: <http://localhost:9001>
@@ -45,10 +43,15 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ./scripts/verify-local.ps1
    ```
 
-5. Load a sample estate (optional, recommended for a first look). A fresh
+5. Load the sample estate (optional, recommended for a first look). A fresh
    install has no metadata, so the catalog, knowledge graph and unified lineage
-   render empty. Populate a value-free retail-and-risk estate — structure and
-   keys only, never row values — through the governed API:
+   render empty. The `sample-source` (Postgres), `sample-mssql-source` (SQL
+   Server) and `sample-oracle-source` (Oracle) containers each hold a distinct
+   real business domain — Customer, Payments, and Risk — with overlapping
+   `customer_id`/`account_id` values across the three engines. The seed script
+   registers all three as real datasources, runs live discovery against each
+   (not a pushed fixture), and requests/approves the cross-boundary grants and
+   cross-source relationship candidates that connect them:
 
    ```powershell
    docker compose --profile seed run --rm seed
@@ -61,11 +64,16 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
    ```
 
    The seed is idempotent and safe to re-run. It creates a demonstration
-   organization, registers a canonical-push datasource, ingests the estate,
-   discovers relationship candidates from the declared foreign keys, and
-   approves them so **Knowledge graph** and **Unified lineage** render a
-   populated, connected estate. Point it only at a development or demonstration
-   environment.
+   organization with one Customer, one Payments, and one Risk data domain;
+   registers and discovers each domain's real datasource; approves the
+   same-source relationship candidates FK introspection finds; grants
+   Customer↔Payments and Customer↔Risk cross-boundary visibility (deliberately
+   leaving Payments↔Risk ungranted, so **Unified lineage** shows a real
+   `withheld_cross_boundary_domain_ids` case); and approves the resulting
+   cross-source relationship and object-resolution candidates so **Knowledge
+   graph**, **Cross-source**, and **Unified lineage** all render a populated,
+   genuinely cross-database estate. Point it only at a development or
+   demonstration environment.
 
 Development authentication is deliberately explicit. API examples must include identity headers documented in the generated OpenAPI specification. Production requires configured OIDC issuer/audience/JWKS verification and a registered non-environment credential provider; it refuses development authentication and `env` secret resolution.
 
