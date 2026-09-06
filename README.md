@@ -45,13 +45,15 @@ Implemented vertical slices include a live AI analyst, governed metadata retriev
 
 5. Load the sample estate (optional, recommended for a first look). A fresh
    install has no metadata, so the catalog, knowledge graph and unified lineage
-   render empty. The `sample-source` (Postgres), `sample-mssql-source` (SQL
-   Server) and `sample-oracle-source` (Oracle) containers each hold a distinct
-   real business domain — Customer, Payments, and Risk — with overlapping
-   `customer_id`/`account_id` values across the three engines. The seed script
-   registers all three as real datasources, runs live discovery against each
-   (not a pushed fixture), and requests/approves the cross-boundary grants and
-   cross-source relationship candidates that connect them:
+   render empty. The `sample-source` container runs two Postgres databases
+   (`bank_demo` for Customer, `risk_demo` for Risk) and `sample-mssql-source`
+   runs SQL Server (`bank_demo_mssql` for Payments) — three real business
+   domains, each registered as its own datasource so cross-source lineage
+   stays genuine, with overlapping `customer_id`/`account_id` values across
+   all three. The seed script registers all three as real datasources, runs
+   live discovery against each (not a pushed fixture), and requests/approves
+   the cross-boundary grants and cross-source relationship candidates that
+   connect them:
 
    ```powershell
    docker compose --profile seed run --rm seed

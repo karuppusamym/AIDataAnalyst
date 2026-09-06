@@ -20,7 +20,7 @@ x-app-environment: &app-environment
   AIDA_OBJECT_STORE_SECRET_KEY: aida-local-only
   AIDA_AUDIT_HMAC_KEY: local-development-audit-hmac-key-only
   AIDA_SAMPLE_SOURCE_DSN: postgresql://source:source-local-only@sample-source:5432/bank_demo
-  AIDA_SAMPLE_ORACLE_SOURCE_DSN: oracle://source:source-local-only@sample-oracle-source:1521/FREEPDB1
+  AIDA_SAMPLE_RISK_SOURCE_DSN: postgresql://source:source-local-only@sample-source:5432/risk_demo
   AIDA_SAMPLE_MSSQL_SOURCE_DSN: mssql://source:S0urce!LocalOnly1@sample-mssql-source:1433/bank_demo_mssql
   AIDA_MODEL_GENERATION_ENABLED: ${AIDA_MODEL_GENERATION_ENABLED:-false}
   AIDA_MODEL_ROUTE: ${AIDA_MODEL_ROUTE:-openai-bank-sql}
@@ -188,46 +188,6 @@ services:
       retries: 20
     restart: unless-stopped
 
-  sample-oracle-source:
-    image: gvenzl/oracle-free:23-slim
-    environment:
-      ORACLE_PASSWORD: "Sys-Local-Only1"
-      ORACLE_DATABASE: FREEPDB1
-    ports:
-      - "15210:1521"
-    volumes:
-      - sample-oracle-source-data:/opt/oracle/oradata
-    healthcheck:
-      test: ["CMD", "healthcheck.sh"]
-      interval: 10s
-      timeout: 10s
-      retries: 30
-      start_period: 60s
-    restart: unless-stopped
-
-  sample-oracle-source-init:
-    image: gvenzl/oracle-free:23-slim
-    depends_on:
-      sample-oracle-source:
-        condition: service_started
-    volumes:
-      - ./infra/sample-oracle-source/init.sql:/init.sql:ro
-    entrypoint: ["/bin/bash", "-c"]
-    command:
-      - |
-        set -e
-        for attempt in $(seq 1 60); do
-          if sqlplus -s sys/Sys-Local-Only1@//sample-oracle-source:1521/FREEPDB1 as sysdba <<< "SELECT 1 FROM DUAL;" > /tmp/probe.log 2>&1; then
-            if ! grep -q "ORA-" /tmp/probe.log; then
-              break
-            fi
-          fi
-          echo "waiting for sample-oracle-source to accept connections (attempt $$attempt/60)..."
-          sleep 5
-        done
-        sqlplus -s sys/Sys-Local-Only1@//sample-oracle-source:1521/FREEPDB1 as sysdba @/init.sql
-    restart: "no"
-
   sample-mssql-source:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
@@ -385,5 +345,4 @@ volumes:
   redpanda-data:
   minio-data:
   sample-source-data:
-  sample-oracle-source-data:
   sample-mssql-source-data:

@@ -5,15 +5,18 @@ A fresh install has no metadata, so the catalog, knowledge graph and unified
 lineage all render empty. This script builds one organization with three data
 domains, each backed by a real live datasource on a different engine:
 
-    Customer  -- Postgres  (sample-source,       bank_demo)
-    Payments  -- SQL Server (sample-mssql-source, bank_demo_mssql)
-    Risk      -- Oracle     (sample-oracle-source, FREEPDB1)
+    Customer  -- Postgres    (sample-source,       bank_demo)
+    Payments  -- SQL Server  (sample-mssql-source,  bank_demo_mssql)
+    Risk      -- Postgres    (sample-source,        risk_demo -- a second
+                              database on the same server, registered as its
+                              own DataSource so this stays a genuine
+                              cross-source relationship, not a same-source one)
 
 Unlike a pushed metadata envelope, this registers each sample database as a
 real DataSource and triggers the platform's own connector-based discovery
 (DatasourceDiscoveryWorkflow) against it -- the catalog reflects what the
 connector actually introspects, not a hand-written fixture. `customer_id`/
-`account_id` values were seeded to overlap across all three engines (see the
+`account_id` values were seeded to overlap across all three (see the
 infra/*/init.sql files), so the platform's cross-source relationship detector
 finds real matches instead of nothing.
 
@@ -422,10 +425,10 @@ DOMAINS = (
         "name": "Risk",
         "project_name": "Risk & Compliance",
         "project_slug": "risk-compliance",
-        "datasource_name": "Risk & Compliance (Oracle, sample)",
-        "connector_type": "oracle",
-        "dialect": "oracle",
-        "credential_reference": "env://AIDA_SAMPLE_ORACLE_SOURCE_DSN",
+        "datasource_name": "Risk & Compliance (Postgres, sample)",
+        "connector_type": "postgres",
+        "dialect": "postgres",
+        "credential_reference": "env://AIDA_SAMPLE_RISK_SOURCE_DSN",
     },
 )
 
@@ -489,8 +492,8 @@ def main() -> int:
     print("\nSample estate ready. Open ui-next and pick 'Northwind Retail Bank (sample)'.")
     print(
         "Catalog, Sources, Relationships, Cross-source, Knowledge graph and Unified "
-        "lineage now render a real, cross-database estate spanning Postgres, SQL "
-        "Server and Oracle."
+        "lineage now render a real, cross-database estate spanning two Postgres "
+        "databases and SQL Server."
     )
     return 0
 
