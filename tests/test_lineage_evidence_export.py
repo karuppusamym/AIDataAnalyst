@@ -431,10 +431,18 @@ async def test_export_reuses_the_exact_same_gate_objects_as_the_live_lineage_rou
     """Not a copy with the same *shape* -- the literal same function/tuple
     objects the live `unified_lineage_api` routes depend on, imported
     directly rather than reimplemented, so a future change to either can
-    never silently diverge into a separate, weaker export-only path."""
-    import aida.lineage_evidence_export_api as export_api
+    never silently diverge into a separate, weaker export-only path.
 
-    assert export_api._load_datasource is unified_lineage_api._load_datasource
+    The datasource gate is now `aida.resource_scope.load_datasource_in_scope`,
+    the single implementation six routers share (review-2026-09-05 R07). The
+    invariant is unchanged and strictly stronger: this asserts both modules
+    resolve to that one object rather than to each other, so the export cannot
+    diverge from the live route *or* from the other four routers."""
+    import aida.lineage_evidence_export_api as export_api
+    from aida.resource_scope import load_datasource_in_scope
+
+    assert export_api.load_datasource_in_scope is load_datasource_in_scope
+    assert unified_lineage_api.load_datasource_in_scope is load_datasource_in_scope
     assert (
         export_api.UNIFIED_LINEAGE_READER_ROLES is unified_lineage_api.UNIFIED_LINEAGE_READER_ROLES
     )

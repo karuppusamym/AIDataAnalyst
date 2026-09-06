@@ -93,9 +93,13 @@ from atlas.modules.ingestion.models import (
 # unchanged.
 from atlas.modules.observability_audit.models import (
     AccessReviewReportRecord as AccessReviewReportRecord,
+    AuditArchiveLease as AuditArchiveLease,
+    AuditArchiveMembership as AuditArchiveMembership,
     AuditArchiveRecord as AuditArchiveRecord,
     AuditEvent as AuditEvent,
     CompliancePackRecord as CompliancePackRecord,
+    DeliveryAttempt as DeliveryAttempt,
+    DeliveryIntent as DeliveryIntent,
     OutboxEvent as OutboxEvent,
     SloDefinition as SloDefinition,
     SloMeasurement as SloMeasurement,

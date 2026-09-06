@@ -39,7 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field, fields
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final
 
 from aida.models import AuditEvent
@@ -131,6 +131,18 @@ class AuditEventEnvelope:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Attach UTC to a ledger timestamp that came back without an offset.
+
+    `AuditEvent.occurred_at` is declared `DateTime(timezone=True)` and is
+    always written in UTC, but SQLite -- the dialect the test suite builds
+    its schema on -- has no timestamptz and returns naive values. Assuming
+    UTC is correct *for this column*, and doing it here keeps the assumption
+    at the ORM boundary instead of inside the serializer, which stays strict.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def envelope_from_audit_event(row: AuditEvent) -> AuditEventEnvelope:
     """Project an `AuditEvent` ORM row onto the envelope, losing nothing."""
     return AuditEventEnvelope(
@@ -144,7 +156,7 @@ def envelope_from_audit_event(row: AuditEvent) -> AuditEventEnvelope:
         outcome=row.outcome,
         correlation_id=row.correlation_id,
         source_ip=row.source_ip,
-        occurred_at=row.occurred_at,
+        occurred_at=_as_utc(row.occurred_at),
         details=dict(row.details or {}),
     )
 
@@ -152,17 +164,20 @@ def envelope_from_audit_event(row: AuditEvent) -> AuditEventEnvelope:
 def _jsonable(value: Any) -> Any:
     """Reduce a field value to something `json.dumps` renders deterministically."""
     if isinstance(value, datetime):
-        # `isoformat` on an aware datetime is round-trippable and stable;
-        # a naive one would compare equal to a differently-offset instant,
-        # so it is rejected rather than silently normalised.
+        # Normalised to UTC before rendering: the same instant read back
+        # through a connection with a different session timezone would
+        # otherwise produce different bytes and so a different checksum.
+        # A naive value is rejected outright rather than assumed to be UTC
+        # here -- see `envelope_from_audit_event`, which is the one place
+        # allowed to make that assumption, and only about the ledger.
         if value.tzinfo is None:
             raise ValueError("audit envelope timestamps must be timezone-aware")
-        return value.isoformat()
+        return value.astimezone(UTC).isoformat()
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, list | tuple):
         return [_jsonable(item) for item in value]
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if isinstance(value, str | int | float | bool) or value is None:
         return value
     return str(value)
 

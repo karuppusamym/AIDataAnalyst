@@ -7,7 +7,7 @@ from typing import Any, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, delete, func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,7 +19,6 @@ from aida.events import record_audit, record_outbox
 from aida.models import (
     AgentRun,
     BusinessDomain,
-    ContextProduct,
     ContextProductConsumptionEdge,
     ContextProductVersion,
     DataContractVersion,
@@ -33,10 +32,8 @@ from aida.models import (
     MetadataBusinessAnnotation,
     MetadataTable,
     OwnershipAssignment,
-    Project,
     QueryExecution,
     SemanticModelVersion,
-    ToolExecution,
 )
 from aida.platform_schemas import (
     DataContractCreate,
@@ -50,16 +47,15 @@ from aida.platform_schemas import (
     MarketplaceAccessRequestCreate,
     MarketplaceAccessRequestRead,
     MarketplaceProductRead,
-    PortfolioAccessRead,
     PortfolioAnalyticsSummaryRead,
     PortfolioAnalyticsTrendsRead,
-    PortfolioLifecycleRead,
-    PortfolioQualityRead,
-    PortfolioQueueRead,
-    PortfolioTopProductRead,
     PortfolioTrendPointRead,
-    PortfolioUsageRead,
 )
+from aida.portfolio_analytics_read_model import (
+    PortfolioAnalyticsWindow,
+    build_portfolio_analytics_summary,
+)
+from aida.resource_scope import load_project_in_scope
 from aida.schemas import GovernanceReviewRead, Page
 from aida.security import SecurityContext, enforce_organization, require_roles
 
@@ -167,16 +163,6 @@ def evaluate_contract_compatibility(
                     }
                 )
     return findings
-
-
-async def _project_scope(
-    session: AsyncSession, project_id: UUID, context: SecurityContext
-) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    enforce_organization(context, project.organization_id)
-    return project
 
 
 async def _product_scope(
@@ -556,14 +542,6 @@ def _marketplace_access_request_read(
     )
 
 
-def _count_map(rows: Sequence[Any]) -> dict[str, int]:
-    return {str(key): int(value) for key, value in rows}
-
-
-def _count_value(counts: dict[str, int], key: str) -> int:
-    return int(counts.get(key, 0))
-
-
 def _trend_bucket_ranges(
     *, now: datetime, window_days: int, bucket_days: int
 ) -> list[tuple[datetime, datetime]]:
@@ -651,7 +629,7 @@ async def create_data_product(
     context: SecurityContext = Depends(require_roles(*PRODUCT_AUTHORS)),
     session: AsyncSession = Depends(get_session),
 ) -> DataProductVersionRead:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     await _validate_product_references(session, project.organization_id, body)
     product = DataProduct(
         organization_id=project.organization_id,
@@ -804,7 +782,7 @@ async def list_data_products(
     context: SecurityContext = Depends(require_roles(*PRODUCT_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> Page:
-    project = await _project_scope(session, project_id, context)
+    project = await load_project_in_scope(session, project_id, context)
     latest = (
         select(func.max(DataProductVersion.version))
         .where(DataProductVersion.product_id == DataProduct.id)
@@ -1356,404 +1334,22 @@ async def portfolio_analytics_summary(
     context: SecurityContext = Depends(require_roles(*ANALYTICS_READERS)),
     session: AsyncSession = Depends(get_session),
 ) -> PortfolioAnalyticsSummaryRead:
+    # R02: the aggregate queries and every derivation from them live in
+    # `aida.portfolio_analytics_read_model`. What stays here is what only a router
+    # can do -- decide whether this caller may read this organization at all, and
+    # fix the single instant the whole summary reports. Kept as a comment rather
+    # than a docstring because a handler docstring becomes this endpoint's
+    # published OpenAPI `description`, and this endpoint has never carried one.
     enforce_organization(context, organization_id)
-    now = datetime.now(UTC)
-    window_start = now - timedelta(days=window_days)
-
-    product_lifecycle_counts = _count_map(
-        (
-            await session.execute(
-                select(DataProduct.lifecycle_status, func.count())
-                .where(DataProduct.organization_id == organization_id)
-                .group_by(DataProduct.lifecycle_status)
-            )
-        ).all()
-    )
-    product_version_counts = _count_map(
-        (
-            await session.execute(
-                select(DataProductVersion.status, func.count())
-                .where(DataProductVersion.organization_id == organization_id)
-                .group_by(DataProductVersion.status)
-            )
-        ).all()
-    )
-    contract_counts = _count_map(
-        (
-            await session.execute(
-                select(DataContractVersion.status, func.count())
-                .where(DataContractVersion.organization_id == organization_id)
-                .group_by(DataContractVersion.status)
-            )
-        ).all()
-    )
-    context_product_total = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(ContextProduct)
-                .where(ContextProduct.organization_id == organization_id)
-            )
-        )
-        or 0
-    )
-    context_version_counts = _count_map(
-        (
-            await session.execute(
-                select(ContextProductVersion.status, func.count())
-                .where(ContextProductVersion.organization_id == organization_id)
-                .group_by(ContextProductVersion.status)
-            )
-        ).all()
-    )
-
-    access_status_counts = _count_map(
-        (
-            await session.execute(
-                select(DataProductAccessRequest.status, func.count())
-                .where(
-                    DataProductAccessRequest.organization_id == organization_id,
-                    DataProductAccessRequest.created_at >= window_start,
-                )
-                .group_by(DataProductAccessRequest.status)
-            )
-        ).all()
-    )
-    fulfillment_counts = _count_map(
-        (
-            await session.execute(
-                select(DataProductAccessRequest.fulfillment_status, func.count())
-                .where(
-                    DataProductAccessRequest.organization_id == organization_id,
-                    DataProductAccessRequest.created_at >= window_start,
-                )
-                .group_by(DataProductAccessRequest.fulfillment_status)
-            )
-        ).all()
-    )
-    active_grants = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(DataProductAccessRequest)
-                .where(
-                    DataProductAccessRequest.organization_id == organization_id,
-                    DataProductAccessRequest.status == "APPROVED",
-                    or_(
-                        DataProductAccessRequest.expires_at.is_(None),
-                        DataProductAccessRequest.expires_at > now,
-                    ),
-                )
-            )
-        )
-        or 0
-    )
-    grants_expiring = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(DataProductAccessRequest)
-                .where(
-                    DataProductAccessRequest.organization_id == organization_id,
-                    DataProductAccessRequest.status == "APPROVED",
-                    DataProductAccessRequest.expires_at.is_not(None),
-                    and_(
-                        DataProductAccessRequest.expires_at >= now,
-                        DataProductAccessRequest.expires_at <= now + timedelta(days=30),
-                    ),
-                )
-            )
-        )
-        or 0
-    )
-
-    context_product_reads = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(ContextProductConsumptionEdge)
-                .where(
-                    ContextProductConsumptionEdge.organization_id == organization_id,
-                    ContextProductConsumptionEdge.consumed_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-    unique_context_consumers = int(
-        (
-            await session.scalar(
-                select(func.count(func.distinct(ContextProductConsumptionEdge.principal_id))).where(
-                    ContextProductConsumptionEdge.organization_id == organization_id,
-                    ContextProductConsumptionEdge.consumed_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-    mcp_operation_counts = _count_map(
-        (
-            await session.execute(
-                select(McpConsumptionEvidence.operation_kind, func.count())
-                .where(
-                    McpConsumptionEvidence.organization_id == organization_id,
-                    McpConsumptionEvidence.consumed_at >= window_start,
-                )
-                .group_by(McpConsumptionEvidence.operation_kind)
-            )
-        ).all()
-    )
-    total_mcp_operations = sum(mcp_operation_counts.values())
-    unique_mcp_consumers = int(
-        (
-            await session.scalar(
-                select(func.count(func.distinct(McpConsumptionEvidence.principal_id))).where(
-                    McpConsumptionEvidence.organization_id == organization_id,
-                    McpConsumptionEvidence.consumed_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-    agent_generation_counts = _count_map(
-        (
-            await session.execute(
-                select(AgentRun.generation_source, func.count())
-                .where(
-                    AgentRun.organization_id == organization_id,
-                    AgentRun.created_at >= window_start,
-                )
-                .group_by(AgentRun.generation_source)
-            )
-        ).all()
-    )
-    agent_runs_total = sum(agent_generation_counts.values())
-    unique_agent_principals = int(
-        (
-            await session.scalar(
-                select(func.count(func.distinct(AgentRun.principal_id))).where(
-                    AgentRun.organization_id == organization_id,
-                    AgentRun.created_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-    query_executions = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(QueryExecution)
-                .where(
-                    QueryExecution.organization_id == organization_id,
-                    QueryExecution.created_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-    governed_tool_executions = int(
-        (
-            await session.scalar(
-                select(func.count())
-                .select_from(ToolExecution)
-                .where(
-                    ToolExecution.organization_id == organization_id,
-                    ToolExecution.created_at >= window_start,
-                )
-            )
-        )
-        or 0
-    )
-
-    published_product_rows = (
-        await session.execute(
-            select(DataProduct, DataProductVersion)
-            .join(DataProductVersion, DataProductVersion.product_id == DataProduct.id)
-            .where(
-                DataProduct.organization_id == organization_id,
-                DataProduct.lifecycle_status == "ACTIVE",
-                DataProductVersion.status == "PUBLISHED",
-            )
-            .order_by(DataProduct.product_key)
-        )
-    ).all()
-    scored_products = [
-        version.quality_score
-        for _, version in published_product_rows
-        if version.quality_score is not None
-    ]
-    average_quality_score = (
-        round(sum(scored_products) / len(scored_products), 2) if scored_products else None
-    )
-    average_lineage_coverage = (
-        round(
-            sum(version.lineage_coverage for _, version in published_product_rows)
-            / len(published_product_rows),
-            2,
-        )
-        if published_product_rows
-        else None
-    )
-
-    access_by_version_rows = (
-        await session.execute(
-            select(
-                DataProductAccessRequest.data_product_version_id,
-                func.count(),
-                func.count().filter(DataProductAccessRequest.status == "APPROVED"),
-            )
-            .where(
-                DataProductAccessRequest.organization_id == organization_id,
-                DataProductAccessRequest.created_at >= window_start,
-            )
-            .group_by(DataProductAccessRequest.data_product_version_id)
-        )
-    ).all()
-    access_by_version = {
-        version_id: {"requests": int(total), "approved": int(approved)}
-        for version_id, total, approved in access_by_version_rows
-    }
-    context_reads_by_version = {
-        version_id: int(total)
-        for version_id, total in (
-            await session.execute(
-                select(
-                    ContextProductConsumptionEdge.context_product_version_id,
-                    func.count(),
-                )
-                .where(
-                    ContextProductConsumptionEdge.organization_id == organization_id,
-                    ContextProductConsumptionEdge.consumed_at >= window_start,
-                )
-                .group_by(ContextProductConsumptionEdge.context_product_version_id)
-            )
-        ).all()
-    }
-    top_products = sorted(
-        [
-            PortfolioTopProductRead(
-                data_product_version_id=version.id,
-                product_key=product.product_key,
-                name=version.name,
-                domain_name=version.domain_name,
-                certification_status=version.certification_status,
-                quality_score=version.quality_score,
-                lineage_coverage=version.lineage_coverage,
-                access_request_count=access_by_version.get(version.id, {}).get("requests", 0),
-                approved_access_count=access_by_version.get(version.id, {}).get("approved", 0),
-                context_read_count=context_reads_by_version.get(
-                    version.context_product_version_id, 0
-                )
-                if version.context_product_version_id is not None
-                else 0,
-            )
-            for product, version in published_product_rows
-        ],
-        key=lambda item: (
-            -(item.access_request_count + item.context_read_count),
-            -item.approved_access_count,
-            -(item.quality_score or -1),
-            item.product_key,
+    return await build_portfolio_analytics_summary(
+        session,
+        PortfolioAnalyticsWindow(
+            organization_id=organization_id,
+            now=datetime.now(UTC),
+            window_days=window_days,
+            low_quality_threshold=low_quality_threshold,
+            top_products_limit=top_products_limit,
         ),
-    )[:top_products_limit]
-
-    return PortfolioAnalyticsSummaryRead(
-        generated_at=now,
-        window_days=window_days,
-        low_quality_threshold=low_quality_threshold,
-        lifecycle=PortfolioLifecycleRead(
-            data_products_total=sum(product_lifecycle_counts.values()),
-            data_products_active=_count_value(product_lifecycle_counts, "ACTIVE"),
-            data_products_candidate=_count_value(product_lifecycle_counts, "CANDIDATE"),
-            data_products_retired=_count_value(product_lifecycle_counts, "RETIRED"),
-            data_product_versions_draft=_count_value(product_version_counts, "DRAFT"),
-            data_product_versions_review_required=_count_value(
-                product_version_counts, "REVIEW_REQUIRED"
-            ),
-            data_product_versions_published=_count_value(product_version_counts, "PUBLISHED"),
-            data_product_versions_retired=_count_value(product_version_counts, "RETIRED"),
-            data_contract_versions_draft=_count_value(contract_counts, "DRAFT"),
-            data_contract_versions_review_required=_count_value(
-                contract_counts, "REVIEW_REQUIRED"
-            ),
-            data_contract_versions_published=_count_value(contract_counts, "PUBLISHED"),
-            context_products_total=context_product_total,
-            context_product_versions_draft=_count_value(context_version_counts, "DRAFT"),
-            context_product_versions_review_required=_count_value(
-                context_version_counts, "REVIEW_REQUIRED"
-            ),
-            context_product_versions_published=_count_value(context_version_counts, "PUBLISHED"),
-            context_product_versions_deprecated=_count_value(
-                context_version_counts, "DEPRECATED"
-            ),
-        ),
-        access=PortfolioAccessRead(
-            requests_created=sum(access_status_counts.values()),
-            requests_pending=_count_value(access_status_counts, "PENDING"),
-            requests_approved=_count_value(access_status_counts, "APPROVED"),
-            requests_rejected=_count_value(access_status_counts, "REJECTED"),
-            requests_revoked=_count_value(access_status_counts, "REVOKED"),
-            requests_expired=_count_value(access_status_counts, "EXPIRED"),
-            active_grants=active_grants,
-            grants_expiring_within_30_days=grants_expiring,
-            fulfillment_pending=_count_value(fulfillment_counts, "PENDING"),
-            fulfillment_provisioned=_count_value(fulfillment_counts, "PROVISIONED"),
-            fulfillment_failed=_count_value(fulfillment_counts, "FAILED"),
-            fulfillment_revoked=_count_value(fulfillment_counts, "REVOKED"),
-        ),
-        usage=PortfolioUsageRead(
-            unique_context_consumers=unique_context_consumers,
-            unique_mcp_consumers=unique_mcp_consumers,
-            unique_agent_principals=unique_agent_principals,
-            context_product_reads=context_product_reads,
-            mcp_operations=total_mcp_operations,
-            mcp_resource_reads=_count_value(mcp_operation_counts, "RESOURCE"),
-            mcp_prompt_reads=_count_value(mcp_operation_counts, "PROMPT"),
-            mcp_tool_calls=_count_value(mcp_operation_counts, "TOOL"),
-            mcp_control_operations=_count_value(mcp_operation_counts, "CONTROL"),
-            agent_runs=agent_runs_total,
-            governed_tool_agent_runs=_count_value(agent_generation_counts, "GOVERNED_TOOL"),
-            model_gateway_agent_runs=_count_value(agent_generation_counts, "MODEL_GATEWAY"),
-            development_override_agent_runs=_count_value(
-                agent_generation_counts, "DEVELOPMENT_OVERRIDE"
-            ),
-            policy_blocked_agent_runs=_count_value(agent_generation_counts, "POLICY_BLOCK"),
-            query_executions=query_executions,
-            governed_tool_executions=governed_tool_executions,
-        ),
-        quality=PortfolioQualityRead(
-            published_products=len(published_product_rows),
-            scored_products=len(scored_products),
-            average_quality_score=average_quality_score,
-            low_quality_products=sum(
-                1 for score in scored_products if int(score) < low_quality_threshold
-            ),
-            certified_products=sum(
-                1
-                for _, version in published_product_rows
-                if version.certification_status == "CERTIFIED"
-            ),
-            uncertified_products=sum(
-                1
-                for _, version in published_product_rows
-                if version.certification_status != "CERTIFIED"
-            ),
-            average_lineage_coverage=average_lineage_coverage,
-        ),
-        queues=PortfolioQueueRead(
-            review_required_data_product_versions=_count_value(
-                product_version_counts, "REVIEW_REQUIRED"
-            ),
-            review_required_data_contract_versions=_count_value(
-                contract_counts, "REVIEW_REQUIRED"
-            ),
-            review_required_context_product_versions=_count_value(
-                context_version_counts, "REVIEW_REQUIRED"
-            ),
-            pending_marketplace_access_requests=_count_value(access_status_counts, "PENDING"),
-        ),
-        top_products=top_products,
     )
 
 

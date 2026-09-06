@@ -13883,6 +13883,23 @@
       "GovernanceReviewBulkDecisionItemRead": {
         "additionalProperties": false,
         "properties": {
+          "outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "APPLIED",
+                  "CONFLICT",
+                  "NOT_PERMITTED",
+                  "FAILED"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
           "reason": {
             "anyOf": [
               {
@@ -22719,6 +22736,70 @@
         "title": "QueryLineageRead",
         "type": "object"
       },
+      "ReadinessResponse": {
+        "additionalProperties": false,
+        "description": "`/health/ready`'s body.\n\nA superset of `HealthResponse`: `dependencies` keeps its existing meaning\n(every probe, merged, name -> state) so existing consumers and tests are\nunaffected, and the new fields add the contract that was missing.\n`required`/`optional` say which probes actually gate the verdict, `controls`\nreports enforcement posture per control (F11) rather than reachability, and\n`signals` carries staleness and lag as strings.",
+        "properties": {
+          "controls": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Controls",
+            "type": "object"
+          },
+          "dependencies": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "object"
+          },
+          "optional": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Optional",
+            "type": "object"
+          },
+          "required": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Required",
+            "type": "object"
+          },
+          "service": {
+            "title": "Service",
+            "type": "string"
+          },
+          "signals": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Signals",
+            "type": "object"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "version"
+        ],
+        "title": "ReadinessResponse",
+        "type": "object"
+      },
       "RelationshipCandidateBulkDecisionItemRead": {
         "additionalProperties": false,
         "properties": {
@@ -23825,6 +23906,81 @@
           "diffable_count"
         ],
         "title": "ReviewQueueRead",
+        "type": "object"
+      },
+      "ReviewQueueSummaryRead": {
+        "additionalProperties": false,
+        "description": "F16: aggregate counts for the review queue, composed from nothing.\n\nDeliberately a separate response model from `ReviewQueueRead` rather than a\ntrimmed variant of it. `ReviewQueueRead`'s counts are `computed_field`s over\na list that was actually returned, which is what makes them impossible to\ndisagree with the page; these counts describe rows the caller never\nreceives, so they are ordinary fields carrying an aggregate query's result\nand the two must not be mistaken for each other.\n\n`by_queue` groups by `requested_action` -- the reviewer-facing work queues\n(approve a publish, approve a withdrawal, ...) within an object type.",
+        "properties": {
+          "by_object_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Object Type",
+            "type": "object"
+          },
+          "by_queue": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Queue",
+            "type": "object"
+          },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "By Status",
+            "type": "object"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "object_type_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Object Type Filter"
+          },
+          "organization_id": {
+            "format": "uuid",
+            "title": "Organization Id",
+            "type": "string"
+          },
+          "status_filter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status Filter"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "organization_id",
+          "status_filter",
+          "object_type_filter",
+          "generated_at",
+          "total",
+          "by_status",
+          "by_object_type",
+          "by_queue"
+        ],
+        "title": "ReviewQueueSummaryRead",
         "type": "object"
       },
       "ReviewerAgentRunResult": {
@@ -30040,6 +30196,7 @@
     },
     "/health/live": {
       "get": {
+        "description": "F18: deliberately trivial and dependency-free. Liveness answers \"should\nthis process be restarted\", and a liveness check that consults a database\nturns a database outage into a rolling restart of every replica.",
         "operationId": "liveness_health_live_get",
         "responses": {
           "200": {
@@ -30061,13 +30218,14 @@
     },
     "/health/ready": {
       "get": {
+        "description": "F18/F11: bounded probes, a required/optional contract, and control posture.\n\n`dependencies` keeps its previous meaning (name -> UP/DOWN for every probe).\nWhat is new: `required` vs `optional` (only `required` gates the 503, so a\nTemporal outage no longer reports a universal outage -- AU-12 already made\nthe app serve through one), `signals` (per-probe staleness, timing and the\noutbox backlog depth/age this deployment uses as its projection-lag signal),\nand `controls`, which reports whether workspace authorization is ENFORCING,\nOBSERVING or SCOPE_UNRESOLVED -- the distinction F11 found was impossible to\nmake without reading source. Every probe is timeout-bounded by\n`settings.readiness_probe_timeout_seconds`; see `aida.readiness`.",
         "operationId": "readiness_health_ready_get",
         "responses": {
           "200": {
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/HealthResponse"
+                  "$ref": "#/components/schemas/ReadinessResponse"
                 }
               }
             },
@@ -54580,7 +54738,7 @@
     },
     "/v1/governance/reviews/bulk-decision": {
       "post": {
-        "description": "PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING\ngovernance reviews in one call, across whichever object type(s) the\nunified review queue already supports, by explicit id list or by a\nstatus/object-type filter scoped to the caller's organization.\n\nExactly the same maker != checker, PENDING-only, and organization-\nboundary rules as `decide_governance_review` apply per item -- this\ncalls `_apply_governance_review_decision`, the same core the\nsingle-item endpoint calls, so the two paths cannot drift -- but a rule\nviolation on one item marks that item FAILED and continues (RL-6/CT-1's\npartial-success precedent) rather than aborting the whole batch. Each\nitem's dispatch runs inside its own SAVEPOINT (`session.begin_nested`),\nso a failure partway through one item's (possibly multi-table) side\neffects can never leak a partial write into an item reported FAILED --\nverified directly against a real SAVEPOINT rollback, not assumed.\n\nSelection is always a single bulk query: an explicit id list is deduped\nin Python then fetched with one `WHERE id IN (...)`, and a filter pushes\nevery predicate into SQL via `_resolve_governance_review_bulk_subjects`.\nNothing here loads the full review table into Python to filter it there.",
+        "description": "PG-3: decide up to GOVERNANCE_REVIEW_BULK_DECISION_MAX_ITEMS PENDING\ngovernance reviews in one call, across whichever object type(s) the\nunified review queue already supports, by explicit id list or by a\nstatus/object-type filter scoped to the caller's organization.\n\nExactly the same maker != checker, PENDING-only, and organization-\nboundary rules as `decide_governance_review` apply per item, because both\nendpoints go through `governance_decision_service.decide_review` -- but a\nrule violation on one item marks that item FAILED and continues\n(RL-6/CT-1's partial-success precedent) rather than aborting the whole\nbatch. Each item's dispatch runs inside its own SAVEPOINT\n(`session.begin_nested`), so a failure partway through one item's\n(possibly multi-table) side effects can never leak a partial write into\nan item reported FAILED -- verified directly against a real SAVEPOINT\nrollback, not assumed.\n\nF05: the batch's subjects are loaded with `FOR UPDATE` in a deterministic\nid order (`lock_reviews_for_decision`) so two overlapping batches queue\nrather than deadlock, and each item is then *claimed* out of PENDING with\na compare-and-set before its side effects run. The in-memory status check\nthat used to stand in for that claim is still here, but only as a cheap\npre-filter: an item whose status changed between this batch's read and\nits claim is reported `outcome=\"CONFLICT\"` with the review's refreshed\nstatus, and its savepoint is rolled back, so a contended review still\nends with exactly one terminal decision and one set of side effects.\n\nSelection is always a single bulk query: an explicit id list is deduped\nin Python then fetched with one `WHERE id IN (...)`, and a filter pushes\nevery predicate into SQL via `_resolve_governance_review_bulk_subjects`.\nNothing here loads the full review table into Python to filter it there.",
         "operationId": "bulk_decide_governance_reviews_v1_governance_reviews_bulk_decision_post",
         "parameters": [
           {
@@ -54890,8 +55048,163 @@
         ]
       }
     },
+    "/v1/governance/reviews/queue/summary": {
+      "get": {
+        "description": "F16: how much is in the queue, without composing any of it.\n\nThe Overview screen used to answer \"how many reviews are waiting\" by\nrequesting a page of up to 1,000 reviews from `/queue` -- each one carrying\na composed diff, its evidence and its snapshots -- and taking the length of\nthe list. This is one grouped `COUNT(*)`: nothing is loaded, nothing is\ndiffed, and the response size does not depend on the queue depth.\n\nThe `status` and `object_type` filters mean the same thing they do on\n`/queue`, so a screen can count exactly the batch it would otherwise fetch.",
+        "operationId": "get_review_queue_summary_v1_governance_reviews_queue_summary_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 30,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": "PENDING",
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "object_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Object Type"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Principal-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Principal-Type",
+            "required": false,
+            "schema": {
+              "default": "USER",
+              "title": "X-Principal-Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Organization-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Organization-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Roles",
+            "required": false,
+            "schema": {
+              "default": "Viewer",
+              "title": "X-Roles",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Business-Purpose",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Business-Purpose"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewQueueSummaryRead"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review Queue Summary",
+        "tags": [
+          "governance-review-queue"
+        ]
+      }
+    },
     "/v1/governance/reviews/{review_id}/decision": {
       "post": {
+        "description": "One checker's decision on one governance review.\n\nThe `FOR UPDATE` read and the `PENDING`/maker-checker guards below are\nkept as the fast, specific refusals a reviewer should see for a review\nthat was already decided before they pressed the button. They are not\nwhat makes the decision safe under contention: the authoritative guard is\nthe compare-and-set inside `governance_decision_service.claim_review`,\nreached through `_apply_governance_review_decision`, which is the same\nguard the bulk endpoint, the sample-review endpoint and the reviewer\nagent go through (F05). A checker that loses that race gets a 409\ncarrying the review's refreshed state instead of a second set of side\neffects.",
         "operationId": "decide_governance_review_v1_governance_reviews__review_id__decision_post",
         "parameters": [
           {

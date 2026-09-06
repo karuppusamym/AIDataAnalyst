@@ -14,6 +14,30 @@ Existing identity workflows (bank IAM sync, admin CLI delete, etc.) should
 call ``emit_principal_deleted`` / ``emit_principal_merged`` at the moment
 they remove or merge a principal. The event itself is what downstream
 services (SIEM, audit archive, external identity sync) also consume.
+
+Ownership record (D02; F19 in ``Docs/review-2026-09-05/REVIEW.md``)
+-------------------------------------------------------------------
+:Owner: platform governance -- ownership and identity lifecycle.
+:Default: this module mutates nothing on its own. Its handlers are gated by
+    ``settings.ownership_leaver_auto_reassign``; the only entry point that
+    reaches them from a running process is ``aida.principal_reconciliation``,
+    which is off by default (``settings.principal_reconciliation_enabled``).
+:Production eligibility: eligible once an identity source actually calls the
+    two emitters below -- an IdP webhook, a directory sync, or an admin
+    workflow. Until one exists, the reconciliation pass replays the outbox
+    rows these functions write, so a deployment that has never called them
+    has nothing to reconcile and the pass is a no-op.
+:Retirement condition: retire this module when principal lifecycle moves to
+    an external identity service that owns ownership reassignment directly.
+    Retiring it means deleting the two emitters, the reconciliation pass and
+    ``ownership_principal_lifecycle`` together -- they are one feature.
+
+The two ``event_type`` strings are constants here rather than literals at
+each call site because the reconciliation consumer
+(``aida.principal_reconciliation``) has to select on exactly the strings
+this module writes. A consumer that disagreed with the emitter by one
+character would silently reconcile nothing, which is the failure mode F19
+already found once.
 """
 
 from __future__ import annotations
@@ -31,6 +55,9 @@ from aida.ownership_principal_lifecycle import (
     handle_principal_merged,
 )
 from aida.security import SecurityContext
+
+PRINCIPAL_DELETED_EVENT_TYPE = "identity.principal.deleted.v1"
+PRINCIPAL_MERGED_EVENT_TYPE = "identity.principal.merged.v1"
 
 
 async def emit_principal_deleted(
@@ -67,7 +94,7 @@ async def emit_principal_deleted(
         organization_id=organization_id,
         aggregate_type="principal",
         aggregate_id=principal_id,
-        event_type="identity.principal.deleted.v1",
+        event_type=PRINCIPAL_DELETED_EVENT_TYPE,
         payload=payload,
     )
     return await handle_principal_deleted(
@@ -115,7 +142,7 @@ async def emit_principal_merged(
         organization_id=organization_id,
         aggregate_type="principal",
         aggregate_id=from_principal_id,
-        event_type="identity.principal.merged.v1",
+        event_type=PRINCIPAL_MERGED_EVENT_TYPE,
         payload=payload,
     )
     return await handle_principal_merged(

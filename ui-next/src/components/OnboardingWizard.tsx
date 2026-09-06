@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { useOrgId } from "../lib/org";
+import { useSession } from "../lib/session";
 import type { Persona } from "../lib/ui-types";
 import { Button, Pill } from "./primitives";
 import "./OnboardingWizard.css";
@@ -69,18 +71,35 @@ export const PERSONA_CHECKLISTS: Record<Persona, ChecklistItem[]> = {
 
 const STORAGE_PREFIX = "atlas.onboarding";
 
-function loadDone(persona: string): Set<string> {
+/* F22: progress is keyed by ORGANIZATION, PRINCIPAL and persona -- not by
+ * persona alone, which is what it used to be.
+ *
+ * THE DEFECT that removes: the key was the persona name, so one browser shared
+ * one checklist across every account and every tenant that used it. Two people
+ * on a shared machine saw each other's ticks; an administrator who is a Steward
+ * in one organization and in another saw one organization's progress presented
+ * as the other's. Onboarding is per person per estate, and the key has to say
+ * so.
+ *
+ * It remains a per-browser convenience either way: there is no server field for
+ * "has this principal finished onboarding", so clearing storage or opening a
+ * private window still starts over. That is a known limit, not a silent one. */
+function progressKey(orgId: string, principalId: string, persona: string): string {
+  return `${STORAGE_PREFIX}.${orgId}.${principalId}.${persona}.done`;
+}
+
+function loadDone(key: string): Set<string> {
   try {
-    const raw = localStorage.getItem(`${STORAGE_PREFIX}.${persona}.done`);
+    const raw = localStorage.getItem(key);
     return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
   } catch {
     return new Set(); // private window / storage blocked -- degrade to "nothing marked done yet"
   }
 }
 
-function saveDone(persona: string, done: Set<string>) {
+function saveDone(key: string, done: Set<string>) {
   try {
-    localStorage.setItem(`${STORAGE_PREFIX}.${persona}.done`, JSON.stringify([...done]));
+    localStorage.setItem(key, JSON.stringify([...done]));
   } catch {
     /* best-effort only -- a viewer whose browser blocks storage just re-sees the checklist next time */
   }
@@ -99,29 +118,36 @@ export function OnboardingWizard({
   onNavigate: (navId: string) => void;
   compact?: boolean;
 }) {
-  const [done, setDone] = useState<Set<string>>(() => (persona ? loadDone(persona) : new Set()));
+  /* Both fall back safely outside their providers (bare-rendered tests): the
+   * default estate id, and no principal. A shared fallback key is still
+   * scoped by persona, which is what this component used to do for everyone. */
+  const orgId = useOrgId();
+  const principalId = useSession().me?.principal_id ?? "anonymous";
+  const key = persona ? progressKey(orgId, principalId, persona) : null;
+
+  const [done, setDone] = useState<Set<string>>(() => (key ? loadDone(key) : new Set()));
 
   useEffect(() => {
-    setDone(persona ? loadDone(persona) : new Set());
-  }, [persona]);
+    setDone(key ? loadDone(key) : new Set());
+  }, [key]);
 
   const checklist = useMemo(() => (persona ? PERSONA_CHECKLISTS[persona] : []), [persona]);
 
   const toggle = (navId: string) => {
-    if (!persona) return;
+    if (!key) return;
     setDone((prev) => {
       const next = new Set(prev);
       if (next.has(navId)) next.delete(navId);
       else next.add(navId);
-      saveDone(persona, next);
+      saveDone(key, next);
       return next;
     });
   };
 
   const reset = () => {
-    if (!persona) return;
+    if (!key) return;
     setDone(new Set());
-    saveDone(persona, new Set());
+    saveDone(key, new Set());
   };
 
   if (!persona) {

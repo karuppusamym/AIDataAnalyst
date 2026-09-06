@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type {
   DataSourceRead,
   RelationshipCandidateBulkDecisionResultRead,
@@ -269,9 +269,12 @@ describe("RelationshipsScreen", () => {
     await waitFor(() => expect(fetchRelationshipCandidateReviewQueue).toHaveBeenCalledTimes(2));
   });
 
-  it("requires a reason before calling the endpoint on reject, and skips the call if none is given", async () => {
+  /* The rationale moved out of `window.prompt` and into a focus-trapped
+     dialog (review 2026-09-05, F21): a blocked prompt returned `null`, which
+     was indistinguishable from "the reviewer cancelled", so the decision was
+     dropped without anyone being told. */
+  it("will not submit a rejection until a rationale is typed into the dialog", async () => {
     fetchRelationshipCandidateReviewQueue.mockResolvedValue(queueOf([HIGH_IMPACT]));
-    vi.spyOn(window, "prompt").mockReturnValue(null);
     const RelationshipsScreen = await loadScreen();
     render(<RelationshipsScreen />);
     await pickDatasource();
@@ -281,8 +284,22 @@ describe("RelationshipsScreen", () => {
 
     screen.getAllByRole("button", { name: "Reject" })[0]!.click();
 
-    expect(window.prompt).toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: "Reject this relationship" });
+    expect(within(dialog).getByRole("button", { name: "Reject" })).toBeDisabled();
     expect(decideRelationshipCandidate).not.toHaveBeenCalled();
+
+    fireEvent.change(within(dialog).getByRole("textbox"), {
+      target: { value: "Coincidental name match across unrelated domains." },
+    });
+    within(dialog).getByRole("button", { name: "Reject" }).click();
+
+    await waitFor(() =>
+      expect(decideRelationshipCandidate).toHaveBeenCalledWith(
+        "rc_high",
+        { decision: "REJECT", reason: "Coincidental name match across unrelated domains." },
+        undefined,
+      ),
+    );
   });
 
   it("a bulk-selected set calls the bulk-decision endpoint once with every selected id, not N single calls", async () => {

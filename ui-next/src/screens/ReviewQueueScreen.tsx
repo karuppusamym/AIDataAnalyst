@@ -1,10 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+/* Filters and selection live in the URL so a filtered view is shareable and
+   survives Back/Forward. This screen carried a verbatim copy of the old hook
+   -- a `useState` seeded once from `location.search`, subscribed to nothing --
+   so its idea of the selection and the address bar drifted apart the first
+   time either the Back button or a same-screen link was used (review
+   2026-09-05, F09 - R07). The shared hook reads one location store. */
+import { useUrlState } from "../lib/useUrlState";
 import type { ReviewQueueProposalRead } from "../lib/types";
 import { ApiError, decideGovernanceReview, fetchReviewQueue } from "../lib/api";
 import { VirtualList } from "../components/VirtualList";
 import { PropagationLog } from "../components/PropagationLog";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
-import "../components/ProposalCard.css";
+import {
+  Button,
+  ConfirmDialog,
+  CopyLinkButton,
+  Empty,
+  ErrorState,
+  Field,
+  Pill,
+  useToast,
+} from "../components/primitives";
+/* The .prop/.conf/.dl classes `ProposalRow` below renders. The file kept
+ * its name from a fixture-era `ProposalCard` component that no longer exists
+ * (D01): the component was dead, these styles were not. */
+import "../components/ProposalRow.css";
 import "../components/EvidencePane.css";
 import "./ReviewQueueScreen.css";
 
@@ -65,22 +84,6 @@ const OBJECT_TYPES = [
 
 const pct = (n: number) => `${Math.round(n * 100)}%`;
 
-function useUrlState() {
-  const [params, setParams] = useState(() => new URLSearchParams(location.search));
-  const update = useCallback((patch: Record<string, string | null>) => {
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null || v === "") next.delete(k);
-        else next.set(k, v);
-      }
-      const query = next.toString();
-      history.replaceState(null, "", `${location.pathname}${query ? `?${query}` : ""}${location.hash}`);
-      return next;
-    });
-  }, []);
-  return [params, update] as const;
-}
 
 /** P1-03: per-object-type row-detail renderers. The queue already ships
  *  every object_type through the same generic ProposalRow; this map only
@@ -287,7 +290,19 @@ export function ReviewQueueScreen() {
   const [data, setData] = useState<{ proposals: ReviewQueueProposalRead[]; byStatus: Record<string, number> } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const toast = useToast();
   const [deciding, setDeciding] = useState<string | null>(null);
+  /* Rejection needs a written rationale -- the endpoint refuses REJECT without
+     one. That was collected with `window.prompt`, which cannot be labelled or
+     validated, is blocked outright by some browsers (returning `null`, which
+     this screen read as "cancelled", so the reviewer's decision vanished), and
+     leaves no accessible name on anything. `ConfirmDialog` is the same
+     transaction with a real focus-trapped dialog, a required field, and the
+     server's own error shown in place (review 2026-09-05, F21). */
+  const [rejecting, setRejecting] = useState<string | null>(null);
+  const [decideError, setDecideError] = useState<string | null>(null);
+  const rejectingRef = useRef<string | null>(null);
+  rejectingRef.current = rejecting;
 
   const inflight = useRef<AbortController | null>(null);
   const reqSeq = useRef(0);
@@ -324,18 +339,27 @@ export function ReviewQueueScreen() {
   const proposals = data?.proposals ?? [];
 
   const decide = useCallback(
-    async (reviewId: string, decision: "APPROVE" | "REJECT") => {
-      let reason: string | null = null;
-      if (decision === "REJECT") {
-        reason = window.prompt("A reason is required to reject this proposal:");
-        if (!reason) return; // the endpoint itself requires a non-empty reason on REJECT
-      }
+    async (reviewId: string, decision: "APPROVE" | "REJECT", reason: string | null) => {
       setDeciding(reviewId);
+      setDecideError(null);
       try {
         await decideGovernanceReview(reviewId, { decision, reason });
+        setRejecting(null);
+        // The list refetches underneath, which on its own looks like nothing
+        // happened. Say what was recorded.
+        toast.show(
+          decision === "APPROVE" ? "Approval recorded." : "Rejection recorded with your rationale.",
+        );
         await load();
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        const message = e instanceof ApiError ? e.detail : (e as Error).message;
+        // A failed decision belongs next to the decision, not in the screen's
+        // load-error slot: the reviewer still has the dialog open and needs to
+        // know whether to retry or to reload because someone else decided
+        // first (409). Replacing the whole list with an error banner would
+        // discard the rationale they just typed.
+        if (rejectingRef.current) setDecideError(message);
+        else setError(message);
       } finally {
         setDeciding(null);
       }
@@ -354,6 +378,7 @@ export function ReviewQueueScreen() {
 
   return (
     <div className="rq">
+      {toast.node}
       <header className="rq__head">
         <div>
           <h1 className="rq__h1">Review queue</h1>
@@ -432,7 +457,11 @@ export function ReviewQueueScreen() {
                 focused={p.review_id === focusedId}
                 onFocus={() => setParams({ review: p.review_id })}
                 deciding={deciding === p.review_id}
-                onDecide={(decision) => void decide(p.review_id, decision)}
+                onDecide={(decision) =>
+                  decision === "REJECT"
+                    ? setRejecting(p.review_id)
+                    : void decide(p.review_id, "APPROVE", null)
+                }
               />
             )}
           />
@@ -463,23 +492,46 @@ export function ReviewQueueScreen() {
             </ol>
           </div>
           <footer className="evp__foot">
-            <Button
-              onClick={() => {
-                const permalink = `${location.origin}${location.pathname}?review=${focused.review_id}`;
-                void navigator.clipboard?.writeText(permalink);
-              }}
-            >
-              Copy permalink
-            </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/governance`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+            <CopyLinkButton
+              target={{ screen: "governance", params: { review: focused.review_id } }}
+              label="Copy permalink"
+            />
           </footer>
         </aside>
       ) : null}
 
+      {rejecting ? (
+        <ConfirmDialog
+          title="Reject this proposal"
+          description="The rationale is recorded on the review and is visible to whoever raised it."
+          reasonLabel="Why is this being rejected?"
+          requireReason
+          destructive
+          confirmLabel="Reject proposal"
+          busy={deciding === rejecting}
+          error={decideError}
+          onCancel={() => {
+            setRejecting(null);
+            setDecideError(null);
+          }}
+          onConfirm={(reason) => void decide(rejecting, "REJECT", reason)}
+        />
+      ) : null}
+
       {PROPAGATION_LOG_ENABLED ? (
         <section className="rq__sec">
-          <h2 className="rq__h2">Why orders_raw is currently blocked</h2>
+          <h2 className="rq__h2">How a quality incident propagates (worked example)</h2>
+          {/* D02: kept, and labelled. The gate below being on is not evidence
+              that a traversal happened -- so the section says whose data this
+              is not, in the heading, in the pill and in the accessible name. */}
           <PropagationLog
             title="Quality propagation · ADR-0016 fails closed"
+            illustrative
+            illustrativeNote="A hard-coded four-step story about a sample table. No lineage walk produced it: `quality_coupling.check_tool_gate` gates only on a tool's own declared dependencies, and no classification-propagation mechanism exists yet (AT-11). It is here to show the shape of the explanation a real traversal will render."
             steps={[
               {
                 kind: "origin",

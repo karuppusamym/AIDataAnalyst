@@ -20,6 +20,18 @@ RUN python -m pip install --upgrade pip && python -m pip install uv==0.8.17
 COPY pyproject.toml uv.lock alembic.ini ./
 COPY src ./src
 COPY migrations ./migrations
+# REVIEW.md §7 packaging gap: `[tool.hatch.build.targets.wheel].packages` in
+# pyproject.toml declares three package roots -- `src/aida`, `src/atlas` and
+# `sdk/aida_tool_sdk` -- but only `src` was copied here. That did not fail the
+# build: hatchling's editable install wrote a .pth for the roots it could see
+# and silently skipped the missing one, so the image came out claiming to be an
+# install of this project while `import aida_tool_sdk` raised ModuleNotFoundError.
+# The decision recorded in Docs/60-delivery/20-capability-register.md is that the
+# image IS the project's declared distribution, so it ships every declared
+# package. `scripts/check_image_packaging.py` fails CI if a package root is
+# added to the manifest without a matching COPY here (and the docker-build job
+# imports the SDK from the built image as the runtime proof).
+COPY sdk ./sdk
 
 # --frozen (also set via UV_FROZEN above): fail the build rather than silently
 # re-resolving a dependency set that differs from the committed lockfile, same

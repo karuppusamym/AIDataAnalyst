@@ -85,54 +85,61 @@ export function isScreenId(value: string | null | undefined): value is ScreenId 
 }
 
 /**
- * Estate context that survives a screen change.
+ * Estate context that MAY survive a screen change.
  *
- * These name *where in the estate you are working*, not *what you filtered on
- * this page*. Moving from Catalog to Lineage should keep the datasource you
- * were looking at; it should not keep Catalog's text search. Everything not
- * listed here is screen-owned and is dropped when the screen changes.
+ * These name *where in the estate you are working* rather than *what you
+ * filtered on this page*. Moving from Data quality to Lineage should keep the
+ * datasource you were looking at; it should not keep Data quality's severity
+ * filter.
+ *
+ * Inheritance is conditional, not automatic: a context field is carried only
+ * when the TARGET screen declares that it reads it. Catalog does not read
+ * `ds`, so arriving there with `?ds=…` would leave a field in a shareable URL
+ * that the screen it points at does not understand -- which is the same class
+ * of defect as the shell carrying the previous page's whole query string.
  */
 export const CONTEXT_FIELDS = ["ds", "project", "dom"] as const;
 
 /**
- * The query fields each screen owns, beyond `CONTEXT_FIELDS`.
+ * The query fields each screen reads, including any of `CONTEXT_FIELDS`.
  *
- * A screen missing from this table declares no fields: `buildLink` will pass
- * its params through unchanged and warn in development. Add the screen rather
+ * Derived from what each screen actually reads out of the query string. A
+ * screen missing from this table declares nothing: `buildLink` passes its
+ * params through unchanged and warns in development. Add the screen rather
  * than relying on that -- an undeclared field is a field nobody can tell you
  * is misspelled.
  */
 export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> = {
   home: [],
   inbox: ["persona"],
-  analyst: ["run"],
+  analyst: ["ds", "run"],
   catalog: ["asset", "cert", "q", "type"],
-  semantics: ["metric", "model"],
-  tools: ["status", "tool"],
+  semantics: ["metric", "model", "project"],
+  tools: ["project", "status", "tool"],
   "tool-plans": ["plan"],
-  lineage: ["depth", "node", "view"],
-  "unified-lineage": ["node", "scope", "tab"],
+  lineage: ["depth", "ds", "node", "view"],
+  "unified-lineage": ["dom", "ds", "node", "scope", "tab"],
   marketplace: ["class", "domain", "product", "q", "sort"],
-  context: [],
-  developer: ["tab"],
+  context: ["project"],
+  developer: ["project", "tab"],
   "portfolio-analytics": ["window"],
-  stewardship: ["action", "field", "pattern"],
+  stewardship: ["action", "ds", "field", "pattern"],
   worklist: ["ranking", "zero"],
   playbooks: [],
   "negative-knowledge": ["assertion_type", "subject", "suppression"],
-  meaning: ["asset", "node", "q", "view"],
+  meaning: ["asset", "ds", "node", "q", "view"],
   "description-drafts": ["focus", "type"],
-  relationships: ["candidate"],
-  "cross-source": ["status"],
-  transformations: ["dbtProject", "import", "match", "resource", "type"],
-  quality: ["incident", "severity", "status"],
+  relationships: ["candidate", "ds"],
+  "cross-source": ["dom", "status"],
+  transformations: ["dbtProject", "import", "match", "project", "resource", "type"],
+  quality: ["ds", "incident", "severity", "status"],
   studio: ["cs", "status"],
   governance: ["review", "status", "type"],
   "parsed-lineage-review": ["review", "status"],
   refusals: ["run"],
   "reviewer-agent": ["offset", "outcome", "window"],
   sources: ["q", "source", "status"],
-  operations: ["batch_ds", "outbox_status", "run_status"],
+  operations: ["batch_ds", "ds", "outbox_status", "run_status"],
   agents: ["ai"],
   ai: ["ai"],
   "agent-roster": ["window"],
@@ -145,10 +152,9 @@ export const SCREEN_QUERY_FIELDS: Partial<Record<ScreenId, readonly string[]>> =
   compliance: [],
 };
 
-/** Fields a screen may carry: its own, plus the shared estate context. */
+/** The fields a screen may carry, or `null` when the screen declares none. */
 export function allowedFieldsFor(screen: ScreenId): readonly string[] | null {
-  const own = SCREEN_QUERY_FIELDS[screen];
-  return own ? [...CONTEXT_FIELDS, ...own] : null;
+  return SCREEN_QUERY_FIELDS[screen] ?? null;
 }
 
 export interface LinkTarget {
@@ -190,15 +196,18 @@ export function buildSearch(
     typeof currentSearch === "string" ? new URLSearchParams(currentSearch) : currentSearch;
   const next = new URLSearchParams();
 
+  const dropped: string[] = [];
+  const allowed = allowedFieldsFor(target.screen);
+
   if (target.inheritContext !== false) {
     for (const field of CONTEXT_FIELDS) {
+      // Only inherit what the target actually reads. See CONTEXT_FIELDS.
+      if (!allowed?.includes(field)) continue;
       const value = current.get(field);
       if (value) next.set(field, value);
     }
   }
 
-  const dropped: string[] = [];
-  const allowed = allowedFieldsFor(target.screen);
   for (const [key, raw] of Object.entries(target.params ?? {})) {
     if (raw === null || raw === undefined || raw === "") {
       next.delete(key);

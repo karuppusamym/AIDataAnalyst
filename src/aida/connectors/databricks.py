@@ -42,6 +42,7 @@ from aida.connectors.base import (
     QueryEstimate,
     QueryResult,
     TableProfileSnapshot,
+    rows_to_dicts,
 )
 from aida.connectors.discovery import (
     append_grouped_foreign_key_rows,
@@ -167,15 +168,6 @@ def _parse_dsn(dsn: str) -> _DatabricksConnectionParams:
         catalog=catalog,
         schema=schema,
     )
-
-
-def _rows_to_dicts(cursor: Any, rows: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
-    if not rows:
-        return []
-    if isinstance(rows[0], dict):
-        return [dict(r) for r in rows]
-    col_names = [desc[0].lower() for desc in cursor.description] if cursor.description else []
-    return [dict(zip(col_names, row, strict=False)) for row in rows]
 
 
 def _extract_databricks_explain_cost(plan_text: str) -> QueryEstimate:
@@ -430,7 +422,7 @@ class DatabricksConnector(SqlExecutor):
                         ORDER BY c.table_schema, c.table_name, c.ordinal_position
                         """  # noqa: S608 -- catalog identifier is backtick-quoted, not interpolated as a literal
                     )
-                    column_rows = _rows_to_dicts(cur, cur.fetchall())
+                    column_rows = rows_to_dicts(cur, cur.fetchall())
 
                     # Primary keys and unique constraints. Unity Catalog PK/UNIQUE
                     # constraints are informational (not enforced), but the metadata
@@ -456,7 +448,7 @@ class DatabricksConnector(SqlExecutor):
                             tc.constraint_name, kcu.ordinal_position
                         """  # noqa: S608
                     )
-                    pk_rows = _rows_to_dicts(cur, cur.fetchall())
+                    pk_rows = rows_to_dicts(cur, cur.fetchall())
 
                     # Foreign keys. Best-effort: Unity Catalog FK support (and the
                     # REFERENTIAL_CONSTRAINTS / CONSTRAINT_COLUMN_USAGE views that
@@ -496,7 +488,7 @@ class DatabricksConnector(SqlExecutor):
                                 tc.constraint_name, kcu.ordinal_position
                             """  # noqa: S608
                         )
-                        fk_rows = _rows_to_dicts(cur, cur.fetchall())
+                        fk_rows = rows_to_dicts(cur, cur.fetchall())
                     except Exception:
                         fk_rows = []
 
@@ -511,7 +503,7 @@ class DatabricksConnector(SqlExecutor):
                             WHERE schema_name <> '{_EXCLUDED_SCHEMA}'
                             """  # noqa: S608
                         )
-                        schema_rows = _rows_to_dicts(cur, cur.fetchall())
+                        schema_rows = rows_to_dicts(cur, cur.fetchall())
                     except Exception:
                         schema_rows = []
 
@@ -522,7 +514,7 @@ class DatabricksConnector(SqlExecutor):
                             FROM {quoted_catalog}.information_schema.catalogs
                             """  # noqa: S608
                         )
-                        catalog_rows = _rows_to_dicts(cur, cur.fetchall())
+                        catalog_rows = rows_to_dicts(cur, cur.fetchall())
                     except Exception:
                         catalog_rows = []
                 finally:
@@ -616,7 +608,7 @@ class DatabricksConnector(SqlExecutor):
                             SELECT {", ".join(expressions)} FROM bounded_sample
                             """  # noqa: S608 -- identifiers are backtick-quoted; sample_rows is a validated int
                         )
-                        stats_rows = _rows_to_dicts(cur, cur.fetchall())
+                        stats_rows = rows_to_dicts(cur, cur.fetchall())
                         stats = stats_rows[0] if stats_rows else {}
                         sampled_row_count = max(
                             sampled_row_count, int(stats.get("sampled_row_count") or 0)

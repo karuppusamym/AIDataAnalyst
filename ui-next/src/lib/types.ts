@@ -2333,6 +2333,7 @@ export interface GovernanceReviewBulkDecisionItemRead {
   review_id: string;
   status: "SUCCEEDED" | "FAILED";
   reason?: string | null;
+  outcome?: "APPLIED" | "CONFLICT" | "NOT_PERMITTED" | "FAILED" | null;
 }
 
 export interface GovernanceReviewBulkDecisionRequest {
@@ -3805,6 +3806,18 @@ export interface QueryLineageRead {
   policy_version: string;
 }
 
+/** `/health/ready`'s body. */
+export interface ReadinessResponse {
+  status: string;
+  service: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  required?: Record<string, string>;
+  optional?: Record<string, string>;
+  controls?: Record<string, string>;
+  signals?: Record<string, string>;
+}
+
 export interface RelationshipCandidateBulkDecisionItemRead {
   candidate_id: string;
   status: "SUCCEEDED" | "FAILED";
@@ -3991,6 +4004,18 @@ export interface ReviewQueueRead {
   by_status: Record<string, number>;
   by_object_type: Record<string, number>;
   diffable_count: number;
+}
+
+/** F16: aggregate counts for the review queue, composed from nothing. */
+export interface ReviewQueueSummaryRead {
+  organization_id: string;
+  status_filter: string | null;
+  object_type_filter: string | null;
+  generated_at: string;
+  total: number;
+  by_status: Record<string, number>;
+  by_object_type: Record<string, number>;
+  by_queue: Record<string, number>;
 }
 
 export interface ReviewerAgentRunResult {

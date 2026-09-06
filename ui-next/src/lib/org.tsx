@@ -18,10 +18,17 @@ import type { OrganizationRead } from "./types";
    keep resolving to the id their fixtures use, with no change.
 --------------------------------------------------------------------------- */
 
-/** The development/fixture organization id every screen used to hard-code. */
-export const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
+import {
+  DEFAULT_ORG_ID,
+  getCurrentOrgId,
+  readStoredOrgId,
+  setCurrentOrgId,
+} from "./org-context";
 
-const STORAGE_KEY = "atlas.org.id";
+/* The org-id mirror `api.ts` reads lives in `./org-context`, which imports
+ * nothing -- see that file for why. Re-exported here so the existing
+ * `import { DEFAULT_ORG_ID } from "./org"` call sites keep working. */
+export { DEFAULT_ORG_ID, getCurrentOrgId } from "./org-context";
 
 export interface OrgSelection {
   orgId: string;
@@ -34,52 +41,36 @@ export interface OrgSelection {
 
 const OrgContext = createContext<OrgSelection | null>(null);
 
-function readStoredOrgId(): string {
-  try {
-    return localStorage.getItem(STORAGE_KEY) || DEFAULT_ORG_ID;
-  } catch {
-    return DEFAULT_ORG_ID;
-  }
-}
-
-/* Mirrors the selected org id outside React so `api.ts`'s `identityHeaders()`
- * can attach `X-Organization-Id` to every request without threading an
- * organization id through hundreds of call sites. A handful of backend
- * routes (observability/SLO, notification-rules, tool-plans) take no
- * `{organization_id}` path segment at all and resolve it purely from this
- * header server-side (`security.py`'s `get_security_context`) -- so without
- * this, those specific routes 400 under a live backend even though every
- * path-scoped route works fine. Safe to read lazily from `api.ts` despite
- * the circular import (this module already imports `fetchOrganizations`
- * from `./api`): neither side touches the other's export at module-eval
- * time, only inside a function body invoked well after both modules load. */
-let currentOrgId: string = readStoredOrgId();
-
-/** The current organization id, readable outside React. */
-export function getCurrentOrgId(): string {
-  return currentOrgId;
-}
-
 export function OrgProvider({ children }: { children: ReactNode }) {
   const [organizations, setOrganizations] = useState<OrganizationRead[]>([]);
   const [orgId, setOrgIdState] = useState<string>(readStoredOrgId);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const addOrganization = useCallback((organization: OrganizationRead) => {
-    setOrganizations((items) => items.some((item) => item.id === organization.id) ? items : [...items, organization]);
-    setOrgIdState(organization.id);
+
+  /* F10: the mirror is updated *in the setter*, not in an effect.
+   *
+   * When it was an effect, the module-level org id changed one commit after
+   * the state did, so every request issued in that gap -- including the scope
+   * reload the organization change itself triggers -- carried the PREVIOUS
+   * organization in its `X-Organization-Id` header while the UI already
+   * showed the new one. Out-of-order responses could then populate a screen
+   * belonging to a tenant the user had just left. Backend enforcement still
+   * decides what may be seen; this closes the window in which the client
+   * asks the wrong question. */
+  const setOrgId = useCallback((id: string) => {
+    setCurrentOrgId(id);
+    setOrgIdState(id);
   }, []);
 
-  // Persist every choice so a returning viewer lands on the same estate, and
-  // mirror it to the module-level variable `identityHeaders()` reads.
-  useEffect(() => {
-    currentOrgId = orgId;
-    try {
-      localStorage.setItem(STORAGE_KEY, orgId);
-    } catch {
-      /* private mode / storage disabled — selection is simply not remembered */
-    }
-  }, [orgId]);
+  const addOrganization = useCallback(
+    (organization: OrganizationRead) => {
+      setOrganizations((items) =>
+        items.some((item) => item.id === organization.id) ? items : [...items, organization],
+      );
+      setOrgId(organization.id);
+    },
+    [setOrgId],
+  );
 
   useEffect(() => {
     const controller = new AbortController();
@@ -90,9 +81,10 @@ export function OrgProvider({ children }: { children: ReactNode }) {
         // If the stored id is not among the real organizations, adopt the first
         // one so a fresh browser lands on a selectable estate rather than a
         // dead id that renders every screen empty.
-        setOrgIdState((current) =>
-          orgs.some((o) => o.id === current) ? current : (orgs[0]?.id ?? current),
-        );
+        const resolved = orgs.some((o) => o.id === getCurrentOrgId())
+          ? getCurrentOrgId()
+          : (orgs[0]?.id ?? getCurrentOrgId());
+        setOrgId(resolved);
       })
       .catch((e: unknown) => {
         if (!controller.signal.aborted) {
@@ -103,11 +95,11 @@ export function OrgProvider({ children }: { children: ReactNode }) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [setOrgId]);
 
   const value = useMemo<OrgSelection>(
-    () => ({ orgId, organizations, setOrgId: setOrgIdState, addOrganization, loading, error }),
-    [orgId, organizations, addOrganization, loading, error],
+    () => ({ orgId, organizations, setOrgId, addOrganization, loading, error }),
+    [orgId, organizations, setOrgId, addOrganization, loading, error],
   );
 
   return <OrgContext.Provider value={value}>{children}</OrgContext.Provider>;

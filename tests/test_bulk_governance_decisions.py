@@ -11,8 +11,10 @@ checker, PENDING-only, and organization-boundary rules. PG-3 adds a
      own filter shape, scoped to the caller's organization -- never a
      Python-side scan of the whole table (`_resolve_governance_review_bulk_subjects`).
   2. Applies the *exact same* core decision logic as the single-item endpoint
-     (`_apply_governance_review_decision`) per item, so the two paths cannot
-     drift.
+     (`governance_decision_service.decide_review`) per item, so the two paths
+     cannot drift -- including F05's compare-and-set claim, which is what
+     makes "exactly one terminal decision per review" true under contention
+     (proved separately in `test_governance_decision_concurrency.py`).
   3. Reports partial success: which items succeeded, which failed and why,
      never all-or-nothing -- mirroring RL-6 (relationship candidates) and
      CT-1 (catalog bulk actions).
@@ -371,9 +373,7 @@ async def test_bulk_decide_per_item_rationale_falls_back_to_shared_reason(
     has_specific_rationale = await _seed_binding_and_review(
         session, org, term, requested_by="maker-a"
     )
-    uses_shared_default = await _seed_binding_and_review(
-        session, org, term, requested_by="maker-b"
-    )
+    uses_shared_default = await _seed_binding_and_review(session, org, term, requested_by="maker-b")
 
     context = _context(org, principal="reviewer")
     await bulk_decide_governance_reviews(
@@ -429,8 +429,7 @@ async def test_bulk_decide_by_filter_spans_object_types_and_scopes_to_org(
     other_term = await _term(session, other_org)
 
     pending_bindings = [
-        await _seed_binding_and_review(session, org, term, requested_by="maker")
-        for _ in range(3)
+        await _seed_binding_and_review(session, org, term, requested_by="maker") for _ in range(3)
     ]
     pending_conflict = await _seed_conflict_and_review(session, org, requested_by="maker")
     # Noise the filter must not pick up:
@@ -537,6 +536,64 @@ async def test_bulk_decide_maker_checker_enforced_per_item(session: AsyncSession
 
     await session.refresh(self_approval)
     assert self_approval.status == "PENDING"  # untouched, not partially mutated
+
+
+async def test_bulk_item_outcomes_separate_the_four_ways_an_item_can_end(
+    session: AsyncSession,
+) -> None:
+    """F05: `status` stays the original SUCCEEDED/FAILED answer, and the
+    additive `outcome` field says *why* -- so a reviewer looking at a
+    partially-applied batch can tell "somebody else decided this"
+    (CONFLICT) from "you may not decide this" (NOT_PERMITTED) from "this
+    item's target refused" (FAILED). Without that distinction every
+    non-applied item looks like an error the reviewer has to chase.
+    """
+    org = await _org(session)
+    other_org = await _org(session)
+    other_term = await _term(session, other_org)
+    term = await _term(session, org)
+    reviewer = "reviewer"
+
+    applied = await _seed_binding_and_review(session, org, term, requested_by="maker")
+    already_decided = await _seed_binding_and_review(
+        session, org, term, requested_by="maker", review_status="APPROVED"
+    )
+    self_approval = await _seed_binding_and_review(session, org, term, requested_by=reviewer)
+    foreign = await _seed_binding_and_review(session, other_org, other_term, requested_by="maker")
+    # A target that has already moved on: the adapter refuses after the claim.
+    doomed = await _seed_binding_and_review(
+        session, org, term, requested_by="maker", binding_status="ACTIVE"
+    )
+
+    result = await bulk_decide_governance_reviews(
+        GovernanceReviewBulkDecisionRequest(
+            review_ids=[applied.id, already_decided.id, self_approval.id, foreign.id, doomed.id],
+            decision="APPROVE",
+            reason="batch sweep",
+        ),
+        context=_context(org, principal=reviewer),
+        session=session,
+    )
+
+    by_id = {item.review_id: item for item in result.results}
+    assert by_id[str(applied.id)].outcome == "APPLIED"
+    assert by_id[str(applied.id)].status == "SUCCEEDED"
+    assert by_id[str(already_decided.id)].outcome == "CONFLICT"
+    assert by_id[str(self_approval.id)].outcome == "NOT_PERMITTED"
+    assert by_id[str(foreign.id)].outcome == "NOT_PERMITTED"
+    assert by_id[str(doomed.id)].outcome == "FAILED"
+    # ...and every non-applied item still reports the pre-existing FAILED
+    # status, so a client that only reads `status` is unaffected.
+    assert {item.status for item in result.results if item.review_id != str(applied.id)} == {
+        "FAILED"
+    }
+
+    # The item whose target refused had its claim rolled back with its own
+    # savepoint; the one that applied is untouched by its neighbour's failure.
+    await session.refresh(doomed)
+    await session.refresh(applied)
+    assert doomed.status == "PENDING"
+    assert applied.status == "APPROVED"
 
 
 async def test_bulk_decide_not_found_and_cross_organization_are_reported_failed(

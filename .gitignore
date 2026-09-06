@@ -10,7 +10,11 @@ htmlcov/
 dist/
 build/
 *.tsbuildinfo
+# Vite and Vitest each transpile their TypeScript config to a throwaway
+# timestamped .mjs next to the original. D04 (Docs/review-2026-09-05/REVIEW.md):
+# only the `vite.` variant was ignored, so 60 `vitest.` ones had been committed.
 vite.config.ts.timestamp-*.mjs
+vitest.config.ts.timestamp-*.mjs
 *.egg-info/
 .idea/
 .vscode/

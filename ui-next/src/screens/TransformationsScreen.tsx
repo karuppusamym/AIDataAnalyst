@@ -22,7 +22,7 @@ import {
 } from "../lib/api";
 import { useOrgId } from "../lib/org";
 import { useUrlState } from "../lib/useUrlState";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./TransformationsScreen.css";
@@ -225,17 +225,16 @@ function ResourceRow({
 function ResourceDetailPane({
   resource,
   onClose,
+  context,
 }: {
   resource: DbtResourceRead;
   onClose: () => void;
+  /** The project and dbt project the resource id is only meaningful inside.
+   *  Passed explicitly rather than scraped off `location.search`, which also
+   *  swept up this screen's type/match filters and shipped them to whoever
+   *  the link was sent to. */
+  context: { project: string | null; dbtProject: string | null };
 }) {
-  const [copied, setCopied] = useState(false);
-
-  const permalink = useMemo(() => {
-    const p = new URLSearchParams(location.search);
-    p.set("resource", resource.id);
-    return `${location.origin}${location.pathname}?${p.toString()}`;
-  }, [resource.id]);
 
   return (
     <aside className="evp" aria-label={`Detail for ${resource.name}`}>
@@ -334,14 +333,21 @@ function ResourceDetailPane({
         )}
       </div>
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-            setCopied(true);
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/transformations`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{
+            screen: "transformations",
+            params: {
+              project: context.project,
+              dbtProject: context.dbtProject,
+              resource: resource.id,
+            },
           }}
-        >
-          {copied ? "Link copied" : "Copy resource link"}
-        </Button>
+          label="Copy resource link"
+        />
         <span className="evp__hint">Evidence, not source values &mdash; literals are redacted</span>
       </footer>
     </aside>
@@ -928,7 +934,11 @@ export function TransformationsScreen() {
           </div>
 
           {selectedResource ? (
-            <ResourceDetailPane resource={selectedResource} onClose={() => setParams({ resource: null })} />
+            <ResourceDetailPane
+              resource={selectedResource}
+              context={{ project: orgProjectId, dbtProject: dbtProjectId }}
+              onClose={() => setParams({ resource: null })}
+            />
           ) : (
             <aside className="evp evp--idle" aria-label="Resource detail">
               <Empty

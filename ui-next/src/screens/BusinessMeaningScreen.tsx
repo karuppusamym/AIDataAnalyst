@@ -1,18 +1,12 @@
 import { BusinessGeneration } from "../components/SemanticAuthor";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MetadataBusinessAnnotationRead } from "../lib/types";
-import { ApiError, fetchBusinessAnnotations, fetchBusinessMap, fetchTableBusinessAnnotation, fetchCatalogRows } from "../lib/api";
-import {
-  createGlossaryTerm,
-  linkTermToTable,
-  listGlossaryTerms,
-  submitGlossaryTermVersion,
-  type GlossaryTermRead,
-} from "../lib/_api_append";
+import { ApiError, fetchBusinessAnnotations, fetchBusinessMap, fetchTableBusinessAnnotation } from "../lib/api";
+import { listGlossaryTerms, type GlossaryTermRead } from "../lib/_api_append";
 import { useUrlState } from "../lib/useUrlState";
 import { useDatasourcePicker, datasourceName } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { AsyncState, Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./BusinessMeaningScreen.css";
 
@@ -52,6 +46,7 @@ import "./BusinessMeaningScreen.css";
 --------------------------------------------------------------------------- */
 
 import { useOrgId } from "../lib/org";
+import { CreateTermDialog, LinkTermDialog } from "./BusinessMeaningDialogs";
 const PAGE_LIMIT = 100;
 
 function matchesQuery(a: MetadataBusinessAnnotationRead, q: string): boolean {
@@ -114,7 +109,6 @@ function BusinessAnnotationPane({
 }) {
   const [detail, setDetail] = useState<MetadataBusinessAnnotationRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!tableId) {
@@ -135,7 +129,6 @@ function BusinessAnnotationPane({
     return () => ac.abort();
   }, [tableId]);
 
-  useEffect(() => setCopied(false), [tableId]);
 
   if (!tableId) {
     return (
@@ -149,9 +142,6 @@ function BusinessAnnotationPane({
   }
 
   const display = detail ?? row ?? null;
-  const permalink = dsId
-    ? `${location.origin}${location.pathname}?ds=${dsId}&asset=${tableId}`
-    : `${location.origin}${location.pathname}?asset=${tableId}`;
   const displayName = display?.business_name ?? row?.business_name ?? tableId;
 
   return (
@@ -168,15 +158,15 @@ function BusinessAnnotationPane({
 
       <div className="evp__body">
         {error ? (
-          <div className="evp__error" role="alert">
-            {error instanceof ApiError && error.status === 404
-              ? "No approved business annotation exists for this table."
-              : error instanceof ApiError && error.status === 403
-                ? "You are not authorized to view this table's business meaning."
-                : `Business meaning could not be loaded: ${
-                    error instanceof ApiError ? error.detail : error.message
-                  }`}
-          </div>
+          <AsyncState
+            error={error}
+            subject="this table's business meaning"
+            errorTitle={
+              error instanceof ApiError && error.status === 404
+                ? "No approved business annotation exists for this table"
+                : "This business meaning could not be loaded"
+            }
+          />
         ) : display === null ? (
           <div className="evp__load" role="status">Loading business meaning…</div>
         ) : (
@@ -232,14 +222,14 @@ function BusinessAnnotationPane({
       </div>
 
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-            setCopied(true);
-          }}
-        >
-          {copied ? "Link copied" : "Copy business-meaning link"}
-        </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/meaning`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{ screen: "meaning", params: { ds: dsId, asset: tableId } }}
+          label="Copy business-meaning link"
+        />
         <span className="evp__hint">Permission-aware · AT-6 approved version</span>
       </footer>
     </aside>
@@ -414,250 +404,6 @@ function GlossaryTab({
           }}
         />
       ) : null}
-    </div>
-  );
-}
-
-function CreateTermDialog({
-  organizationId,
-  businessNodeId,
-  onClose,
-  onCreated,
-}: {
-  organizationId: string;
-  businessNodeId: string | null;
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [displayName, setDisplayName] = useState("");
-  const [termKey, setTermKey] = useState("");
-  const [definition, setDefinition] = useState("");
-  const [synonymsRaw, setSynonymsRaw] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = useCallback(async () => {
-    setSubmitting(true);
-    setError(null);
-    try {
-      const created = await createGlossaryTerm(organizationId, {
-        term_key: termKey.trim(),
-        display_name: displayName.trim(),
-        definition: definition.trim(),
-        business_node_id: businessNodeId ?? undefined,
-        synonyms: synonymsRaw
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
-      });
-      // Auto-submit for review -- ADR-0001: models propose, humans decide;
-      // a term that stays in DRAFT forever helps nobody, so the create
-      // form leaves it in REVIEW_REQUIRED so a reviewer can see it.
-      try {
-        await submitGlossaryTermVersion(created.id);
-      } catch {
-        /* If the auto-submit fails, the term still exists in DRAFT and
-         *  the reviewer can submit it manually from the term row. */
-      }
-      onCreated();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [
-    organizationId,
-    businessNodeId,
-    termKey,
-    displayName,
-    definition,
-    synonymsRaw,
-    onCreated,
-  ]);
-
-  const canSubmit =
-    !submitting &&
-    displayName.trim().length >= 2 &&
-    termKey.trim().length >= 2 &&
-    definition.trim().length >= 10;
-
-  return (
-    <div className="bmdialog__backdrop" role="dialog" aria-modal="true" aria-label="Create glossary term">
-      <div className="bmdialog">
-        <header className="bmdialog__head">
-          <h2 className="bmdialog__h2">Create glossary term</h2>
-          <button className="bmdialog__x" onClick={onClose} aria-label="Close">
-            {"×"}
-          </button>
-        </header>
-        <div className="bmdialog__body">
-          <Field label="Display name">
-            <input
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Monthly Recurring Revenue"
-            />
-          </Field>
-          <Field label="Term key">
-            <input
-              value={termKey}
-              onChange={(e) => setTermKey(e.target.value.toLowerCase())}
-              placeholder="mrr"
-            />
-          </Field>
-          <Field label="Definition">
-            <textarea
-              value={definition}
-              onChange={(e) => setDefinition(e.target.value)}
-              rows={4}
-              placeholder="Recurring revenue normalized to a monthly cadence, excluding one-time fees."
-            />
-          </Field>
-          <Field label="Synonyms (comma-separated, optional)">
-            <input
-              value={synonymsRaw}
-              onChange={(e) => setSynonymsRaw(e.target.value)}
-              placeholder="recurring revenue, monthly rev"
-            />
-          </Field>
-          {error ? <p className="bmdialog__err" role="alert">{error}</p> : null}
-        </div>
-        <footer className="bmdialog__foot">
-          <Button onClick={onClose} disabled={submitting}>
-            Cancel
-          </Button>
-          <Button variant="primary" onClick={() => void submit()} disabled={!canSubmit}>
-            {submitting ? "Creating..." : "Create and submit for review"}
-          </Button>
-        </footer>
-      </div>
-    </div>
-  );
-}
-
-function LinkTermDialog({
-  organizationId,
-  term,
-  onClose,
-  onLinked,
-}: {
-  organizationId: string;
-  term: GlossaryTermRead;
-  onClose: () => void;
-  onLinked: () => void;
-}) {
-  const [q, setQ] = useState("");
-  const [candidates, setCandidates] = useState<{ id: string; name: string; schema_name: string }[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [selected, setSelected] = useState<{ id: string; name: string } | null>(null);
-  const [reason, setReason] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const search = useCallback(async () => {
-    if (!q.trim()) return;
-    setSearching(true);
-    setError(null);
-    try {
-      const page = await fetchCatalogRows({
-        organizationId,
-        q: q.trim(),
-        objectType: "TABLE",
-        limit: 25,
-      });
-      setCandidates(page.items.map((r) => ({ id: r.id, name: r.name, schema_name: r.schema_name })));
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setSearching(false);
-    }
-  }, [organizationId, q]);
-
-  const submit = useCallback(async () => {
-    if (!selected) return;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await linkTermToTable(organizationId, selected.id, term.term_id, {
-        reason: reason.trim() || undefined,
-      });
-      onLinked();
-    } catch (e) {
-      setError(e instanceof ApiError ? e.detail : (e as Error).message);
-    } finally {
-      setSubmitting(false);
-    }
-  }, [organizationId, selected, term.term_id, reason, onLinked]);
-
-  return (
-    <div className="bmdialog__backdrop" role="dialog" aria-modal="true" aria-label={`Link ${term.display_name}`}>
-      <div className="bmdialog">
-        <header className="bmdialog__head">
-          <h2 className="bmdialog__h2">
-            Link {"“"}{term.display_name}{"”"} to an asset
-          </h2>
-          <button className="bmdialog__x" onClick={onClose} aria-label="Close">
-            {"×"}
-          </button>
-        </header>
-        <div className="bmdialog__body">
-          <Field label="Search asset by name">
-            <input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void search();
-                }
-              }}
-              placeholder="orders_raw"
-            />
-          </Field>
-          <Button onClick={() => void search()} disabled={searching || !q.trim()}>
-            {searching ? "Searching..." : "Search"}
-          </Button>
-          {candidates.length > 0 ? (
-            <ul className="bmdialog__results" role="listbox" aria-label="Matching tables">
-              {candidates.map((c) => (
-                <li key={c.id}>
-                  <button
-                    type="button"
-                    role="option"
-                    aria-selected={selected?.id === c.id}
-                    className={`bmdialog__opt${selected?.id === c.id ? " bmdialog__opt--sel" : ""}`}
-                    onClick={() => setSelected({ id: c.id, name: `${c.schema_name}.${c.name}` })}
-                  >
-                    {c.schema_name}.{c.name}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {selected ? (
-            <Field label="Reason (optional)">
-              <input
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                placeholder="why this term applies to this asset"
-              />
-            </Field>
-          ) : null}
-          {error ? <p className="bmdialog__err" role="alert">{error}</p> : null}
-        </div>
-        <footer className="bmdialog__foot">
-          <Button onClick={onClose} disabled={submitting}>
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            onClick={() => void submit()}
-            disabled={submitting || !selected}
-          >
-            {submitting ? "Linking..." : `Link to ${selected?.name ?? "..."}`}
-          </Button>
-        </footer>
-      </div>
     </div>
   );
 }

@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.db import get_session
 from aida.models import GovernanceReview, MetadataEnrichmentProposal
-from aida.review_queue_read_model import compose_review_queue
-from aida.review_queue_schemas import ReviewQueueRead
+from aida.review_queue_read_model import compose_review_queue, summarize_review_queue
+from aida.review_queue_schemas import ReviewQueueRead, ReviewQueueSummaryRead
 from aida.security import SecurityContext, require_roles
 
 router = APIRouter(prefix="/v1", tags=["governance-review-queue"])
@@ -30,6 +30,43 @@ router = APIRouter(prefix="/v1", tags=["governance-review-queue"])
 _REVIEW_QUEUE_READ_ROLES = ("PlatformAdmin", "SemanticAdmin", "DataSteward", "Reviewer")
 
 _MAX_QUEUE_ROWS = 1000
+
+
+@router.get("/governance/reviews/queue/summary", response_model=ReviewQueueSummaryRead)
+async def get_review_queue_summary(
+    review_status: str | None = Query(default="PENDING", alias="status", max_length=30),
+    object_type: str | None = Query(default=None, max_length=100),
+    context: SecurityContext = Depends(require_roles(*_REVIEW_QUEUE_READ_ROLES)),
+    session: AsyncSession = Depends(get_session),
+) -> ReviewQueueSummaryRead:
+    """F16: how much is in the queue, without composing any of it.
+
+    The Overview screen used to answer "how many reviews are waiting" by
+    requesting a page of up to 1,000 reviews from `/queue` -- each one carrying
+    a composed diff, its evidence and its snapshots -- and taking the length of
+    the list. This is one grouped `COUNT(*)`: nothing is loaded, nothing is
+    diffed, and the response size does not depend on the queue depth.
+
+    The `status` and `object_type` filters mean the same thing they do on
+    `/queue`, so a screen can count exactly the batch it would otherwise fetch.
+    """
+    organization_id = context.require_organization()
+    summary = await summarize_review_queue(
+        session,
+        organization_id=organization_id,
+        status=review_status.upper() if review_status else None,
+        object_type=object_type.upper() if object_type else None,
+    )
+    return ReviewQueueSummaryRead(
+        organization_id=summary.organization_id,
+        status_filter=review_status.upper() if review_status else None,
+        object_type_filter=object_type.upper() if object_type else None,
+        generated_at=datetime.now(UTC),
+        total=summary.total,
+        by_status=summary.by_status,
+        by_object_type=summary.by_object_type,
+        by_queue=summary.by_queue,
+    )
 
 
 @router.get("/governance/reviews/queue", response_model=ReviewQueueRead)

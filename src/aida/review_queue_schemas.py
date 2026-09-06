@@ -54,6 +54,30 @@ class ReviewQueueProposalRead(ApiModel):
     diff: GovernanceReviewDiffRead
 
 
+class ReviewQueueSummaryRead(ApiModel):
+    """F16: aggregate counts for the review queue, composed from nothing.
+
+    Deliberately a separate response model from `ReviewQueueRead` rather than a
+    trimmed variant of it. `ReviewQueueRead`'s counts are `computed_field`s over
+    a list that was actually returned, which is what makes them impossible to
+    disagree with the page; these counts describe rows the caller never
+    receives, so they are ordinary fields carrying an aggregate query's result
+    and the two must not be mistaken for each other.
+
+    `by_queue` groups by `requested_action` -- the reviewer-facing work queues
+    (approve a publish, approve a withdrawal, ...) within an object type.
+    """
+
+    organization_id: UUID
+    status_filter: str | None
+    object_type_filter: str | None
+    generated_at: datetime
+    total: int
+    by_status: dict[str, int]
+    by_object_type: dict[str, int]
+    by_queue: dict[str, int]
+
+
 class ReviewQueueRead(ApiModel):
     """A composed batch of review-queue proposals plus the filters that
     selected it. See `aida.review_queue_read_model` module docstring for why

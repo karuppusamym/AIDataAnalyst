@@ -22,7 +22,6 @@ import type {
   GovernanceReviewRead,
   MarketplaceAccessRequestCreate,
   MarketplaceAccessRequestRead,
-  MeRead,
   MetadataBusinessAnnotationRead,
   MetadataIngestionBatchRead,
   OrganizationRead,
@@ -83,12 +82,6 @@ import {
   makeFixtureLineageGraph,
   makeFixtureMarketplaceAccessRequest,
   makeFixtureMarketplaceProducts,
-  makeFixtureMe,
-  makeFixtureOrgDatasources,
-  makeFixtureOrgWorkspaces,
-  makeFixtureOrganizations,
-  makeFixtureOrgProjects,
-  makeFixtureWorkspaceSourceBindings,
   makeFixtureOutboxEvents,
   makeFixtureCreatePlaybook,
   makeFixtureDeletePlaybook,
@@ -122,100 +115,45 @@ import {
 } from "./fixtures";
 
 /* ---------------------------------------------------------------------------
-   One fetch wrapper for the whole app.
+   The API client's transport seam.
 
-   Two things it must get right that the current portal does not:
-   1. Every non-2xx becomes a typed ApiError carrying the server's own detail
-      string, so a screen can show what actually went wrong instead of
-      "something went wrong".
-   2. Every request is abortable. A catalog where typing in the filter box
-      leaves eight in-flight requests racing to write the same state is the
-      single most common source of "the UI showed me the wrong rows".
+   The fetch/decode logic that used to be copied once per verb in this file
+   now lives in `lib/http.ts` (review 2026-09-05, F14): one decoder that keeps
+   the server's error code, correlation id and field errors instead of
+   flattening every failure to a status string. The verb helpers below are
+   thin, unchanged-signature wrappers so the ~500 call sites in this file did
+   not all have to move in the same change.
+
+   `ApiError` is re-exported rather than redefined: screens and tests import it
+   from here (`import { ApiError } from "../lib/api"`), and it must remain the
+   same class as the one `http.ts` throws or every `instanceof` check silently
+   turns false.
+
+   NOTE ON THE ORG MIRROR: the organization id is read from `./org-context`,
+   which imports nothing. It used to be read from `./org.tsx`, a React
+   provider that imports this file -- an `api -> org -> api` cycle that
+   happened to work only because neither side touched the other at module-eval
+   time (R03/R05).
 --------------------------------------------------------------------------- */
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly detail: string,
-  ) {
-    super(detail);
-    this.name = "ApiError";
-  }
-}
+import { USE_FIXTURES } from "./appConfig";
+import { ApiError, requestBlob } from "./http";
 
-/** Set VITE_USE_FIXTURES=0 to run against a live API on :8000 via the dev proxy. */
-const USE_FIXTURES = import.meta.env.VITE_USE_FIXTURES !== "0";
+/* R05: the transport, the header provider and the fixture adapter live in
+ * `./api/transport.ts`. They are re-exported from here unchanged, because
+ * this file is the client's public barrel: every screen imports from
+ * `../lib/api` and none of them should have to learn that the client is now
+ * more than one file. */
+import { deleteRequest, get, patchJson, postJson, putJson } from "./api/transport";
 
-/**
- * Development-mode identity headers.
- *
- * The backend's `get_security_context` (security.py) fail-closes any
- * request with no `X-Principal-Id` when `identity_provider == "development"`
- * -- the same INV-4 fail-closed default used everywhere else in this app.
- * The legacy portal (ui/scripts/api.js -> baseHeaders()) has always sent
- * these on every request; this client never did, which is why every
- * live-API screen here 401s under the default `VITE_USE_FIXTURES=0`
- * compose config even though the backend and its data are fine -- the
- * legacy portal proves both work against the identical API.
- *
- * Mirrors the legacy defaults so both UIs exercise the same dev principal.
- * Override with VITE_DEV_PRINCIPAL_ID / VITE_DEV_ROLES if needed.
- *
- * Not gated on the Vite build mode on purpose: `ui-next`'s default compose
- * service serves a *production* build (`import.meta.env.DEV` is false
- * there) against the same `identity_provider=development` backend, so a
- * dev-build-only gate would silently skip these headers on exactly the
- * deployment that needs them. The real safety net is server-side: under
- * `identity_provider=oidc` (security.py's other branch) the backend never
- * consults `X-Principal-Id` at all -- it requires `Authorization: Bearer`
- * instead -- so sending this in an OIDC environment is inert, not a leak.
- */
-const DEV_PRINCIPAL_ID = import.meta.env.VITE_DEV_PRINCIPAL_ID || "local-ui-admin";
-const DEV_ROLES =
-  import.meta.env.VITE_DEV_ROLES ||
-  "PlatformAdmin,OrganizationAdmin,ProjectAdmin,MetadataAdmin,MetadataIngestor,DataAdmin,SemanticAdmin,DataSteward,ToolDeveloper,ToolConsumer,AgentDeveloper,Reviewer,MetadataReviewer,Auditor,Operations,Analyst,Viewer";
-
-/* A few routes (observability/SLO, notification-rules, tool-plans) take no
- * `{organization_id}` path segment and resolve the org purely from this
- * header server-side -- see `org.tsx`'s `getCurrentOrgId()` for why this is
- * read from outside React rather than threaded through every call site. */
-import { getCurrentOrgId } from "./org";
-
-function identityHeaders(): Record<string, string> {
-  if (USE_FIXTURES) return {};
-  return { "X-Principal-Id": DEV_PRINCIPAL_ID, "X-Roles": DEV_ROLES, "X-Organization-Id": getCurrentOrgId() };
-}
-
-function serverErrorDetail(value: unknown, fallback: string): string {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(item => {
-    if (item && typeof item === "object" && "msg" in item) {
-      const loc = "loc" in item && Array.isArray(item.loc) ? item.loc.join(".") : "Request";
-      return `${loc}: ${String(item.msg)}`;
-    }
-    return "Request validation failed";
-  }).join("; ");
-  return fallback;
-}
-
-export async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    signal,
-    headers: { Accept: "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = serverErrorDetail(body.detail, detail);
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as T;
-}
+export { ApiError } from "./http";
+export type { FieldError } from "./http";
+export { USE_FIXTURES } from "./appConfig";
+export { deleteRequest, demoOr, get, patchJson, postJson, putJson } from "./api/transport";
+export * from "./api/identity";
+export * from "./api/glossary";
+export * from "./api/crossSource";
+export * from "./api/columnDocumentation";
 
 /** Downloads use the same identity and authorization boundary as screen reads. */
 export async function exportAssetEvidence(tableId: string): Promise<void> {
@@ -232,99 +170,6 @@ export async function exportAssetEvidence(tableId: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** Same contract as `get`, for the write endpoints UX-15's screens call
- *  (governance decisions, marketplace access requests, Studio submit). No
- *  request body is optional here on purpose: every write this app makes
- *  carries one, even if it is `{}` -- an empty POST invites a caller to
- *  forget the body a route actually requires. */
-export async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    method: "POST",
-    signal,
-    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as T;
-}
-
-/** Same contract as `postJson`, for the few endpoints that mutate an existing
- *  resource with PUT (e.g. advancing an AI remediation's status). */
-export async function putJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    method: "PUT",
-    signal,
-    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as T;
-}
-
-/** Same contract as `postJson`/`putJson`, for endpoints that partially update
- *  an existing resource with PATCH (e.g. `PlaybookUpdate` — every field
- *  optional, send only the fields actually changing). */
-export async function patchJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    method: "PATCH",
-    signal,
-    headers: { Accept: "application/json", "Content-Type": "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const errBody = (await res.json()) as { detail?: string };
-      if (errBody.detail) detail = serverErrorDetail(errBody.detail, detail);
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-  return (await res.json()) as T;
-}
-
-/** Same contract as `get`, for the endpoints that delete a resource with no
- *  response body (e.g. `DELETE /v1/playbooks/{id}` -> 204). */
-export async function deleteRequest(path: string, signal?: AbortSignal): Promise<void> {
-  const res = await fetch(path, {
-    method: "DELETE",
-    signal,
-    headers: { Accept: "application/json", ...identityHeaders() },
-    credentials: "same-origin",
-  });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      const body = (await res.json()) as { detail?: string };
-      if (body.detail) detail = serverErrorDetail(body.detail, detail);
-    } catch {
-      /* non-JSON error body; the status line is what we have */
-    }
-    throw new ApiError(res.status, detail);
-  }
-}
 
 export interface CatalogQuery {
   organizationId: string;
@@ -395,34 +240,6 @@ export async function fetchAssetEvidence(
   return get<AssetEvidenceRead>(`/v1/metadata/tables/${tableId}/evidence`, signal);
 }
 
-/**
- * UX-1 / module 21 §5: the one call that decides whether the shell may offer a
- * persona picker at all. `identity_provider` is the server's own prod/dev gate
- * (`Settings.identity_provider`, `aida.security.get_security_context`) — the shell
- * defers to it rather than inferring its own, and in `OIDC` mode `persona` is the
- * only persona the UI is allowed to use, never a client-selected value.
- *
- * `GET /v1/me` exists today (unlike the read-model calls above), so flip
- * `VITE_USE_FIXTURES=0` to see the real thing; fixture mode reports `DEVELOPMENT`
- * with no persona so the manual switcher below still works for pure-frontend
- * iteration with no backend running.
- */
-export async function fetchMe(signal?: AbortSignal): Promise<MeRead> {
-  if (USE_FIXTURES) return makeFixtureMe();
-  return get<MeRead>("/v1/me", signal);
-}
-
-/**
- * `GET /v1/organizations` (api.py) — the tenant list the shell's organization
- * picker needs. Fixture mode returns the single development organization every
- * screen historically hard-coded, so pure-frontend iteration is unchanged;
- * live mode returns the real (e.g. seeded) organizations so one can be chosen.
- */
-export async function fetchOrganizations(signal?: AbortSignal): Promise<OrganizationRead[]> {
-  if (USE_FIXTURES) return makeFixtureOrganizations();
-  const page = await get<PageOf<OrganizationRead>>("/v1/organizations?limit=200", signal);
-  return page.items;
-}
 
 /* ---------------------------------------------------------------------------
    UX-15: review queue, marketplace, lineage refusals and Studio change sets.
@@ -666,46 +483,6 @@ export async function submitStudioChangeSet(
   return postJson<StudioChangeSetRead>(`/v1/studio/change-sets/${changeSetId}/submit`, {}, signal);
 }
 
-/** `GET /v1/organizations/{id}/datasources` — resolves a datasource's display
- *  name to the id UX-20's lineage-impact call needs (`CatalogRowRead` only
- *  carries `datasource_name`, per this file's own catalog-rows note; the
- *  unified-lineage routes are scoped by `datasource_id`, so this bridges the
- *  two without a backend change). */
-export async function fetchOrgDatasources(
-  organizationId: string,
-  signal?: AbortSignal,
-): Promise<PageOf<DataSourceRead>> {
-  if (USE_FIXTURES) return makeFixtureOrgDatasources();
-  return get<PageOf<DataSourceRead>>(
-    `/v1/organizations/${organizationId}/datasources?limit=500`,
-    signal,
-  );
-}
-
-/** Access-axis workspaces for an organization (ADR-0018). A workspace does
- * not own projects; it reaches project-owned sources through bindings. */
-export async function fetchOrgWorkspaces(
-  organizationId: string,
-  signal?: AbortSignal,
-): Promise<PageOf<WorkspaceRead>> {
-  if (USE_FIXTURES) return makeFixtureOrgWorkspaces(organizationId);
-  return get<PageOf<WorkspaceRead>>(
-    `/v1/organizations/${organizationId}/workspaces?limit=200`,
-    signal,
-  );
-}
-
-/** Grants connecting the selected workspace to one or more datasources. */
-export async function fetchWorkspaceSourceBindings(
-  workspaceId: string,
-  signal?: AbortSignal,
-): Promise<PageOf<SourceBindingRead>> {
-  if (USE_FIXTURES) return makeFixtureWorkspaceSourceBindings(workspaceId);
-  return get<PageOf<SourceBindingRead>>(
-    `/v1/workspaces/${workspaceId}/source-bindings`,
-    signal,
-  );
-}
 
 export interface LineageImpactQuery {
   depth?: number;
@@ -1220,20 +997,6 @@ export async function fetchBusinessMap(
    uses to bridge a display name to an id `unified-lineage` needs.
 --------------------------------------------------------------------------- */
 
-/** `GET /v1/organizations/{id}/projects` (`operational_api.py::list_organization_projects`)
- *  — real, already-merged, and NOT the org-wide semantic-model browse this
- *  screen would ideally have; it lists projects so a project can be picked,
- *  one call away from the project-scoped semantic-model-versions list below. */
-export async function fetchOrgProjects(
-  organizationId: string,
-  signal?: AbortSignal,
-): Promise<PageOf<ProjectRead>> {
-  if (USE_FIXTURES) return makeFixtureOrgProjects();
-  return get<PageOf<ProjectRead>>(
-    `/v1/organizations/${organizationId}/projects?limit=500`,
-    signal,
-  );
-}
 
 export interface SemanticPageQuery {
   limit?: number;
@@ -4489,22 +4252,11 @@ export async function downloadCompiledContextProduct(
     blob = new Blob([artifact.content], { type: artifact.content_type });
     if (artifact.content_type.includes("yaml")) filename = filename.replace(/\.json$/, ".yaml");
   } else {
-    const res = await fetch(
+    const downloaded = await requestBlob(
       `/v1/context-product-versions/${versionId}/compile/download?target=${encodeURIComponent(target)}`,
-      { headers: { Accept: "*/*", ...identityHeaders() }, credentials: "same-origin" },
     );
-    if (!res.ok) {
-      let detail = `${res.status} ${res.statusText}`;
-      try {
-        const body = (await res.json()) as { detail?: string };
-        if (body.detail) detail = serverErrorDetail(body.detail, detail);
-      } catch {
-        /* non-JSON error body; the status line is what we have */
-      }
-      throw new ApiError(res.status, detail);
-    }
-    blob = await res.blob();
-    const disposition = res.headers.get("Content-Disposition") || "";
+    blob = downloaded.blob;
+    const disposition = downloaded.response.headers.get("Content-Disposition") || "";
     filename = disposition.match(/filename="([^"]+)"/)?.[1] || filename;
   }
   const url = URL.createObjectURL(blob);

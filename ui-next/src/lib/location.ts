@@ -104,16 +104,22 @@ export function getLocationSnapshot(): AppLocation {
 
 function commit(url: string, mode: "push" | "replace"): void {
   const absolute = `${window.location.pathname}${url}`;
-  const target = `${window.location.search}${window.location.hash}`;
-  const next = url;
-  if (target === next && mode === "push") {
+  if (`${window.location.search}${window.location.hash}` === url && mode === "push") {
     // Navigating to where you already are must not add a history entry the
     // Back button then has to eat.
     return;
   }
+  const previousHash = window.location.hash;
   if (mode === "push") history.pushState(null, "", absolute);
   else history.replaceState(null, "", absolute);
   window.dispatchEvent(new Event(INTERNAL_EVENT));
+  // `history.pushState` fires nothing, so a screen change made through this
+  // store would be invisible to anything still listening for `hashchange`.
+  // Emitting it keeps that contract while consumers migrate to the store, and
+  // is harmless afterwards: the handler is idempotent.
+  if (window.location.hash !== previousHash) {
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  }
 }
 
 /**

@@ -404,5 +404,83 @@ source_modules = [
   "aida.agent_intelligence",
   "aida.intelligence_api",
   "aida.semantic_inference",
+  # R02 (review-2026-09-05): the rules extracted out of
+  # `unified_lineage_api._build_unified_graph` and
+  # `intelligence_api.get_knowledge_graph_neighborhood`. They belong to the same
+  # one-directional layer as the routers they came from, so the ratchet moves
+  # with them rather than being left behind on the thin handlers.
+  "aida.unified_lineage_builder",
+  "aida.knowledge_graph_neighborhood",
 ]
 forbidden_modules = ["aida.query_gateway"]
+
+[[tool.importlinter.contracts]]
+# F05 / R02 / R03 (review-2026-09-05). The review recorded a four-module cycle,
+# `semantic_api -> agent_contract_request_api -> agent_contract_api ->
+# reviewer_agent -> semantic_api`, closed by the reviewer agent reaching back into a
+# router for the shared governance-decision core. That core is now
+# `aida.governance_decision_service` (with its stdlib-only DTOs in
+# `aida.governance_decision_contracts`), and the cycle is gone: every surface --
+# the single-decision endpoint, the bulk endpoint, the sample-review endpoint and
+# the agent -- depends on the service, and the service depends on none of them.
+#
+# The per-object-type adapters stay in `semantic_api`, which *registers* them into
+# the service at import time. That is deliberate and is what this contract pins: a
+# router may hand the service an adapter, but the service may never import a router
+# to find one. Without this, the natural "just import the dispatcher" fix silently
+# rebuilds the cycle.
+#
+# `aida.reviewer_agent` is a source module here for the same reason: it is
+# automation, not a router, and the review is explicit that "reviewer automation
+# should call the application service". Its old function-local
+# `from aida.semantic_api import _apply_governance_review_decision` is exactly the
+# edge this forbids.
+#
+# Verified green when written, and it constrains no existing edge.
+name = "F05 the governance decision service is never reached from a router (and never imports one)"
+type = "forbidden"
+source_modules = [
+  "aida.governance_decision_contracts",
+  "aida.governance_decision_service",
+  "aida.reviewer_agent",
+]
+forbidden_modules = [
+  "aida.semantic_api",
+  "aida.agent_contract_api",
+  "aida.agent_contract_request_api",
+  "aida.asset_description_api",
+]
+
+[[tool.importlinter.contracts]]
+# R02 / R03 (review-2026-09-05). Three of R02's six hotspots were router
+# functions that owned rules rather than translation:
+# `unified_lineage_api._build_unified_graph`,
+# `intelligence_api.get_knowledge_graph_neighborhood` and
+# `product_marketplace_api.portfolio_analytics_summary`. Their rules now live in
+# `aida.unified_lineage_builder`, `aida.knowledge_graph_neighborhood` and
+# `aida.portfolio_analytics_read_model`, and the routers call in one direction
+# only.
+#
+# R03's instruction is the thing this pins: "services should not obtain business
+# models from routers". The extracted modules take ORM rows, `aida.schemas` /
+# `aida.platform_schemas` DTOs and `aida.security_types.SecurityContext` --
+# never a symbol that lives beside an `APIRouter`. Without this contract the
+# cheapest fix for any future shared constant (a role tuple, a response helper)
+# is an import back into the router it came from, which is exactly how the
+# cycles the review found were built.
+#
+# Verified green when written, and it constrains no existing edge.
+name = "R02 extracted lineage/graph/portfolio services never import a router"
+type = "forbidden"
+source_modules = [
+  "aida.knowledge_graph_neighborhood",
+  "aida.portfolio_analytics_read_model",
+  "aida.unified_lineage_builder",
+]
+forbidden_modules = [
+  "aida.api",
+  "aida.intelligence_api",
+  "aida.product_marketplace_api",
+  "aida.semantic_api",
+  "aida.unified_lineage_api",
+]

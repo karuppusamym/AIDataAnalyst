@@ -148,3 +148,70 @@ describe("App shell persona gating", () => {
     expect(screen.getByText("Operations", { selector: ".topbar__trail strong" })).toBeInTheDocument();
   });
 });
+
+/* ---------------------------------------------------------------------------
+   F13/T10 and F21/T17 in the assembled shell. The badge must report the
+   build's real state rather than the two hard-coded strings it replaced, and
+   the route outlet must survive a screen that throws.
+--------------------------------------------------------------------------- */
+
+describe("shell status", () => {
+  it("reports demo data instead of the old static 'Platform connected' / 'Live'", async () => {
+    fetchMe.mockResolvedValue({
+      principal_id: "dev-fixture-user",
+      principal_type: "USER",
+      organization_id: null,
+      roles: ["Analyst"],
+      persona: null,
+      identity_provider: "DEVELOPMENT",
+    });
+    const App = await loadApp();
+    render(<App />);
+
+    const badge = await screen.findByTestId("shell-status");
+    expect(badge).toHaveAttribute("data-state", "demo");
+    expect(badge).toHaveTextContent("Demo data");
+    // The colour is not the success colour: a demo build must not read as a
+    // healthy connection.
+    expect(badge).toHaveAttribute("data-tone", "demo");
+
+    expect(screen.queryByText("Platform connected")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
+  });
+
+  it("offers no reconnect action in a state that reconnecting cannot fix", async () => {
+    fetchMe.mockResolvedValue({
+      principal_id: "dev-fixture-user",
+      principal_type: "USER",
+      organization_id: null,
+      roles: ["Analyst"],
+      persona: null,
+      identity_provider: "DEVELOPMENT",
+    });
+    const App = await loadApp();
+    render(<App />);
+
+    await screen.findByTestId("shell-status");
+    expect(screen.queryByTestId("session-reconnect")).not.toBeInTheDocument();
+  });
+});
+
+describe("navigation drops the page you left behind", () => {
+  it("does not carry one screen's filters into the next screen", async () => {
+    // `status` means something different on Data quality and on Studio; the
+    // old shell defaulted the query to `location.search`, so it arrived
+    // anyway (F09).
+    history.replaceState(null, "", "/?severity=HIGH&status=OPEN#/quality");
+    fetchMe.mockReturnValue(new Promise(() => {}));
+    const App = await loadApp();
+    render(<App />);
+
+    const nav = within(screen.getByRole("navigation", { name: "Main" }));
+    fireEvent.click(nav.getByRole("button", { name: "Reviewer" }));
+    fireEvent.click(nav.getByRole("button", { name: "Review queue" }));
+
+    expect(location.hash).toBe("#/governance");
+    expect(location.search).not.toContain("severity=HIGH");
+    expect(location.search).not.toContain("status=OPEN");
+  });
+});

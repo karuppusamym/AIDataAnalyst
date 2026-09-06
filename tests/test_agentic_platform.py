@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -155,13 +156,20 @@ class _GovernanceDecisionSession:
     async def scalar(self, _statement: object) -> object:
         return self._get_queue.pop(0)
 
-    async def execute(self, _statement: object) -> None:
-        return None
+    async def execute(self, _statement: object) -> object:
+        # `governance_decision_service.claim_review` reads `rowcount` off the
+        # compare-and-set that claims the review out of PENDING (F05); a bare
+        # `None` no longer models what a session returns for DML. One row
+        # matched is the uncontended case this test is about.
+        return SimpleNamespace(rowcount=1)
 
     def add(self, value: object) -> None:
         self.added.append(value)
 
     async def flush(self) -> None:
+        return None
+
+    async def refresh(self, _instance: object) -> None:
         return None
 
     async def commit(self) -> None:
@@ -204,9 +212,9 @@ async def test_request_marketplace_access_flushes_review_before_access_insert(
         created_by="owner",
     )
 
-    async def _fake_version_scope(_session: object, _version_id: object, _context: object) -> tuple[
-        DataProduct, DataProductVersion
-    ]:
+    async def _fake_version_scope(
+        _session: object, _version_id: object, _context: object
+    ) -> tuple[DataProduct, DataProductVersion]:
         return product, version
 
     monkeypatch.setattr(product_marketplace_api, "_version_scope", _fake_version_scope)

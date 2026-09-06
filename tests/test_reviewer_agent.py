@@ -247,10 +247,11 @@ async def test_the_reviewer_agent_cannot_reach_a_publish_or_activate_path() -> N
     """ADR-0027 condition (a), as a static property rather than a behaviour.
 
     `reviewer_agent.py` may reach exactly one decision entry point --
-    `_apply_governance_review_decision`, the same core a human checker uses.
-    It must not import or call anything that publishes a semantic version,
-    activates a model route, or grants access directly. Same technique as
-    `test_inv4_authorization_wiring.py`'s static scan.
+    `governance_decision_service.decide_review`, the same application service
+    the human single-decision, bulk-decision and sample-review endpoints all
+    go through (F05). It must not import or call anything that publishes a
+    semantic version, activates a model route, or grants access directly.
+    Same technique as `test_inv4_authorization_wiring.py`'s static scan.
     """
     source = (REPO_ROOT / "src" / "aida" / "reviewer_agent.py").read_text(encoding="utf-8")
     forbidden = (
@@ -264,9 +265,17 @@ async def test_the_reviewer_agent_cannot_reach_a_publish_or_activate_path() -> N
     )
     hits = [name for name in forbidden if name in source]
     assert hits == [], f"reviewer_agent must not reach these paths: {hits}"
-    assert "_apply_governance_review_decision" in source, (
+    assert "decide_review(" in source, (
         "the agent must decide through the same core a human checker uses, "
         "not through a private path of its own"
+    )
+    assert "from aida.governance_decision_service import" in source, (
+        "that core is the shared application service, imported at module scope -- "
+        "not a deferred import of a router (R03)"
+    )
+    assert "from aida.semantic_api import" not in source, (
+        "reaching back into the router for the decision core is exactly the "
+        "cycle edge the review recorded (R03)"
     )
 
 
@@ -352,9 +361,7 @@ async def test_one_human_action_suspends_and_resumes_one_organization(
 async def test_suspension_is_audited(session: AsyncSession) -> None:
     org = await _seed_org(session)
     context = security_context(organization_id=org.id, principal_id="risk-officer")
-    await set_suspended(
-        session, org.id, suspended=True, context=context, reason="spike"
-    )
+    await set_suspended(session, org.id, suspended=True, context=context, reason="spike")
     await session.flush()
     rows = (
         await session.scalars(

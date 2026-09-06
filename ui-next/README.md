@@ -3,9 +3,10 @@
 The React rebuild of the portal, per
 `Docs/10-architecture/adr/ADR-0021-experience-shell-stack-and-strangle-migration.md`.
 
-`ui/` still serves every screen not yet migrated. This app owns routing, navigation,
-persona and chrome from day one; screens marked `legacy` in the nav have not moved
-across yet. There is no cutover — `ui/` is deleted when the last marker goes.
+**The strangle migration is finished.** This is the only portal: the vanilla-JS `ui/`
+app was deleted on 2026-09-05 (finding D05 of `../Docs/review-2026-09-05/REVIEW.md`,
+resolved by outright removal rather than a parity gate), along with its compose service
+and nginx route. There is no `legacy` nav marker and no second frontend to fall back to.
 
 ## Run
 
@@ -23,28 +24,30 @@ docker compose -f compose.yaml -f compose.dev.yaml up --build -d
 ```
 
 Open <http://localhost:5174>. Changes under `ui-next/` are applied through
-Vite hot-module reload; changes under `src/` restart the API automatically.
-The full legacy portal stays available at <http://localhost:3000>; edits under
-`ui/` are served straight from the bind mount after a browser refresh. The
+Vite hot-module reload; changes under `src/` restart the API automatically. The
 overlay uses polling so HMR also works reliably with Windows bind mounts.
 Use `docker compose up --build -d` (without the overlay) to return to the
-production-like setup; the built React portal is then available at
-<http://localhost:3001>, alongside the legacy portal at <http://localhost:3000>.
+production-like setup; the built React portal is then served by nginx at
+<http://localhost:3001>. Nothing runs on port 3000 any more.
 
-The production-like `ui-next` image builds the React app and proxies `/v1/*` to
-the API container. It uses live API calls by default. Set
-`UI_NEXT_USE_FIXTURES=1` before `docker compose up --build` if a fixture-backed
-image is needed for local UI work.
+The production-like image builds the React app and puts nginx in front of it.
+`ui-next/nginx.conf` proxies **both** API path prefixes to the API container on
+the same origin — `/v1/` and `/mcp` — and everything else falls through to the SPA.
+That pair has to stay equal to `vite.config.ts`'s `server.proxy` keys, because the
+Agent gateway screen tells an engineer the MCP endpoint is `${location.origin}/mcp`;
+`scripts/check_proxy_contract.py` fails CI if the two configurations diverge (F07).
 
-Fixtures are on by default, so the Catalog runs without a backend: it generates a
-1,000,000-row catalog lazily and mirrors the server's keyset cursor contract.
+The image uses live API calls by default (`compose.yaml` passes
+`UI_NEXT_USE_FIXTURES:-0`). Set `UI_NEXT_USE_FIXTURES=1` before
+`docker compose up --build` if a fixture-backed image is needed for local UI work.
+
+`npm run dev` on the host defaults to fixtures, so the Catalog runs without a
+backend: it generates a 1,000,000-row catalog lazily and mirrors the server's
+keyset cursor contract.
 
 ```bash
-VITE_USE_FIXTURES=0 npm run dev    # proxies /v1 to the API on :8000
+VITE_USE_FIXTURES=0 npm run dev    # proxies /v1 and /mcp to the API on :8000
 ```
-
-Fixtures-off works against `GET /v1/organizations/{org}/catalog/rows` (tracker UX-12).
-The remaining cutover work is migrating the screens that still live under `ui/`.
 
 ```bash
 npm run build      # tsc -b && vite build -> dist/, served by the existing nginx
@@ -56,13 +59,13 @@ npm run typecheck
 ```
 src/
   tokens.css              colour, type, spacing; both themes; focus; reduced-motion
-  App.tsx                 shell, persona, nav, strangle seam
+  App.tsx                 shell, persona, nav, routing
   lib/types.ts            mirrors src/aida/schemas.py — hand-written, see UX-14
   lib/api.ts              one fetch wrapper; typed errors; every request abortable
   lib/fixtures.ts         1M-row catalog computed per index, never materialised
   components/             primitives, CatalogTable, EvidencePane,
                           ProposalCard, PropagationLog
-  screens/                CatalogScreen, ReviewQueueScreen
+  screens/                one component per entry in lib/routes.ts's SCREEN_IDS
 ```
 
 ## Adding a screen

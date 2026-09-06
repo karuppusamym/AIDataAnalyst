@@ -1,7 +1,29 @@
+"""The Kafka-driven projector that keeps Neo4j in step with PostgreSQL.
+
+Three invariants this module is responsible for holding:
+
+* **A rebuild's memory is bounded by a chunk, not by the estate.** Reading is
+  delegated to `aida.graph_projection.iter_projection_chunks`; nothing here
+  ever holds a whole datasource's metadata at once.
+* **A rebuild is a replacement, not an accumulation.** Every node written in a
+  rebuild is stamped with that rebuild's `generation`; anything still carrying
+  an older generation for the same tenant and datasource is deleted afterwards.
+  Before this, a row deleted at the source stayed in the graph forever, because
+  MERGE only ever adds.
+* **No single tenant owns the sweep.** Consumed events are buffered through
+  `TenantFairQueue`, which round-robins between organizations, and the age of
+  the oldest waiting event is exported so a budget policy can be chosen from
+  measurements instead of guesses.
+"""
+
+from __future__ import annotations
+
 import asyncio
 import hashlib
 import json
 import signal
+import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -9,21 +31,36 @@ from uuid import UUID
 import structlog
 from aiokafka import AIOKafkaConsumer
 from neo4j import AsyncDriver, AsyncGraphDatabase
-from sqlalchemy import select
+from neo4j import AsyncSession as AsyncNeo4jSession
 
 from aida.config import get_settings
 from aida.db import session_factory
+from aida.graph_projection import (
+    BacklogSnapshot,
+    ProjectionChunk,
+    TenantBudget,
+    TenantFairQueue,
+    event_lag_seconds,
+    iter_projection_chunks,
+    resolve_chunk_size,
+)
 from aida.logging import configure_logging
-from aida.models import (
-    DataSource,
-    DbtProject,
-    MetadataCatalog,
-    MetadataColumn,
-    MetadataConstraint,
-    MetadataSchema,
-    MetadataTable,
+from aida.models import DataSource, DbtProject
+from aida.projection_metrics import (
+    PROJECTION_BACKLOG_EVENTS,
+    PROJECTION_BACKLOG_TENANTS,
+    PROJECTION_CHUNKS,
+    PROJECTION_DELETIONS,
+    PROJECTION_LAG_SECONDS,
+    PROJECTION_LEVEL_SECONDS,
+    PROJECTION_OLDEST_BACKLOG_SECONDS,
+    PROJECTION_REBUILD_SECONDS,
+    PROJECTION_ROWS,
+    PROJECTION_TENANT_YIELDS,
 )
 from aida.unified_lineage_api import build_unified_lineage_graph_payload
+
+logger = structlog.get_logger(__name__)
 
 # Event types that trigger `project_unified_lineage` in `run_projector` below.
 # Named (rather than an inline set literal) so it can be asserted against
@@ -85,188 +122,159 @@ async def ensure_graph_constraints(driver: AsyncDriver) -> None:
             await graph_session.run(statement)
 
 
-async def load_projection(
-    datasource_id: UUID, organization_id: UUID
-) -> dict[str, list[dict[str, Any]]]:
-    async with session_factory() as session:
-        # ADR-0017 SS2 -- every projected node carries its full tenancy path, not
-        # just organization_id, so a bounded traversal can be scoped to a domain.
-        datasource = await session.get(DataSource, datasource_id)
-        tenancy_path = (
-            {
-                "line_of_business_id": str(datasource.line_of_business_id),
-                "data_domain_id": str(datasource.data_domain_id),
-                "project_id": str(datasource.project_id),
-            }
-            if datasource is not None
-            else {}
-        )
-        catalogs = (
-            await session.scalars(
-                select(MetadataCatalog).where(
-                    MetadataCatalog.datasource_id == datasource_id,
-                    MetadataCatalog.organization_id == organization_id,
-                )
-            )
-        ).all()
-        catalog_ids = [catalog.id for catalog in catalogs]
-        schemas = (
-            await session.scalars(
-                select(MetadataSchema).where(
-                    MetadataSchema.catalog_id.in_(catalog_ids),
-                    MetadataSchema.organization_id == organization_id,
-                )
-            )
-        ).all()
-        schema_ids = [schema.id for schema in schemas]
-        tables = (
-            await session.scalars(
-                select(MetadataTable).where(
-                    MetadataTable.schema_id.in_(schema_ids),
-                    MetadataTable.organization_id == organization_id,
-                )
-            )
-        ).all()
-        table_ids = [table.id for table in tables]
-        columns = (
-            await session.scalars(
-                select(MetadataColumn).where(
-                    MetadataColumn.table_id.in_(table_ids),
-                    MetadataColumn.organization_id == organization_id,
-                )
-            )
-        ).all()
-        constraints = (
-            await session.scalars(
-                select(MetadataConstraint).where(
-                    MetadataConstraint.table_id.in_(table_ids),
-                    MetadataConstraint.organization_id == organization_id,
-                )
-            )
-        ).all()
-
+def _tenancy_path(datasource: DataSource | None) -> dict[str, str]:
+    """ADR-0017 SS2 -- every projected node carries its full tenancy path, not
+    just `organization_id`, so a bounded traversal can be scoped to a domain
+    before it walks edges rather than filtering after."""
+    if datasource is None:
+        return {}
     return {
-        "catalogs": [
-            {
-                "platform_id": str(item.id),
-                "organization_id": str(organization_id),
-                "datasource_id": str(datasource_id),
-                "name": item.name,
-                "status": item.status,
-                **tenancy_path,
-            }
-            for item in catalogs
-        ],
-        "schemas": [
-            {
-                "platform_id": str(item.id),
-                "organization_id": str(organization_id),
-                "catalog_id": str(item.catalog_id),
-                "name": item.name,
-                "status": item.status,
-                **tenancy_path,
-            }
-            for item in schemas
-        ],
-        "tables": [
-            {
-                "platform_id": str(item.id),
-                "organization_id": str(organization_id),
-                "schema_id": str(item.schema_id),
-                "name": item.name,
-                "object_type": item.object_type,
-                "status": item.status,
-                **tenancy_path,
-            }
-            for item in tables
-        ],
-        "columns": [
-            {
-                "platform_id": str(item.id),
-                "organization_id": str(organization_id),
-                "table_id": str(item.table_id),
-                "name": item.name,
-                "ordinal_position": item.ordinal_position,
-                "physical_type": item.physical_type,
-                "classification": item.classification,
-                "status": item.status,
-                **tenancy_path,
-            }
-            for item in columns
-        ],
-        "constraints": [
-            {
-                "platform_id": str(item.id),
-                "organization_id": str(organization_id),
-                "table_id": str(item.table_id),
-                "name": item.name,
-                "constraint_type": item.constraint_type,
-                "columns": item.columns,
-                "referenced_table_id": (
-                    str(item.referenced_table_id) if item.referenced_table_id else None
-                ),
-                "referenced_columns": item.referenced_columns,
-                "status": item.status,
-                **tenancy_path,
-            }
-            for item in constraints
-        ],
+        "line_of_business_id": str(datasource.line_of_business_id),
+        "data_domain_id": str(datasource.data_domain_id),
+        "project_id": str(datasource.project_id),
     }
 
 
-async def project_discovery(driver: AsyncDriver, event: dict[str, Any]) -> None:
-    payload = event["payload"]
-    datasource_id = UUID(payload["datasource_id"])
-    organization_id = UUID(event["organization_id"])
-    projection = await load_projection(datasource_id, organization_id)
-    async with driver.session() as graph_session:
+def rebuild_generation(event: Mapping[str, Any]) -> str:
+    """The stamp that separates "written by this rebuild" from "left over".
+
+    Derived only from the event envelope, so it is a pure function of
+    authoritative input: replaying the same event produces the same generation
+    and therefore the same projection (INV-1's rebuild property, asserted by
+    `tests/test_inv1_single_authoritative_store.py::test_projection_rebuild`),
+    while a *later* discovery event -- necessarily a different `event_id` --
+    produces a different one and so retires whatever the previous rebuild left
+    behind.
+    """
+    seed = json.dumps(
+        {
+            "event_id": str(event.get("event_id") or ""),
+            "occurred_at": str(event.get("occurred_at") or ""),
+            "organization_id": str(event.get("organization_id") or ""),
+            "datasource_id": str((event.get("payload") or {}).get("datasource_id") or ""),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(seed.encode("utf-8")).hexdigest()
+
+
+# Neo4j label per hierarchy level, and the MERGE statements that write it.
+# Written as a table rather than as five inline blocks so the write path, the
+# deletion-reconciliation path and the metric labels are all driven by one
+# declaration and cannot fall out of step.
+_LEVEL_LABELS: dict[str, str] = {
+    "catalogs": "Catalog",
+    "schemas": "Schema",
+    "tables": "Table",
+    "columns": "Column",
+    "constraints": "Constraint",
+}
+
+# Children before parents: DETACH DELETE on a Table would silently take its
+# columns' HAS_COLUMN edges with it, so the columns are reconciled on their own
+# terms first and the resulting count means what it says.
+_DELETION_ORDER: tuple[str, ...] = ("columns", "constraints", "tables", "schemas", "catalogs")
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionRebuildReport:
+    """What one rebuild actually did.
+
+    Returned rather than only logged so a measurement harness or a test can
+    assert on progress and on reconciliation without parsing log lines.
+    """
+
+    generation: str
+    rows_by_level: dict[str, int]
+    chunks_by_level: dict[str, int]
+    deleted_by_level: dict[str, int]
+    duration_seconds: float
+    lag_seconds: float | None
+
+    @property
+    def rows(self) -> int:
+        return sum(self.rows_by_level.values())
+
+    @property
+    def deleted(self) -> int:
+        return sum(self.deleted_by_level.values())
+
+
+async def _write_chunk(
+    graph_session: AsyncNeo4jSession, chunk: ProjectionChunk, *, generation: str
+) -> None:
+    """Write one bounded chunk of one level.
+
+    Every statement is written inline at its own `run()` call rather than
+    looked up from a table of Cypher strings. That is deliberate:
+    `tests/test_inv1_single_authoritative_store.py` proves the dual-write
+    prohibition and the MERGE-not-CREATE idempotence rule by extracting Cypher
+    at the graph-call site, and a statement hidden behind a dict lookup is a
+    statement that invariant scan can no longer see.
+
+    `SET n += row, n.generation = $generation` is what makes a rebuild a
+    replacement: the stamp says which rebuild last wrote this node, so
+    `_reconcile_deleted_nodes` can retire whatever this one did not touch.
+    """
+    rows = chunk.rows
+    if chunk.level == "catalogs":
         await graph_session.run(
             """
             UNWIND $rows AS row
             MERGE (n:Catalog {platform_id: row.platform_id})
-            SET n += row
+            SET n += row, n.generation = $generation
             """,
-            rows=projection["catalogs"],
+            rows=rows,
+            generation=generation,
         )
+    elif chunk.level == "schemas":
         await graph_session.run(
             """
             UNWIND $rows AS row
             MATCH (parent:Catalog {platform_id: row.catalog_id})
             MERGE (n:Schema {platform_id: row.platform_id})
-            SET n += row
+            SET n += row, n.generation = $generation
             MERGE (parent)-[:HAS_SCHEMA]->(n)
             """,
-            rows=projection["schemas"],
+            rows=rows,
+            generation=generation,
         )
+    elif chunk.level == "tables":
         await graph_session.run(
             """
             UNWIND $rows AS row
             MATCH (parent:Schema {platform_id: row.schema_id})
             MERGE (n:Table {platform_id: row.platform_id})
-            SET n += row
+            SET n += row, n.generation = $generation
             MERGE (parent)-[:HAS_TABLE]->(n)
             """,
-            rows=projection["tables"],
+            rows=rows,
+            generation=generation,
         )
+    elif chunk.level == "columns":
         await graph_session.run(
             """
             UNWIND $rows AS row
             MATCH (parent:Table {platform_id: row.table_id})
             MERGE (n:Column {platform_id: row.platform_id})
-            SET n += row
+            SET n += row, n.generation = $generation
             MERGE (parent)-[:HAS_COLUMN]->(n)
             """,
-            rows=projection["columns"],
+            rows=rows,
+            generation=generation,
         )
+    elif chunk.level == "constraints":
         await graph_session.run(
             """
             UNWIND $rows AS row
             MATCH (parent:Table {platform_id: row.table_id})
             MERGE (n:Constraint {platform_id: row.platform_id})
-            SET n += row
+            SET n += row, n.generation = $generation
             MERGE (parent)-[:HAS_CONSTRAINT]->(n)
             """,
-            rows=projection["constraints"],
+            rows=rows,
+            generation=generation,
         )
         await graph_session.run(
             """
@@ -276,9 +284,159 @@ async def project_discovery(driver: AsyncDriver, event: dict[str, Any]) -> None:
             MATCH (referenced:Table {platform_id: row.referenced_table_id})
             MERGE (n)-[:REFERENCES]->(referenced)
             """,
-            rows=projection["constraints"],
+            rows=rows,
+            generation=generation,
         )
+    else:  # pragma: no cover -- PROJECTION_LEVELS is closed; a new level is a code change
+        raise ValueError(f"unknown projection level: {chunk.level}")
 
+
+async def _reconcile_deleted_nodes(
+    graph_session: AsyncNeo4jSession,
+    *,
+    organization_id: UUID,
+    datasource_id: UUID,
+    generation: str,
+    batch_size: int,
+) -> dict[str, int]:
+    """Retire every node of this tenant/datasource the current rebuild did not write.
+
+    `n.generation IS NULL` is the one-time migration clause: nodes written
+    before generations existed carry none, and a rebuild that rewrites every
+    live row leaves exactly the retired ones holding a null. Without it those
+    nodes would outlive their source rows forever -- the "additive world"
+    assumption the 2026-09-05 review flagged.
+
+    Batched by `batch_size` for the same reason the read side is chunked: one
+    unbounded `DETACH DELETE` over a retired million-column source is a single
+    transaction the graph has to hold entirely in memory.
+    """
+    deleted: dict[str, int] = {}
+    for level in _DELETION_ORDER:
+        label = _LEVEL_LABELS[level]
+        total = 0
+        while True:
+            result = await graph_session.run(
+                f"""
+                MATCH (n:{label})
+                WHERE n.organization_id = $organization_id
+                  AND n.datasource_id = $datasource_id
+                  AND (n.generation IS NULL OR n.generation <> $generation)
+                WITH n LIMIT $batch_size
+                DETACH DELETE n
+                RETURN count(*) AS deleted
+                """,
+                organization_id=str(organization_id),
+                datasource_id=str(datasource_id),
+                generation=generation,
+                batch_size=batch_size,
+            )
+            removed = 0
+            async for record in result:
+                removed = int(record["deleted"])
+            if removed <= 0:
+                break
+            total += removed
+            if removed < batch_size:
+                break
+        if total:
+            PROJECTION_DELETIONS.labels(level).inc(total)
+        deleted[level] = total
+    return deleted
+
+async def project_discovery(
+    driver: AsyncDriver,
+    event: dict[str, Any],
+    *,
+    chunk_size: int | None = None,
+) -> ProjectionRebuildReport:
+    """Rebuild one datasource's metadata projection with bounded memory.
+
+    Two properties this holds that the previous whole-estate `load_projection`
+    did not: peak memory is a function of `chunk_size` rather than of the
+    estate, and a source row that has gone away is removed from the graph
+    instead of surviving indefinitely because MERGE only ever adds.
+    """
+    payload = event["payload"]
+    datasource_id = UUID(payload["datasource_id"])
+    organization_id = UUID(event["organization_id"])
+    generation = rebuild_generation(event)
+    size = chunk_size if chunk_size is not None else resolve_chunk_size()
+    started = time.perf_counter()
+    rows_by_level: dict[str, int] = {}
+    chunks_by_level: dict[str, int] = {}
+
+    async with session_factory() as session:
+        datasource = await session.get(DataSource, datasource_id)
+        tenancy_path = _tenancy_path(datasource)
+        async with driver.session() as graph_session:
+            current_level: str | None = None
+            level_started = time.perf_counter()
+            async for chunk in iter_projection_chunks(
+                session,
+                datasource_id,
+                organization_id,
+                tenancy_path=tenancy_path,
+                chunk_size=size,
+            ):
+                if chunk.level != current_level:
+                    if current_level is not None:
+                        PROJECTION_LEVEL_SECONDS.labels(current_level).observe(
+                            time.perf_counter() - level_started
+                        )
+                    current_level = chunk.level
+                    level_started = time.perf_counter()
+                await _write_chunk(graph_session, chunk, generation=generation)
+                # Release the read snapshot between chunks. A large-source
+                # rebuild now spans every Neo4j write as well as every read, and
+                # one PostgreSQL transaction held open for that whole span
+                # blocks vacuum on the metadata tables for the duration. Nothing
+                # is lost: under READ COMMITTED each statement already takes its
+                # own snapshot, so keyset pagination was never
+                # snapshot-consistent, and a row that appears or disappears
+                # mid-rebuild is reconciled by the next generation anyway.
+                await session.rollback()
+                rows_by_level[chunk.level] = rows_by_level.get(chunk.level, 0) + len(chunk.rows)
+                chunks_by_level[chunk.level] = chunks_by_level.get(chunk.level, 0) + 1
+                PROJECTION_ROWS.labels(chunk.level).inc(len(chunk.rows))
+                PROJECTION_CHUNKS.labels(chunk.level).inc()
+            if current_level is not None:
+                PROJECTION_LEVEL_SECONDS.labels(current_level).observe(
+                    time.perf_counter() - level_started
+                )
+            deleted_by_level = await _reconcile_deleted_nodes(
+                graph_session,
+                organization_id=organization_id,
+                datasource_id=datasource_id,
+                generation=generation,
+                batch_size=size,
+            )
+
+    duration = time.perf_counter() - started
+    lag = event_lag_seconds(event)
+    PROJECTION_REBUILD_SECONDS.observe(duration)
+    if lag is not None:
+        PROJECTION_LAG_SECONDS.set(lag)
+    report = ProjectionRebuildReport(
+        generation=generation,
+        rows_by_level=rows_by_level,
+        chunks_by_level=chunks_by_level,
+        deleted_by_level=deleted_by_level,
+        duration_seconds=duration,
+        lag_seconds=lag,
+    )
+    logger.info(
+        "metadata_graph_rebuilt",
+        datasource_id=str(datasource_id),
+        organization_id=str(organization_id),
+        generation=generation,
+        rows=report.rows,
+        chunks=sum(chunks_by_level.values()),
+        reconciled_deletions=report.deleted,
+        duration_seconds=round(duration, 4),
+        lag_seconds=None if lag is None else round(lag, 3),
+    )
+    return report
 
 async def _event_datasource_id(event: dict[str, Any]) -> UUID | None:
     payload = event.get("payload") or {}
@@ -437,11 +595,75 @@ async def project_unified_lineage(driver: AsyncDriver, event: dict[str, Any]) ->
     return True
 
 
+async def project_event(driver: AsyncDriver, event: dict[str, Any]) -> None:
+    """Apply one consumed event to the graph.
+
+    Split out of `run_projector`'s loop so the fair-share scheduler has
+    something to call per event, and so a test can drive the projection of a
+    single event without a Kafka consumer.
+    """
+    event_type = event.get("event_type")
+    if event_type in {"metadata.discovery.completed.v1", "metadata.discovery.snapshot.v1"}:
+        report = await project_discovery(driver, event)
+        logger.info(
+            "metadata_graph_projected",
+            event_id=event.get("event_id"),
+            datasource_id=event["payload"]["datasource_id"],
+            rows=report.rows,
+            reconciled_deletions=report.deleted,
+        )
+    if event_type in UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES and await project_unified_lineage(
+        driver, event
+    ):
+        logger.info(
+            "unified_lineage_graph_projected",
+            event_id=event.get("event_id"),
+            event_type=event_type,
+        )
+
+
+def publish_backlog(queue: TenantFairQueue) -> BacklogSnapshot:
+    """Export the fair-share buffer's current depth and oldest age.
+
+    The review asks for tenant budgets *and* for the evidence to choose them
+    from; this is the second half. `oldest_organization_id` goes to the log,
+    never to a metric label -- an organization id is exactly the unbounded
+    label cardinality F17 flagged.
+    """
+    snapshot = queue.backlog()
+    PROJECTION_BACKLOG_EVENTS.set(snapshot.events)
+    PROJECTION_BACKLOG_TENANTS.set(snapshot.tenants)
+    PROJECTION_OLDEST_BACKLOG_SECONDS.set(snapshot.oldest_age_seconds)
+    return snapshot
+
+
+async def drain_fairly(driver: AsyncDriver, queue: TenantFairQueue) -> int:
+    """Project everything currently buffered, round-robin across tenants.
+
+    Returns the number of events projected. The buffer is drained *completely*
+    before the caller commits its offsets: fairness reorders work within a
+    fetched batch, it never lets an offset advance past an event that has not
+    been projected.
+    """
+    projected = 0
+    yields_before = queue.yields
+    while (event := queue.take()) is not None:
+        await project_event(driver, event)
+        projected += 1
+        publish_backlog(queue)
+    yielded = queue.yields - yields_before
+    if yielded:
+        PROJECTION_TENANT_YIELDS.inc(yielded)
+        logger.info("graph_projector_tenant_budget_yielded", yields=yielded, projected=projected)
+    return projected
+
+
 async def run_projector() -> None:
     settings = get_settings()
     configure_logging(settings.log_level)
-    logger = structlog.get_logger(__name__)
     state = ProjectorState()
+    budget = TenantBudget.from_env()
+    queue = TenantFairQueue(budget=budget)
     loop = asyncio.get_running_loop()
     for signal_name in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signal_name, setattr, state, "stopping", True)
@@ -461,33 +683,39 @@ async def run_projector() -> None:
         auto_offset_reset="earliest",
     )
     await consumer.start()
-    logger.info("graph_projector_started")
+    logger.info(
+        "graph_projector_started",
+        tenant_events_per_round=budget.events_per_round,
+        max_buffered_events=budget.max_buffered_events,
+        chunk_rows=resolve_chunk_size(),
+    )
     try:
-        async for message in consumer:
-            event = json.loads(message.value)
-            event_type = event.get("event_type")
-            if event_type in {
-                "metadata.discovery.completed.v1",
-                "metadata.discovery.snapshot.v1",
-            }:
-                await project_discovery(driver, event)
-                logger.info(
-                    "metadata_graph_projected",
-                    event_id=event["event_id"],
-                    datasource_id=event["payload"]["datasource_id"],
-                )
-            if (
-                event_type in UNIFIED_LINEAGE_PROJECTION_EVENT_TYPES
-                and await project_unified_lineage(driver, event)
-            ):
-                logger.info(
-                    "unified_lineage_graph_projected",
-                    event_id=event.get("event_id"),
-                    event_type=event_type,
-                )
+        while not state.stopping:
+            # `getmany` rather than `async for message in consumer`: fairness
+            # can only mean anything across more than one event, and a batch is
+            # the only place several tenants' events are visible at once. The
+            # commit below still happens strictly after every event in the
+            # batch has been projected, so at-least-once delivery is unchanged.
+            batches = await consumer.getmany(
+                timeout_ms=1_000, max_records=budget.max_buffered_events
+            )
+            if not batches:
+                publish_backlog(queue)
+                continue
+            for records in batches.values():
+                for message in records:
+                    event = json.loads(message.value)
+                    if not queue.offer(event):
+                        # Backpressure rather than loss: the buffer is full, so
+                        # drain what is in it and then take this event. Offsets
+                        # are still committed only after the whole batch has
+                        # been projected, so an at-least-once redelivery -- not
+                        # a dropped event -- is the worst a crash here costs.
+                        await drain_fairly(driver, queue)
+                        queue.offer(event)
+            publish_backlog(queue)
+            await drain_fairly(driver, queue)
             await consumer.commit()
-            if state.stopping:
-                break
     finally:
         await consumer.stop()
         await driver.close()

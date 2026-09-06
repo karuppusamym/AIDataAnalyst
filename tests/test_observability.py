@@ -3,6 +3,9 @@ from datetime import UTC, datetime
 import pytest
 
 import aida.observability as observability_module
+from aida.audit_archive_storage import NullArchiveStorage
+from aida.audit_envelope import AuditEventEnvelope, compute_batch_checksum
+from aida.delivery_intents import DeliveryOutcome
 from aida.main import app
 from aida.observability import (
     MetricsConfig,
@@ -18,14 +21,10 @@ from aida.siem_routing import (
     SiemConfig,
     format_cef,
     format_webhook_payload,
-    route_to_siem,
+    routing_state,
+    siem_payload,
 )
 from aida.worm_archive import (
-    ArchiveConfig,
-    AuditEventEnvelope,
-    apply_legal_hold,
-    archive_audit_events,
-    release_legal_hold,
     retention_policy_for_classification,
     validate_archive_integrity,
 )
@@ -167,8 +166,12 @@ def _event(
     )
 
 
+def _payload(event: SecurityEvent, *, include_details: bool = True) -> dict[str, object]:
+    return siem_payload(event, SiemConfig(include_details=include_details))
+
+
 def test_format_cef_structure() -> None:
-    cef = format_cef(_event())
+    cef = format_cef(_payload(_event()))
     assert cef.startswith("CEF:0|Atlas|DataIntelligence|1.0|")
     assert "|100|" in cef  # AUTH_FAILURE signature ID
     assert "|8|" in cef  # HIGH severity
@@ -178,47 +181,66 @@ def test_format_cef_structure() -> None:
 
 
 def test_format_cef_policy_violation() -> None:
-    cef = format_cef(_event(event_type="POLICY_VIOLATION", severity="CRITICAL"))
+    cef = format_cef(_payload(_event(event_type="POLICY_VIOLATION", severity="CRITICAL")))
     assert "|200|" in cef
     assert "|10|" in cef
 
 
 def test_format_webhook_payload() -> None:
-    payload = format_webhook_payload(_event())
+    payload = format_webhook_payload(_payload(_event()))
     assert payload["event_type"] == "AUTH_FAILURE"
     assert payload["severity"] == "HIGH"
     assert payload["cef_severity"] == 8
     assert payload["organization_id"] == "org-1"
 
 
-def test_route_to_siem_disabled() -> None:
-    config = SiemConfig(enabled=False)
-    assert route_to_siem(_event(), config) is False
+# F04: the four configuration states that used to collapse into one bool.
+# `routing_state` is the classification `route_to_siem` performs before it
+# stages anything, so these assert the distinction without a database.
 
 
-def test_route_to_siem_no_endpoint() -> None:
-    config = SiemConfig(enabled=True, endpoint="")
-    assert route_to_siem(_event(), config) is False
+def test_routing_state_disabled() -> None:
+    outcome, _ = routing_state(SiemConfig(enabled=False))
+    assert outcome is DeliveryOutcome.DISABLED
 
 
-def test_route_to_siem_syslog() -> None:
+def test_routing_state_no_endpoint() -> None:
+    outcome, destination = routing_state(SiemConfig(enabled=True, endpoint=""))
+    assert outcome is DeliveryOutcome.NOT_CONFIGURED
+    assert "empty" in destination.reason
+
+
+def test_routing_state_syslog_is_queueable() -> None:
     config = SiemConfig(enabled=True, endpoint="syslog://host:514", transport="syslog")
-    assert route_to_siem(_event(), config) is True
+    outcome, destination = routing_state(config)
+    assert outcome is DeliveryOutcome.QUEUED
+    assert (destination.host, destination.port, destination.protocol) == ("host", 514, "udp")
 
 
-def test_route_to_siem_webhook() -> None:
+def test_routing_state_webhook_is_queueable() -> None:
     config = SiemConfig(
         enabled=True, endpoint="https://siem.example.com/events", transport="webhook"
     )
-    assert route_to_siem(_event(), config) is True
+    outcome, _ = routing_state(config)
+    assert outcome is DeliveryOutcome.QUEUED
 
 
-def test_route_to_siem_unsupported_transport() -> None:
+def test_routing_state_unsupported_transport() -> None:
     config = SiemConfig(enabled=True, endpoint="https://example.com", transport="kafka")
-    assert route_to_siem(_event(), config) is False
+    outcome, destination = routing_state(config)
+    assert outcome is DeliveryOutcome.NOT_CONFIGURED
+    assert "kafka" in destination.reason
 
 
 # --- OB-3: WORM audit archive ---
+#
+# The archive lifecycle, its storage providers and the canonical envelope
+# each have their own file now (`tests/test_worm_archive_lifecycle.py`,
+# `..._storage.py`, `..._envelope.py`), because the 2026-09-05 review found
+# the behaviour asserted here was the defect: `archive_audit_events` returned
+# a success object without writing to any destination, and the checksum it
+# certified covered three fields out of twelve. What remains here is the part
+# that genuinely belongs beside the other pure observability helpers.
 
 
 def _envelope(event_id: str = "ev-1") -> AuditEventEnvelope:
@@ -229,41 +251,16 @@ def _envelope(event_id: str = "ev-1") -> AuditEventEnvelope:
         resource_type="table",
         resource_id="tbl-1",
         principal_id="user-1",
+        principal_type="USER",
+        outcome="SUCCESS",
+        correlation_id="corr-1",
         occurred_at=datetime(2024, 6, 15, 12, 0, tzinfo=UTC),
     )
 
 
-def test_archive_empty_events() -> None:
-    config = ArchiveConfig()
-    result = archive_audit_events([], config)
-    assert result.archived_count == 0
-    assert result.archive_id == ""
-
-
-def test_archive_events_produces_result() -> None:
-    config = ArchiveConfig(retention_days=365, storage_backend="s3")
-    events = [_envelope("ev-1"), _envelope("ev-2")]
-    result = archive_audit_events(events, config)
-    assert result.archived_count == 2
-    assert result.archive_id.startswith("archive-")
-    assert len(result.checksum) == 64  # SHA-256 hex
-    assert result.storage_backend == "s3"
-    assert result.legal_hold is False
-
-
-def test_archive_checksum_deterministic() -> None:
-    events = [_envelope("ev-1"), _envelope("ev-2")]
-    config = ArchiveConfig()
-    r1 = archive_audit_events(events, config)
-    r2 = archive_audit_events(events, config)
-    assert r1.checksum == r2.checksum
-
-
 def test_validate_archive_integrity_pass() -> None:
     events = [_envelope("ev-1")]
-    config = ArchiveConfig()
-    result = archive_audit_events(events, config)
-    assert validate_archive_integrity(events, result.checksum) is True
+    assert validate_archive_integrity(events, compute_batch_checksum(events)) is True
 
 
 def test_validate_archive_integrity_fail() -> None:
@@ -271,22 +268,10 @@ def test_validate_archive_integrity_fail() -> None:
     assert validate_archive_integrity(events, "bad-checksum") is False
 
 
-def test_archive_legal_hold_enabled() -> None:
-    config = ArchiveConfig(legal_hold_enabled=True)
-    result = archive_audit_events([_envelope()], config)
-    assert result.legal_hold is True
-
-
-def test_apply_legal_hold() -> None:
-    result = apply_legal_hold("archive-1", "litigation")
-    assert result["legal_hold"] is True
-    assert result["reason"] == "litigation"
-
-
-def test_release_legal_hold() -> None:
-    result = release_legal_hold("archive-1", "case closed")
-    assert result["legal_hold"] is False
-    assert result["reason"] == "case closed"
+def test_no_destination_configured_refuses_rather_than_succeeding() -> None:
+    """The F01 defect, at its smallest: an unconfigured archive stores nothing."""
+    storage = NullArchiveStorage()
+    assert storage.available is False
 
 
 def test_retention_policy_by_classification() -> None:

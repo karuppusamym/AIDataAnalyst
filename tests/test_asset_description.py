@@ -27,6 +27,7 @@ from fastapi import HTTPException
 
 import aida.asset_description_api as asset_description_api
 import aida.asset_description_service as asset_description_service
+import aida.governance_decision_service as governance_decision_service
 import aida.semantic_api as semantic_api
 from aida.asset_description_service import (
     MINIMUM_EVIDENCE_FOR_REVIEW,
@@ -178,43 +179,58 @@ def test_submit_endpoint_calls_the_evidence_gate_before_creating_a_review() -> N
 def test_apply_asset_description_draft_has_exactly_one_call_site() -> None:
     """The only function that can move a draft to APPROVED and publish its
     text onto AssetDocumentationVersion is `apply_asset_description_draft`.
-    It must be called from nowhere but the shared governance-review dispatch
-    (`semantic_api._apply_governance_review_decision`, invoked only from
-    `decide_governance_review`) — i.e. there is no bypass, however high a
-    draft's confidence score."""
+    It must be called from nowhere but the ASSET_DESCRIPTION_DRAFT adapter
+    the shared governance-decision service dispatches to — i.e. there is no
+    bypass, however high a draft's confidence score.
+
+    (The 921-line `_apply_governance_review_decision` chain this used to
+    inspect is now one adapter per object type, registered into
+    `governance_decision_service`; the property being pinned is unchanged.)
+    """
     source = inspect.getsource(semantic_api)
     call_pattern = re.compile(r"apply_asset_description_draft\(")
     matches = call_pattern.findall(source)
-    # one import + one call site inside _apply_governance_review_decision
-    assert source.count("apply_asset_description_draft") == 2
+    # Exactly one call site in the whole router module.
     assert len(matches) == 1
 
-    dispatch_source = inspect.getsource(semantic_api._apply_governance_review_decision)
-    assert "apply_asset_description_draft(" in dispatch_source
-    assert "reject_asset_description_draft(" in dispatch_source
+    adapter_source = inspect.getsource(semantic_api._decide_asset_description_draft)
+    assert "apply_asset_description_draft(" in adapter_source
+    assert "reject_asset_description_draft(" in adapter_source
 
-    # and decide_governance_review calls nothing but that shared dispatcher
+    # ...and it is reachable only through the registry the decision service
+    # dispatches on, never called directly by an endpoint.
+    assert (
+        semantic_api._TARGET_EFFECT_ADAPTERS["ASSET_DESCRIPTION_DRAFT"]
+        is semantic_api._decide_asset_description_draft
+    )
     decide_source = inspect.getsource(semantic_api.decide_governance_review)
     assert "apply_asset_description_draft(" not in decide_source
     assert "_apply_governance_review_decision(" in decide_source
 
 
 def test_decide_governance_review_checks_self_approval_before_publishing() -> None:
-    """The shared maker-checker guard in `decide_governance_review` must run,
-    and must textually precede the call into `_apply_governance_review_decision`
-    (where the ASSET_DESCRIPTION_DRAFT branch and the one call site of
-    `apply_asset_description_draft` live) — so self-approval is denied before
-    any GL-9 draft can be published, the same guard every other governed
-    object type in this dispatch chain relies on."""
+    """The shared maker-checker guard must run before anything is published.
+
+    Two halves now, because the guard and the publish live in different
+    functions: `decide_governance_review` still checks maker != checker
+    textually before it calls `_apply_governance_review_decision`, and that
+    call goes through `governance_decision_service.decide_review`, which
+    re-checks the same rule (`check_decision_permitted`) *before* it claims
+    the review or reaches any adapter. So self-approval is denied before any
+    GL-9 draft can be published, however the decision arrives."""
     decide_source = inspect.getsource(semantic_api.decide_governance_review)
     guard_at = decide_source.index("maker-checker separation is required")
     dispatch_call_at = decide_source.index("_apply_governance_review_decision(")
     assert guard_at < dispatch_call_at
 
-    dispatch_source = inspect.getsource(semantic_api._apply_governance_review_decision)
-    branch_at = dispatch_source.index('review.object_type == "ASSET_DESCRIPTION_DRAFT"')
-    publish_at = dispatch_source.index("apply_asset_description_draft(")
-    assert branch_at < publish_at
+    service_source = inspect.getsource(governance_decision_service.decide_review)
+    permission_at = service_source.index("check_decision_permitted(")
+    claim_at = service_source.index("claim_review(")
+    adapter_at = service_source.index("await adapter(")
+    assert permission_at < claim_at < adapter_at
+    assert "maker-checker separation is required" in inspect.getsource(
+        governance_decision_service.check_decision_permitted
+    )
 
 
 def test_apply_asset_description_draft_refuses_a_non_pending_draft() -> None:

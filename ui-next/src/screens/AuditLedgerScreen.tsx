@@ -3,7 +3,7 @@ import type { AuditEventRead } from "../lib/ui-types";
 import { ApiError, fetchAuditEvents } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./AuditLedgerScreen.css";
@@ -106,10 +106,6 @@ function AuditRow({
 }
 
 function EventDetailPane({ event, onClose }: { event: AuditEventRead; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => setCopied(false), [event.id]);
-
-  const permalink = `${location.origin}${location.pathname}?event=${event.id}`;
   const detailEntries = Object.entries(event.details);
   // "Legible" means key/value rows when the shape allows it; a nested object
   // or array can't be flattened honestly, so it falls back to a pretty-printed
@@ -182,14 +178,14 @@ function EventDetailPane({ event, onClose }: { event: AuditEventRead; onClose: (
       </div>
 
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-            setCopied(true);
-          }}
-        >
-          {copied ? "Link copied" : "Copy permalink"}
-        </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/audit`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{ screen: "audit", params: { event: event.id } }}
+          label="Copy permalink"
+        />
         <span className="evp__hint">UX-16 · org-wide</span>
       </footer>
     </aside>

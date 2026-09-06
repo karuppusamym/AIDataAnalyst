@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Pill } from "../components/primitives";
 import { OnboardingWizard } from "../components/OnboardingWizard";
-import { fetchCatalogRows, fetchOrgDatasources, fetchReviewQueue } from "../lib/api";
+import { fetchCatalogRows, fetchOrgDatasources, fetchReviewQueue, get, USE_FIXTURES } from "../lib/api";
 import { useOrgId } from "../lib/org";
-import type { DataSourceRead, ReviewQueueRead } from "../lib/types";
+import type { DataSourceRead, ReviewQueueSummaryRead } from "../lib/types";
 import type { CatalogRowRead, Persona } from "../lib/ui-types";
 import type { Tone } from "../components/primitives";
 import "./HomeScreen.css";
@@ -14,10 +14,39 @@ interface OverviewData {
   assets: CatalogRowRead[];
   assetTotal: number | null;
   sources: DataSourceRead[];
-  reviews: ReviewQueueRead | null;
+  /** How many reviews are waiting. A COUNT, never the reviews themselves. */
+  pendingReviews: number | null;
 }
 
-const EMPTY_DATA: OverviewData = { assets: [], assetTotal: null, sources: [], reviews: null };
+const EMPTY_DATA: OverviewData = { assets: [], assetTotal: null, sources: [], pendingReviews: null };
+
+/**
+ * How many reviews are pending (review 2026-09-05, F16).
+ *
+ * THE DEFECT this removes: Overview asked `GET /v1/governance/reviews/queue`
+ * for up to 1,000 proposals -- each one composing a structured diff from the
+ * database, with its evidence and its semantic/glossary snapshots -- and then
+ * used nothing from the response except one integer out of `by_status`. The
+ * cost of rendering a number on the landing page grew with the size of the
+ * review backlog.
+ *
+ * `/queue/summary` is one grouped COUNT(*): it composes nothing and its
+ * response size does not depend on queue depth. The fixtures build keeps
+ * reading the fixture queue because there is no server to aggregate for it and
+ * the array is already in memory -- the N+1 this replaces was a database
+ * shape, not a client one.
+ */
+async function fetchPendingReviewCount(signal: AbortSignal): Promise<number> {
+  if (USE_FIXTURES) {
+    const queue = await fetchReviewQueue({ status: "PENDING", limit: 1000 }, signal);
+    return queue.by_status["PENDING"] ?? 0;
+  }
+  const summary = await get<ReviewQueueSummaryRead>(
+    "/v1/governance/reviews/queue/summary?status=PENDING",
+    signal,
+  );
+  return summary.total;
+}
 
 const certTone = (status: CatalogRowRead["certification"]): Tone =>
   status === "CERTIFIED" ? "ok" : status === "EXPIRED" ? "warn" : status === "REVOKED" ? "bad" : "mute";
@@ -52,14 +81,14 @@ export function HomeScreen({
     Promise.allSettled([
       fetchCatalogRows({ organizationId, limit: 12 }, controller.signal),
       fetchOrgDatasources(organizationId, controller.signal),
-      fetchReviewQueue({ status: null, limit: 1000 }, controller.signal),
+      fetchPendingReviewCount(controller.signal),
     ]).then(([catalog, sources, reviews]) => {
       if (controller.signal.aborted) return;
       setData({
         assets: catalog.status === "fulfilled" ? catalog.value.items : [],
         assetTotal: catalog.status === "fulfilled" ? (catalog.value.total ?? null) : null,
         sources: sources.status === "fulfilled" ? sources.value.items : [],
-        reviews: reviews.status === "fulfilled" ? reviews.value : null,
+        pendingReviews: reviews.status === "fulfilled" ? reviews.value : null,
       });
       setPartialError([catalog, sources, reviews].some((result) => result.status === "rejected"));
       setLoading(false);
@@ -81,7 +110,7 @@ export function HomeScreen({
       needsOwner,
       qualityAlerts,
       activeSources: data.sources.filter((source) => source.status === "ACTIVE").length,
-      pendingReviews: data.reviews?.by_status.PENDING ?? 0,
+      pendingReviews: data.pendingReviews ?? 0,
     };
   }, [data]);
 

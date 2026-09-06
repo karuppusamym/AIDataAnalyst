@@ -13,6 +13,7 @@ from aida.certification_expiry_warning import run_certification_expiry_warning_p
 from aida.config import Settings, get_settings
 from aida.custom_quality_rules import run_due_rule_packs
 from aida.db import session_factory
+from aida.delivery_intents import run_delivery_worker_pass
 from aida.events import record_audit, record_outbox
 from aida.fleet import RunAdmissionRejected, reserve_analysis_run
 from aida.glossary_owner_routing import DEFAULT_ESCALATE_AFTER, sync_unowned_asset_backlog
@@ -30,6 +31,7 @@ from aida.models import (
 )
 from aida.ownership_expiry_warning import run_ownership_expiry_pass
 from aida.playbooks import run_due_playbooks_pass
+from aida.principal_reconciliation import run_principal_reconciliation_pass
 from aida.profiling_exceptions import purge_expired_value_profile_artifacts
 from aida.reaper_service import run_reaper_scheduler_pass
 from aida.security import SecurityContext
@@ -637,12 +639,30 @@ async def run_scheduler_iteration(client: Client, settings: Settings) -> int:
     # `settings.ownership_expiry_warn_interval_seconds` (default 86_400) with
     # the same in-process cadence tracker the cert pass above uses.
     await run_ownership_expiry_pass(settings, now=now)
+    # F19: replay recent `identity.principal.deleted/merged.v1` outbox rows
+    # through the ownership-lifecycle handlers, so a leaver's ownership is
+    # reconciled by a process that actually runs rather than by a caller that
+    # was never built. OFF by default (`principal_reconciliation_enabled`) and
+    # rate-limited inside the pass, so calling it every iteration is a no-op
+    # for every deployment that has not opted in -- the same shape as the
+    # reaper and certification passes above. Replaying an already-reconciled
+    # event changes nothing (see `aida.principal_reconciliation`).
+    await run_principal_reconciliation_pass(settings, now=now)
     # NT-1: relay REVIEW_REQUESTED. Review creation has 27 call sites and no
     # shared funnel, so this is a sweep over a watermark column rather than a
     # hook -- see `governance_review_relay`'s module docstring for why that is
     # the better shape here and not just the cheaper one. Returns immediately
     # when governance notifications are off, which is the default.
     await run_review_notification_pass(settings, now=now)
+    # F04/F12: drain durable delivery intents -- SIEM security events and
+    # governance notifications share one ledger and one worker
+    # (`aida.delivery_intents`). This is the *only* place in the platform that
+    # opens a socket to either destination, which is what keeps a downed SOC
+    # collector or chat webhook off every business transaction. OFF by default
+    # (`delivery_worker_enabled`); when off the pass returns before touching
+    # the database, and everything queued stays queued for whenever it is
+    # turned on -- the same shape as the reaper and certification passes above.
+    await run_delivery_worker_pass(settings, now=now)
     async with session_factory() as session:
         policy_ids = (await session.scalars(due_scan_policies_statement(settings, now))).all()
     admitted = 0

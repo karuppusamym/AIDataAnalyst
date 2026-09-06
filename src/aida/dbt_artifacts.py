@@ -1,11 +1,13 @@
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlglot import exp, parse
 from sqlglot.errors import ParseError
+
+from aida.artifact_parsing import optional_text, parse_generated_at
 
 MAX_ARTIFACT_BYTES = 32 * 1024 * 1024
 MAX_RESOURCES = 25_000
@@ -74,31 +76,11 @@ class ParsedDbtArtifact:
     edges: list[tuple[str, str]]
 
 
-def _optional_text(value: Any, limit: int) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text[:limit] if text else None
-
-
 def _required_text(value: Any, field: str, limit: int) -> str:
-    text = _optional_text(value, limit)
+    text = optional_text(value, limit)
     if not text:
         raise DbtArtifactError(f"dbt resource {field} is required")
     return text
-
-
-def _parse_generated_at(value: Any) -> datetime | None:
-    text = _optional_text(value, 100)
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed
 
 
 def _redact_compiled_sql(sql: str | None, dialect: str) -> tuple[str | None, str | None, str]:
@@ -160,10 +142,10 @@ def _resource_from_manifest(
         col_name = str(raw_name)[:255]
         column_names.append(col_name)
         if isinstance(raw_col, dict):
-            desc = _optional_text(raw_col.get("description"), 4000)
+            desc = optional_text(raw_col.get("description"), 4000)
             if desc:
                 column_descriptions[col_name] = desc
-            dtype = _optional_text(raw_col.get("data_type") or raw_col.get("type"), 255)
+            dtype = optional_text(raw_col.get("data_type") or raw_col.get("type"), 255)
             if dtype:
                 column_types[col_name] = dtype
 
@@ -172,32 +154,32 @@ def _resource_from_manifest(
         owner = payload.get("owner")
         if isinstance(owner, dict):
             if owner.get("name"):
-                extra_metadata["owner_name"] = _optional_text(owner.get("name"), 255)
+                extra_metadata["owner_name"] = optional_text(owner.get("name"), 255)
             if owner.get("email"):
-                extra_metadata["owner_email"] = _optional_text(owner.get("email"), 255)
+                extra_metadata["owner_email"] = optional_text(owner.get("email"), 255)
         if payload.get("url"):
-            extra_metadata["url"] = _optional_text(payload.get("url"), 1000)
+            extra_metadata["url"] = optional_text(payload.get("url"), 1000)
         if payload.get("maturity"):
-            extra_metadata["maturity"] = _optional_text(payload.get("maturity"), 50)
+            extra_metadata["maturity"] = optional_text(payload.get("maturity"), 50)
         if payload.get("type"):
-            extra_metadata["exposure_type"] = _optional_text(payload.get("type"), 50)
+            extra_metadata["exposure_type"] = optional_text(payload.get("type"), 50)
     elif resource_type in {"semantic_model", "metric"}:
         if payload.get("type"):
-            extra_metadata["type"] = _optional_text(payload.get("type"), 100)
+            extra_metadata["type"] = optional_text(payload.get("type"), 100)
         if payload.get("label"):
-            extra_metadata["label"] = _optional_text(payload.get("label"), 255)
+            extra_metadata["label"] = optional_text(payload.get("label"), 255)
 
     return ParsedDbtResource(
         unique_id=_required_text(unique_id, "unique_id", 500),
         resource_type=resource_type.upper(),
         package_name=_required_text(package_name, "package_name", 255),
         name=_required_text(physical_name, "name", 255),
-        database_name=_optional_text(payload.get("database"), 255),
-        schema_name=_optional_text(payload.get("schema"), 255),
-        relation_name=_optional_text(payload.get("relation_name"), 1000),
-        materialization=_optional_text(config.get("materialized"), 100),
-        original_file_path=_optional_text(payload.get("original_file_path"), 1000),
-        description=_optional_text(payload.get("description"), 4000),
+        database_name=optional_text(payload.get("database"), 255),
+        schema_name=optional_text(payload.get("schema"), 255),
+        relation_name=optional_text(payload.get("relation_name"), 1000),
+        materialization=optional_text(config.get("materialized"), 100),
+        original_file_path=optional_text(payload.get("original_file_path"), 1000),
+        description=optional_text(payload.get("description"), 4000),
         compiled_sql_hash=sql_hash,
         compiled_sql_redacted=redacted_sql,
         sql_parse_status=parse_status,
@@ -253,9 +235,9 @@ def parse_dbt_manifest(manifest: dict[str, Any], dialect: str) -> ParsedDbtArtif
     return ParsedDbtArtifact(
         fingerprint=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         dbt_schema_version=schema_version,
-        dbt_version=_optional_text(metadata.get("dbt_version"), 50),
-        invocation_id=_optional_text(metadata.get("invocation_id"), 255),
-        generated_at=_parse_generated_at(metadata.get("generated_at")),
+        dbt_version=optional_text(metadata.get("dbt_version"), 50),
+        invocation_id=optional_text(metadata.get("invocation_id"), 255),
+        generated_at=parse_generated_at(metadata.get("generated_at")),
         resources=resources,
         edges=edges,
     )
@@ -280,7 +262,7 @@ def parse_dbt_catalog(catalog: dict[str, Any]) -> dict[str, dict[str, str]]:
             for col_name, col_data in cols.items():
                 if isinstance(col_data, dict):
                     raw_type = col_data.get("type") or col_data.get("data_type")
-                    dtype = _optional_text(raw_type, 255)
+                    dtype = optional_text(raw_type, 255)
                     if dtype:
                         col_types[str(col_name)[:255]] = dtype
             if col_types:
@@ -300,8 +282,8 @@ def parse_dbt_run_results(run_results: dict[str, Any]) -> dict[str, ParsedDbtTes
     for item in raw_results:
         if not isinstance(item, dict):
             continue
-        unique_id = _optional_text(item.get("unique_id"), 500)
-        status_val = _optional_text(item.get("status"), 50)
+        unique_id = optional_text(item.get("unique_id"), 500)
+        status_val = optional_text(item.get("status"), 50)
         if not unique_id or not status_val:
             continue
         failures = item.get("failures")
@@ -320,7 +302,7 @@ def parse_dbt_run_results(run_results: dict[str, Any]) -> dict[str, ParsedDbtTes
             unique_id=unique_id,
             status=status_val.upper(),
             failures=failures_int,
-            message=_optional_text(item.get("message"), 4000),
+            message=optional_text(item.get("message"), 4000),
             execution_time=exec_time_float,
         )
     return parsed

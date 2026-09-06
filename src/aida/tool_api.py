@@ -38,14 +38,14 @@ from aida.multi_table_blueprint import (
     resolve_blueprint_tables_and_edges,
 )
 from aida.quality_coupling import check_tool_gate, fetch_open_incidents, resolve_table_ids
-from aida.query_gateway import GatewayResult, QueryExecutionGateway, QueryRejected
+from aida.query_execution_view import query_execution_response
+from aida.query_gateway import QueryExecutionGateway, QueryRejected
 from aida.schemas import (
     ApiModel,
     GovernanceReviewRead,
     GovernedToolVersionCreate,
     GovernedToolVersionRead,
     Page,
-    QueryExecutionResponse,
     ToolCertificationCaseCreate,
     ToolCertificationCaseRead,
     ToolCertificationDecisionRequest,
@@ -181,24 +181,6 @@ def _impact_summary(impact: DeprecationImpact) -> dict[str, int | bool]:
         "recent_execution_count": impact.recent_execution_count,
         "total_blast_radius": impact.total_blast_radius,
     }
-
-
-def _query_response(result: GatewayResult) -> QueryExecutionResponse:
-    execution = result.execution
-    return QueryExecutionResponse(
-        execution_id=execution.id,
-        status=execution.status,
-        normalized_sql=execution.normalized_sql or "",
-        referenced_tables=execution.referenced_tables,
-        referenced_columns=execution.referenced_columns,
-        column_lineage=execution.column_lineage,
-        plan_cost=execution.plan_cost or 0.0,
-        warehouse_query_id=execution.warehouse_query_id,
-        row_count=execution.row_count or 0,
-        elapsed_ms=execution.elapsed_ms or 0,
-        masked_columns=list(result.masked_columns),
-        rows=list(result.rows),
-    )
 
 
 async def _persist_tool_version_draft(
@@ -1134,7 +1116,7 @@ async def execute_tool_version(
         tool_version_id=version.id,
         tool_slug=tool.slug,
         tool_version=version.version,
-        execution=_query_response(result),
+        execution=query_execution_response(result),
         quality_gate=(
             {
                 "action": quality_gate.action,

@@ -52,10 +52,10 @@ Every module spec follows the same sections, so a reader can find the same fact 
 | [15](15-model-gateway.md) | model-gateway | L3 | Provider-neutral, budgeted, fail-closed model access | No | `model_gateway.py` |
 | [16](16-query-gateway.md) | query-gateway | L3 | The one path to a source | No | `query_gateway.py`, `sql_guard.py`, `connectors/execution_access.py`. The strongest-built module; INV-2 enforced by import-linter since 2026-08-30 |
 | [17](17-policy-and-governance.md) | policy-governance | L1 | Policy, entitlement, and maker-checker as primitives | No | `policy_engine.py`, `context_product_policy.py`, `integration_service.py`, `ai_governance_api.py`. Maker≠checker real and tested; **ABAC and bulk decisions not implemented** |
-| [18](18-studio.md) | studio | L5 | Authoring semantics and tools with tests and version control | No | **Nothing.** Zero matches for `studio` anywhere in `src/` or `ui/`. Entirely greenfield |
+| [18](18-studio.md) | studio | L5 | Authoring semantics and tools with tests and version control | No | *(2026-08-30 snapshot: "Nothing. Zero matches for `studio` anywhere in `src/`.")* `studio.py`, `studio_api.py`, `studio_test_harness.py` now exist — see `60-delivery/00-status.md` §4 |
 | [19](19-context-products-and-mcp.md) | context-products-mcp | L4 | Governed context for external agents | No | `mcp_server.py` (1,776 lines, real JSON-RPC 2.0), `mcp_budget.py`, `context_product_api.py`, `context_compiler.py`, `context_compiler_api.py`, `product_marketplace_api.py` |
 | [20](20-observability-and-audit.md) | observability-audit | L1 | Evidence, telemetry, and the ledger | No | `events.py` (audit + outbox), `logging.py`, `operational_api.py`. **No OpenTelemetry export, no SIEM routing** despite the dependency being present |
-| [21](21-experience-shell.md) | experience-shell | L5 | Persona-derived navigation and the product frame | No | `ui/` only — vanilla JS, no framework, `app.js` plus 4 feature modules. **No server-side module** |
+| [21](21-experience-shell.md) | experience-shell | L5 | Persona-derived navigation and the product frame | No | `ui-next/` — React 18 + TypeScript SPA, 40 screens in `SCREEN_IDS`. **No server-side module.** *(The vanilla-JS `ui/` portal this row used to name was deleted on 2026-09-05; see D05 in `../review-2026-09-05/POINTS-TRACKER.md`.)* |
 
 **How to read the last two columns (added 2026-08-30, sourced from the code).** "Module dir?"
 answers only *"does `src/atlas/modules/<name>/` exist?"* — for 20 of 21 the answer is No, and
@@ -65,9 +65,15 @@ platform and have no module directory at all, while module 01 has the only direc
 least of it filled in. Capability status per module is in that module's own
 "Current state → target" section, and the two are independent axes.
 
-**Two rows are worth reading twice.** Module 18 has no code of any kind. Module 12 is
-implemented but only in its lexical half, and the missing half (vector, graph expansion,
-fusion) is what several other modules' target behaviour depends on.
+**The last column is a dated snapshot, not a living status field.** It was sourced from the code on
+2026-08-30 and has not been re-derived row by row since. Two of its claims were corrected on
+2026-09-06 because they had become false — module 18 ("no code of any kind") and module 21 ("`ui/`
+only", a portal that has since been deleted) — but the rest were not re-audited, and module 12's
+"lexical half only" and module 17's "ABAC and bulk decisions not implemented" are both known to
+have moved on. For what is true today, use
+[`../60-delivery/20-capability-register.md`](../60-delivery/20-capability-register.md), which keeps
+*implemented*, *reachable*, *configured* and *verified* as separate columns; this index answers
+"what does each module own", which is a different question.
 
 ## Reading order
 

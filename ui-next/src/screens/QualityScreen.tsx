@@ -11,7 +11,7 @@ import { useUrlState } from "../lib/useUrlState";
 import { datasourceName, useDatasourcePicker } from "../lib/useDatasourcePicker";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, ConfirmDialog, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./QualityScreen.css";
@@ -268,23 +268,31 @@ export function QualityScreen() {
     return () => inflight.current?.abort();
   }, [load]);
 
+  /* Both transitions are recorded with a written reason -- the endpoint
+     requires one of at least three characters. It was collected with
+     `window.prompt`, which cannot be labelled, cannot show the length rule,
+     and returns `null` when a browser blocks it, which this screen could not
+     tell apart from "the user cancelled" (review 2026-09-05, F21). */
+  const [transitionRequest, setTransitionRequest] = useState<{
+    incidentId: string;
+    status: "ACKNOWLEDGED" | "RESOLVED";
+  } | null>(null);
+  const [transitionError, setTransitionError] = useState<string | null>(null);
+
   const transition = useCallback(
-    async (incidentId: string, status: "ACKNOWLEDGED" | "RESOLVED") => {
-      const reason = window.prompt(
-        status === "ACKNOWLEDGED"
-          ? "A reason is required to acknowledge this incident:"
-          : "A reason is required to resolve this incident:",
-      );
-      // The endpoint itself requires a non-empty (>=3 char) reason on both
-      // transitions -- checked client-side too so a blank prompt doesn't
-      // round-trip to a 422.
-      if (!reason || reason.trim().length < 3) return;
+    async (incidentId: string, status: "ACKNOWLEDGED" | "RESOLVED", reason: string) => {
+      if (reason.trim().length < 3) {
+        setTransitionError("Give at least three characters of reason; the server requires one.");
+        return;
+      }
       setTransitioningId(incidentId);
+      setTransitionError(null);
       try {
         await transitionQualityIncident(incidentId, { status, reason: reason.trim() });
+        setTransitionRequest(null);
         await load();
       } catch (e) {
-        setError(e instanceof ApiError ? e.detail : (e as Error).message);
+        setTransitionError(e instanceof ApiError ? e.detail : (e as Error).message);
       } finally {
         setTransitioningId(null);
       }
@@ -424,7 +432,9 @@ export function QualityScreen() {
                     incident={incident}
                     focused={incident.id === selectedId}
                     onFocus={() => setParams({ incident: incident.id })}
-                    onTransition={(status) => void transition(incident.id, status)}
+                    onTransition={(status) =>
+                      setTransitionRequest({ incidentId: incident.id, status })
+                    }
                     transitioning={transitioningId === incident.id}
                   />
                 )}
@@ -501,7 +511,12 @@ export function QualityScreen() {
                       {selected.status === "OPEN" ? (
                         <Button
                           disabled={transitioningId === selected.id}
-                          onClick={() => void transition(selected.id, "ACKNOWLEDGED")}
+                          onClick={() =>
+                            setTransitionRequest({
+                              incidentId: selected.id,
+                              status: "ACKNOWLEDGED",
+                            })
+                          }
                         >
                           Acknowledge
                         </Button>
@@ -509,26 +524,57 @@ export function QualityScreen() {
                       <Button
                         variant="primary"
                         disabled={transitioningId === selected.id}
-                        onClick={() => void transition(selected.id, "RESOLVED")}
+                        onClick={() =>
+                          setTransitionRequest({ incidentId: selected.id, status: "RESOLVED" })
+                        }
                       >
                         Resolve
                       </Button>
                     </>
                   ) : null}
-                  <Button
-                    onClick={() => {
-                      const permalink = `${location.origin}${location.pathname}?ds=${dsId}&incident=${selected.id}`;
-                      void navigator.clipboard?.writeText(permalink);
-                    }}
-                  >
-                    Copy permalink
-                  </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/quality`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+                  <CopyLinkButton
+                    target={{ screen: "quality", params: { ds: dsId, incident: selected.id } }}
+                    label="Copy permalink"
+                  />
                 </footer>
               </aside>
             ) : null}
           </div>
         </>
       )}
+
+      {transitionRequest ? (
+        <ConfirmDialog
+          title={
+            transitionRequest.status === "ACKNOWLEDGED"
+              ? "Acknowledge this incident"
+              : "Resolve this incident"
+          }
+          description={
+            transitionRequest.status === "ACKNOWLEDGED"
+              ? "Acknowledging records that someone has picked this up. The incident stays open."
+              : "Resolving closes the incident. Downstream tool gates that were failing closed on it are released."
+          }
+          reasonLabel="What did you find? (at least three characters)"
+          requireReason
+          confirmLabel={
+            transitionRequest.status === "ACKNOWLEDGED" ? "Acknowledge" : "Resolve incident"
+          }
+          busy={transitioningId === transitionRequest.incidentId}
+          error={transitionError}
+          onCancel={() => {
+            setTransitionRequest(null);
+            setTransitionError(null);
+          }}
+          onConfirm={(reason) =>
+            void transition(transitionRequest.incidentId, transitionRequest.status, reason)
+          }
+        />
+      ) : null}
     </div>
   );
 }

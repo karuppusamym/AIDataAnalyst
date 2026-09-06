@@ -67,6 +67,44 @@ export function VirtualList<T>({
     initialRect: { width: 1024, height: 640 },
   });
 
+  /* Keyboard traversal (review 2026-09-05, F21 / UX section 7).
+
+     Every row in these lists is already a real button, so a row could be
+     ACTIVATED from the keyboard -- but reaching row 90 meant ninety Tab
+     presses, and in a virtualized list the row you want may not be mounted at
+     all. Arrow keys move between rows, Home/End jump to the ends, and the
+     virtualizer is asked to bring an unmounted target into view first. Doing
+     it here means every list that uses this component gets it, rather than
+     each screen inventing part of it. */
+  const focusRow = (index: number) => {
+    const clamped = Math.max(0, Math.min(items.length - 1, index));
+    const focusIn = () => {
+      const row = parentRef.current?.querySelector<HTMLElement>(`[data-index="${clamped}"]`);
+      const target = row?.querySelector<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      );
+      target?.focus();
+    };
+    virtualizer.scrollToIndex(clamped);
+    // The row may not be mounted yet; the virtualizer renders it on the next
+    // frame, so focus after it exists rather than silently doing nothing.
+    focusIn();
+    requestAnimationFrame(focusIn);
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const KEYS = ["ArrowDown", "ArrowUp", "Home", "End"];
+    if (!KEYS.includes(event.key)) return;
+    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-index]");
+    const current = row ? Number(row.dataset["index"]) : 0;
+    if (!Number.isFinite(current)) return;
+    event.preventDefault();
+    if (event.key === "ArrowDown") focusRow(current + 1);
+    else if (event.key === "ArrowUp") focusRow(current - 1);
+    else if (event.key === "Home") focusRow(0);
+    else focusRow(items.length - 1);
+  };
+
   const virtualItems = virtualizer.getVirtualItems();
   const last = virtualItems[virtualItems.length - 1];
   if (onReachEnd && last && last.index >= items.length - 5 && !loadingMore) {
@@ -82,6 +120,7 @@ export function VirtualList<T>({
       role="list"
       aria-label={ariaLabel}
       aria-rowcount={totalCount ?? items.length}
+      onKeyDown={onKeyDown}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualItems.map((v) => {

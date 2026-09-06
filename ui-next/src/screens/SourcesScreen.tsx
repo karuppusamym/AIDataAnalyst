@@ -13,7 +13,7 @@ import { useScopeSelection } from "../lib/scope";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
 import { CrossLinks } from "../components/CrossLinks";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { Button, CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./SourcesScreen.css";
@@ -119,7 +119,6 @@ function HealthPane({
 }) {
   const [health, setHealth] = useState<ConnectorHealthScoreRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  const [copied, setCopied] = useState(false);
   const [generating, setGenerating] = useState<"markdown" | "json" | null>(null);
   const [generateNotice, setGenerateNotice] = useState<string | null>(null);
   const [exportingWorkbook, setExportingWorkbook] = useState(false);
@@ -163,7 +162,6 @@ function HealthPane({
     const ac = new AbortController();
     setHealth(null);
     setError(null);
-    setCopied(false);
     fetchDatasourceHealth(source.id, ac.signal)
       .then(setHealth)
       .catch((e: unknown) => {
@@ -173,7 +171,7 @@ function HealthPane({
     return () => ac.abort();
   }, [source.id]);
 
-  const permalink = `${location.origin}${location.pathname}?source=${source.id}`;
+
 
   return (
     <aside className="evp" aria-label={`Health for ${source.name}`}>
@@ -266,14 +264,14 @@ function HealthPane({
       </div>
 
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-            setCopied(true);
-          }}
-        >
-          {copied ? "Link copied" : "Copy source link"}
-        </Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/sources`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{ screen: "sources", params: { source: source.id } }}
+          label="Copy source link"
+        />
         <Button
           disabled={generating !== null}
           onClick={() => void generateSnapshot("markdown")}

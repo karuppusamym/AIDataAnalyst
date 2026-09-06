@@ -28,11 +28,22 @@ unifying one:
   composed row per review: its own status/decision fields, a numeric
   `confidence` where the proposal type carries one, `evidence` in
   `aida.asset_evidence`'s established `EvidenceItemRead` shape (one item per
-  traceable fact, each carrying a `source`), and a structured `diff` -- SM-7's
-  own `compose_governance_review_diff` (`aida.semantic_api`), reused directly,
-  never reimplemented, so this surface and `GET
-  /v1/governance/reviews/{id}/diff` cannot disagree on what is diffable for a
-  given review or what its diff looks like.
+  traceable fact, each carrying a `source`), and a structured `diff`.
+* `compose_review_queue_diffs` -- F16. Until 2026-09-06 the diff for each row
+  came from SM-7's own `compose_governance_review_diff` (`aida.semantic_api`),
+  called once per review: correct, and the one remaining query path whose cost
+  scaled with page size (up to five statements per diffable row, so up to five
+  thousand for a 1,000-row page). Diffs are now composed one *type* at a time
+  from batched snapshot loads. Reuse-by-calling was the old guarantee that this
+  surface and `GET /v1/governance/reviews/{id}/diff` could not disagree; the
+  new guarantee is `tests/test_review_queue_read_model.py::
+  test_embedded_diff_matches_sm7_endpoint_directly`, which asserts the two
+  composers return the same object for the same review -- a check that fails
+  the build, where the old one relied on nobody forking the call.
+* `summarize_review_queue` -- F16's other half. Counts by status, object type
+  and requested action from a single grouped `COUNT(*)`, composing nothing, so
+  the Overview screen can render a number without asking for a page of a
+  thousand fully-composed reviews to count its length.
 * The API layer (`review_queue_api.py`) additionally accepts an
   `inference_run_id` filter, which is the genuine "a run's proposals" view
   for `METADATA_ENRICHMENT_PROPOSAL` reviews -- the one case where "run"
@@ -71,23 +82,32 @@ silently dropped from the queue.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.models import (
     AssetDescriptionDraft,
     GlossaryLinkProposal,
+    GlossaryTermVersion,
     GovernanceReview,
     MetadataEnrichmentProposal,
+    SemanticMetric,
     SemanticMetricProposal,
+    SemanticMetricVersion,
+    SemanticModelVersion,
     TermSemanticBinding,
 )
 from aida.review_queue_schemas import ReviewQueueProposalRead
 from aida.schemas import EvidenceItemRead
-from aida.semantic_api import GovernanceReviewDiffRead, compose_governance_review_diff
+from aida.semantic_api import GovernanceReviewDiffRead, SemanticFieldDeltaRead
+from aida.semantic_diff import diff_semantic_object
 
 
 def _parse_object_id(review: GovernanceReview) -> UUID | None:
@@ -172,8 +192,7 @@ def _metadata_enrichment_evidence(proposal: MetadataEnrichmentProposal) -> list[
         EvidenceItemRead(
             category="BUSINESS_SEMANTICS_PROPOSAL",
             claim=(
-                f"Proposed by the {proposal.engine_type} engine "
-                f"(version {proposal.engine_version})"
+                f"Proposed by the {proposal.engine_type} engine (version {proposal.engine_version})"
             ),
             source=source,
             occurred_at=proposal.created_at,
@@ -220,16 +239,363 @@ def _term_binding_evidence(binding: TermSemanticBinding) -> list[EvidenceItemRea
     ]
 
 
+MODEL_VERSION_TYPE = "SEMANTIC_MODEL_VERSION"
+GLOSSARY_TERM_VERSION_TYPE = "GLOSSARY_TERM_VERSION"
+
+# Wording reproduced verbatim from `semantic_api.compose_governance_review_diff`'s
+# non-diffable branch. `test_review_queue_read_model.py::
+# test_embedded_diff_matches_sm7_endpoint_directly` compares the two composers'
+# output field by field, so a divergence here fails the build rather than
+# quietly giving one surface different words than the other.
+_NOT_DIFFABLE_MESSAGE = (
+    "structured diffs are not yet available for {object_type}; "
+    "the raw proposed object is still reachable through its own read endpoint"
+)
+
+
+def _metric_snapshot(
+    metric_version: SemanticMetricVersion, metric: SemanticMetric
+) -> dict[str, Any]:
+    return {
+        "name": metric_version.name,
+        "description": metric_version.description,
+        "aggregation": metric_version.aggregation,
+        "grain": metric_version.grain,
+        "source_table_id": str(metric_version.source_table_id),
+        "measure_column_id": (
+            str(metric_version.measure_column_id) if metric_version.measure_column_id else None
+        ),
+        "default_time_column_id": (
+            str(metric_version.default_time_column_id)
+            if metric_version.default_time_column_id
+            else None
+        ),
+        "allowed_dimension_column_ids": sorted(metric_version.allowed_dimension_column_ids),
+    }
+
+
+async def _semantic_model_snapshots(
+    session: AsyncSession, version_ids: set[UUID]
+) -> tuple[dict[UUID, dict[str, Any]], dict[UUID, UUID | None]]:
+    """Batched equivalent of `semantic_api._semantic_model_version_snapshot`
+    plus `_published_semantic_model_version_id`, for a whole page at once.
+
+    Three queries regardless of how many versions are asked for: the requested
+    versions, their projects' published counterparts, and every metric version
+    belonging to either set. Returns `(snapshot by version id, published
+    counterpart id by requested version id)`.
+
+    The counterpart lookup orders by `version` descending where the single-row
+    original took whichever row the database returned first. That is strictly
+    more determinstic, not less: a project is only ever meant to have one
+    PUBLISHED version, and if that invariant is ever broken the batched form
+    picks the newest instead of an arbitrary one.
+    """
+    if not version_ids:
+        return {}, {}
+    versions = (
+        await session.scalars(
+            select(SemanticModelVersion).where(SemanticModelVersion.id.in_(version_ids))
+        )
+    ).all()
+    by_id = {version.id: version for version in versions}
+    project_ids = {version.project_id for version in versions}
+    published = (
+        await session.scalars(
+            select(SemanticModelVersion)
+            .where(
+                SemanticModelVersion.project_id.in_(project_ids),
+                SemanticModelVersion.status == "PUBLISHED",
+            )
+            .order_by(SemanticModelVersion.version.desc())
+        )
+    ).all()
+    published_by_project: dict[UUID, list[SemanticModelVersion]] = {}
+    for candidate in published:
+        published_by_project.setdefault(candidate.project_id, []).append(candidate)
+
+    counterpart: dict[UUID, UUID | None] = {}
+    needed: set[UUID] = set(by_id)
+    for version_id, version in list(by_id.items()):
+        match = next(
+            (
+                candidate
+                for candidate in published_by_project.get(version.project_id, [])
+                if candidate.id != version_id
+            ),
+            None,
+        )
+        counterpart[version_id] = match.id if match is not None else None
+        if match is not None:
+            by_id.setdefault(match.id, match)
+            needed.add(match.id)
+
+    metric_rows = (
+        await session.execute(
+            select(SemanticMetricVersion, SemanticMetric)
+            .join(SemanticMetric, SemanticMetricVersion.metric_id == SemanticMetric.id)
+            .where(SemanticMetricVersion.semantic_model_version_id.in_(needed))
+        )
+    ).all()
+    metrics_by_version: dict[UUID, dict[str, Any]] = {version_id: {} for version_id in needed}
+    for metric_version, metric in metric_rows:
+        metrics_by_version[metric_version.semantic_model_version_id][metric.slug] = (
+            _metric_snapshot(metric_version, metric)
+        )
+
+    snapshots = {
+        version_id: {
+            "name": by_id[version_id].name,
+            "change_summary": by_id[version_id].change_summary,
+            "metrics": metrics_by_version.get(version_id, {}),
+        }
+        for version_id in needed
+    }
+    return snapshots, counterpart
+
+
+async def _glossary_term_snapshots(
+    session: AsyncSession, version_ids: set[UUID]
+) -> tuple[dict[UUID, dict[str, Any]], dict[UUID, UUID | None]]:
+    """Batched equivalent of `semantic_api._glossary_term_version_snapshot`
+    plus `_published_glossary_term_version_id`. Two queries for a whole page.
+    """
+    if not version_ids:
+        return {}, {}
+    versions = (
+        await session.scalars(
+            select(GlossaryTermVersion).where(GlossaryTermVersion.id.in_(version_ids))
+        )
+    ).all()
+    by_id = {version.id: version for version in versions}
+    term_ids = {version.term_id for version in versions}
+    approved = (
+        await session.scalars(
+            select(GlossaryTermVersion)
+            .where(
+                GlossaryTermVersion.term_id.in_(term_ids),
+                GlossaryTermVersion.status == "APPROVED",
+            )
+            .order_by(GlossaryTermVersion.version.desc())
+        )
+    ).all()
+    approved_by_term: dict[UUID, list[GlossaryTermVersion]] = {}
+    for candidate in approved:
+        approved_by_term.setdefault(candidate.term_id, []).append(candidate)
+
+    counterpart: dict[UUID, UUID | None] = {}
+    for version_id, version in list(by_id.items()):
+        match = next(
+            (
+                candidate
+                for candidate in approved_by_term.get(version.term_id, [])
+                if candidate.id != version_id
+            ),
+            None,
+        )
+        counterpart[version_id] = match.id if match is not None else None
+        if match is not None:
+            by_id.setdefault(match.id, match)
+
+    snapshots = {
+        version_id: {
+            "display_name": version.display_name,
+            "definition": version.definition,
+            "synonyms": sorted(version.synonyms),
+            "owner_principal": version.owner_principal,
+        }
+        for version_id, version in by_id.items()
+    }
+    return snapshots, counterpart
+
+
+def _diff_read(
+    review: GovernanceReview,
+    *,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    message: str | None,
+) -> GovernanceReviewDiffRead:
+    diff = diff_semantic_object(before, after) if after is not None else None
+    return GovernanceReviewDiffRead(
+        review_id=review.id,
+        object_type=review.object_type,
+        object_id=review.object_id,
+        diffable=diff is not None,
+        before=before,
+        after=after,
+        entries=[
+            SemanticFieldDeltaRead(
+                field=entry.field,
+                change=entry.change,
+                before=entry.before,
+                after=entry.after,
+            )
+            for entry in (diff.entries if diff is not None else [])
+        ],
+        message=message,
+    )
+
+
+async def compose_review_queue_diffs(
+    session: AsyncSession, reviews: Sequence[GovernanceReview]
+) -> dict[UUID, GovernanceReviewDiffRead]:
+    """F16: every review's diff in at most five queries, whatever the page size.
+
+    The composer this replaces on the list path
+    (`semantic_api.compose_governance_review_diff`) is correct and stays the
+    single-review endpoint's implementation. It is simply per-review: up to five
+    statements for each diffable row, so a 1,000-row page issued up to five
+    thousand. This groups the page by object type first and loads each type's
+    snapshots in one pass, which is the only way "the queue endpoint's cost does
+    not depend on how many rows you asked for" can be true.
+
+    Reusing SM-7's function verbatim was the previous anti-divergence
+    mechanism; the replacement is stronger and is a test rather than a comment:
+    `test_embedded_diff_matches_sm7_endpoint_directly` asserts this function and
+    `compose_governance_review_diff` return the same object for the same review.
+    """
+    model_ids: dict[UUID, UUID] = {}
+    term_ids: dict[UUID, UUID] = {}
+    for review in reviews:
+        object_id = _parse_object_id(review)
+        if object_id is None:
+            continue
+        if review.object_type == MODEL_VERSION_TYPE:
+            model_ids[review.id] = object_id
+        elif review.object_type == GLOSSARY_TERM_VERSION_TYPE:
+            term_ids[review.id] = object_id
+
+    model_snapshots, model_counterparts = await _semantic_model_snapshots(
+        session, set(model_ids.values())
+    )
+    term_snapshots, term_counterparts = await _glossary_term_snapshots(
+        session, set(term_ids.values())
+    )
+
+    composed: dict[UUID, GovernanceReviewDiffRead] = {}
+    for review in reviews:
+        if review.id in model_ids:
+            object_id = model_ids[review.id]
+            if object_id not in model_snapshots:
+                # Same 409 the single-review composer raises: a queue row whose
+                # target vanished is a conflict, not an empty diff.
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            counterpart = model_counterparts.get(object_id)
+            composed[review.id] = _diff_read(
+                review,
+                before=model_snapshots[counterpart] if counterpart is not None else {},
+                after=model_snapshots[object_id],
+                message=None,
+            )
+        elif review.id in term_ids:
+            object_id = term_ids[review.id]
+            if object_id not in term_snapshots:
+                raise HTTPException(status_code=409, detail="review target is unavailable")
+            counterpart = term_counterparts.get(object_id)
+            composed[review.id] = _diff_read(
+                review,
+                before=term_snapshots[counterpart] if counterpart is not None else {},
+                after=term_snapshots[object_id],
+                message=None,
+            )
+        else:
+            composed[review.id] = _diff_read(
+                review,
+                before=None,
+                after=None,
+                message=_NOT_DIFFABLE_MESSAGE.format(object_type=review.object_type),
+            )
+    return composed
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewQueueSummary:
+    """F16: the counts the Overview screen needs, without composing a single row.
+
+    The finding was that the Overview asked for a page of up to 1,000 fully
+    composed reviews -- diffs, evidence, snapshots -- in order to render a
+    number. This is that number, from one grouped `COUNT(*)`: nothing is loaded,
+    nothing is diffed, and the cost does not move when the queue grows.
+
+    `by_queue` groups by `requested_action`, which is what distinguishes the
+    work queues a reviewer actually chooses between (approve a publish, approve
+    a withdrawal, ...) within one object type.
+    """
+
+    organization_id: UUID
+    total: int
+    by_status: dict[str, int]
+    by_object_type: dict[str, int]
+    by_queue: dict[str, int]
+
+
+async def summarize_review_queue(
+    session: AsyncSession,
+    *,
+    organization_id: UUID,
+    status: str | None = None,
+    object_type: str | None = None,
+) -> ReviewQueueSummary:
+    """Aggregate counts for one organization's governance-review queue.
+
+    Exactly one statement, always: a `GROUP BY status, object_type,
+    requested_action` whose result set is bounded by the product of those three
+    small vocabularies, not by the number of reviews. `status`/`object_type`
+    narrow it the same way `get_review_queue`'s filters do, so a caller can ask
+    "how many PENDING glossary links" without fetching one.
+    """
+    filters = [GovernanceReview.organization_id == organization_id]
+    if status:
+        filters.append(GovernanceReview.status == status)
+    if object_type:
+        filters.append(GovernanceReview.object_type == object_type)
+    rows = (
+        await session.execute(
+            select(
+                GovernanceReview.status,
+                GovernanceReview.object_type,
+                GovernanceReview.requested_action,
+                func.count(),
+            )
+            .where(*filters)
+            .group_by(
+                GovernanceReview.status,
+                GovernanceReview.object_type,
+                GovernanceReview.requested_action,
+            )
+        )
+    ).all()
+    by_status: Counter[str] = Counter()
+    by_object_type: Counter[str] = Counter()
+    by_queue: Counter[str] = Counter()
+    total = 0
+    for row_status, row_object_type, row_action, count in rows:
+        count = int(count)
+        total += count
+        by_status[str(row_status)] += count
+        by_object_type[str(row_object_type)] += count
+        by_queue[str(row_action)] += count
+    return ReviewQueueSummary(
+        organization_id=organization_id,
+        total=total,
+        by_status=dict(by_status),
+        by_object_type=dict(by_object_type),
+        by_queue=dict(by_queue),
+    )
+
+
 async def compose_review_queue(
     session: AsyncSession, reviews: Sequence[GovernanceReview]
 ) -> list[ReviewQueueProposalRead]:
     """Compose one `ReviewQueueProposalRead` per review in `reviews`, in a
-    fixed number of batched queries independent of `len(reviews)` for the
-    confidence/evidence side (one query per distinct proposal type present in
-    the batch, following `aida.catalog_read_model`'s idiom). The diff side
-    calls SM-7's own `compose_governance_review_diff` once per review --
-    unavoidable to reuse it unchanged rather than reimplement it in batched
-    form, and each call is itself already O(1) queries.
+    fixed number of queries independent of `len(reviews)`.
+
+    Confidence/evidence: one query per distinct proposal type present in the
+    batch, following `aida.catalog_read_model`'s idiom. Diffs: one batched pass
+    per diffable type (`compose_review_queue_diffs`) -- F16's fix for the last
+    remaining per-row query path, which used to call SM-7's single-review
+    composer once for every row on the page.
     """
     ids_by_type: dict[str, list[UUID]] = {}
     object_ids: dict[UUID, UUID] = {}
@@ -255,6 +621,7 @@ async def compose_review_queue(
     term_bindings = await _term_semantic_bindings_by_id(
         session, ids_by_type.get("TERM_SEMANTIC_BINDING", [])
     )
+    diffs = await compose_review_queue_diffs(session, reviews)
 
     composed: list[ReviewQueueProposalRead] = []
     for review in reviews:
@@ -299,7 +666,7 @@ async def compose_review_queue(
             if binding is not None:
                 evidence = _term_binding_evidence(binding)
 
-        diff: GovernanceReviewDiffRead = await compose_governance_review_diff(session, review)
+        diff: GovernanceReviewDiffRead = diffs[review.id]
         composed.append(
             ReviewQueueProposalRead(
                 review_id=review.id,

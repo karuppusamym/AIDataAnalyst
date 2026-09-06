@@ -2,10 +2,11 @@ import { useEffect, useState } from "react";
 import type { AssetEvidenceRead } from "../lib/types";
 import type { CatalogRowRead } from "../lib/ui-types";
 import { ApiError, exportAssetEvidence, fetchAssetEvidence } from "../lib/api";
+import type { ScreenId } from "../lib/routes";
 import { ColumnPanel } from "./ColumnPanel";
 import { CrossLinks } from "./CrossLinks";
 import type { CrossLink } from "./CrossLinks";
-import { Button, Empty, Pill } from "./primitives";
+import { AsyncState, Button, CopyLinkButton, Empty, Pill } from "./primitives";
 import "./EvidencePane.css";
 
 /* ---------------------------------------------------------------------------
@@ -38,9 +39,13 @@ export function EvidencePane({
   tableId,
   row,
   onClose,
+  screen = "catalog",
 }: {
   /** The one thing a permalink actually needs to resolve evidence. */
   tableId: string | null;
+  /** The screen that reads `?asset=` and renders this pane. Written into the
+   *  copied link so it reopens *this* view rather than the persona default. */
+  screen?: ScreenId;
   /** Optional: the matching `CatalogRowRead`, when the grid already has it
    *  loaded. Purely cosmetic (name/path/glossary terms) -- evidence itself
    *  never depends on this being present. */
@@ -49,7 +54,6 @@ export function EvidencePane({
 }) {
   const [evidence, setEvidence] = useState<AssetEvidenceRead | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  const [copied, setCopied] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);
 
@@ -72,10 +76,6 @@ export function EvidencePane({
     return () => ac.abort();
   }, [tableId]);
 
-  useEffect(() => {
-    setCopied(false);
-  }, [tableId]);
-
   if (!tableId) {
     return (
       <aside className="evp evp--idle" aria-label="Evidence">
@@ -87,7 +87,6 @@ export function EvidencePane({
     );
   }
 
-  const permalink = `${location.origin}${location.pathname}?asset=${tableId}`;
   const displayName = row?.name ?? evidence?.table_name ?? tableId;
 
   /* The joins. Evidence answers "can I trust this table"; the next question is
@@ -124,15 +123,11 @@ export function EvidencePane({
 
       <div className="evp__body">
         {error ? (
-          <div className="evp__error" role="alert">
-            {error instanceof ApiError && error.status === 403
-              ? "You are not authorized to view this evidence."
-              : error instanceof ApiError && error.status === 404
-                ? "This asset no longer exists."
-                : `Evidence could not be loaded: ${
-                    error instanceof ApiError ? error.detail : error.message
-                  }`}
-          </div>
+          <AsyncState
+            error={error}
+            subject="this asset's evidence"
+            errorTitle="This evidence could not be loaded"
+          />
         ) : evidence === null ? (
           <div className="evp__load" role="status">Loading evidence…</div>
         ) : (
@@ -173,14 +168,13 @@ export function EvidencePane({
       </div>
 
       <footer className="evp__foot">
-        <Button
-          onClick={() => {
-            void navigator.clipboard?.writeText(permalink);
-            setCopied(true);
-          }}
-        >
-          {copied ? "Link copied" : "Copy evidence link"}
-        </Button>
+        {/* The link must name the screen that resolves `?asset=`, not just
+            carry the id: a URL without `#/catalog` opens the recipient's
+            persona default and the selection is read by nobody (F08). */}
+        <CopyLinkButton
+          target={{ screen, params: { asset: tableId } }}
+          label="Copy evidence link"
+        />
         <Button disabled={exporting} onClick={() => {
           setExporting(true);
           setExportError(null);

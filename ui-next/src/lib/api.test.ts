@@ -83,7 +83,7 @@ describe("listAssetDescriptionDrafts", () => {
     expect(url).toBe(
       `/v1/organizations/${ORG}/asset-description-drafts?status=DRAFT&limit=200`,
     );
-    expect(init?.method).toBeUndefined(); // GET
+    expect(init?.method).toBe("GET");
   });
 
   it("derives next_cursor from offset + limit < total, and omits it on the last page", async () => {

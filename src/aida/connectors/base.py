@@ -5,6 +5,29 @@ from datetime import datetime
 from typing import Any
 
 
+def rows_to_dicts(cursor: Any, rows: list[Any] | tuple[Any, ...]) -> list[dict[str, Any]]:
+    """Map DBAPI rows to dicts keyed by lower-cased column name.
+
+    Shared by the Snowflake and Databricks connectors, which held
+    byte-identical private copies (`Docs/review-2026-09-05/REVIEW.md` R07).
+    Both warehouses return upper-cased identifiers from their metadata views
+    while the rest of this system keys on lower case, so the folding is the
+    contract rather than a convenience -- a second copy that stopped folding
+    would silently return rows every caller reads as empty.
+
+    Some drivers already yield mappings; those are copied through untouched.
+    `strict=False` on the zip is deliberate: a driver whose description and
+    row width disagree should lose the surplus column rather than abort a
+    discovery run mid-catalog.
+    """
+    if not rows:
+        return []
+    if isinstance(rows[0], dict):
+        return [dict(r) for r in rows]
+    col_names = [desc[0].lower() for desc in cursor.description] if cursor.description else []
+    return [dict(zip(col_names, row, strict=False)) for row in rows]
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectorCapabilities:
     catalogs: bool = True

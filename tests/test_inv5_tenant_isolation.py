@@ -377,7 +377,10 @@ def test_every_background_worker_is_tenant_scoped() -> None:
     """
     subjects = [("aida.workflows.activities", name) for name in _temporal_activities()]
     subjects += [
-        ("aida.projectors.graph_projector", "load_projection"),
+        # `load_projection` became `graph_projection.iter_projection_chunks`
+        # when the whole-estate materialisation was replaced by bounded chunks;
+        # the tenancy obligation moved with it, so the subject moved too.
+        ("aida.graph_projection", "iter_projection_chunks"),
         ("aida.projectors.graph_projector", "project_discovery"),
         ("aida.projectors.graph_projector", "load_unified_lineage_projection"),
         ("aida.projectors.graph_projector", "project_unified_lineage"),

@@ -30,13 +30,14 @@ from aida.procedure_lineage import (
     parse_procedure_lineage,
 )
 from aida.procedure_lineage_models import DeepProcedureLineageEdge
+from aida.resource_scope import load_datasource_in_scope
 from aida.schemas import (
     DeepProcedureLineageEdgeRead,
     DeepProcedureLineageParseResponse,
     ProcedureCapabilityConstructRead,
     ProcedureCapabilityMatrixRead,
 )
-from aida.security import SecurityContext, enforce_organization, require_roles
+from aida.security import SecurityContext, require_roles
 from aida.sql_lineage_parser import PROCEDURE_RESULT_TARGET
 
 router = APIRouter(prefix="/v1", tags=["procedure-lineage"])
@@ -56,16 +57,6 @@ class RoutineNotEligibleError(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"routine is not eligible for lineage parsing: {reason}")
-
-
-async def _load_datasource(
-    session: AsyncSession, context: SecurityContext, datasource_id: UUID
-) -> DataSource:
-    datasource = await session.get(DataSource, datasource_id)
-    if datasource is None:
-        raise HTTPException(status_code=404, detail="datasource not found")
-    enforce_organization(context, datasource.organization_id)
-    return datasource
 
 
 def require_eligible_routine_body(routine: MetadataRoutine | None) -> str:
@@ -240,7 +231,7 @@ async def parse_deep_procedure_lineage_endpoint(
     own body is missing, withheld, unparsed, or quarantined -- see
     `require_eligible_routine_body`. The SQL is never executed.
     """
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     routine = await _load_routine(session, datasource, routine_id)
     try:
         body = require_eligible_routine_body(routine)
@@ -292,7 +283,7 @@ async def list_deep_procedure_lineage(
     context: SecurityContext = Depends(require_roles(*_LINEAGE_READER_ROLES)),
     session: AsyncSession = Depends(get_session),
 ) -> list[DeepProcedureLineageEdgeRead]:
-    datasource = await _load_datasource(session, context, datasource_id)
+    datasource = await load_datasource_in_scope(session, context, datasource_id)
     rows = (
         await session.scalars(
             select(DeepProcedureLineageEdge)

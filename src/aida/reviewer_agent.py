@@ -41,12 +41,20 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aida.config import Settings
 from aida.context import get_correlation_id
 from aida.events import record_audit, record_outbox
+from aida.governance_decision_contracts import TERMINAL_STATUS
+from aida.governance_decision_service import (
+    GovernanceDecisionRefused,
+    decide_review,
+    record_decision_audit,
+    record_decision_outbox,
+)
 from aida.models import (
     DataQualityIncident,
     GovernanceReview,
@@ -368,23 +376,28 @@ async def auto_decide_tier0_tier1(
     outside the tier allowlist -- derived from the tier table, not from
     config -- and anything the agent itself proposed.
 
-    Decisions go through `semantic_api._apply_governance_review_decision`,
-    the single core the human endpoint and the bulk endpoint both call, so
-    every object type's side effects, audit row and outbox event are
-    identical to a human decision. Nothing about the decision path is
-    special-cased for the agent except who is recorded as deciding it.
+    Decisions go through `governance_decision_service.decide_review`, the
+    single application service the human endpoint, the bulk endpoint and the
+    sample-review endpoint all call, so every object type's side effects,
+    audit row and outbox event are identical to a human decision. Nothing
+    about the decision path is special-cased for the agent except who is
+    recorded as deciding it.
+
+    F05 applies here too, and it is the reason the batch below does not
+    abort on a contended item: the service claims each review out of PENDING
+    with a compare-and-set, so an item a human decided between this batch's
+    read and its claim is refused (`GovernanceDecisionRefused`), rolled back
+    with its own savepoint, and left out of the returned outcomes -- the
+    human's decision stands, and the agent records neither a second audit row
+    nor a second outbox event for it. That also means this pass deliberately
+    takes no `FOR UPDATE` locks: a lock order different from the bulk
+    endpoint's would create the deadlock the compare-and-set makes
+    unnecessary.
     """
     if not settings.reviewer_agent_enabled:
         raise ReviewerAgentUnavailable(REASON_DISABLED)
-    if settings.reviewer_agent_suspended or await organization_suspended(
-        session, organization_id
-    ):
+    if settings.reviewer_agent_suspended or await organization_suspended(session, organization_id):
         raise ReviewerAgentUnavailable(REASON_SUSPENDED)
-
-    # Imported here rather than at module scope: `semantic_api` imports a
-    # large slice of the application, and importing it at load time would
-    # make this module unimportable from a worker that does not need it.
-    from aida.semantic_api import _apply_governance_review_decision
 
     moment = now or datetime.now(UTC)
     ceiling = settings.reviewer_agent_max_tier or DEFAULT_MAX_AGENT_TIER
@@ -420,21 +433,40 @@ async def auto_decide_tier0_tier1(
         if review.requested_by == agent_principal:
             continue
 
-        decision = "APPROVED" if review.pre_review_recommendation == "APPROVE" else "REJECTED"
+        # The *verdict* ("APPROVE"/"REJECT") is what the decision service
+        # takes; `decision` below is the terminal status it writes, which is
+        # what this function has always reported and what `ReviewAuditSample`
+        # stores. Deriving one from the other through `TERMINAL_STATUS`
+        # rather than restating both is deliberate: passing the past-tense
+        # form where a verdict was expected used to be silently read as a
+        # rejection.
+        verdict = "APPROVE" if review.pre_review_recommendation == "APPROVE" else "REJECT"
+        decision = TERMINAL_STATUS[verdict]
         reason = (
             f"reviewer agent ({agent_principal}), rule v1, tier {tier}: "
             f"{review.pre_review_recommendation}"
         )
-        event_type, aggregate_type, aggregate_id, payload = (
-            await _apply_governance_review_decision(
-                session,
-                review,
-                decision=decision,
-                reason=reason,
-                context=context,
-                now=moment,
-            )
-        )
+        try:
+            async with session.begin_nested():
+                effect = await decide_review(
+                    session,
+                    review,
+                    decision=verdict,
+                    reason=reason,
+                    context=context,
+                    now=moment,
+                )
+                record_decision_outbox(session, review, effect)
+        except GovernanceDecisionRefused:
+            # Another checker (human or a parallel agent pass) reached this
+            # review first, or it is not the agent's to decide. Its savepoint
+            # has unwound; leave the winner's decision alone and move on.
+            continue
+        except HTTPException:
+            # The target object refused this decision (it moved on, a gate
+            # did not pass). Same treatment: this item's writes are rolled
+            # back with its savepoint and the batch continues.
+            continue
         is_sampled = decision == "APPROVED" and sampled_for_audit(
             review.id, settings.reviewer_agent_sampling_rate
         )
@@ -451,14 +483,11 @@ async def auto_decide_tier0_tier1(
                     human_outcome="PENDING",
                 )
             )
-        record_audit(
+        record_decision_audit(
             session,
-            context,
+            review,
+            context=context,
             action="reviewer_agent.decide",
-            resource_type="governance_review",
-            resource_id=str(review.id),
-            outcome="SUCCESS",
-            correlation_id=get_correlation_id(),
             details={
                 "decision": decision,
                 "object_type": review.object_type,
@@ -466,14 +495,6 @@ async def auto_decide_tier0_tier1(
                 "sampled_for_audit": is_sampled,
                 "rule_version": 1,
             },
-        )
-        record_outbox(
-            session,
-            organization_id=organization_id,
-            aggregate_type=aggregate_type,
-            aggregate_id=aggregate_id,
-            event_type=event_type,
-            payload=payload,
         )
         outcomes.append(
             AutoDecisionOutcome(

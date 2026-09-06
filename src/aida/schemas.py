@@ -219,7 +219,6 @@ class AnalysisTaskRead(ApiModel):
     updated_at: datetime
 
 
-
 class FleetSummaryRead(ApiModel):
     organization_id: UUID
     datasource_statuses: dict[str, int]
@@ -509,6 +508,14 @@ class GovernanceReviewBulkDecisionItemRead(ApiModel):
     review_id: str
     status: Literal["SUCCEEDED", "FAILED"]
     reason: str | None = None
+    # F05: additive detail beside the original two-valued `status`, which is
+    # deliberately left alone so existing clients keep working. It separates
+    # the three distinct reasons an item was not applied -- another checker
+    # reached the terminal decision first (CONFLICT), this checker may not
+    # decide it at all (NOT_PERMITTED), or the target itself refused (FAILED)
+    # -- which the single `FAILED` value cannot express. Optional so a
+    # response produced before this field existed still validates.
+    outcome: Literal["APPLIED", "CONFLICT", "NOT_PERMITTED", "FAILED"] | None = None
 
 
 class GovernanceReviewBulkDecisionResultRead(ApiModel):
@@ -1197,8 +1204,6 @@ class CanonicalTableOverrideRequest(ApiModel):
     rationale: str = Field(min_length=1, max_length=2000)
 
 
-
-
 class CompositeRelationshipCandidateDiscoveryRequest(ApiModel):
     max_candidates: int = Field(default=200, ge=1, le=2_000)
 
@@ -1228,6 +1233,8 @@ class CompositeRelationshipCandidateRead(ApiModel):
     members: list[CompositeRelationshipCandidateMemberRead]
     created_at: datetime
     updated_at: datetime
+
+
 class GraphNodeRead(ApiModel):
     id: UUID
     node_type: Literal["TABLE"]
@@ -2380,9 +2387,7 @@ class ExternalQualitySignalIngest(ApiModel):
     @classmethod
     def _validate_details(cls, value: dict[str, Any]) -> dict[str, Any]:
         if len(value) > _EXTERNAL_SIGNAL_DETAILS_MAX_KEYS:
-            raise ValueError(
-                f"details may carry at most {_EXTERNAL_SIGNAL_DETAILS_MAX_KEYS} keys"
-            )
+            raise ValueError(f"details may carry at most {_EXTERNAL_SIGNAL_DETAILS_MAX_KEYS} keys")
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError("details keys must be strings")
@@ -3091,7 +3096,7 @@ class SimulatedSubject(ApiModel):
 
 
 class AuthorizationSimulationRequest(ApiModel):
-    """"Who could see this?" -- one resource, several hypothetical subjects.
+    """ "Who could see this?" -- one resource, several hypothetical subjects.
 
     Unlike `AuthorizationProbeRequest`, which answers for the calling
     principal's own real membership, this varies `subjects` directly against
@@ -3867,9 +3872,7 @@ class ParsedLineageEdgeReviewQueueItemRead(ApiModel):
     the reviewer's UI dereferences on demand)."""
 
     edge_id: UUID
-    edge_type: Literal[
-        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
-    ]
+    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
     organization_id: UUID
     created_at: datetime
     created_by: str | None
@@ -3890,9 +3893,7 @@ class ParsedLineageEdgeReviewQueueRead(ApiModel):
 class ParsedLineageEdgeDecisionRequest(ApiModel):
     """Decision on one PROPOSED parsed-lineage edge."""
 
-    edge_type: Literal[
-        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
-    ]
+    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
     decision: Literal["APPROVED", "REJECTED"]
     reason: str = Field(min_length=1, max_length=2000)
 
@@ -3908,9 +3909,7 @@ class ParsedLineageEdgeDecisionRead(ApiModel):
 
 class ParsedLineageEdgeBulkDecisionItem(ApiModel):
     edge_id: UUID
-    edge_type: Literal[
-        "VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"
-    ]
+    edge_type: Literal["VIEW", "PROCEDURE", "DBT", "OPENLINEAGE_TABLE", "OPENLINEAGE_COLUMN"]
 
 
 class ParsedLineageEdgeBulkDecisionRequest(ApiModel):

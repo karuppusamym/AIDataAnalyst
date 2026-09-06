@@ -347,3 +347,111 @@ describe("AskScreen against the real agent-analyses endpoint", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Ask" })).not.toBeDisabled());
   });
 });
+
+/* ---------------------------------------------------------------------------
+   The rows themselves (review 2026-09-05, F20 - T14).
+
+   Ask rendered the row COUNT, the elapsed time, the tables, the SQL, the
+   explanation and the evidence -- everything about the answer except the
+   answer. `QueryExecutionResponse.rows` was in the response and on the floor.
+--------------------------------------------------------------------------- */
+
+const MASKED_RESPONSE: AgentAnalysisResponse = {
+  ...ANALYSIS_RESPONSE,
+  agent_run_id: "run_masked_1",
+  execution: {
+    ...ANALYSIS_RESPONSE.execution,
+    // A `LIMIT 2` reached by a 2-row result: the gateway rewrites the
+    // statement with the governed limit and reports the applied value only in
+    // its audit details, so truncation is read off the executed SQL.
+    normalized_sql: "SELECT customer_email, net_amount FROM orders_raw LIMIT 2",
+    row_count: 2,
+    masked_columns: ["customer_email"],
+    column_lineage: [
+      {
+        output_column: "net_amount",
+        lineage_type: "DERIVED",
+        source_columns: [{ table: "analytics.core.orders_raw", column: "amount" }],
+        transformations: ["SUM"],
+      },
+    ],
+    rows: [
+      { customer_email: "***MASKED***", net_amount: 1200 },
+      { customer_email: "***MASKED***", net_amount: 340 },
+    ],
+  },
+};
+
+describe("AskScreen's result panel", () => {
+  async function ask(response: AgentAnalysisResponse) {
+    runAgentAnalysis.mockResolvedValue(response);
+    fetchAgentRunGroundingReceipts.mockResolvedValue({
+      agent_run_id: response.agent_run_id,
+      fragment_count: 0,
+      fragments: [],
+    });
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+    await pickDatasource();
+    fireEvent.change(screen.getByLabelText("Question"), {
+      target: { value: "What was net revenue last quarter?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask" }));
+    return screen.findByRole("region", { name: "Result" });
+  }
+
+  it("renders the returned rows, not just how many there were", async () => {
+    const result = await ask(ANALYSIS_RESPONSE);
+
+    const table = within(result).getByRole("table");
+    expect(within(table).getByRole("columnheader", { name: /month/ })).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: /net_revenue/ })).toBeInTheDocument();
+    expect(within(table).getByText("2026-06-01")).toBeInTheDocument();
+    expect(within(table).getByText("100")).toBeInTheDocument();
+  });
+
+  it("marks masked columns rather than printing the gateway's sentinel", async () => {
+    const result = await ask(MASKED_RESPONSE);
+
+    const table = within(result).getByRole("table");
+    expect(
+      within(table).getByRole("columnheader", { name: /customer_email.*masked/i }),
+    ).toBeInTheDocument();
+    expect(within(table).queryByText("***MASKED***")).not.toBeInTheDocument();
+    expect(within(table).getAllByText("masked").length).toBeGreaterThan(0);
+    // `column_lineage` says the value was computed, not read.
+    expect(
+      within(table).getByRole("columnheader", { name: /net_amount.*derived/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("says when the result stopped at the governed row limit", async () => {
+    const result = await ask(MASKED_RESPONSE);
+
+    expect(within(result).getByText(/stopped at the governed row limit of 2/)).toBeInTheDocument();
+  });
+
+  it("states that the values are not retained, and points at the value-free alternative", async () => {
+    const result = await ask(ANALYSIS_RESPONSE);
+
+    // The review is explicit that improving history must not smuggle in result
+    // storage. The panel says which of the two things is kept.
+    expect(within(result).getByText(/are not stored/)).toBeInTheDocument();
+    expect(within(result).getByText(/value-free definition/)).toBeInTheDocument();
+  });
+
+  it("shows no result grid for a run reopened from history, and says why", async () => {
+    fetchAgentRuns.mockResolvedValue({ items: [PAST_RUN], limit: 50, offset: 0, total: 1 });
+    fetchAgentRun.mockResolvedValue(PAST_RUN);
+    fetchAgentRunGroundingReceipts.mockResolvedValue(PAST_RUN_RECEIPTS);
+    history.replaceState(null, "", "/?ds=ds_1&run=run_past_1");
+    const AskScreen = await loadScreen();
+    render(<AskScreen />);
+
+    const panel = await screen.findByLabelText("Answer for run run_past_1");
+    await waitFor(() =>
+      expect(within(panel).getByText(/result values are not retained/)).toBeInTheDocument(),
+    );
+    expect(within(panel).queryByRole("table")).not.toBeInTheDocument();
+  });
+});

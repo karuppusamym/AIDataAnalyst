@@ -16,7 +16,7 @@ import {
 } from "../lib/api";
 import { useUrlState } from "../lib/useUrlState";
 import { VirtualList } from "../components/VirtualList";
-import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
+import { CopyLinkButton, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
 import "../components/EvidencePane.css";
 import "./SemanticsScreen.css";
@@ -204,10 +204,6 @@ function SemanticDetail({
     );
   }
 
-  const permalink = metric
-    ? `${location.origin}${location.pathname}?project=${model?.project_id ?? ""}&model=${model?.id ?? ""}&metric=${metric.id}`
-    : `${location.origin}${location.pathname}?project=${model?.project_id ?? ""}&model=${model?.id ?? ""}`;
-
   const name = metric ? metric.metric_name : model?.name ?? "";
 
   return (
@@ -257,7 +253,20 @@ function SemanticDetail({
       </div>
 
       <footer className="evp__foot">
-        <Button onClick={() => void navigator.clipboard?.writeText(permalink)}>Copy link</Button>
+{/* The copied link names the screen that resolves this selection.
+            Built as `origin + pathname + '?' + id` it carried no `#/semantics`,
+            so a fresh tab landed on the persona default and the id was read by
+            nobody (review 2026-09-05, F08). */}
+        <CopyLinkButton
+          target={{
+            screen: "semantics",
+            params: {
+              project: model?.project_id,
+              model: model?.id,
+              metric: metric?.id,
+            },
+          }}
+        />
         <span className="evp__hint">Consumer footer · UX-18</span>
       </footer>
     </aside>

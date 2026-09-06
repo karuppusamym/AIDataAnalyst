@@ -49,33 +49,37 @@ Usage
 -----
 Import and call from agent_intelligence.GovernedRetriever.retrieve() or
 directly from GovernedAgentOrchestrator.
+
+The enhanced pipeline
+---------------------
+`hybrid_retrieve` above is the lexical stage and is complete in itself.
+`hybrid_retrieve_enhanced` is not a longer version of it -- it is a
+*composition* of the stages defined in `aida.retrieval_stages`: authorized
+candidates (which calls `hybrid_retrieve`), the vector channel, the graph
+channel, the merge rule, trust, fusion, evidence. Each of those is one rule and
+is documented where it lives. What this module keeps is the lexical scan itself,
+the hit type every caller consumes, and the composition's order.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
-from typing import Any
+import time
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import structlog
 from sqlalchemy import func, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from aida.business_annotation_versions import current_version_alias
 from aida.config import Settings
-from aida.embedding_provider import (
-    AsyncEmbeddingProvider,
-    EmbeddingUnavailable,
-    resolve_embedding_provider,
-)
 from aida.models import (
     BusinessDomain,
     BusinessEntity,
     DataSource,
     DbtArtifactImport,
-    DbtLineageEdge,
     DbtProject,
     DbtResource,
     GlossaryTerm,
@@ -84,15 +88,19 @@ from aida.models import (
     GovernedToolVersion,
     MetadataBusinessAnnotation,
     MetadataColumn,
-    MetadataConstraint,
     MetadataTable,
     QueryExecution,
     SemanticMetric,
     SemanticMetricVersion,
     TermSemanticBinding,
 )
-from aida.quality_coupling import demote_in_retrieval, fetch_open_incidents, resolve_table_ids
-from aida.secrets import SecretResolver
+from aida.quality_coupling import resolve_table_ids
+from aida.retrieval_metrics import RETRIEVAL_SECONDS
+
+if TYPE_CHECKING:
+    # Annotation-only (this module defers the real import to call time, to
+    # break the cycle `retrieval_stages` -> `retrieval` -> `retrieval_stages`).
+    from aida.retrieval_stages import CancellationToken
 
 # ---------------------------------------------------------------------------
 # Text normalisation & tokenisation
@@ -786,573 +794,94 @@ async def hybrid_retrieve_enhanced(
     include_vector: bool = True,
     include_graph: bool = True,
     max_hops: int = 2,
+    candidate_limit: int | None = None,
+    cancel: CancellationToken | None = None,
 ) -> list[HybridRetrievalHit]:
-    """Enhanced hybrid retrieval orchestrating full-text, vector, graph, and fusion.
+    """Compose the hybrid retrieval stages; hold no rule of its own.
 
-    This is the new pipeline that orchestrates:
-      1. Full-text search (ts_query-style)
-      2. Vector similarity search
-      3. Graph expansion from seed hits
-      4. Fusion ranking with inspectable factors
+    Each stage is defined in `aida.retrieval_stages` and is independently
+    readable there: authorized candidates, the vector channel, the graph
+    channel, the merge rule, trust, fusion, evidence. What lives here is only
+    the order they run in and the two cross-cutting properties that order
+    makes possible --
 
-    Backward compatible: falls back gracefully when vector/graph data
-    is not available.
+    * a cancellation check at every stage boundary, so a retrieval whose
+      caller has gone away (or whose deadline has passed) stops between
+      stages rather than finishing work nobody will read; and
+    * one per-retrieval log line carrying every stage's candidate count,
+      latency and mean score, so "which channel is slow" and "which channel
+      has stopped contributing" are answerable without a profiler.
+
+    `candidate_limit` bounds the authorized set explicitly. `cancel` defaults
+    to no cancellation, so every existing caller behaves exactly as before.
+
+    Backward compatible: falls back gracefully when vector or graph data is
+    not available, and every channel records why it was skipped.
     """
-    from aida.fusion_ranking import (
-        FusionConfig,
-        RankedCandidate,
-        SignalScore,
-        build_evidence,
-        fuse_results,
+    # Deferred import, matching the pattern this function already used for
+    # `fusion_ranking`/`graph_retrieval`/`vector_*`: `retrieval_stages` imports
+    # `HybridRetrievalHit` and `hybrid_retrieve` from this module, so importing
+    # it at module scope would be an import cycle.
+    from aida.retrieval_stages import (
+        NeverCancelled,
+        RetrievalRequest,
+        assemble_evidence,
+        check_cancelled,
+        fuse,
+        merge_contributions,
+        run_graph_channel,
+        run_trust_channel,
+        run_vector_channel,
+        select_authorized_candidates,
     )
-    from aida.graph_retrieval import (
-        GraphEdge,
-        GraphNode,
-        KnowledgeGraph,
-        expand_graph,
-    )
-    from aida.vector_index_service import index_freshness, search_persisted_index
-    from aida.vector_retrieval import (
-        build_embedding_text,
-        vector_search,
-    )
-    from aida.vector_store import EmbeddingRef, VectorIndexUnavailable
 
-    org_id = organization_id or datasource.organization_id
-    # Tokenisation and the scan cap belong to `hybrid_retrieve`, which is called below and
-    # applies both itself. Recomputing them here produced two unused locals and, worse, a
-    # second place where a cap could drift out of step with the one actually enforced.
-    retrieval_limit = settings.agent_retrieval_limit
-
-    # ------------------------------------------------------------------
-    # Stage 1: Lexical / BM25 retrieval (existing pipeline)
-    # ------------------------------------------------------------------
-    lexical_hits = await hybrid_retrieve(
-        session,
+    started = time.perf_counter()
+    request = RetrievalRequest(
         datasource=datasource,
         question=question,
         settings=settings,
+        organization_id=organization_id or datasource.organization_id,
         preferred_tool_version_id=preferred_tool_version_id,
+        fusion_method=fusion_method,
+        include_vector=include_vector,
+        include_graph=include_graph,
+        max_hops=max_hops,
+        candidate_limit=candidate_limit,
+        cancel=cancel or NeverCancelled(),
     )
 
-    # Build candidate index from lexical hits
-    candidates: dict[str, RankedCandidate] = {}
-    for hit in lexical_hits:
-        key = f"{hit.object_type}:{hit.object_id}"
-        candidates[key] = RankedCandidate(
-            object_type=hit.object_type,
-            object_id=hit.object_id,
-            display_name=hit.display_name,
-            signals=[SignalScore(signal="lexical", raw_score=hit.score)],
-            metadata=hit.metadata,
-        )
+    check_cancelled(request, "lexical")
+    pool = await select_authorized_candidates(session, request)
 
-    # ------------------------------------------------------------------
-    # Stage 2: Vector similarity (if enabled)
-    # ------------------------------------------------------------------
-    # The vector stage runs only with a real embedding model behind it. It used to build
-    # `HashEmbeddingProvider()` unconditionally and feed the result into fusion as a
-    # signal named "vector" -- but a SHA-256 digest has no semantic structure, so that
-    # score was noise carrying the name of a signal, and fusion could rank on it. With no
-    # provider configured the stage is skipped and the reason recorded, which is a
-    # smaller answer rather than a confidently wrong one (INV-4, INV-9).
-    embedding_provider: AsyncEmbeddingProvider | None = None
-    vector_skipped_reason: str | None = None
-    if include_vector:
-        try:
-            embedding_provider = resolve_embedding_provider(settings, SecretResolver(settings))
-        except EmbeddingUnavailable as exc:
-            vector_skipped_reason = str(exc)
-            logger.info(
-                "retrieval_vector_stage_skipped",
-                reason=vector_skipped_reason,
-                datasource_id=str(datasource.id),
-            )
+    check_cancelled(request, "vector")
+    merge_contributions(pool, await run_vector_channel(session, request, pool))
 
-    if include_vector and embedding_provider is not None:
-        # RT-1: prefer the *persisted* index when it is fresh. The live path
-        # below embeds every candidate on every query, which is correct but
-        # pays a model call per candidate per query -- cost that grows with
-        # the estate and with traffic at the same time. The persisted index
-        # embeds only the question and compares against vectors built once.
-        #
-        # The fallback is not a degradation: it is the same computation, and
-        # it is what runs whenever the index is empty, stale, built under a
-        # different embedding model, or the estate has changed since the last
-        # build. Which path ran is recorded per hit (`vector_path`) so
-        # "why was this ranked here" stays answerable.
-        freshness = await index_freshness(session, org_id, settings=settings)
-        hit_by_key = {f"{hit.object_type}:{hit.object_id}": hit for hit in lexical_hits}
-        vector_path = "PERSISTED_INDEX" if freshness.usable else "LIVE_EMBED"
-        logger.info(
-            "retrieval_vector_stage_path",
-            path=vector_path,
-            reason=freshness.reason,
-            indexed_entries=freshness.entries,
-            datasource_id=str(datasource.id),
-        )
+    check_cancelled(request, "graph")
+    merge_contributions(pool, await run_graph_channel(session, request, pool))
 
-        scored: list[tuple[str, str, float]] = []
-        if freshness.usable:
-            batch = await embedding_provider.embed([question])
-            query_emb = tuple(batch.vectors[0])
-            # Policy still filters before ranking: the candidate set handed to
-            # the index is exactly the policy-narrowed lexical set, so the
-            # index can only reorder what the caller was already entitled to.
-            refs = tuple(
-                EmbeddingRef(owner_type=hit.object_type, owner_id=str(hit.object_id))
-                for hit in lexical_hits
-            )
-            try:
-                scored = list(
-                    await search_persisted_index(
-                        session,
-                        org_id,
-                        query_emb,
-                        settings=settings,
-                        candidates=refs or None,
-                        limit=retrieval_limit,
-                    )
-                )
-            except VectorIndexUnavailable as exc:
-                # The index went away between the freshness check and the
-                # search. Fall back rather than losing the stage.
-                logger.info("retrieval_vector_index_unavailable", reason=str(exc))
-                vector_path = "LIVE_EMBED"
-                freshness = replace(freshness, usable=False)
+    check_cancelled(request, "trust")
+    merge_contributions(pool, await run_trust_channel(session, request, pool))
 
-        if not freshness.usable:
-            # One batched call for the question and every candidate text, rather than a
-            # call per candidate: the provider bills and rate-limits per request, and
-            # N+1 network round trips inside a retrieval path is a latency budget spent
-            # on nothing.
-            candidate_texts = [
-                build_embedding_text(name=hit.display_name, object_type=hit.object_type)
-                for hit in lexical_hits
-            ]
-            batch = await embedding_provider.embed([question, *candidate_texts])
-            query_emb_list = list(batch.vectors[0])
-            candidate_embeddings = [list(v) for v in batch.vectors[1:]]
+    check_cancelled(request, "fusion")
+    ranked, config = fuse(request, pool)
 
-            vector_candidates: list[dict[str, Any]] = []
-            for hit, emb in zip(lexical_hits, candidate_embeddings, strict=True):
-                vector_candidates.append({
-                    "object_type": hit.object_type,
-                    "object_id": hit.object_id,
-                    "display_name": hit.display_name,
-                    "embedding": emb,
-                    "datasource_id": hit.metadata.get("datasource_id"),
-                    "metadata": hit.metadata,
-                })
+    check_cancelled(request, "evidence")
+    hits = assemble_evidence(pool, ranked, config)
 
-            scored = [
-                (vhit.object_type, str(vhit.object_id), vhit.similarity)
-                for vhit in vector_search(
-                    query_emb_list, vector_candidates, top_k=retrieval_limit
-                )
-            ]
-
-        for object_type, object_id, similarity in scored:
-            key = f"{object_type}:{object_id}"
-            source_hit = hit_by_key.get(key)
-            if key in candidates:
-                candidates[key].signals.append(
-                    SignalScore(signal="vector", raw_score=similarity)
-                )
-                candidates[key].metadata.setdefault("vector_path", vector_path)
-            else:
-                metadata = dict(source_hit.metadata) if source_hit else {}
-                metadata["vector_path"] = vector_path
-                candidates[key] = RankedCandidate(
-                    object_type=object_type,
-                    object_id=object_id,
-                    display_name=(
-                        source_hit.display_name if source_hit else str(object_id)
-                    ),
-                    signals=[SignalScore(signal="vector", raw_score=similarity)],
-                    metadata=metadata,
-                )
-
-    # ------------------------------------------------------------------
-    # Stage 3: Graph expansion (if enabled)
-    # ------------------------------------------------------------------
-    # Real edges, not just seed nodes. A graph with nodes but no edges lets BFS reach
-    # only depth 0 (the seeds themselves, which `expand_graph` doesn't even emit as
-    # hits) -- expansion *past* what lexical/vector already found is the entire point
-    # of RT-2, so the edge source has to be real governed metadata, not a placeholder.
-    # Three real, already-governed edge sources feed the graph: `MetadataConstraint`
-    # foreign keys (already-approved, datasource-scoped table-to-table relationships),
-    # dbt `DEPENDS_ON` `DbtLineageEdge` rows resolved to their matched tables (the
-    # `03-tracker.md` RT-2 follow-up -- a real dbt manifest dependency a table's FKs
-    # never capture, e.g. a staging model with no declared constraint), and a
-    # candidate `GOVERNED_TOOL` hit's own declared `referenced_tables` (so a table
-    # reachable only through a governed tool's SQL, not a raw FK, still expands).
-    if include_graph and lexical_hits:
-        kg = KnowledgeGraph()
-        for hit in lexical_hits:
-            kg.add_node(GraphNode(
-                node_id=f"{hit.object_type}:{hit.object_id}",
-                node_type=hit.object_type,
-                display_name=hit.display_name,
-                organization_id=org_id,
-                datasource_id=hit.metadata.get("datasource_id"),
-            ))
-
-        fk_rows = (
-            await session.execute(
-                select(MetadataConstraint, MetadataTable)
-                .join(MetadataTable, MetadataTable.id == MetadataConstraint.table_id)
-                .where(
-                    MetadataConstraint.datasource_id == datasource.id,
-                    MetadataConstraint.organization_id == org_id,
-                    MetadataConstraint.constraint_type == "FOREIGN_KEY",
-                    MetadataConstraint.status == "ACTIVE",
-                    MetadataConstraint.referenced_table_id.is_not(None),
-                    MetadataTable.status == "ACTIVE",
-                )
-                .limit(settings.agent_retrieval_scan_limit)
-            )
-        ).all()
-        referenced_ids = {constraint.referenced_table_id for constraint, _table in fk_rows}
-        referenced_tables: dict[UUID, MetadataTable] = {}
-        if referenced_ids:
-            referenced_tables = {
-                table.id: table
-                for table in (
-                    await session.scalars(
-                        select(MetadataTable).where(
-                            MetadataTable.id.in_(referenced_ids),
-                            MetadataTable.status == "ACTIVE",
-                        )
-                    )
-                ).all()
-            }
-        for constraint, table in fk_rows:
-            target_table = referenced_tables.get(constraint.referenced_table_id)
-            if target_table is None:
-                continue
-            source_node_id = f"TABLE:{table.id}"
-            target_node_id = f"TABLE:{target_table.id}"
-            if kg.get_node(source_node_id) is None:
-                kg.add_node(GraphNode(
-                    node_id=source_node_id,
-                    node_type="TABLE",
-                    display_name=table.name,
-                    organization_id=org_id,
-                    datasource_id=datasource.id,
-                ))
-            if kg.get_node(target_node_id) is None:
-                kg.add_node(GraphNode(
-                    node_id=target_node_id,
-                    node_type="TABLE",
-                    display_name=target_table.name,
-                    organization_id=org_id,
-                    datasource_id=datasource.id,
-                ))
-            kg.add_edge(GraphEdge(
-                source_id=source_node_id,
-                target_id=target_node_id,
-                edge_type="FOREIGN_KEY",
-            ))
-
-        # RT-2 follow-up: dbt `DEPENDS_ON` edges, resolved through each side's
-        # `matched_table_id`. Only the latest artifact snapshot per ACTIVE dbt
-        # project is read (same scope `hybrid_retrieve`'s dbt-resource stage
-        # uses), and only edges where BOTH ends resolved to a real, ACTIVE
-        # `MetadataTable` are added -- an unmatched dbt node (no `matched_table_id`)
-        # contributes no graph edge here, it just isn't a table-level relationship
-        # yet.
-        dbt_artifact_ids = await _latest_dbt_artifact_import_ids(session, datasource=datasource)
-        if dbt_artifact_ids:
-            source_resource = aliased(DbtResource)
-            target_resource = aliased(DbtResource)
-            dbt_edge_rows = (
-                await session.execute(
-                    select(source_resource, target_resource)
-                    .select_from(DbtLineageEdge)
-                    .join(
-                        source_resource,
-                        source_resource.id == DbtLineageEdge.source_resource_id,
-                    )
-                    .join(
-                        target_resource,
-                        target_resource.id == DbtLineageEdge.target_resource_id,
-                    )
-                    .where(
-                        DbtLineageEdge.artifact_import_id.in_(dbt_artifact_ids),
-                        DbtLineageEdge.organization_id == org_id,
-                        DbtLineageEdge.edge_type == "DEPENDS_ON",
-                        source_resource.matched_table_id.is_not(None),
-                        target_resource.matched_table_id.is_not(None),
-                    )
-                    .limit(settings.agent_retrieval_scan_limit)
-                )
-            ).all()
-            dbt_table_ids = {
-                table_id
-                for source, target in dbt_edge_rows
-                for table_id in (source.matched_table_id, target.matched_table_id)
-            }
-            dbt_tables: dict[UUID, MetadataTable] = {}
-            if dbt_table_ids:
-                dbt_tables = {
-                    table.id: table
-                    for table in (
-                        await session.scalars(
-                            select(MetadataTable).where(
-                                MetadataTable.id.in_(dbt_table_ids),
-                                MetadataTable.status == "ACTIVE",
-                            )
-                        )
-                    ).all()
-                }
-            for source, target in dbt_edge_rows:
-                source_table = dbt_tables.get(source.matched_table_id)
-                target_table = dbt_tables.get(target.matched_table_id)
-                if source_table is None or target_table is None:
-                    continue
-                source_node_id = f"TABLE:{source_table.id}"
-                target_node_id = f"TABLE:{target_table.id}"
-                if kg.get_node(source_node_id) is None:
-                    kg.add_node(GraphNode(
-                        node_id=source_node_id,
-                        node_type="TABLE",
-                        display_name=source_table.name,
-                        organization_id=org_id,
-                        datasource_id=datasource.id,
-                    ))
-                if kg.get_node(target_node_id) is None:
-                    kg.add_node(GraphNode(
-                        node_id=target_node_id,
-                        node_type="TABLE",
-                        display_name=target_table.name,
-                        organization_id=org_id,
-                        datasource_id=datasource.id,
-                    ))
-                kg.add_edge(GraphEdge(
-                    source_id=source_node_id,
-                    target_id=target_node_id,
-                    edge_type="DBT_DEPENDS_ON",
-                ))
-
-        # RT-2 follow-up: a `GOVERNED_TOOL` candidate's own declared
-        # `referenced_tables` (already-published tool metadata, no further
-        # approval needed to read) become TOOL -> TABLE edges, so a table a
-        # governed tool queries -- but that has no FK/dbt relationship to
-        # anything already surfaced -- is still reachable by expansion.
-        tool_hits = [h for h in lexical_hits if h.object_type == "GOVERNED_TOOL"]
-        graph_tool_name_pool = {
-            name
-            for hit in tool_hits
-            for name in (hit.metadata.get("referenced_tables") or [])
-        }
-        if graph_tool_name_pool:
-            tool_table_ids = await resolve_table_ids(
-                session, datasource=datasource, table_names=sorted(graph_tool_name_pool)
-            )
-            for hit in tool_hits:
-                tool_node_id = f"{hit.object_type}:{hit.object_id}"
-                for name in hit.metadata.get("referenced_tables") or []:
-                    table_id = tool_table_ids.get(name)
-                    if table_id is None:
-                        continue
-                    target_node_id = f"TABLE:{table_id}"
-                    if kg.get_node(target_node_id) is None:
-                        kg.add_node(GraphNode(
-                            node_id=target_node_id,
-                            node_type="TABLE",
-                            display_name=name,
-                            organization_id=org_id,
-                            datasource_id=datasource.id,
-                        ))
-                    kg.add_edge(GraphEdge(
-                        source_id=tool_node_id,
-                        target_id=target_node_id,
-                        edge_type="TOOL_REFERENCES_TABLE",
-                    ))
-
-        seed_ids = [f"{h.object_type}:{h.object_id}" for h in lexical_hits[:10]]
-        graph_hits = expand_graph(
-            kg,
-            seed_ids,
-            allowed_org_id=org_id,
-            max_hops=max_hops,
-            max_results=retrieval_limit,
-        )
-
-        for ghit in graph_hits:
-            # `GraphHit.object_id` is the graph's own node id (`f"{type}:{id}"`, per the
-            # construction above), not a bare object id -- unwrap it here rather than
-            # leaking the composite string into `RankedCandidate.object_id`, which every
-            # other caller (e.g. `_model_context`'s `UUID(hit.object_id)`) expects to be
-            # the raw id.
-            raw_object_id = ghit.object_id.removeprefix(f"{ghit.object_type}:")
-            key = f"{ghit.object_type}:{raw_object_id}"
-            if key in candidates:
-                candidates[key].signals.append(
-                    SignalScore(signal="graph", raw_score=ghit.proximity_score)
-                )
-                candidates[key].metadata.setdefault("graph_expansion_path", ghit.expansion_path)
-            else:
-                candidates[key] = RankedCandidate(
-                    object_type=ghit.object_type,
-                    object_id=raw_object_id,
-                    display_name=ghit.display_name,
-                    signals=[SignalScore(signal="graph", raw_score=ghit.proximity_score)],
-                    metadata={**ghit.metadata, "graph_expansion_path": ghit.expansion_path},
-                )
-
-    # ------------------------------------------------------------------
-    # Stage 4: quality/trust demotion (RT-7/DQ-3) and usage/popularity
-    # (RT-6). Both are derived from persisted runtime evidence rather than
-    # placeholders, and both batch their shared lookups per retrieval call.
-    # ------------------------------------------------------------------
-    candidate_table_ids: dict[str, set[UUID]] = {}
-    tool_name_pool: set[str] = set()
-    for key, candidate in candidates.items():
-        table_ids: set[UUID] = set()
-        if candidate.object_type == "TABLE":
-            table_ids.add(UUID(candidate.object_id))
-        else:
-            for field_name in ("table_id", "source_table_id"):
-                raw = candidate.metadata.get(field_name)
-                if raw:
-                    table_ids.add(raw if isinstance(raw, UUID) else UUID(str(raw)))
-            if candidate.object_type == "GOVERNED_TOOL":
-                tool_name_pool.update(candidate.metadata.get("referenced_tables") or [])
-        candidate_table_ids[key] = table_ids
-
-    if tool_name_pool:
-        tool_table_ids = await resolve_table_ids(
-            session, datasource=datasource, table_names=sorted(tool_name_pool)
-        )
-        for key, candidate in candidates.items():
-            if candidate.object_type != "GOVERNED_TOOL":
-                continue
-            for name in candidate.metadata.get("referenced_tables") or []:
-                resolved = tool_table_ids.get(name)
-                if resolved is not None:
-                    candidate_table_ids[key].add(resolved)
-
-    all_table_ids: set[UUID] = set()
-    for ids in candidate_table_ids.values():
-        all_table_ids.update(ids)
-
-    incidents = (
-        await fetch_open_incidents(session, datasource=datasource, table_ids=list(all_table_ids))
-        if all_table_ids
-        else []
+    elapsed = time.perf_counter() - started
+    RETRIEVAL_SECONDS.observe(elapsed)
+    logger.info(
+        "retrieval_completed",
+        datasource_id=str(datasource.id),
+        candidates=len(pool.candidates),
+        candidate_bound=request.authorized_limit,
+        candidate_bound_applied=pool.truncated,
+        returned=len(hits),
+        fusion_method=config.method,
+        seconds=round(elapsed, 4),
+        stages=pool.evidence(),
     )
-    usage_counts = await _table_execution_counts(
-        session,
-        datasource=datasource,
-        table_ids=all_table_ids,
-        scan_limit=settings.agent_retrieval_scan_limit,
-    )
-
-    for key, candidate in candidates.items():
-        ids = candidate_table_ids.get(key) or set()
-        if ids:
-            per_table_scores = {
-                str(table_id): demote_in_retrieval(str(table_id), incidents)
-                for table_id in ids
-            }
-            quality_trust_score = min(per_table_scores.values())
-            popularity_count = max(usage_counts.get(tid, 0) for tid in ids)
-            demoted_ids = sorted(
-                table_id for table_id, score in per_table_scores.items() if score < 1.0
-            )
-        else:
-            quality_trust_score = 1.0
-            popularity_count = 0
-            demoted_ids = []
-        if demoted_ids:
-            candidate.metadata["quality_trust_demotion"] = {
-                "reason": "OPEN_QUALITY_INCIDENT",
-                "demoted_table_ids": demoted_ids,
-                "worst_factor": quality_trust_score,
-            }
-        usage_popularity_score = min(1.0, popularity_count / _USAGE_POPULARITY_SATURATION)
-        candidate.signals.append(
-            SignalScore(signal="quality_trust", raw_score=round(quality_trust_score, 4))
-        )
-        candidate.signals.append(
-            SignalScore(signal="usage_popularity", raw_score=round(usage_popularity_score, 4))
-        )
-
-    # ------------------------------------------------------------------
-    # Stage 5: Fusion ranking
-    # ------------------------------------------------------------------
-    config = FusionConfig(method=fusion_method)
-    candidate_list = list(candidates.values())
-    ranked = fuse_results(candidate_list, config=config, top_k=retrieval_limit)
-
-    # ------------------------------------------------------------------
-    # Convert back to HybridRetrievalHit with evidence
-    # ------------------------------------------------------------------
-    result_hits: list[HybridRetrievalHit] = []
-    for candidate in ranked:
-        evidence_factors = build_evidence(candidate, config)
-        evidence = RetrievalEvidence(
-            object_type=candidate.object_type,
-            object_id=candidate.object_id,
-            display_name=candidate.display_name,
-            final_score=candidate.final_score,
-            fusion_method=config.method,
-            factors=[
-                {
-                    "signal": f.signal,
-                    "raw_score": f.raw_score,
-                    "weight": f.weight,
-                    "weighted_score": f.weighted_score,
-                    "rank": f.rank,
-                }
-                for f in evidence_factors
-            ],
-            graph_expansion_path=candidate.metadata.get("graph_expansion_path", []),
-            source_signals=[s.signal for s in candidate.signals],
-            metadata=candidate.metadata,
-        )
-
-        # GovernedPlanner.plan() (agent_intelligence.py) gates GOVERNED_TOOL selection
-        # on `hit.score >= Settings.agent_tool_match_threshold`, a [0,1] match-confidence
-        # figure the lexical stage produces (BM25 + boosts, capped at 1.0). A fusion
-        # score is a different, relative ranking quantity on its own scale (RRF's is
-        # ~1/rrf_k) -- handing it to that threshold would silently change which
-        # governed tools the planner will ever select, which is tool-selection
-        # orchestration behaviour this integration does not touch. So a tool hit keeps
-        # its lexical score as `.score`; the real fused score is still fully visible in
-        # `retrieval_evidence.final_score` for inspection. Every other object type
-        # (nothing else is threshold-gated) gets the richer fused score as `.score`.
-        if candidate.object_type == "GOVERNED_TOOL":
-            lexical_signal = candidate.get_signal("lexical")
-            operational_score = (
-                lexical_signal.raw_score if lexical_signal else candidate.final_score
-            )
-        else:
-            operational_score = candidate.final_score
-
-        result_hits.append(
-            HybridRetrievalHit(
-                object_type=candidate.object_type,
-                object_id=candidate.object_id,
-                display_name=candidate.display_name,
-                score=operational_score,
-                reason_codes=[s.signal for s in candidate.signals],
-                metadata={
-                    **candidate.metadata,
-                    "retrieval_evidence": {
-                        "final_score": evidence.final_score,
-                        "fusion_method": evidence.fusion_method,
-                        "factors": evidence.factors,
-                        "source_signals": evidence.source_signals,
-                    },
-                },
-            )
-        )
-
-    return result_hits
-
+    return hits
 
 # ---------------------------------------------------------------------------
 # GROUP A: RT-9 cross-source retrieval + RT-5 global-search support

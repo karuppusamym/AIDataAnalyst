@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import type {
   AgentContractRequestCreate,
@@ -24,6 +24,7 @@ import { navigateTo } from "../lib/navigate";
 import { useOrgId } from "../lib/org";
 import { Button, Empty, ErrorState, Field, Pill } from "../components/primitives";
 import type { Tone } from "../components/primitives";
+import { ConnectTab } from "./AgentGatewayConnect";
 import "./AgentGatewayScreen.css";
 
 /* ---------------------------------------------------------------------------
@@ -70,148 +71,10 @@ const KILL_SCOPES = ["AGENT", "TIER", "ALL"] as const;
 const requestStatusTone = (status: string): Tone =>
   status === "ACTIVATED" ? "ok" : status === "REJECTED" || status === "EVAL_BLOCKED" ? "bad" : "warn";
 
-/** Mirrors `mcp_server.py`'s module constants. Pinned here rather than
- *  fetched because `initialize` is a negotiation an agent performs, not a
- *  read this screen is entitled to make on its behalf. */
-const MCP_PROTOCOL_VERSION = "2025-03-26";
-const MCP_SERVER_NAME = "atlas-governed-data-platform";
-
-/** `POST /mcp`, resolved against wherever this app is served so the value is
- *  correct in dev, in the compose deployment, and behind a reverse proxy —
- *  all three of which the legacy portal's hard-coded localhost would get
- *  wrong. */
-function mcpEndpoint(): string {
-  return `${location.origin}/mcp`;
-}
-
 const decisionTone = (decision: string): Tone =>
   decision === "ALLOW" ? "ok" : decision === "DENY" ? "bad" : "warn";
 
 const channelTone = (channel: string): Tone => (channel === "MCP" ? "accent" : "info");
-
-function CopyBlock({ label, value }: { label: string; value: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard is unavailable over plain HTTP on some browsers. The value
-      // is on screen and selectable, so say what happened rather than
-      // pretending it worked.
-      setCopied(false);
-    }
-  };
-  return (
-    <div className="agcopy">
-      <div className="agcopy__head">
-        <span className="agcopy__label">{label}</span>
-        <Button onClick={() => void copy()}>{copied ? "Copied" : "Copy"}</Button>
-      </div>
-      <pre className="agcopy__pre">{value}</pre>
-    </div>
-  );
-}
-
-function ConnectTab({ me }: { me: MeRead | null }) {
-  const endpoint = mcpEndpoint();
-  const oidc = me?.identity_provider === "OIDC";
-
-  const clientConfig = useMemo(
-    () =>
-      JSON.stringify(
-        {
-          mcpServers: {
-            atlas: {
-              url: endpoint,
-              transport: "http",
-              headers: oidc
-                ? { Authorization: "Bearer ${ATLAS_ACCESS_TOKEN}" }
-                : {
-                    "X-Principal-Id": "${ATLAS_PRINCIPAL_ID}",
-                    "X-Roles": "Analyst",
-                    "X-Organization-Id": me?.organization_id ?? "${ATLAS_ORGANIZATION_ID}",
-                  },
-            },
-          },
-        },
-        null,
-        2,
-      ),
-    [endpoint, oidc, me?.organization_id],
-  );
-
-  return (
-    <div className="agconnect">
-      <section className="agcard">
-        <h2 className="agcard__h2">Endpoint</h2>
-        <p className="agcard__lede">
-          One stateless JSON-RPC 2.0 endpoint. Every call resolves a security context before
-          dispatch and executes through the same gateway as the REST API — MCP is not a side
-          door.
-        </p>
-        <dl className="agfacts">
-          <div><dt>URL</dt><dd><code>POST {endpoint}</code></dd></div>
-          <div><dt>Protocol</dt><dd><code>{MCP_PROTOCOL_VERSION}</code></dd></div>
-          <div><dt>Server name</dt><dd><code>{MCP_SERVER_NAME}</code></dd></div>
-          <div>
-            <dt>Authentication</dt>
-            <dd>
-              {oidc ? (
-                <><code>Authorization: Bearer &lt;OIDC token&gt;</code> — issuer, audience and JWKS verified per request.</>
-              ) : (
-                <>
-                  This deployment runs <code>identity_provider=development</code>: identity comes
-                  from <code>X-Principal-Id</code> / <code>X-Roles</code> / <code>X-Organization-Id</code>.
-                  Under OIDC the server ignores those headers and requires a Bearer token instead.
-                </>
-              )}
-            </dd>
-          </div>
-          {me ? (
-            <div>
-              <dt>You are</dt>
-              <dd><code>{me.principal_id}</code> · {me.roles.length} role{me.roles.length === 1 ? "" : "s"}</dd>
-            </div>
-          ) : null}
-        </dl>
-      </section>
-
-      <section className="agcard">
-        <h2 className="agcard__h2">Client configuration</h2>
-        <p className="agcard__lede">
-          Drop this into an MCP client (Claude Desktop, Cursor, or your own). Keep the credential
-          in the environment — never in the file you commit.
-        </p>
-        <CopyBlock label="mcp.json" value={clientConfig} />
-      </section>
-
-      <section className="agcard">
-        <h2 className="agcard__h2">Methods</h2>
-        <table className="agmethods">
-          <thead>
-            <tr><th scope="col">Method</th><th scope="col">Returns</th></tr>
-          </thead>
-          <tbody>
-            <tr><td><code>initialize</code></td><td>Capability negotiation.</td></tr>
-            <tr><td><code>tools/list</code></td><td>Published governed tools you are role-eligible for, plus native lineage, validation and marketplace tools.</td></tr>
-            <tr><td><code>tools/call</code></td><td>One tool execution through the deterministic SQL gateway. Masked, cost-checked, audited.</td></tr>
-            <tr><td><code>resources/list</code></td><td>Catalog assets as <code>atlas://catalog/…</code> URIs — value-free metadata only.</td></tr>
-            <tr><td><code>resources/read</code></td><td>Metadata for one resource, policy-evaluated per read.</td></tr>
-            <tr><td><code>prompts/list</code></td><td>Published Context Products as version-pinned governed prompts.</td></tr>
-            <tr><td><code>prompts/get</code></td><td>One quality-gated context prompt at <code>atlas://context-products/&#123;key&#125;/versions/&#123;n&#125;</code>.</td></tr>
-            <tr><td><code>ping</code></td><td>Liveness.</td></tr>
-          </tbody>
-        </table>
-        <p className="agcard__note">
-          Resources and prompts never carry source values. To read data, an agent calls a
-          published tool — which is the only path that reaches a source at all.
-        </p>
-      </section>
-    </div>
-  );
-}
 
 function ExposureTab({
   products,

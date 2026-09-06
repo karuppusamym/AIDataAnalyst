@@ -34,6 +34,7 @@ from fastapi import HTTPException
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+import aida.governance_decision_service as governance_decision_service
 import aida.metric_suggestion_api as metric_suggestion_api
 import aida.metric_suggestion_service as metric_suggestion_service
 import aida.semantic_api as semantic_api
@@ -141,9 +142,7 @@ def test_score_evidence_is_a_deterministic_pure_function() -> None:
 
 def test_score_evidence_rewards_corroborating_evidence() -> None:
     bare = score_evidence(_evidence())
-    partial = score_evidence(
-        _evidence(table_role="FACT", bound_term_names=("Account Balance",))
-    )
+    partial = score_evidence(_evidence(table_role="FACT", bound_term_names=("Account Balance",)))
     rich = score_evidence(_well_evidenced_evidence())
 
     assert bare.overall < partial.overall < rich.overall
@@ -209,36 +208,48 @@ def test_submit_endpoint_calls_the_evidence_gate_before_creating_a_review() -> N
 def test_apply_metric_suggestion_proposal_has_exactly_one_call_site() -> None:
     """The only function that can move a proposal to APPROVED and publish a
     real `SemanticMetricVersion` is `apply_metric_suggestion_proposal`. It
-    must be called from nowhere but the shared governance-review dispatch
-    (`semantic_api._apply_governance_review_decision`, invoked only from
-    `decide_governance_review`) -- i.e. there is no bypass, however high a
-    proposal's confidence score."""
+    must be called from nowhere but the SEMANTIC_METRIC_PROPOSAL adapter the
+    shared governance-decision service dispatches to -- i.e. there is no
+    bypass, however high a proposal's confidence score.
+
+    (The 921-line `_apply_governance_review_decision` chain this used to
+    inspect is now one adapter per object type, registered into
+    `governance_decision_service`; the property being pinned is unchanged.)
+    """
     source = inspect.getsource(semantic_api)
     call_pattern = re.compile(r"apply_metric_suggestion_proposal\(")
     matches = call_pattern.findall(source)
-    # one import + one call site inside _apply_governance_review_decision
-    assert source.count("apply_metric_suggestion_proposal") == 2
+    # Exactly one call site in the whole router module.
     assert len(matches) == 1
 
-    dispatch_source = inspect.getsource(semantic_api._apply_governance_review_decision)
-    assert "apply_metric_suggestion_proposal(" in dispatch_source
-    assert "reject_metric_suggestion_proposal(" in dispatch_source
+    adapter_source = inspect.getsource(semantic_api._decide_semantic_metric_proposal)
+    assert "apply_metric_suggestion_proposal(" in adapter_source
+    assert "reject_metric_suggestion_proposal(" in adapter_source
 
+    assert (
+        semantic_api._TARGET_EFFECT_ADAPTERS["SEMANTIC_METRIC_PROPOSAL"]
+        is semantic_api._decide_semantic_metric_proposal
+    )
     decide_source = inspect.getsource(semantic_api.decide_governance_review)
     assert "apply_metric_suggestion_proposal(" not in decide_source
     assert "_apply_governance_review_decision(" in decide_source
 
 
 def test_decide_governance_review_checks_self_approval_before_publishing() -> None:
+    """The maker-checker guard runs before anything is published, in both
+    halves of the split: textually in `decide_governance_review` before it
+    dispatches, and again in `governance_decision_service.decide_review`
+    before it claims the review or reaches any adapter."""
     decide_source = inspect.getsource(semantic_api.decide_governance_review)
     guard_at = decide_source.index("maker-checker separation is required")
     dispatch_call_at = decide_source.index("_apply_governance_review_decision(")
     assert guard_at < dispatch_call_at
 
-    dispatch_source = inspect.getsource(semantic_api._apply_governance_review_decision)
-    branch_at = dispatch_source.index('review.object_type == "SEMANTIC_METRIC_PROPOSAL"')
-    publish_at = dispatch_source.index("apply_metric_suggestion_proposal(")
-    assert branch_at < publish_at
+    service_source = inspect.getsource(governance_decision_service.decide_review)
+    permission_at = service_source.index("check_decision_permitted(")
+    claim_at = service_source.index("claim_review(")
+    adapter_at = service_source.index("await adapter(")
+    assert permission_at < claim_at < adapter_at
 
 
 def test_apply_metric_suggestion_proposal_refuses_a_non_pending_proposal() -> None:
