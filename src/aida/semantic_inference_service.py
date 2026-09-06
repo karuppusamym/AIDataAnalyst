@@ -96,7 +96,7 @@ async def generate_semantic_inference(
         )
     )
     table_rows = [
-        (table, schema) for table, schema in table_rows if table.id not in already_proposed_table_ids
+        row for row in table_rows if row[0].id not in already_proposed_table_ids
     ]
     table_ids = [table.id for table, _schema in table_rows]
     columns = list(

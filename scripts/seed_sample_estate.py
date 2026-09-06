@@ -195,7 +195,9 @@ def ensure_data_domain(lob_id: str, name: str, code: str, org_id: str) -> dict[s
     return domain
 
 
-def ensure_project(lob_id: str, data_domain_id: str, name: str, slug: str, org_id: str) -> dict[str, Any]:
+def ensure_project(
+    lob_id: str, data_domain_id: str, name: str, slug: str, org_id: str
+) -> dict[str, Any]:
     path = f"/v1/lines-of-business/{lob_id}/projects"
     existing = _find(f"{path}?limit=200", "slug", slug, org_id=org_id)
     if existing:
@@ -297,7 +299,10 @@ def discover_and_approve_same_source_relationships(datasource_id: str, org_id: s
 
 def _find_pending_review(object_type: str, object_id: str, org_id: str) -> dict[str, Any] | None:
     _, payload = _request(
-        "GET", "/v1/governance/reviews?status=PENDING&limit=200", org_id=org_id, headers=CHECKER_HEADERS
+        "GET",
+        "/v1/governance/reviews?status=PENDING&limit=200",
+        org_id=org_id,
+        headers=CHECKER_HEADERS,
     )
     for review in _items(payload):
         if review.get("object_type") == object_type and review.get("object_id") == object_id:
@@ -325,7 +330,9 @@ def request_and_approve_grant(
         None,
     )
     if existing and existing.get("status") == "ACTIVE":
-        print(f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} already ACTIVE")
+        print(
+            f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} already ACTIVE"
+        )
         return
     if not existing:
         _, existing = _request(
@@ -340,12 +347,18 @@ def request_and_approve_grant(
         )
     review = _find_pending_review("CROSS_BOUNDARY_GRANT", existing["id"], org_id)
     if review is None:
-        print(f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]} has no pending review")
+        print(
+            f"  cross-boundary grant {source_domain_id[:8]}->{target_domain_id[:8]}"
+            " has no pending review"
+        )
         return
     _request(
         "POST",
         f"/v1/governance/reviews/{review['id']}/decision",
-        {"decision": "APPROVE", "reason": "Seeded sample estate: expected cross-domain resolution need."},
+        {
+            "decision": "APPROVE",
+            "reason": "Seeded sample estate: expected cross-domain resolution need.",
+        },
         org_id=org_id,
         headers=CHECKER_HEADERS,
     )
@@ -380,7 +393,10 @@ def discover_and_approve_cross_source(domain_id: str, target_domain_id: str, org
             list_kind_path = (
                 f"/v1/datasources/{datasource['id']}/relationship-candidates?limit=500"
                 if kind == "relationship"
-                else f"/v1/datasources/{datasource['id']}/cross-source-object-resolution-candidates?limit=500"
+                else (
+                    f"/v1/datasources/{datasource['id']}"
+                    "/cross-source-object-resolution-candidates?limit=500"
+                )
             )
             _, existing = _request("GET", list_kind_path, org_id=org_id)
             for candidate in _items(existing):
@@ -437,10 +453,26 @@ DOMAINS = (
 # viewed from any of the three). Payments<->Risk is deliberately left
 # ungranted -- Unified Lineage should show a real withheld-boundary case.
 GRANT_PAIRS = (
-    ("CUSTOMER", "PAYMENTS", "Payments needs account/customer id resolution against the customer master."),
-    ("PAYMENTS", "CUSTOMER", "Customer stewardship needs to see which accounts have posted activity."),
-    ("CUSTOMER", "RISK", "Risk needs customer/account id resolution for risk snapshots and exposure."),
-    ("RISK", "CUSTOMER", "Customer stewardship needs to see which customers carry an open risk case."),
+    (
+        "CUSTOMER",
+        "PAYMENTS",
+        "Payments needs account/customer id resolution against the customer master.",
+    ),
+    (
+        "PAYMENTS",
+        "CUSTOMER",
+        "Customer stewardship needs to see which accounts have posted activity.",
+    ),
+    (
+        "CUSTOMER",
+        "RISK",
+        "Risk needs customer/account id resolution for risk snapshots and exposure.",
+    ),
+    (
+        "RISK",
+        "CUSTOMER",
+        "Customer stewardship needs to see which customers carry an open risk case.",
+    ),
 )
 
 
@@ -482,8 +514,12 @@ def main() -> int:
             )
 
         print("Discovering cross-source relationships and object resolutions...")
-        for source_code, target_code, _ in GRANT_PAIRS[::2]:  # one direction per pair is enough to discover both ways
-            discover_and_approve_cross_source(domains[source_code]["id"], domains[target_code]["id"], org_id)
+        for source_code, target_code, _ in GRANT_PAIRS[
+            ::2
+        ]:  # one direction per pair is enough to discover both ways
+            discover_and_approve_cross_source(
+                domains[source_code]["id"], domains[target_code]["id"], org_id
+            )
 
     except SeedError as error:
         print(f"\nSeed failed: {error}", file=sys.stderr)
