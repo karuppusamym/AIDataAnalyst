@@ -43,6 +43,13 @@ def query_execution_response(result: GatewayResult) -> QueryExecutionResponse:
     not-yet-executed statement has no measurement to report. Zero here means
     "not measured", which is why callers must read `status` to know whether
     the execution happened at all.
+
+    `applied_row_limit` and `row_limit_source` deliberately do **not** take
+    that treatment (F20). A zero or a default row limit would be a claim
+    about policy that no measurement supports; None is the honest value for
+    "the gateway applied no limit to this execution", and it is passed
+    through unchanged so both routes tell a caller the same thing about
+    truncation.
     """
     execution = result.execution
     return QueryExecutionResponse(
@@ -58,4 +65,6 @@ def query_execution_response(result: GatewayResult) -> QueryExecutionResponse:
         elapsed_ms=execution.elapsed_ms or 0,
         masked_columns=list(result.masked_columns),
         rows=list(result.rows),
+        applied_row_limit=result.applied_row_limit,
+        row_limit_source=result.row_limit_source,
     )

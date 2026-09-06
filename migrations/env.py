@@ -32,6 +32,11 @@ RAW_SQL_ONLY_INDEXES = frozenset(
         "ix_metadata_table_catalog_page",  # f9a2b3c4d5e6_catalog_scale_indexes.py
         "ix_metadata_table_name_trgm",  # f9a2b3c4d5e6_catalog_scale_indexes.py
         "ix_metadata_table_description_trgm",  # f9a2b3c4d5e6_catalog_scale_indexes.py
+        "ix_project_name_trgm",  # c3f0a71d5e94_picker_search_trgm_indexes.py
+        "ix_project_slug_trgm",  # c3f0a71d5e94_picker_search_trgm_indexes.py
+        "ix_workspace_name_trgm",  # c3f0a71d5e94_picker_search_trgm_indexes.py
+        "ix_workspace_slug_trgm",  # c3f0a71d5e94_picker_search_trgm_indexes.py
+        "ix_datasource_name_trgm",  # c3f0a71d5e94_picker_search_trgm_indexes.py
     }
 )
 

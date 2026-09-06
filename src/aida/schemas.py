@@ -644,6 +644,17 @@ class QueryExecutionResponse(ApiModel):
     elapsed_ms: int
     masked_columns: list[str]
     rows: list[dict[str, Any]]
+    # F20: the row limit the gateway's guard actually rewrote this statement
+    # with, and which bound produced it (`STATEMENT` / `REQUEST` /
+    # `GATEWAY_CAP` -- see `aida.query_gateway.row_limit_source`). Optional
+    # and defaulted to None so this stays an additive response change: null
+    # means the gateway applied no limit to this execution, never "the
+    # default cap applied". Without them a caller can only guess at
+    # truncation by parsing `LIMIT n` back out of `normalized_sql`, which a
+    # subquery's own LIMIT answers wrong, and cannot tell a platform cap from
+    # a limit the caller asked for itself.
+    applied_row_limit: int | None = None
+    row_limit_source: str | None = None
 
 
 class QueryLineageRead(ApiModel):
