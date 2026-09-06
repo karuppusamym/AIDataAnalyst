@@ -310,6 +310,11 @@ export function ColumnPanel({ tableId }: { tableId: string }) {
             : `${documentedCount} of ${columns.length} described`}
         </span>
       </div>
+      <p className="colp__guidance">
+        Definitions and source comments come from discovery scans. Automatic description
+        drafts currently apply to tables; use the source model workbook for bulk column
+        business descriptions.
+      </p>
 
       {notice ? (
         <div className="colp__notice" role="status">

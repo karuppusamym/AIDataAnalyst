@@ -246,7 +246,7 @@ export function CatalogScreen() {
                   : "Generate a metadata-drafted description for each selected asset."
               }
             >
-              {draftBusy ? "Generating…" : "Generate description drafts"}
+              {draftBusy ? "Generating…" : "Generate table description drafts"}
             </Button>
             <Button
               disabled
@@ -265,7 +265,7 @@ export function CatalogScreen() {
               disabled={draftBusy}
               title="Generate a metadata-drafted description for this asset. Submit it for review from the Description drafts screen."
             >
-              {draftBusy ? "Generating…" : "Generate description draft"}
+              {draftBusy ? "Generating…" : "Generate table description draft"}
             </Button>
           </div>
         ) : null}

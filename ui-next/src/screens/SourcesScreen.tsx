@@ -232,16 +232,6 @@ function HealthPane({
 
         <section className="src__model" aria-labelledby="src-model-heading">
           <div className="evp__sub" id="src-model-heading">Model workbook</div>
-          <p className="src__modellede">
-            Tables, columns and data types are populated by discovery scans. Use the
-            Catalog link below to inspect them. The workbook is for bulk business-description
-            review, not for creating the physical schema.
-          </p>
-          <ol className="src__modelsteps">
-            <li>Download the current model.</li>
-            <li>Edit it in Excel or another spreadsheet app and save the file.</li>
-            <li>Upload the saved file here to preview the changes.</li>
-          </ol>
           <div className="src__modelaction">
             <Button
               disabled={exportingWorkbook}
@@ -252,6 +242,16 @@ function HealthPane({
             </Button>
             <span>This is a manual round trip; saving in Excel does not upload automatically.</span>
           </div>
+          <p className="src__modellede">
+            Tables, columns and data types are populated by discovery scans. Use the
+            Catalog link below to inspect them. The workbook is for bulk business-description
+            review, not for creating the physical schema.
+          </p>
+          <ol className="src__modelsteps">
+            <li>Download the current model.</li>
+            <li>Edit it in Excel or another spreadsheet app and save the file.</li>
+            <li>Upload the saved file here to preview the changes.</li>
+          </ol>
           {canImportWorkbook ? (
             <WorkbookImport datasourceId={source.id} />
           ) : (
