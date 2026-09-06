@@ -164,6 +164,7 @@ Full index with reading orders, **and a per-module map from bounded context to t
 | [02 Decision log](90-reference/02-decision-log.md) | One-line index of every decision and open question |
 | [03 Sources](90-reference/03-sources.md) | Competitive research sources and how to refresh them |
 | [04 Analysis algorithms](90-reference/04-analysis-algorithms.md) | Scoring models, pruning strategies, and detection signals behind modules 05–07 |
+| [05 CCDIVACLAD reference architecture](90-reference/05-ccdivaclad-reference-architecture.md) | External prior art: an enterprise metadata-agent platform — ontology, KG standards, ingestion frameworks. Not authoritative for Atlas |
 
 ## The four things to understand first
 
