@@ -30,6 +30,11 @@ CREATE TABLE customer.account (
 CREATE TABLE customer.card (
     card_id BIGINT PRIMARY KEY,
     account_id BIGINT NOT NULL REFERENCES customer.account(account_id),
+    -- Denormalized for card-issuance queries -- deliberately NOT a declared
+    -- FK (unlike account_id above), so the platform's same-source
+    -- relationship detector has a real, undeclared name+type match to find
+    -- against customer.customer_id (EXACT_NAME_TYPE_TO_PRIMARY_KEY_V1).
+    customer_id BIGINT NOT NULL,
     card_network TEXT NOT NULL,
     last4 CHAR(4) NOT NULL,
     status TEXT NOT NULL,
@@ -54,10 +59,10 @@ INSERT INTO customer.account VALUES
     (1007, 5, 'CHECKING', 'USD', 'BR-410', 'ACTIVE', '2022-05-30', NULL, 8120.40),
     (1008, 5, 'SAVINGS',  'USD', 'BR-410', 'CLOSED', '2022-05-30', '2025-01-15', 0.00);
 
-INSERT INTO customer.card VALUES
-    (5001, 1001, 'VISA',       '4412', 'ACTIVE', '2020-01-15', '2027-01-31'),
-    (5002, 1003, 'MASTERCARD', '5561', 'ACTIVE', '2021-03-20', '2026-03-31'),
-    (5003, 1004, 'VISA',       '4479', 'ACTIVE', '2019-06-05', '2027-06-30'),
-    (5004, 1006, 'VISA',       '4402', 'BLOCKED','2023-08-25', '2027-08-31'),
-    (5005, 1007, 'MASTERCARD', '5588', 'ACTIVE', '2022-06-01', '2026-06-30'),
-    (5006, 1008, 'VISA',       '4433', 'CANCELLED','2022-06-01', '2025-06-30');
+INSERT INTO customer.card (card_id, account_id, customer_id, card_network, last4, status, issued_at, expires_at) VALUES
+    (5001, 1001, 1, 'VISA',       '4412', 'ACTIVE', '2020-01-15', '2027-01-31'),
+    (5002, 1003, 2, 'MASTERCARD', '5561', 'ACTIVE', '2021-03-20', '2026-03-31'),
+    (5003, 1004, 3, 'VISA',       '4479', 'ACTIVE', '2019-06-05', '2027-06-30'),
+    (5004, 1006, 4, 'VISA',       '4402', 'BLOCKED','2023-08-25', '2027-08-31'),
+    (5005, 1007, 5, 'MASTERCARD', '5588', 'ACTIVE', '2022-06-01', '2026-06-30'),
+    (5006, 1008, 5, 'VISA',       '4433', 'CANCELLED','2022-06-01', '2025-06-30');

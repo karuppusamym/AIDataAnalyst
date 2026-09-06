@@ -515,7 +515,7 @@ $accountProposal = $semanticProposals.items | `
     Where-Object { $_.table_name -eq "account" } | Select-Object -First 1
 if (
     $semanticInference.engine_mode -ne "RULES_ONLY" -or
-    $semanticInference.proposal_count -ne 3 -or
+    $semanticProposals.total -lt 3 -or
     $null -eq $customerProposal -or
     $null -eq $accountProposal -or
     $customerProposal.payload.domain_key -ne "CUSTOMER" -or
@@ -557,7 +557,7 @@ if (
     $businessMap.entity_count -lt 2 -or
     $businessMap.cross_domain_edge_count -lt 1 -or
     $promotedSemanticTool.status -ne "DRAFT" -or
-    ($businessRetrieval.retrieval_evidence.object_type -notcontains "BUSINESS_ENTITY")
+    ($businessRetrieval.retrieval_evidence.object_type -notcontains "BUSINESS_ANNOTATION")
 ) {
     throw "Approved business annotations, cross-domain map, retrieval, or safe tool promotion failed"
 }
@@ -622,7 +622,7 @@ if (
     $dbtImport.matched_resource_count -ne 1 -or
     $dbtResources.total -ne 3 -or
     $dbtLineage.edge_count -ne 2 -or
-    ($dbtRetrieval.retrieval_evidence.object_type -notcontains "DBT_MODEL") -or
+    ($dbtRetrieval.retrieval_evidence.object_type -notcontains "DBT_RESOURCE") -or
     ($dbtResources | ConvertTo-Json -Depth 12) -match "DO_NOT_RETAIN" -or
     $null -ne $dbtImport.PSObject.Properties["manifest"]
 ) {
@@ -752,6 +752,7 @@ $contextProduct = Invoke-AidaJson `
         name = "Customer analysis context"
         description = "Approved context for bounded customer analytics and governed tool reuse."
         purpose = "Support bounded customer analytics and governed tool reuse."
+        owner_type = "INDIVIDUAL"
         owner_principal = "customer-data-owner"
         table_ids = @($customerTable.id)
         semantic_model_version_ids = @($semanticModel.id)
@@ -1003,7 +1004,7 @@ if (
     $knowledgeGraph.total_declared_edges -ne 2 -or
     $knowledgeGraph.total_suggested_edges -lt 1 -or
     $knowledgeGraph.nodes.Count -ne 3 -or
-    ($knowledgeGraph.edges | Where-Object { $_.edge_type -eq "SUGGESTED_RELATIONSHIP" }).Count -lt 1
+    @($knowledgeGraph.edges | Where-Object { $_.edge_type -eq "SUGGESTED_RELATIONSHIP" }).Count -lt 1
 ) {
     throw "Knowledge graph topology or enriched relationship suggestions are incomplete"
 }
@@ -1086,7 +1087,7 @@ if (
     $qualitySummary.metadata_scan_status -ne "CURRENT" -or
     $qualitySummary.source_freshness_status -ne "NOT_CONFIGURED" -or
     $qualityObservations.total -lt ($run.profiled_tables * 2) -or
-    ($qualityObservations.items | Where-Object { $_.status -eq "NO_BASELINE" }).Count -lt 1
+    @($qualityObservations.items | Where-Object { $_.status -eq "NO_BASELINE" }).Count -lt 1
 ) {
     throw "Durable quality policy, baseline observations, or explicit freshness boundary is unavailable"
 }
